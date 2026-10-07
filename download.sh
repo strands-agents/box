@@ -41,7 +41,7 @@ triple="aarch64-apple-darwin"
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL "$1" -o "$2"; }
-    latest_url() { curl -fsSI -o /dev/null -w '%{url_effective}\n' "$1"; }
+    latest_url() { curl -fsSIL -o /dev/null -w '%{url_effective}\n' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -qO "$2" "$1"; }
     latest_url() {
