@@ -1,0 +1,40 @@
+// An agent reaching the Anthropic API, with read and write on the project directory.
+//
+// Replace `~/project` with the box's project path, spelled `~`-relative. The
+// interpreters report every path under the operator's home relative to it, so a
+// `~`-relative spelling names the same directory on every machine.
+
+// ── Reaching the model ───────────────────────────────────────────────────────
+// One outbound call is two decisions. The connect leg sees a host and a port before
+// TLS, so it is scoped to the port; the request leg sees the real host after TLS.
+@id("anthropic_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.port == 443 };
+
+@id("anthropic_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "api.anthropic.com" };
+
+// ── Running commands ───────────────────────────────────────────────────────────
+// An agent that runs commands needs `shell:exec`. This permit does not bound what
+// a command touches — the filesystem rules below are what confine it. See
+// `shell-guard.dw` to refuse a dangerous line.
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// ── Reading and writing the project ──────────────────────────────────────────
+// A prefix is not a directory, so each verb needs two clauses: the directory itself and
+// its contents. `fs:read` does not cover `fs:write`, so each is one clause.
+@id("project_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/project" ||
+  context.input.path like "~/project/*"
+};
+
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when {
+  context.input.path == "~/project" ||
+  context.input.path like "~/project/*"
+};

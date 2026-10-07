@@ -1,0 +1,56 @@
+# To author or change the policy next to this file, point your coding agent at the skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+# The box's name, and where it keeps its own state. The agent can't reach box_dir.
+name = "claude-code"
+box_dir = "<HOME>/box-tutorial/claude-code/state"
+# The policy file, next to this one.
+policy = "policy.dw"
+
+[agent]
+# The program the box starts: Claude Code, with its own permission prompts off, so the policy
+# decides each command. The task comes from the command line, after `--`.
+command = ["<HOME>/.local/bin/claude", "--dangerously-skip-permissions"]
+# The directory the agent starts in. This alone grants nothing.
+workspace = "<HOME>/box-tutorial/my-project"
+
+# The agent gets these variables, plus the ones the box adds. Nothing comes from your shell.
+[agent.env]
+PATH = "/usr/bin:/bin"
+# Claude Code calls Bedrock in this region, with this model.
+AWS_REGION = "us-west-2"
+CLAUDE_CODE_USE_BEDROCK = "1"
+ANTHROPIC_MODEL = "global.anthropic.claude-opus-5"
+# Claude Code keeps its settings, its sessions, and its temporary files in these two directories,
+# beside this file. They hold the agent's own state, and the project stays out of them.
+CLAUDE_CONFIG_DIR = "<HOME>/box-tutorial/claude-code/config"
+CLAUDE_CODE_TMPDIR = "<HOME>/box-tutorial/claude-code/tmp"
+TMPDIR = "<HOME>/box-tutorial/claude-code/tmp"
+# A box runs the Claude Code you installed.
+DISABLE_AUTOUPDATER = "1"
+# Claude Code's own spans, log records, and metrics, which the box relays. The box supplies the
+# endpoint and the protocol. See docs/user/telemetry.md.
+CLAUDE_CODE_ENABLE_TELEMETRY = "1"
+# Spans need this second name. The first name alone exports log records and metrics.
+CLAUDE_CODE_ENHANCED_TELEMETRY_BETA = "1"
+OTEL_TRACES_EXPORTER = "otlp"
+OTEL_LOGS_EXPORTER = "otlp"
+OTEL_METRICS_EXPORTER = "otlp"
+# Claude Code puts TRACEPARENT in the environment of each command it runs, so each decision a command
+# causes names the agent's own tool span as its parent.
+CLAUDE_CODE_PROPAGATE_TRACEPARENT = "1"
+
+# What the agent's own process can touch without asking the policy. The project's files are not
+# here: Claude Code reaches them through its Bash tool alone, where the policy decides each one.
+[agent.filesystem]
+# The Claude Code installation, and the two directories it keeps its state in.
+read = ["~/.local/share/claude/versions", "~/box-tutorial/claude-code/config", "~/box-tutorial/claude-code/tmp"]
+exec = ["~/.local/share/claude/versions"]
+write = ["~/box-tutorial/claude-code/config", "~/box-tutorial/claude-code/tmp"]
+# Claude Code lists the names in its working directory when it starts. It can't open the files itself.
+list = ["~/box-tutorial/my-project"]
+
+# The box adds your Bedrock API key to each request to Bedrock. The agent gets a stand-in value.
+[egress.model]
+destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"

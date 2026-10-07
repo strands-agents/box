@@ -1,0 +1,64 @@
+// Connect to Bedrock, and send it requests.
+@id("model_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "bedrock-mantle.us-west-2.api.aws" && context.input.port == 443 };
+
+@id("model_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "bedrock-mantle.us-west-2.api.aws" };
+
+// Run any command in the box's shell. Each file a command touches is still its own decision.
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// Read anything in the project. A path under your home starts with "~" here.
+@id("project_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/box-tutorial/my-project" ||
+  context.input.path like "~/box-tutorial/my-project/*"
+};
+
+// Write anything in the project.
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.path like "~/box-tutorial/my-project/*" };
+
+// Use /dev/null, which agents redirect output to all the time.
+@id("dev_null")
+permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/dev/null" };
+
+// One file inside the project stays unread, whatever the permit above says. The agent can see that
+// the file exists, and nothing more.
+@id("no_env")
+@description("The .env file holds credentials the agent must not read.")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/box-tutorial/my-project/.env" &&
+  context.input.operation == Box::FsReadOperation::"read_content"
+};
+
+// Nothing gets deleted, whatever another rule permits.
+@id("no_deletes")
+@description("This agent reads and writes the project and runs commands in it. It deletes nothing.")
+forbid (principal, action == Box::Action::"fs:delete", resource);
+
+@id("metadata_hosts")
+@description("Refuse the cloud metadata services by name, before resolution.")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input.host == "metadata.google.internal" ||
+  context.input.host == "metadata.azure.internal"
+};
+
+@id("metadata_addresses")
+@description("Refuse link-local and cloud metadata addresses, on the address resolution pinned.")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip && (
+    context.input.ip like "169.254.*" ||
+    context.input.ip == "fd00:ec2::254" ||
+    context.input.ip like "fe8*" || context.input.ip like "fe9*" ||
+    context.input.ip like "fea*" || context.input.ip like "feb*")
+};

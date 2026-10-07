@@ -1,0 +1,47 @@
+# To author or change the policy next to this file, point your coding agent at the skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+# The box's name, and where it keeps its own state. The agent can't reach box_dir.
+name = "strands-sdk"
+box_dir = "<HOME>/box-tutorial/strands-agent/state"
+# The policy file, next to this one.
+policy = "policy.dw"
+
+[agent]
+# The program the box starts: the Python in the example's virtual environment, running agent.py.
+# The task comes from the command line, after `--`.
+command = [
+  "<HOME>/box-tutorial/strands-agent/runtime/.venv/bin/python3",
+  "<HOME>/box-tutorial/strands-agent/agent.py",
+]
+# The directory the agent starts in. This alone grants nothing.
+workspace = "<HOME>/box-tutorial/my-project"
+# The agent gets these variables, plus the ones the box adds. Nothing comes from your shell. The
+# SDK reads the region and skips the EC2 metadata service; agent.py reads the model.
+env = { AWS_REGION = "us-west-2", AWS_EC2_METADATA_DISABLED = "true", MODEL_ID = "global.anthropic.claude-opus-5", PATH = "/usr/bin:/bin", TMPDIR = "<HOME>/box-tutorial/strands-agent/tmp" }
+
+# What the agent's own process can touch without asking the policy.
+[agent.filesystem]
+# Python loads the SDK from the virtual environment, and its standard library and the libraries it
+# links from Homebrew's kegs.
+read = [
+  "~/box-tutorial/strands-agent/runtime/.venv",
+  "/opt/homebrew/Cellar/python@3.14",
+  "/opt/homebrew/Cellar/openssl@3",
+  "/opt/homebrew/Cellar/sqlite",
+]
+# Homebrew's opt directory holds the links that Python and its libraries follow into the kegs.
+metadata = ["/opt/homebrew/opt"]
+# Python runs agent.py.
+read_file = ["~/box-tutorial/strands-agent/agent.py"]
+# Homebrew's python3 starts the interpreter inside its own framework.
+exec = ["/opt/homebrew/Cellar/python@3.14"]
+# Python's temporary files.
+write = ["~/box-tutorial/strands-agent/tmp"]
+# The agent lists the names in its working directory. It can't open the files itself.
+list = ["~/box-tutorial/my-project"]
+
+# The box adds your Bedrock API key to each request to Bedrock. The agent gets a stand-in value.
+[egress.model]
+destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"

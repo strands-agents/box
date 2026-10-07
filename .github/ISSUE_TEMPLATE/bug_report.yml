@@ -1,0 +1,96 @@
+name: Bug Report
+description: Report a bug in Strands Box
+title: "[BUG] "
+labels: ["triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report for Strands Box!
+  - type: checkboxes
+    id: "checks"
+    attributes:
+      label: "Checks"
+      options:
+        - label: "I have built from the latest `main` and can still reproduce this"
+          required: true
+        - label: "I have checked the documentation and this is not expected behavior"
+          required: true
+        - label: "I have searched [./issues](./issues?q=) and there are no duplicates of my issue"
+          required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Strands Box is affected?
+      options:
+        - box CLI / binary
+        - Containment / boundary
+        - Egress proxy / credentials
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Version / Commit
+      description: Which commit of Strands Box did you build from?
+      placeholder: e.g., output of `git rev-parse --short HEAD`
+    validations:
+      required: true
+  - type: input
+    id: toolchain-version
+    attributes:
+      label: Toolchain Version
+      description: Which Rust toolchain (and, if relevant, Node or Python) did you use?
+      placeholder: e.g., rustc 1.96.0, Node.js 22.6.0, Python 3.12.4
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: Which operating system and architecture are you using?
+      placeholder: e.g., macOS 14.5 (arm64)
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps to reproduce the behavior
+      placeholder: |
+        1. box.toml (minimal reproducible config)
+        2. Command you ran (e.g. `box run --config ... -- ...`)
+        3. What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+      description: What actually happened
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other relevant information, logs, screenshots, etc.
+  - type: textarea
+    id: possible-solution
+    attributes:
+      label: Possible Solution
+      description: Optional - If you have suggestions on how to fix the bug
+  - type: input
+    id: related-issues
+    attributes:
+      label: Related Issues
+      description: Optional - Link to related issues if applicable

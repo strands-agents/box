@@ -1,0 +1,28 @@
+// The same outbound byte budget as `egress_byte_budget.dw`, calibrated for real wire
+// traffic.
+//
+// The budget is 400 bytes rather than 100 because the proxy reports what it actually
+// wrote to the socket — the whole serialized request, headers included — not just the
+// body. A 10-byte body therefore charges ~150 bytes. Counting the wire total is the
+// honest measure for an egress budget (headers leave the box too), so the threshold
+// moves rather than the measurement.
+//
+// Sums `http:request::response`, never `::request`: a resolution exists only for a
+// request that was allowed AND actually written, so a denied attempt cannot consume
+// budget.
+@id("egress_byte_budget_e2e")
+permit (
+    principal,
+    action == Box::Action::"http:request",
+    resource
+)
+when temporal {
+    exists (total: Long). (
+        (sum b for (b: Long), (t: Timepoint). where (
+            formerly within 60s (
+                Box::Action::"http:request"::response{ input.host: _, input.body_bytes: b } && tp(t)
+            )
+        )) == total
+        && total < 400
+    )
+};

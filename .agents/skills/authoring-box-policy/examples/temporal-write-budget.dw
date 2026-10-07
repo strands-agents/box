@@ -1,0 +1,32 @@
+// A history-dependent rule — refuse a write once six writes have completed in the
+// last 60 seconds.
+//
+// The cap is a `forbid`, because a permit only adds permission: a
+// `permit … when temporal { total < 6 }` beside a broader `fs:write` permit caps
+// nothing, and the box refuses that shape at load. A `forbid` beats every permit, so
+// this rule holds beside `agent-anthropic.dw` or any other write permit.
+//
+// The count walks `fs:write::response` events. A `::response` exists only for an effect
+// that happened, because only a recorded outcome emits one. Keying on `::request`
+// instead would count a denied attempt, so a budget written against `::request` is
+// defeated by asking and being refused.
+//
+// `formerly within 60s` bounds the window. A window is mandatory, and it is also what
+// keeps the engine's retained history bounded.
+//
+// A temporal predicate names one granular action, offers no group, no `||`, and no
+// wildcard. Every field it reads is derived from the action's `input` record.
+
+@id("write_budget")
+@description("This workload has reached its write budget of six writes in 60 seconds. Wait a minute before the next write, or batch the remaining writes into one call.")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 60s (
+                Box::Action::"fs:write"::response{ input.path: _, input.operation: Box::FsWriteOperation::"write_content" } && tp(t)
+            )
+        )) == total
+        && total >= 6
+    )
+};

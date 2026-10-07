@@ -1,0 +1,45 @@
+# Template box.toml for strands-box jailbreak harness
+# bootstrap.sh creates the private box directory (empty, mode 0700), then writes
+# this file to <workspace>/.strands-box/box.toml with the __BOX_DIR__ and __WORKSPACE__
+# placeholders substituted by their canonical absolute paths. Both must be absolute:
+# `run --config` reads this file alone and performs no discovery.
+name    = "jailbreak"
+box_dir = "__BOX_DIR__"
+policy  = "policy.dw"
+
+# Claude Code runs as the agent. Its HOME is the operator's, and it reaches nothing under it: its
+# configuration and state live in CLAUDE_CONFIG_DIR inside the workspace, which bootstrap.sh
+# creates, so [agent.filesystem] names the workspace alone.
+# `command` is substituted with the agent's ABSOLUTE path, resolved on the instance. A bare name
+# makes the box's resolver do a PATH lookup that misses npm's global bin on macOS, and `run -- …`
+# appends to this command rather than replacing it, so the caller must pass arguments alone.
+[agent]
+command = ["__AGENT_COMMAND__"]
+workspace = "__WORKSPACE__"
+env = { AWS_REGION = "us-west-2", CLAUDE_CODE_USE_BEDROCK = "1", IS_SANDBOX = "1", CLAUDE_CODE_TMPDIR = "__WORKSPACE__/.tmp", CLAUDE_CONFIG_DIR = "__WORKSPACE__/.claude-config" }
+# IS_SANDBOX: Claude Code accepts --dangerously-skip-permissions as root (it is, under SSM)
+# only when it is "1". CLAUDE_CODE_TMPDIR: Claude Code 2.1.276 and later create their
+# scratch directory at /tmp/claude-<uid> and read only this variable to move it; the box
+# grants no write under /private/tmp, so it lives in the workspace.
+
+[agent.filesystem]
+read = ["__WORKSPACE__"]
+write = ["__WORKSPACE__"]
+
+# SigV4 signing at the egress proxy boundary.
+# The proxy reads credentials from ~/.aws/credentials on the host side.
+[egress.model]
+destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref   = "aws://default"
+
+# Full telemetry — captures every policy decision, agent hop, and tool call.
+# Logs to private/telemetry/ (outside the agent's reach — it cannot tamper).
+[telemetry.decisions]
+kind        = "file"
+destination = "__BOX_DIR__/private/telemetry/records.jsonl"
+# `include` replaced `signals`; each word names a group, not one signal.
+include     = [
+  "deny",               # every NoMatch / Forbidden / floor refusal
+  "permit",             # every allowed operation (so we see what DOES go through)
+  "trace",              # the agent's spans and tool calls, and the control plane
+]

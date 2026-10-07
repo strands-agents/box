@@ -1,0 +1,45 @@
+# To author or change the policy next to this file, point your coding agent at the skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+# The box's name, and where it keeps its own state. The agent can't reach box_dir.
+name = "codex"
+box_dir = "<HOME>/box-tutorial/codex/state"
+# The policy file, next to this one.
+policy = "policy.dw"
+
+[agent]
+# The program the box starts: the native Codex binary inside the npm package, in the layout that
+# Homebrew's npm makes on Apple silicon, in its non-interactive mode. The task comes from the
+# command line, after `--`. The project is a plain directory, so Codex skips its git check.
+command = [
+  "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+  "exec",
+  "--skip-git-repo-check",
+  # Codex's own spans, log records, and metrics, which the box relays. Codex takes these settings from
+  # its own configuration and reads no OTEL_EXPORTER_OTLP_* variable, and each exporter needs a
+  # literal endpoint, so the box substitutes a token for each one at launch. See
+  # docs/user/telemetry.md.
+  "-c", 'otel.trace_exporter={otlp-http={endpoint="${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}",protocol="json"}}',
+  "-c", 'otel.exporter={otlp-http={endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT}/v1/logs",protocol="json"}}',
+  "-c", 'otel.metrics_exporter={otlp-http={endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT}/v1/metrics",protocol="json"}}',
+  # The task text stays out of the records.
+  "-c", 'otel.log_user_prompt=false',
+]
+# The directory the agent starts in. This alone grants nothing.
+workspace = "<HOME>/box-tutorial/my-project"
+# The agent gets these variables, plus the ones the box adds. Nothing comes from your shell. Codex
+# reads the region for Bedrock, and keeps its configuration and sessions under CODEX_HOME.
+env = { AWS_REGION = "us-west-2", CODEX_HOME = "<HOME>/box-tutorial/codex/home", TMPDIR = "<HOME>/box-tutorial/codex/tmp", PATH = "/usr/bin:/bin" }
+
+# What the agent's own process can touch without asking the policy.
+[agent.filesystem]
+# Codex reads its config.toml and writes its sessions, logs, and history.
+read = ["~/box-tutorial/codex/home"]
+write = ["~/box-tutorial/codex/home", "~/box-tutorial/codex/tmp"]
+# Codex lists the names in its working directory. It can't open the files itself.
+list = ["~/box-tutorial/my-project"]
+
+# The box adds your Bedrock API key to each request to Bedrock. The agent gets a stand-in value.
+[egress.model]
+destinations = ["bedrock-mantle.us-west-2.api.aws"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"

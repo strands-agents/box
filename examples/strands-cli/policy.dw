@@ -1,0 +1,25 @@
+// Connect to Bedrock, and send it requests.
+@id("model_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "bedrock-runtime.us-west-2.amazonaws.com" && context.input.port == 443 };
+
+@id("model_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "bedrock-runtime.us-west-2.amazonaws.com" };
+
+// Run any command in the box's shell. Each file a command touches is still its own decision.
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// Read anything in the project. A path under your home starts with "~" here.
+@id("project_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/box-tutorial/my-project" ||
+  context.input.path like "~/box-tutorial/my-project/*"
+};
+
+// Use /dev/null, which agents redirect output to all the time.
+@id("dev_null")
+permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/dev/null" };

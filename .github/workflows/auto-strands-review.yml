@@ -1,0 +1,72 @@
+name: Auto Strands Review
+
+# Dispatches strands-command.yml with `command: review` on every PR into main,
+# pinning the exact commit the event fired on. Authors can opt out by adding
+# their login to the exclusion list below; they can still run it by hand with
+# `/strands review` on the PR.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  authorization-check:
+    # Authors who opt out of auto-review. They can still trigger it manually by
+    # commenting `/strands review` on the PR.
+    if: ${{ !contains(fromJSON('[]'), github.event.pull_request.user.login) }}
+    name: Check access
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      approval-env: ${{ steps.auth.outputs.approval-env }}
+    steps:
+      - name: Check Authorization
+        id: auth
+        uses: strands-agents/devtools/authorization-check@main
+        with:
+          skip-check: false
+          username: ${{ github.event.pull_request.user.login || 'invalid' }}
+          allowed-roles: 'triage,write,maintain,admin'
+
+  trigger-review:
+    name: Trigger Strands Review
+    needs: authorization-check
+    environment:
+      name: ${{ needs.authorization-check.outputs.approval-env }}
+      deployment: false
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Strands Command Workflow
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Pass the exact commit this pull_request event fired on so the
+            // dispatched run acts on that commit instead of re-resolving the
+            // branch later. A later push just fires another event (a new run
+            // for the new commit).
+            const pr = context.payload.pull_request;
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'strands-command.yml',
+              ref: 'main',
+              inputs: {
+                issue_id: String(pr.number),
+                command: 'review',
+                session_id: '',
+                head_sha: pr.head.sha,
+                head_repo: pr.head.repo.full_name,
+                head_ref: pr.head.ref
+              }
+            });
+            console.log(`Triggered /strands review for PR #${pr.number}`);

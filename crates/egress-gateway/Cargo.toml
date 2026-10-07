@@ -1,0 +1,70 @@
+[package]
+name = "strands-box-egress-gateway"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The egress gateway — the outbound boundary of the zero-trust box. Provides mechanism controls, credential injection, and a domain-owned effect-interception seam."
+
+[lib]
+name = "egress_gateway"
+path = "src/lib.rs"
+
+[features]
+# TLS interception (the MITM adapter's selective-terminate machinery) is a
+# DEFAULT-ON cargo feature scoped to Part A only (never Part B). With it off the
+# crate still builds as a tunnel-only MITM and any Control needing `Http` visibility
+# is a config-load error. The feature pulls in the TLS stack
+# (rustls + ring for the ephemeral CA); the socket-free Part B never touches them.
+default = ["tls-intercept"]
+tls-intercept = [
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:webpki-roots",
+    "dep:ring",
+    "dep:rcgen",
+]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# The credential vault (mint half). This is the ONE-WAY dependency the mint/inject
+# split rests on: the proxy *injects* the secret, `credentials` *mints* it
+# and owns the `RequestId` shared by their audit records. `credentials` must never
+# depend back on this crate (nor on `policy`).
+strands-box-credentials = { path = "../credentials" }
+
+# Fail-closed, typed error model — same pattern as the sibling crates.
+thiserror = "2"
+
+# Secret hygiene: the Real_Secret and the ephemeral CA private key live in
+# `Zeroizing` so plaintext is wiped on drop; never logged, never disked.
+zeroize = { version = "1", features = ["derive"] }
+
+# Base64 for BasicAuth credential injection (`Authorization: Basic <base64>`).
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+
+# HTTP/1.1 request/response parsing on the intercepted plaintext leg.
+httparse = "1"
+
+# JSON-RPC frame classification for both kinds of MCP server (identifiers only — no body is retained).
+serde_json = "1"
+
+# ------------------------------------------------------------------------------
+# tls-intercept-only deps (Part A / MITM adapter). Optional so `--no-default-features`
+# builds a tunnel-only MITM with none of the TLS stack compiled in.
+# ------------------------------------------------------------------------------
+# The TLS terminator (server side to the workload, client side to the upstream).
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1", optional = true }
+# System-root trust anchors for the upstream (client) side of interception.
+webpki-roots = { version = "1", optional = true }
+# ECDSA P-256 keygen + signing for the ephemeral CA and per-host leaf minting.
+ring = { version = "0.17", optional = true }
+# X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
+rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
+
+[dev-dependencies]
+# The full-interception E2E stands up a real TLS upstream and a real TLS workload client (both
+# trusting the ephemeral CA) so a request is genuinely intercepted end-to-end over TLS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

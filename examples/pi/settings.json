@@ -1,0 +1,5 @@
+{
+  "shellPath": "<HOME>/box-tutorial/pi/state/bin/bash",
+  "defaultProvider": "amazon-bedrock",
+  "defaultModel": "global.anthropic.claude-opus-5"
+}

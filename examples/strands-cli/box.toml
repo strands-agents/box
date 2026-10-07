@@ -1,0 +1,43 @@
+# To author or change the policy next to this file, point your coding agent at the skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+# The box's name, and where it keeps its own state. The agent can't reach box_dir.
+name = "strands"
+box_dir = "<HOME>/box-tutorial/strands-cli/state"
+# The policy file, next to this one.
+policy = "policy.dw"
+
+[agent]
+# The program the box starts. Node loads the preload file first, then runs the CLI.
+command = [
+  "/opt/homebrew/bin/node",
+  "--import=<HOME>/box-tutorial/strands-cli/proxy-preload.mjs",
+  "/opt/homebrew/lib/node_modules/@strands-agents/cli/bin/strands.js",
+  # Give the agent its shell and web fetch, and no file tools, so the policy decides each file it works on.
+  "--set", 'builtinTools={"*":false,"shell":true,"web_fetch":{"transport":"direct"}}',
+  # Keep sessions and memory out of the project.
+  "--set", 'session.dir="<HOME>/box-tutorial/strands-cli/strands-home/sessions"',
+  "--set", 'memory.dir="<HOME>/box-tutorial/strands-cli/strands-home/memory"',
+]
+# The directory the agent starts in. This alone grants nothing.
+workspace = "<HOME>/box-tutorial/my-project"
+# The agent gets these variables, plus the ones the box adds. Nothing comes from your shell.
+env = { AWS_REGION = "us-west-2", HOME = "<HOME>/box-tutorial/strands-cli/strands-home", PATH = "/usr/bin:/bin", TERM = "xterm-256color" }
+
+# What the agent's own process can touch without asking the policy.
+[agent.filesystem]
+# Node loads the CLI, and the CLI reads its settings.
+read = ["/opt/homebrew/lib/node_modules/@strands-agents/cli", "~/box-tutorial/strands-cli/strands-home"]
+# Node loads the preload file, and reads Homebrew's OpenSSL settings when it starts.
+read_file = ["~/box-tutorial/strands-cli/proxy-preload.mjs", "/opt/homebrew/etc/openssl@3/openssl.cnf"]
+# The CLI writes its sessions and memory.
+write = ["~/box-tutorial/strands-cli/strands-home"]
+# The CLI lists the names in its working directory. It can't open the files itself.
+list = ["~/box-tutorial/my-project"]
+
+# The box adds your Bedrock API key to each request to Bedrock. The agent, and every tool or MCP
+# server in the box, gets a stand-in value.
+# "model" is a name you choose.
+[egress.model]
+destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"

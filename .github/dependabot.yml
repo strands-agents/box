@@ -1,0 +1,60 @@
+# Dependabot configuration.
+#
+# Shared conventions across every ecosystem below:
+#   - cooldown: hold new updates for a few days before opening a PR so we don't
+#     churn on same-day releases. Majors get a long (30-day) window so a human
+#     can vet breaking changes before the PR lands.
+#   - groups: batch low-risk (minor + patch) updates into one PR per ecosystem.
+#     Majors are intentionally left ungrouped so they arrive as individual,
+#     clearly-attributable PRs, gated by the 30-day cooldown.
+#   - schedule: poll weekly. The cooldown already delays PRs by days, so daily
+#     polling just adds noise without surfacing updates any sooner.
+#
+# Directories reflect box's layout: the Cargo workspace at the root, and each
+# excluded crate that carries its own Cargo.lock. There is nothing to publish
+# (the product is the `strands-box` binary, publish = false), so this only keeps
+# dependencies current; it does not drive releases.
+version: 2
+updates:
+  # Rust workspace at the repo root, and each lockfile the workspace excludes.
+  # Minor + patch bumps are batched; majors come individually and wait out the
+  # 30-day cooldown for review.
+  - package-ecosystem: 'cargo'
+    directories:
+      - '/'
+      - '/test-common'
+      - '/test-integ'
+      - '/test-workload/verdict'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 100
+    labels:
+      - 'dependencies'
+      - 'rust'
+    commit-message:
+      prefix: 'ci(rust)'
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      production-minor:
+        applies-to: version-updates
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  # GitHub Actions workflow pins. Low volume, so no grouping. This ecosystem
+  # accepts only `default-days`, so one cooldown applies to every update type.
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 100
+    commit-message:
+      prefix: ci
+    cooldown:
+      default-days: 5

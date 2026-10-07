@@ -1,0 +1,136 @@
+name: Strands Command Handler
+
+# Processes `/strands` comments on issues and PRs, and is dispatched by
+# auto-strands-review.yml for automatic PR review. The agents (reviewer,
+# implementer, refiner, ...) are SOPs in strands-agents/devtools, selected by
+# the keyword after `/strands`. Runs the agent read-only, then applies its
+# deferred writes in a separate finalize job.
+#
+# Requires two repo secrets: AWS_ROLE_ARN (a GitHub OIDC role) and
+# AGENT_SESSIONS_BUCKET (an S3 bucket for agent session storage). Bedrock model
+# access must be enabled in us-west-2 for the role.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_id:
+        description: 'Issue ID to process (can be issue or PR number)'
+        required: true
+        type: string
+      command:
+        description: 'Strands command to execute'
+        required: false
+        type: string
+        default: ''
+      session_id:
+        description: 'Optional session ID to use'
+        required: false
+        type: string
+        default: ''
+      # auto-strands-review.yml passes the exact commit the pull_request event
+      # fired on, so the dispatched run pins it instead of re-resolving live
+      # HEAD. Empty on a manual dispatch or a /strands comment.
+      head_sha:
+        description: 'PR head SHA to pin (from the triggering pull_request event)'
+        required: false
+        type: string
+        default: ''
+      head_repo:
+        description: 'PR head repository (owner/name) for fork checkouts'
+        required: false
+        type: string
+        default: ''
+      head_ref:
+        description: 'PR head branch name'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  authorization-check:
+    if: startsWith(github.event.comment.body, '/strands') || github.event_name == 'workflow_dispatch'
+    name: Check access
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      approval-env: ${{ steps.auth.outputs.approval-env }}
+      # Head resolved once here so downstream jobs act on the same commit the
+      # command was issued against.
+      head-sha: ${{ steps.auth.outputs.head-sha }}
+      head-repo: ${{ steps.auth.outputs.head-repo }}
+      head-ref: ${{ steps.auth.outputs.head-ref }}
+    steps:
+      - name: Check Authorization
+        id: auth
+        uses: strands-agents/devtools/authorization-check@main
+        with:
+          skip-check: ${{ github.event_name == 'workflow_dispatch' }}
+          username: ${{ github.event.comment.user.login || 'invalid' }}
+          allowed-roles: 'maintain,triage,write,admin'
+          issue-id: ${{ inputs.issue_id || github.event.issue.number }}
+
+  setup-and-process:
+    needs: [authorization-check]
+    environment:
+      name: ${{ needs.authorization-check.outputs.approval-env }}
+      deployment: false
+    permissions:
+      # Needed to create a branch for the Implementer Agent.
+      contents: write
+      # Both needed to add the `strands-running` label to issues and PRs.
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse input
+        id: parse
+        uses: strands-agents/devtools/strands-command/actions/strands-input-parser@main
+        with:
+          issue_id: ${{ inputs.issue_id }}
+          command: ${{ inputs.command }}
+          session_id: ${{ inputs.session_id }}
+          # Auto-review supplies the event SHA via inputs.head_sha; a /strands
+          # comment leaves it empty and uses the head resolved by the
+          # authorization job. Either way the parser uses that commit instead of
+          # re-resolving live HEAD.
+          head_sha: ${{ inputs.head_sha || needs.authorization-check.outputs.head-sha }}
+          head_repo: ${{ inputs.head_repo || needs.authorization-check.outputs.head-repo }}
+          head_ref: ${{ inputs.head_ref || needs.authorization-check.outputs.head-ref }}
+
+  execute-readonly-agent:
+    needs: [setup-and-process]
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write # Required for OIDC
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Add environment setup here if an agent needs it (a Rust toolchain, a
+      # language runtime, ...). The reviewer runs read-only over the diff and
+      # needs no build, so nothing is set up by default.
+
+      - name: Run Strands Agent
+        id: agent-runner
+        uses: strands-agents/devtools/strands-command/actions/strands-agent-runner@main
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          sessions_bucket: ${{ secrets.AGENT_SESSIONS_BUCKET }}
+          write_permission: 'false'
+
+  finalize:
+    if: always() && (startsWith(github.event.comment.body, '/strands') || github.event_name == 'workflow_dispatch')
+    needs: [setup-and-process, execute-readonly-agent]
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Execute write operations
+        uses: strands-agents/devtools/strands-command/actions/strands-finalize@main

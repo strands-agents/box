@@ -1,0 +1,9 @@
+// Refuse every delete, whatever a permit says.
+//
+// A forbid survives a widening; a permit does not. A later `permit fs:delete` cannot
+// beat this rule, so a broad filesystem policy can still carve out deletes. There are
+// no action groups, so this refuses `fs:delete` only, not `fs:move` or `fs:write`.
+
+@id("no_deletes")
+@description("This workload cannot delete files. Overwrite in place, move to a trash directory, or ask the operator to add a delete rule.")
+forbid (principal, action == Box::Action::"fs:delete", resource);

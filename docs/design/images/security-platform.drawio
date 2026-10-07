@@ -1,0 +1,104 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device" version="31.5.2">
+  <diagram id="security-platform" name="security-platform">
+    <mxGraphModel dx="1240" dy="702" grid="0" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="702" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="paper" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#FFFFFF;strokeWidth=0;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="0" y="0" width="1240" height="702" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="When a platform provides customer isolation" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=29;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="24" width="1168" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="Illustrative hosted deployment. Verify the selected platform's guarantees." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="74" width="1168" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="customer-A" value="" style="rounded=0;html=0;fillColor=#FCF5E8;strokeColor=#A67B38;strokeWidth=2.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="145" width="544" height="375" as="geometry" />
+        </mxCell>
+        <mxCell id="c6" value="Customer A environment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=23;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="164" width="492" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="c7" value="Platform provides the enclosing isolation." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="205" width="492" height="27" as="geometry" />
+        </mxCell>
+        <mxCell id="trusted-A" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#20323D;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="258" width="496" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="c9" value="Trusted Box process" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=20;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="72" y="268" width="472" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c10" value="Outside the process-containment boundaries below" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#52646F;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="72" y="303" width="472" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="A-24" value="" style="rounded=0;html=0;fillColor=#EAF4F8;strokeColor=#236A89;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="386" width="236" height="101" as="geometry" />
+        </mxCell>
+        <mxCell id="c12" value="Agent containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#236A89;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="68" y="399" width="220" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="c13" value="Agent + native children" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="68" y="440" width="220" height="23" as="geometry" />
+        </mxCell>
+        <mxCell id="A-284" value="" style="rounded=0;html=0;fillColor=#EAF4F8;strokeColor=#236A89;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="320" y="386" width="236" height="101" as="geometry" />
+        </mxCell>
+        <mxCell id="c15" value="Leaf containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#236A89;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="328" y="399" width="220" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="c16" value="Tool or local server" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="328" y="440" width="220" height="23" as="geometry" />
+        </mxCell>
+        <mxCell id="customer-B" value="" style="rounded=0;html=0;fillColor=#FCF5E8;strokeColor=#A67B38;strokeWidth=2.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="660" y="145" width="544" height="375" as="geometry" />
+        </mxCell>
+        <mxCell id="c18" value="Customer B environment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=23;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="684" y="164" width="492" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="c19" value="Platform provides the enclosing isolation." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="684" y="205" width="492" height="27" as="geometry" />
+        </mxCell>
+        <mxCell id="trusted-B" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#20323D;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="684" y="258" width="496" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="c21" value="Trusted Box process" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=20;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="696" y="268" width="472" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c22" value="Outside the process-containment boundaries below" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#52646F;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="696" y="303" width="472" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="B-24" value="" style="rounded=0;html=0;fillColor=#EAF4F8;strokeColor=#236A89;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="684" y="386" width="236" height="101" as="geometry" />
+        </mxCell>
+        <mxCell id="c24" value="Agent containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#236A89;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="692" y="399" width="220" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="c25" value="Agent + native children" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="692" y="440" width="220" height="23" as="geometry" />
+        </mxCell>
+        <mxCell id="B-284" value="" style="rounded=0;html=0;fillColor=#EAF4F8;strokeColor=#236A89;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="944" y="386" width="236" height="101" as="geometry" />
+        </mxCell>
+        <mxCell id="c27" value="Leaf containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#236A89;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="952" y="399" width="220" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="c28" value="Tool or local server" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="952" y="440" width="220" height="23" as="geometry" />
+        </mxCell>
+        <mxCell id="divider" value="" style="rounded=0;html=0;fillColor=#A67B38;strokeColor=#A67B38;strokeWidth=0;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="619" y="170" width="2" height="321" as="geometry" />
+        </mxCell>
+        <mxCell id="c30" value="Isolation between customers belongs to the platform." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=23;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="551" width="1120" height="33" as="geometry" />
+        </mxCell>
+        <mxCell id="c31" value="Box restricts processes inside each environment. Box supplies no isolation guarantee between customers." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="60" y="595" width="1120" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="c32" value="Gold: platform isolation. Blue: process containment. White: trusted Box code outside process containment." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=16;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="653" width="1168" height="27" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

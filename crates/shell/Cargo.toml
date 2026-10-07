@@ -1,0 +1,88 @@
+# Modified by Amazon. Original source: https://github.com/strands-agents/shell
+# Local changes are recorded in crates/shell/UPSTREAM.md.
+
+[package]
+name = "strands-shell"
+# Placeholder — the real version comes from the release git tag, stamped at
+# build time by .github/actions/stamp-version. Do not bump this by hand.
+version = "0.0.0"
+edition = "2024"
+description = "A virtual shell sandbox for AI agents"
+license = "Apache-2.0"
+repository = "https://github.com/strands-agents/shell"
+homepage = "https://github.com/strands-agents/shell"
+
+# Not published to crates.io. Every sibling crate sets this, and the build output
+# here is consumed in-workspace by `strands-box`, so `false` is correct.
+publish = false
+
+[lib]
+name = "strands_shell"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "strands-shell"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "strands-shell-wasm"
+path = "src/wasm_main.rs"
+required-features = ["wasm"]
+
+[features]
+cli = ["rustyline"]
+python = ["pyo3", "cli"]
+node = ["napi", "napi-derive", "napi-build"]
+wasm = []
+
+# ----- Cross-platform dependencies (pure Rust, WASM-safe) -----
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+lexopt = "0.3"
+strands-shell-macros = { path = "strands-shell-macros", version = "0.1.0" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+url = "2"
+jaq-core = "2"
+jaq-std = { version = "2", features = ["format", "log", "math", "regex", "time", "std"] }
+jaq-json = { version = "1", features = ["serde_json"] }
+
+# ----- Native-only dependencies -----
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
+napi = { version = "3", features = ["napi9", "tokio_rt"], optional = true }
+napi-derive = { version = "3", optional = true }
+# Held at 0.29 to share a build with the published Monty interpreter, which reaches
+# `pyo3 ^0.29` through `jiter`. `pyo3` declares `links = "python"`, so two majors cannot
+# coexist in one graph. This feature is default-off and no workspace crate enables it, so
+# nothing here is built against either version today.
+pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+rustyline = { version = "15", optional = true }
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std", "fs", "time", "process"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# ----- WASM dependencies -----
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util"] }
+wasi = "0.14"
+
+# ----- Cross-platform (native + WASM) -----
+[dependencies.mlua]
+version = "0.11.6"
+features = ["lua54", "async", "vendored"]
+
+[dev-dependencies]
+
+# napi-build stays on 2.x — the build-script helper is versioned
+# independently of the napi/napi-derive runtime crates and has no 3.x release
+# (latest is 2.3.2, which is what pairs with napi 3.x).
+[build-dependencies]
+napi-build = { version = "2", optional = true }

@@ -1,0 +1,242 @@
+name: "Rust: Test and Lint"
+
+# Based on GitHub's official Rust starter workflow:
+#   https://docs.github.com/en/actions/tutorials/build-and-test-code/rust
+#   https://github.com/actions/starter-workflows/blob/main/ci/rust.yml
+#
+# Shape: a reusable workflow (`workflow_call`) called from ci.yml, so branch
+# protection can require a single CI Gate status.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      fail_fast:
+        description: "Stop at the first failing test binary. Default false so a PR shows every failure at once, not one at a time. Set true only to trade the full picture for a slightly faster red signal."
+        required: false
+        type: boolean
+        default: false
+      filter:
+        description: "cargo test name filter (substring). Empty runs the whole suite; a dispatch sets it to scope a run to one area and save minutes."
+        required: false
+        type: string
+        default: ""
+      os:
+        description: 'JSON array of runner OSes for the test matrix. Default runs both; a dispatch narrows it, e.g. ["macos-latest"].'
+        required: false
+        type: string
+        default: '["ubuntu-latest", "macos-latest"]'
+      run_lint:
+        description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
+        required: false
+        type: boolean
+        default: true
+
+env:
+  # Colorize cargo output in Actions logs (from the starter template).
+  CARGO_TERM_COLOR: always
+  # ubuntu-latest and macos-latest each give ~14 GB of free disk. Full DWARF
+  # on the dev profile (which `cargo test` inherits) pushed target/ over that
+  # ceiling on Linux and rustc died with `No space left on device`. Setting
+  # the flag through the environment keeps the workspace `Cargo.toml` alone,
+  # so `[profile.dev]` entries stay owned by the workspace root. Line/file
+  # locations disappear from backtraces; panic message and test name still
+  # identify the failure.
+  RUSTFLAGS: "-C debuginfo=0"
+
+jobs:
+  unit-test:
+    name: Unit Tests (${{ matrix.os }})
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    # Cargo test on the full workspace typically finishes in a few minutes;
+    # 30 min caps a hung step instead of running to the 6-hour default.
+    timeout-minutes: 30
+    # macOS is advisory for now. The `strands-meta-harness/python_handler_e2e`
+    # suite fails on Homebrew's `/opt/homebrew/bin/python3`: the box's
+    # Seatbelt profile grants `process-exec` on the resolved literal, but
+    # Homebrew's symlink chain reaches a target the profile does not name
+    # (see `box/AGENTS.md` — "A rule must name the path a load asks for").
+    # Landing the fix belongs in a follow-up; failing this leg for now would
+    # block every merge on an unrelated defect. The failure is visible in
+    # the Actions UI so the pressure to fix it remains.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    strategy:
+      # Report every OS's outcome even if one fails. A single Linux failure
+      # is not a reason to hide the macOS one.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Free disk (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        # ubuntu-latest starts with about 1 GB free after the checkout. A debug
+        # `--all-targets` link of the workspace (many test binaries that each
+        # statically link pyo3, napi, mlua, rustls, and now opentelemetry) fills
+        # the disk, and the link dies: rustc reports `No space left on device`,
+        # or lld faults on its mmap-ed output with `ld terminated with signal 7
+        # [Bus error]`. debuginfo is already off (see RUSTFLAGS above), so the
+        # remaining lever is disk. Deleting the preinstalled Android and .NET
+        # SDKs, which this suite never uses, reclaims about 17 GB. A measured run
+        # kept about 17.5 GB free at the low point and passed at full build
+        # parallelism. The runner is a single-use VM, so the delete is local to
+        # this job.
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Cache cargo
+        # Wraps actions/cache with keys tuned for cargo (registry, git, target).
+        # rust-cache keys include the runner OS, so each matrix leg gets its
+        # own cache line rather than fighting over one entry. Only a push to the
+        # default branch writes the cache; same guard as verdict-hermetic.yml.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install non-framework Python (macOS only)
+        if: matrix.os == 'macos-latest'
+        # `macos-latest`'s Homebrew Python is a framework build: `bin/python3` is a
+        # launcher stub that `posix_spawn`s a second Mach-O inside
+        # `Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python`.
+        # The box's Seatbelt profile grants `process-exec` on one literal, so the
+        # re-exec is refused and every `strands-meta-harness/python_handler_e2e`
+        # test fails at startup. `uv`'s python-build-standalone distribution is a
+        # single binary under `~/.local/share/uv/python/` — no framework, no
+        # re-exec — and the `python` pack already lists that directory as a read
+        # root. Making it first in `PATH` is enough for the box's resolver to
+        # pick it up. Long-term fix tracked at
+        # https://github.com/strands-agents/box/issues/1.
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          "$HOME/.local/bin/uv" python install 3.12
+          UV_PY_DIR=$(dirname "$("$HOME/.local/bin/uv" python find 3.12)")
+          echo "$UV_PY_DIR" >> "$GITHUB_PATH"
+
+      - name: Install Node 22 (macOS only)
+        if: matrix.os == 'macos-latest'
+        # `macos-latest`'s Homebrew Node is 24, and its `bin/node` loads
+        # `@rpath/libnode.137.dylib` from a sibling `lib/` the box's `node`
+        # pack does not grant, so a workload that starts under Node 24 dies
+        # in `dyld` before it runs a line. `containment/AGENTS.md` records
+        # that `a_typescript_handler_is_not_refused_for_its_extension` needs
+        # Node 22, and `actions/setup-node@v7` downloads Node's own
+        # distribution tarball, whose `bin/node` is self-contained and fits
+        # the current pack. Long-term fix — widen the `node` pack or
+        # resolve Node dynamically — tracked at
+        # https://github.com/strands-agents/box/issues/9.
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Build
+        run: cargo build --workspace --locked --all-targets --all-features --verbose
+
+      - name: Run tests (linux)
+        if: matrix.os == 'ubuntu-latest'
+        # The `backend::linux::namespace::*` tests need capabilities the
+        # runner's AppArmor `unprivileged_userns` profile refuses:
+        # `unshare(CLONE_NEWUSER)`, `mount(2)`, and `capset` inside a fresh
+        # user namespace. Those tests belong on the AL2023 EC2 host that
+        # `scripts/test-linux-i4.sh` and `scripts/al2023-i4-test-host.yaml`
+        # provision, not on a hosted GitHub runner. The `view::tests` cases
+        # that only build a mount plan run here; the ones that actually enter a
+        # namespace and mount are skipped by name alongside the module skips.
+        # The four `*_establishes` / `*_is_refused` / `*_not_created_on_the_host`
+        # cases below are in that set too. Every remaining test in the workspace
+        # stays fatal.
+        env:
+          FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
+          FILTER: ${{ inputs.filter }}
+        run: |
+          cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
+            -- \
+            --skip 'backend::linux::namespace::authority' \
+            --skip 'backend::linux::namespace::netns' \
+            --skip 'backend::linux::namespace::reaper' \
+            --skip 'backend::linux::namespace::view::tests::a_read_only_directory_grant_may_enclose_an_exec_literals_file_bind' \
+            --skip 'backend::linux::namespace::view::tests::a_submount_under_a_read_only_grant_is_also_read_only' \
+            --skip 'backend::linux::namespace::view::tests::an_exec_file_under_a_read_root_establishes' \
+            --skip 'backend::linux::namespace::view::tests::a_symlinked_exec_file_under_a_read_root_establishes' \
+            --skip 'backend::linux::namespace::view::tests::a_symlink_at_a_mountpoint_outside_any_bind_is_refused' \
+            --skip 'backend::linux::namespace::view::tests::an_absent_mountpoint_is_not_created_on_the_host'
+
+      - name: Run tests (macos)
+        if: matrix.os == 'macos-latest'
+        # macOS runs the whole workspace with no skips. The runner keeps its own
+        # selected developer directory, and each test's tool table grants it.
+        # Node 22 replaces the framework build.
+        env:
+          FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
+          FILTER: ${{ inputs.filter }}
+        run: |
+          cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"}
+
+  lint:
+    name: Lint
+    if: ${{ inputs.run_lint }}
+    runs-on: ubuntu-latest
+    # Lint typically runs in ~2 min; 20 min caps a hung step instead of
+    # letting it run to the 6-hour default.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: cargo fmt
+        # Owned-crate fmt is the gate. The vendored `strands-shell` and its
+        # `strands-shell-macros` sibling are skipped for the same reason as the
+        # clippy step below: upstream is the source of truth for that tree, and
+        # a fix belongs upstream.
+        run: |
+          cargo fmt --check \
+            -p strands-box \
+            -p strands-box-containment \
+            -p strands-box-credentials \
+            -p strands-box-egress-gateway \
+            -p strands-box-policy \
+            -p strands-box-telemetry
+
+      - name: cargo clippy
+        # `-D warnings` is the gate, but the vendored `strands-shell` carries
+        # warnings we do not fix here:
+        # the root `AGENTS.md` says "owned clippy warnings are not expected;
+        # vendored ones are", and a fix here would diverge from upstream.
+        # `cargo clippy -p` / `--exclude` cannot skip a
+        # workspace crate that is a build dependency of an owned crate, so the
+        # lints are allowed at the driver level. The set was measured against
+        # the current pinned upstream — add a lint when it fires on a fresh
+        # sync, drop one when its `UPSTREAM.md` records an upstream fix. Every
+        # entry stays fatal on owned code because `#[warn(<lint>)]` at the
+        # owned crate root overrides `-A`, which is why this driver-level allow
+        # does not weaken the owned gate.
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- \
+            -D warnings \
+            -A clippy::too_many_arguments \
+            -A clippy::only_used_in_recursion \
+            -A clippy::await_holding_refcell_ref \
+            -A clippy::explicit_auto_deref \
+            -A clippy::chunks_exact_to_as_chunks \
+            -A dead_code \
+            -A non_snake_case

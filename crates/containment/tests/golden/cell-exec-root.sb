@@ -1,0 +1,153 @@
+; Deny every operation unless a rule below grants it.
+(version 1)
+(deny default)
+
+; Hide every other process while permitting self-inspection.
+(deny process-info*)
+(allow process-info* (target self))
+
+; One block per grant cell, below, each in grant order. A cell is one operation at one scope, and
+; the kernel takes the union of every allow — so a path granted read and write reaches two blocks
+; and needs no block of its own.
+
+; exec at file scope: one exec rule plus a metadata read on the same literal, so a PATH search can
+; stat the candidate without reading its bytes.
+(allow process-exec (literal "{ROOT}/agent"))
+(allow file-read-metadata (literal "{ROOT}/agent"))
+(allow file-read-metadata (path-ancestors "{ROOT}/tools"))
+(allow process-exec (subpath "{ROOT}/tools"))
+(allow file-read-metadata (subpath "{ROOT}/tools"))
+(allow process-fork)
+
+; An interactive Agent needs ioctl on an inherited macOS PTY slave, and cannot create a new PTY.
+(allow file-ioctl (regex #"^/dev/ttys[0-9]+$"))
+
+; The inherited standard streams: one metadata rule per regular file behind descriptors 0, 1, and 2
+; at apply time, on that name while a regular file holds it, so `fstat` on a stream the operator
+; redirected to a file no grant names answers instead of refusing. No data and no write travels with
+; it, a path the floor refuses gets none, and a refusal below still wins.
+
+
+; read at file scope: one whole file, and nothing beside it. The proxy trust bundle is the usual
+; one, and this block names no role — whichever files composition granted are the files here.
+(allow file-read* (literal "{ROOT}/proxy-ca.pem"))
+
+; read at dir scope: present, listable, and holding nothing readable. Metadata resolves the path,
+; and on a directory the data operation is enumeration.
+
+
+; read at root scope: the subtree, plus the ancestor metadata a lookup needs to reach it.
+(allow file-read-metadata (path-ancestors "{ROOT}/home"))
+(allow file-read* (subpath "{ROOT}/home"))
+
+; metadata at dir scope: this directory exists, and it is not enumerable.
+
+
+; metadata at root scope: every path in the subtree can be stat'd, and none of them read.
+
+
+; write at file scope: the contents of one file, and nothing else. The cell names the one leaf it
+; needs, so the BSD file flags, the file's own identity, its access-control list, its permission bits
+; and its owner are absent rather than subtracted, and the default deny is what refuses each. A last
+; deny takes the executable mapping off it, so the Agent cannot load as code a file it can rewrite.
+; The one grant of this shape today is a device the operator owns rather than the box.
+
+
+; write at root scope: the subtree's contents are the Agent's, and the root's own identity is not —
+; the two identity denies fix it, because a subpath rule covers the root itself and a symlink at that
+; path would otherwise succeed. The cell names six leaves: the contents, both halves of an entry's
+; identity, the extended attributes, the permission bits, and the timestamps. The BSD file flags, the
+; access-control list and the owner are absent, so the default deny refuses each; nothing ordinary
+; sets any of the three, and a flag or a list the Agent stored would refuse the operator too and leave
+; the box undeletable. The permission bits stay granted because a workload tightens a file it created
+; in its own tree. A last deny takes the executable mapping off the whole subtree, so no file the
+; Agent can rewrite loads as code. A read-only root keeps its own mapping authority, which is where a
+; runtime library comes from.
+(allow file-write-data (subpath "{ROOT}/home"))
+(allow file-write-create (subpath "{ROOT}/home"))
+(allow file-write-unlink (subpath "{ROOT}/home"))
+(allow file-write-xattr (subpath "{ROOT}/home"))
+(allow file-write-mode (subpath "{ROOT}/home"))
+(allow file-write-times (subpath "{ROOT}/home"))
+(deny file-write-unlink (literal "{ROOT}/home"))
+(deny file-write-create (literal "{ROOT}/home"))
+(deny file-map-executable (subpath "{ROOT}/home"))
+
+; write protection: subtract every write and hard-link operation from an opened authority object.
+
+
+; leaf overlay (empty for the agent box): additive leaf-only broad-exec rules, placed AFTER the write
+; cells so an executable-mapping allow overrides their deny, and BEFORE the refused/existence denies
+; below so a refused tree stays non-executable. Filled by the broad-exec branch in seatbelt.rs.
+
+
+; Seven names and no more. Native Rust startup needs the page size, and a runtime that sizes
+; a thread pool needs the processor count. The other five are what the uname interface reads.
+; A runtime asks for all of them before it runs a line of the workload's own code. Each names
+; a public property of the host, and none is a secret.
+(allow sysctl-read
+    (sysctl-name "hw.machine")
+    (sysctl-name "hw.ncpu")
+    (sysctl-name "hw.pagesize_compat")
+    (sysctl-name "kern.hostname")
+    (sysctl-name "kern.osrelease")
+    (sysctl-name "kern.ostype")
+    (sysctl-name "kern.version"))
+
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+; TCP egress uses the composition-owned ports; Unix sockets use write roots or exact connect grants.
+(deny network*)
+
+; Pathname sockets: bind, inbound, and outbound on write roots; outbound on each connect file.
+(allow network-bind (subpath "{ROOT}/home"))
+(allow network-inbound (subpath "{ROOT}/home"))
+(allow network-outbound (subpath "{ROOT}/home"))
+
+; the composition's own localhost ports, in grant order. The first is the proxy.
+(allow network-outbound
+    (remote tcp "localhost:43123"))
+
+; The existence test, refused across the operator's home. Denying by default leaves it answerable,
+; and denying this one operation is what makes an absent path and a refused path indistinguishable.
+; Three parts in one block, and their order decides the outcome under last-match-wins: the home
+; first, then the operation allowed back on each granted path and on the ancestor chain a lookup
+; walks, then every credential store denied last. A machine-wide deny is unavailable, because it
+; refuses the workload's own exec.
+(deny file-test-existence (subpath "{PASSWD_HOME}"))
+(deny file-test-existence (subpath "/System/Volumes/Data{PASSWD_HOME}"))
+(allow file-test-existence (path-ancestors "{ROOT}/agent"))
+(allow file-test-existence (literal "{ROOT}/agent"))
+(allow file-test-existence (path-ancestors "{ROOT}/proxy-ca.pem"))
+(allow file-test-existence (literal "{ROOT}/proxy-ca.pem"))
+(allow file-test-existence (path-ancestors "{ROOT}/home"))
+(allow file-test-existence (subpath "{ROOT}/home"))
+(allow file-test-existence (path-ancestors "{ROOT}/tools"))
+(allow file-test-existence (subpath "{ROOT}/tools"))
+
+; Refused trees remain closed to content reads, writes, and execution.
+
+
+; Metadata and existence lookup for identity-checked files and their ancestors.
+
+
+; View-changing and node-creating operations, each named in full and placed last so no cell above and
+; no future overlay re-grants one. Device nodes; mounting, remounting and unmounting; the change of
+; filesystem root; every volume-snapshot operation, mounting one included; and the grafting of a
+; filesystem image into the namespace. Naming each in full is required rather than tidy: the
+; version-1 preamble grants several of these unconditionally, the default deny does not reach them,
+; and a wildcard does not take back an operation that preamble granted — only the exact name does.
+; The two grafting operations are absent from the operation table before macOS 26, and an absent name
+; refuses the whole profile at compile time. So each of the two states a test of its own name first,
+; and the refusal applies on every host that carries the operation. A host without the name renders
+; neither line, which the crate guidance records as a stated cost.
+(deny file-mknod)
+(deny file-mount)
+(deny file-mount-update)
+(deny file-unmount)
+(deny file-chroot)
+(deny fs-snapshot-create)
+(deny fs-snapshot-delete)
+(deny fs-snapshot-mount)
+(deny fs-snapshot-revert)
+(if (defined? 'file-graft) (deny file-graft))
+(if (defined? 'file-ungraft) (deny file-ungraft))

@@ -1,0 +1,27 @@
+// An outbound byte budget — the rule shape Cedar cannot express.
+//
+// Permit an outbound HTTP request only while the bytes DELIVERED in the last 60
+// seconds stay under the budget. The sum walks `http:request::response` events, never
+// `::request` ones: a request's `body_bytes` is what the workload *offered*, while a
+// resolution's is what actually left the box. Charging for the offer would let a
+// workload burn budget on writes that never egressed, and — worse — a request that is
+// denied never produces a resolution, so only real egress is ever counted.
+//
+// `formerly within 60s` bounds the window, which is also what keeps the engine's
+// retained state bounded: an unbounded window never evicts.
+@id("egress_byte_budget")
+permit (
+    principal,
+    action == Box::Action::"http:request",
+    resource
+)
+when temporal {
+    exists (total: Long). (
+        (sum b for (b: Long), (t: Timepoint). where (
+            formerly within 60s (
+                Box::Action::"http:request"::response{ input.host: _, input.body_bytes: b } && tp(t)
+            )
+        )) == total
+        && total < 100
+    )
+};

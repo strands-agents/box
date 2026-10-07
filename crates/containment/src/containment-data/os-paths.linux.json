@@ -1,0 +1,16 @@
+{
+  "description": "The operating system's own paths on Linux, in two sets named for the containment that receives each. `agent` is agent containment: what any process needs to load and run. `leaf` is leaf containment: what a host tool needs in addition to agent containment. `box` selects the containment through `RuntimeReach`. Each list names one cell, so a set states no exec grant and writes nothing but the null device. Per platform, because a path present on both platforms is not always granted on both: this file withholds /usr/share/icu, /usr/share/locale and /usr/share/terminfo although all three exist on Linux. The paths no grant may reach are a second file, and one list rather than two, because a config authored on one platform can be applied on another.",
+  "agent": {
+    "description": "What any process on this operating system needs to load and run, whatever it is. A process that only runs its own program receives this set alone.",
+    "read_root": ["/usr/share/zoneinfo"],
+    "read_dir": ["/"],
+    "read_file": ["/dev/null", "/etc/localtime"],
+    "write_file": ["/dev/null"],
+    "metadata_dir": ["/etc", "/var"]
+  },
+  "leaf": {
+    "description": "What leaf containment needs in addition to agent containment: the loader's cache and library directories, and the entropy devices a runtime seeds from. A read root here is also a directory the loader maps code from, which a bind cannot make readable without letting code run there, so the startup disclosure says so on each of those lines.",
+    "read_root": ["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/etc/ssl"],
+    "read_file": ["/dev/urandom", "/dev/random", "/dev/zero", "/etc/ld.so.cache"]
+  }
+}

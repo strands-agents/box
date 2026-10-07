@@ -1,0 +1,37 @@
+// An agent reaching Amazon Bedrock, with read and write on the project directory.
+//
+// Replace `~/project` with the box's project path, spelled `~`-relative. The Bedrock
+// host carries a region — `us-east-1` here — which must match `AWS_REGION` in
+// `box.toml`, or the request leg refuses a host the connect leg reached.
+
+// ── Reaching the model ───────────────────────────────────────────────────────
+// The connect leg is scoped to the port; the request leg names the real host after TLS.
+@id("bedrock_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.port == 443 };
+
+@id("bedrock_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "bedrock-runtime.us-east-1.amazonaws.com" };
+
+// ── Running commands ───────────────────────────────────────────────────────────
+// An agent that runs commands needs `shell:exec`. The filesystem rules below bound
+// what a command touches; see `shell-guard.dw` to refuse a dangerous line.
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// ── Reading and writing the project ──────────────────────────────────────────
+// Two clauses per verb: the directory itself and its contents.
+@id("project_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/project" ||
+  context.input.path like "~/project/*"
+};
+
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when {
+  context.input.path == "~/project" ||
+  context.input.path like "~/project/*"
+};

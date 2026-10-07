@@ -1,0 +1,2 @@
+# The Strands Agents SDK. It brings boto3, which the Bedrock model provider uses.
+strands-agents>=1.57,<2

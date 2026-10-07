@@ -1,0 +1,54 @@
+@id("model_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.port == 443 };
+
+@id("model_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host like "*.api.aws" };
+
+@id("agentcore_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host like "*bedrock-agentcore.*.amazonaws.com" };
+
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+@id("workspace_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "{{WORKSPACE}}" ||
+  context.input.path like "{{WORKSPACE}}/*"
+};
+
+@id("workspace_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when {
+  context.input.path == "{{WORKSPACE}}" ||
+  context.input.path like "{{WORKSPACE}}/*"
+};
+
+@id("no_deletes")
+forbid (principal, action == Box::Action::"fs:delete", resource);
+
+@id("harness_configuration")
+forbid (
+  principal,
+  action in [
+    Box::Action::"fs:read",
+    Box::Action::"fs:write",
+    Box::Action::"fs:delete",
+    Box::Action::"fs:move",
+    Box::Action::"fs:other"
+  ],
+  resource
+)
+when {
+  context.input.path == "~/.claude" ||
+  context.input.path like "~/.claude/*" ||
+  context.input.path == "~/.codex" ||
+  context.input.path like "~/.codex/*" ||
+  context.input.path == "~/.kiro" ||
+  context.input.path like "~/.kiro/*" ||
+  context.input.path == "~/.agents" ||
+  context.input.path like "~/.agents/*"
+};

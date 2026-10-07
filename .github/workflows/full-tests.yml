@@ -1,0 +1,49 @@
+name: "Full Tests (--no-fail-fast)"
+
+# Manual diagnostic. Runs the entire workspace test suite with --no-fail-fast
+# on an arbitrary ref — a branch, a tag, or a commit SHA — so one run reports
+# every failure instead of stopping at the first failing test binary. Not a
+# gate; dispatch it by hand when you need the full picture.
+#
+#   gh workflow run full-tests.yml -f ref=<branch|tag|sha>
+#
+# Reuses rust-test-lint.yml with its fail_fast option, so the test logic
+# and the platform skips stay in one place.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or commit SHA to test"
+        required: true
+        type: string
+      filter:
+        description: "cargo test name filter (substring). Empty runs everything; set it to scope to one area and save minutes."
+        required: false
+        type: string
+        default: ""
+      os:
+        description: "Which runner OS to test."
+        required: false
+        type: choice
+        default: both
+        options: [both, ubuntu-latest, macos-latest]
+      lint:
+        description: "Also run fmt/clippy. Off by default for a scoped diagnostic run."
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  full:
+    name: Full suite
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust-test-lint.yml
+    with:
+      ref: ${{ inputs.ref }}
+      fail_fast: false
+      filter: ${{ inputs.filter }}
+      # Map the OS choice to the JSON array the reusable matrix consumes.
+      os: ${{ inputs.os == 'both' && '["ubuntu-latest", "macos-latest"]' || format('["{0}"]', inputs.os) }}
+      run_lint: ${{ inputs.lint }}

@@ -1,0 +1,31 @@
+[package]
+name = "workload-verdict"
+version = "0.1.0"
+edition = "2024"
+# Matches the suite it serves: these run on bare EC2 Linux and macOS hosts against
+# the repo's pinned toolchain (see rust-toolchain.toml).
+rust-version = "1.85"
+description = "The trusted verdict layer for test-workload/. Judges an agent-driven run from host evidence; never from the agent's own report."
+publish = false
+
+# Deliberately excluded from the root workspace, like `test-integ` and `test-common`:
+# this crate reads the BUILT box's artefacts as data and links no crate from
+# `crates/`, so it must compile after the workspace and must stay out of
+# `cargo build --workspace --all-targets` (the unit-test CI leg).
+
+[lib]
+name = "workload_verdict"
+path = "src/lib.rs"
+
+# What the bash launcher calls. The launcher installs a CLI, exports env, execs the
+# agent and tees a log; it decides no verdict.
+[[bin]]
+name = "workload-oracle"
+path = "src/bin/workload-oracle.rs"
+
+[dependencies]
+# The one journal reader every suite shares. See test-common/src/lib.rs for why this
+# is not a per-suite copy.
+test-common = { path = "../../test-common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

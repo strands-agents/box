@@ -1,0 +1,7 @@
+{
+  "onboarding": { "version": 1 },
+  "providers": { "enabled": ["bedrock"] },
+  "profile": { "model": "bedrock/global.anthropic.claude-opus-5" },
+  "permissions": { "mode": "bypassPermissions" },
+  "settings": { "setupOnLaunch": false }
+}

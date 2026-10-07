@@ -1,0 +1,42 @@
+# The Strands Box workspace and its vendored dependencies.
+
+[workspace]
+resolver = "2"
+# POC code lives under .agents/pocs/ (see AGENTS.md) and is excluded so a normal
+# `cargo build`/`cargo test` on a dev host never tries to compile it — e.g.
+# .agents/pocs/sandbox-ebpf only builds for the `bpfel-unknown-none` target with a
+# nightly toolchain.
+#
+members = [
+    "crates/box",
+    "crates/credentials",
+    "crates/policy",
+    "crates/containment",
+    "crates/egress-gateway",
+    "crates/shell",
+    "crates/shell/strands-shell-macros",
+    "crates/telemetry",
+]
+# `test-integ` is the black-box deterministic containment suite. It is excluded
+# deliberately, not overlooked: it drives the BUILT `strands-box` binary as a
+# subprocess rather than linking any crate here, so it must compile AFTER the
+# workspace and it must not be pulled into `cargo build --workspace
+# --all-targets` (which is what the unit-test CI leg runs). It carries its own
+# Cargo.lock for the same reason. See test-integ/README.md.
+exclude = [
+    ".agents/pocs",
+    # The test suites and the reader they share. Excluded for the same reason as
+    # `test-integ`: they read the BUILT box's artefacts as data rather than linking
+    # any crate here, so they must compile after the workspace and must stay out of
+    # `cargo build --workspace --all-targets` (the unit-test CI leg).
+    "test-common",
+    "test-integ",
+    "test-workload/verdict",
+]
+
+# Profiles are workspace-wide (they can only be set at the workspace root). By
+# default, debug info is off for the release profile; set `debug = "limited"` if
+# you need backtraces/profiling in production.
+#   https://doc.rust-lang.org/cargo/reference/profiles.html#debug
+[profile.release]
+# debug = "limited"

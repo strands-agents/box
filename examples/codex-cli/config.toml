@@ -1,0 +1,15 @@
+# Codex reads this file from CODEX_HOME. It selects the model and the Bedrock endpoint; the box's
+# egress gateway adds your Bedrock API key to each request.
+model = "openai.gpt-5.6-terra"
+model_provider = "bedrock"
+
+# The box contains Codex. Codex's own sandbox stays off, so each command it runs goes to the box's
+# shell, where the policy decides it.
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+
+[model_providers.bedrock]
+name = "Amazon Bedrock"
+base_url = "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+wire_api = "responses"
+env_key = "AWS_BEARER_TOKEN_BEDROCK"

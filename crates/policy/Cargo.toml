@@ -1,0 +1,77 @@
+[package]
+name = "strands-box-policy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The local Policy Decision Point (PDP) — one in-process, fail-closed policy authority opened through a concrete facade."
+
+[lib]
+name = "policy"
+path = "src/lib.rs"
+
+[features]
+# The egress-gateway adapter implements its policy-neutral `EffectInterceptor`
+# lifecycle. The compile-time dependency remains behind this default-off
+# integration feature, preserving the one-way mechanism-to-composition
+# dependency graph. egress-gateway's default `tls-intercept` feature is off
+# because the adapter contract is socket-free.
+egress-adapter = ["dep:strands-box-egress-gateway"]
+shell-adapter = ["dep:async-trait", "dep:strands-shell"]
+# The Monty adapter answers the interpreter's OS-call suspensions. Synchronous and
+# socket-free, so it needs no async runtime — unlike the Shell adapter, whose
+# `EffectInterceptor` is an async trait.
+script-adapter = ["dep:monty", "dep:monty-types"]
+
+
+[dependencies]
+async-trait = { version = "0.1", optional = true }
+# The policy engine (docs/design/decisions.md#the-engine-is-dogwood). Pinned to
+# EXACTLY 4.11.0 — a *security* pin: schema-directed context parsing differs across
+# 4.x minors, so the pin is part of the fail-closed contract, not a convenience floor.
+cedar-policy = "=4.11.0"
+# Generates typed Cedar action schemas from raw MCP tools/list responses.
+cedar-policy-mcp-schema-generator = "=0.6.1"
+# Parses raw MCP tools/list responses into the generator's server description.
+mcp-tools-sdk = "=0.4.1"
+# The policy engine. The ONLY decision engine.
+# NOTE: `cedar-policy` above stays a DIRECT exact pin even though the Cedar authorizer is
+# gone — the schema and the request gate are Cedar types, and Dogwood's own constraint on
+# cedar is a caret range, so removing our pin would silently widen it.
+dogwood-language = "=1.0.0"
+# The single-machine temporal engine. Its durable assembly appends each event before
+# evaluation and recovers monitor state from the box's private history file.
+dogwood-local-engine = "=1.0.0"
+# Fail-closed, typed error model shared by the workspace crates (house style).
+thiserror = "2"
+serde_json = "1"
+# The egress adapter target, behind the default-off `egress-adapter` feature.
+# `default-features = false` drops egress-gateway's TLS stack; the adapter uses
+# only its socket-free effect contract.
+strands-box-egress-gateway = { path = "../egress-gateway", default-features = false, optional = true }
+strands-shell = { path = "../shell", optional = true }
+# The Monty adapter targets, behind the default-off `script-adapter` feature. Published
+# crates, not vendored: the integration needs no interpreter change, so there is nothing
+# to carry a fork for. `monty` drives the run loop; `monty-types` carries the OS-call
+# vocabulary the loop hands over (upstream split the two at 0.0.19).
+monty = { version = "1.0.0", optional = true }
+monty-types = { version = "1.0.0", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+dogwood-local-engine = { version = "=1.0.0", features = ["fault-injection"] }
+# Real directories for the script end-to-end tests: a rule that guards a path is only
+# proven by a file that exists and is readable on the host, so that only policy stands
+# between the script and the bytes.
+tempfile = "3"
+# The real MITM proxy, for the end-to-end temporal test. Default features ON here (the
+# non-dev dependency above disables them): `MitmInterceptor` is gated behind
+# `tls-intercept`, and the E2E test needs a real TLS-terminating listener.
+strands-box-egress-gateway = { path = "../egress-gateway" }
+# The test harness's TLS upstream and permissive client are built from these directly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[lints.rust]
+# A swallowed `Result` on a decision path is a compile error.
+unused_must_use = "deny"

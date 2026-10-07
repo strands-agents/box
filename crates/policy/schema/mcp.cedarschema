@@ -1,0 +1,7 @@
+namespace Server {
+    @mcp_principal("Agent")
+    entity Agent;
+
+    @mcp_resource("Resource")
+    entity Resource;
+}

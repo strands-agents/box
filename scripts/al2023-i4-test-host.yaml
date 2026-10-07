@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Strands Box Linux I4 test host on pinned AL2023 kernel 6.12 arm64.
+
+Parameters:
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-059ac2a9af24f4a51
+    Description: Pinned AL2023 kernel 6.12 arm64 AMI in us-west-2.
+  InstanceType:
+    Type: String
+    Default: m7g.large
+    AllowedValues:
+      - m7g.large
+    Description: Graviton instance type for the native arm64 proof.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet with outbound package and Systems Manager access.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the test host.
+
+Resources:
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteTestSource
+            Status: Enabled
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadTestSource
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${SourceBucket.Arn}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No inbound access for the Strands Box I4 test host.
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Permit package and Systems Manager access.
+      VpcId: !Ref VpcId
+
+  TestHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 40
+            VolumeType: gp3
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref SecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-host"
+        - Key: Owner
+          Value: box-maintainers
+        - Key: Purpose
+          Value: strands-box-linux-i4
+        - Key: KernelTrack
+          Value: "6.12"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y \
+            gcc gcc-c++ make perl pkgconf-pkg-config openssl-devel \
+            git tar gzip curl-minimal util-linux procps-ng
+          runuser -u ec2-user -- env \
+            HOME=/home/ec2-user \
+            CARGO_HOME=/home/ec2-user/.cargo \
+            RUSTUP_HOME=/home/ec2-user/.rustup \
+            sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --profile default --default-toolchain 1.97.1"
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID for Systems Manager commands.
+    Value: !Ref TestHost
+  SourceBucketName:
+    Description: Encrypted bucket for the exact test source archive.
+    Value: !Ref SourceBucket

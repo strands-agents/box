@@ -1,0 +1,24 @@
+// Permit commands, but refuse one dangerous line.
+//
+// A shell permit does not bound what a command touches — every file each command reads
+// or writes raises its own `fs:*` decision, and the filesystem rules are what confine
+// the agent. Pair this file with the project read and write rules from an agent example.
+//
+// `shell:exec` and `shell:spawn` are two actions with no group between them. This file
+// permits `shell:exec` only. `shell:spawn` authorizes a HOST binary that reaches the
+// kernel rather than the shell's virtual filesystem, so no `fs:*` decision is raised
+// for what it does; leave it absent unless you mean to grant that.
+
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// Refuse `rm -rf`. `program` is what the first word resolved to, not how it was spelled.
+// `arg1` is optional, so a rule that reads it must guard it with `has`; an unguarded
+// read is a load error, not a rule that quietly matches nothing.
+@id("no_rm_rf")
+@description("`rm -rf` is refused. Remove files one path at a time, or ask the operator to permit the recursive form.")
+forbid (principal, action == Box::Action::"shell:exec", resource)
+when {
+  context.input.program == "rm" &&
+  context.input has arg1 && context.input.arg1 == "-rf"
+};

@@ -1,0 +1,16 @@
+[package]
+name = "test-common"
+version = "0.1.0"
+edition = "2024"
+# Matches test-integ: the test suites run on bare EC2 hosts against the repo's
+# pinned toolchain (see rust-toolchain.toml).
+rust-version = "1.85"
+description = "Shared test-side readers for the box's own output. One journal parser for every suite."
+publish = false
+
+[lib]
+name = "test_common"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1"

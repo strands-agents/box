@@ -1,0 +1,140 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="Electron" type="device" version="31.5.2">
+  <diagram id="security-enforcement" name="security-enforcement">
+    <mxGraphModel dx="1240" dy="860" grid="0" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="860" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="paper" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#FFFFFF;strokeWidth=0;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="0" y="0" width="1240" height="860" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="Process containment and policy" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=30;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="24" width="1168" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="Main access paths on macOS. Each arrow names the control on that path." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="73" width="1168" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="os" value="" style="rounded=0;html=0;fillColor=#FCF5E8;strokeColor=#A67B38;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="24" y="128" width="1192" height="538" as="geometry" />
+        </mxCell>
+        <mxCell id="c6" value="Surrounding operating system" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=22;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="48" y="146" width="1100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c7" value="The operator maintains the local system.&#10;For hosted deployments, use the platform's documented division of responsibility." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="48" y="179" width="1100" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="agent-boundary" value="" style="rounded=0;html=0;fillColor=#EAF4F8;strokeColor=#236A89;strokeWidth=2.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="70" y="244" width="280" height="183" as="geometry" />
+        </mxCell>
+        <mxCell id="c9" value="Agent containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=21;fontColor=#236A89;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="90" y="261" width="240" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#236A89;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="94" y="315" width="232" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="c11" value="Agent process&#10;and native children" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=19;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="104" y="323" width="212" height="62" as="geometry" />
+        </mxCell>
+        <mxCell id="trusted" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#20323D;strokeWidth=2;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="520" y="240" width="646" height="241" as="geometry" />
+        </mxCell>
+        <mxCell id="c13" value="Trusted Box process" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=22;fontColor=#20323D;fontStyle=1;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="542" y="257" width="590" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="c14" value="Outside agent and leaf containment" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="542" y="292" width="590" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="handlers" value="" style="rounded=0;html=0;fillColor=#F3F6F8;strokeColor=#80939F;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="542" y="350" width="294" height="94" as="geometry" />
+        </mxCell>
+        <mxCell id="c16" value="Request handlers" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=19;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="550" y="360" width="278" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="c17" value="Strands Shell · Monty&#10;Egress gateway" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="550" y="394" width="278" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="policy" value="" style="rounded=0;html=0;fillColor=#F3F6F8;strokeColor=#80939F;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="966" y="359" width="174" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="c19" value="Policy engine" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=19;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="976" y="372" width="154" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="c20" value="" style="html=0;rounded=0;strokeColor=#236A89;strokeWidth=2;endArrow=block;endFill=1;startArrow=none;startFill=1;dashed=0;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="350" y="356" as="sourcePoint" />
+            <mxPoint x="542" y="397" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="440" y="356" />
+              <mxPoint x="440" y="397" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c21" value="Requests&#10;through Box" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=#FCF5E8;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#236A89;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="356" y="293" width="148" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="c22" value="" style="html=0;rounded=0;strokeColor=#20323D;strokeWidth=2;endArrow=block;endFill=1;startArrow=block;startFill=1;dashed=0;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="836" y="397" as="sourcePoint" />
+            <mxPoint x="966" y="397" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c23" value="Ask / decide" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=#FFFFFF;strokeColor=none;fontFamily=Arial;fontSize=15;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="838" y="362" width="126" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="files" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#80939F;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="70" y="557" width="280" height="79" as="geometry" />
+        </mxCell>
+        <mxCell id="c25" value="Files in the surrounding OS" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=18;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="81" y="578" width="258" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="c26" value="" style="html=0;rounded=0;strokeColor=#236A89;strokeWidth=2;endArrow=block;endFill=1;startArrow=none;startFill=1;dashed=0;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="210" y="427" as="sourcePoint" />
+            <mxPoint x="210" y="557" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c27" value="Direct access&#10;OS checks grants" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=#FCF5E8;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#236A89;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="107" y="467" width="206" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="c28" value="" style="html=0;rounded=0;strokeColor=#20323D;strokeWidth=2;endArrow=block;endFill=1;startArrow=none;startFill=1;dashed=0;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="630" y="444" as="sourcePoint" />
+            <mxPoint x="350" y="596" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="630" y="526" />
+              <mxPoint x="408" y="526" />
+              <mxPoint x="408" y="596" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c29" value="Permitted file operations" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=#FCF5E8;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#20323D;fontStyle=0;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="450" y="494" width="274" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="remote" value="" style="rounded=0;html=0;fillColor=#FFFFFF;strokeColor=#80939F;strokeWidth=1.5;dashed=0;" parent="1" vertex="1">
+          <mxGeometry x="903" y="722" width="290" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="c31" value="Remote service" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=20;fontColor=#20323D;fontStyle=1;align=center;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="915" y="741" width="266" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="c32" value="" style="html=0;rounded=0;strokeColor=#20323D;strokeWidth=2;endArrow=block;endFill=1;startArrow=none;startFill=1;dashed=0;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="790" y="444" as="sourcePoint" />
+            <mxPoint x="903" y="761" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="790" y="761" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c33" value="Permitted network requests&#10;through the egress gateway" style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=#FCF5E8;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#20323D;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="831" y="549" width="347" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="c34" value="An allowed request does not&#10;contain the remote service." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="468" y="731" width="350" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="c35" value="Blue outline: process containment. Gold outline: the surrounding OS." style="text;html=0;whiteSpace=nowrap;overflow=visible;rounded=0;fillColor=none;strokeColor=none;fontFamily=Arial;fontSize=17;fontColor=#52646F;fontStyle=0;align=left;verticalAlign=middle;spacing=0;" parent="1" vertex="1">
+          <mxGeometry x="36" y="812" width="1168" height="25" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

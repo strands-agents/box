@@ -1,0 +1,547 @@
+name: Release Box
+
+# GitHub-native release path for the box binaries. A manual dispatch names the
+# version and a commit; the workflow builds strands-box for each target below on
+# hosted runners, packages each binary set as a versioned tarball, and attaches
+# the macOS tarball and its SHA256SUMS.txt to a GitHub Release.
+# That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
+# consume:
+#
+#   box-<version>-<triple>.tar.gz     e.g. box-v0.1.0-aarch64-apple-darwin.tar.gz
+#   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
+#
+# Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
+# aarch64. Only the macOS tarball is released. The Linux tarballs build so the
+# Linux backend can be brought up, and stay run artifacts that are never
+# published. musl and native distro packages (deb/rpm) are not built here.
+#
+# Shape (mirrors the harness-sdk release workflows, retargeted to a binary
+# release): scan -> test-lint / build -> inspect -> approve ->
+#           tag + release -> verify.
+#
+# Dry-Run (the default) runs scan/build/inspect so you can review the
+# bundle on the run page, and skips approve/tag/release/verify. Everything runs
+# on a fork too, and a fork run publishes to the fork's own releases, so a
+# fork release goes end-to-end.
+#
+# One-time setup before the first non-dry run: a GitHub environment named
+# `release-gate` with the reviewers who approve a release. A fork has no
+# reviewer config there, so approve just passes on a fork.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version, e.g. 0.1.0 (bare semver, no leading v). The tag is v<version>.'
+        required: true
+        type: string
+      sha:
+        description: 'Optional commit SHA to release (must be an ancestor of origin/main). Defaults to current origin/main.'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Dry-Run: build/inspect still run so you can review the bundle on the run page; skip approve + tag + release + verify.'
+        required: true
+        default: true
+        type: boolean
+      skip_tests:
+        description: 'Fork testing only: skip the test + lint job entirely so the release pipeline runs without waiting on it. Inert on the upstream repo.'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-box
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Resolve the commit, validate the version, refuse a bad bump ─────────
+  scan:
+    name: Resolve SHA and validate version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_sha: ${{ steps.scan.outputs.release_sha }}
+      prev_tag: ${{ steps.scan.outputs.prev_tag }}
+      new_tag: ${{ steps.scan.outputs.new_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Resolve SHA, find previous tag, validate version
+        id: scan
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          SHA_INPUT: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # 1. Validate the typed version (bare semver, no prefix).
+          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$NEW_VERSION' is not bare semver (expected MAJOR.MINOR.PATCH, no 'v')."
+            exit 1
+          fi
+
+          # 2. Resolve the SHA. Default to origin/main; a typed sha is accepted
+          #    only if it is an ancestor of origin/main.
+          if [ -n "$SHA_INPUT" ]; then
+            RELEASE_SHA=$(git rev-parse --verify "$SHA_INPUT^{commit}" 2>/dev/null) || {
+              echo "::error::sha '$SHA_INPUT' is not a valid commit."
+              exit 1
+            }
+            if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+              echo "::error::sha $RELEASE_SHA is not an ancestor of origin/main -- release only from main history."
+              exit 1
+            fi
+          else
+            RELEASE_SHA=$(git rev-parse origin/main)
+          fi
+
+          # 3. Resolve the previous tag. A baseline is required.
+          TAG_PREFIX="v"
+          PREV_TAG=$(git tag --list "${TAG_PREFIX}*" --sort=-v:refname | head -n1)
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::No prior tag matching ${TAG_PREFIX}* -- refusing to release without a baseline. (Fork-testing? Push a baseline tag first, e.g. \`git tag ${TAG_PREFIX}0.0.1 <sha> && git push origin ${TAG_PREFIX}0.0.1\`.)"
+            exit 1
+          fi
+          PREV_VERSION="${PREV_TAG#"${TAG_PREFIX}"}"
+          NEW_TAG="${TAG_PREFIX}${NEW_VERSION}"
+
+          # 4. Reject duplicate / non-monotonic / pre-existing tags, and require a
+          #    single-step increment (major, minor, or patch) so a typo like
+          #    0.1.0 -> 0.10.0 fails here instead of relying on the approver.
+          if [ "$NEW_VERSION" = "$PREV_VERSION" ]; then
+            echo "::error::version $NEW_VERSION matches existing tag $PREV_TAG."
+            exit 1
+          fi
+          HIGHER=$(printf '%s\n%s\n' "$PREV_VERSION" "$NEW_VERSION" | sort -V | tail -n1)
+          if [ "$HIGHER" != "$NEW_VERSION" ]; then
+            echo "::error::version $NEW_VERSION is not greater than previous $PREV_VERSION."
+            exit 1
+          fi
+          # Validate the baseline first: a malformed previous tag must fail with
+          # a clear message, not a cryptic arithmetic error under set -e.
+          if ! [[ "$PREV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::previous tag version '$PREV_VERSION' is not bare semver -- cannot compute the increment baseline."
+            exit 1
+          fi
+          IFS=. read -r P_MAJ P_MIN P_PAT <<< "$PREV_VERSION"
+          VALID="$((P_MAJ+1)).0.0 ${P_MAJ}.$((P_MIN+1)).0 ${P_MAJ}.${P_MIN}.$((P_PAT+1))"
+          case " $VALID " in
+            *" $NEW_VERSION "*) ;;
+            *)
+              echo "::error::version $NEW_VERSION is not a single increment of $PREV_VERSION (expected one of: $VALID)."
+              exit 1;;
+          esac
+          if git rev-parse --verify "refs/tags/$NEW_TAG" >/dev/null 2>&1; then
+            echo "::error::tag $NEW_TAG already exists."
+            exit 1
+          fi
+
+          # 5. Sanity-check: at least one commit since prev tag.
+          COUNT=$(git rev-list --count "$PREV_TAG..$RELEASE_SHA")
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::no commits between $PREV_TAG and $RELEASE_SHA -- nothing to release."
+            exit 1
+          fi
+
+          {
+            echo "release_sha=$RELEASE_SHA"
+            echo "prev_tag=$PREV_TAG"
+            echo "new_tag=$NEW_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release scan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Previous tag | \`$PREV_TAG\` |"
+            echo "| Proposed tag | \`$NEW_TAG\` |"
+            echo "| Pinned SHA | \`$RELEASE_SHA\` |"
+            echo "| Commits since prev tag | **$COUNT** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Build + lint + unit-test gate ──────────────────────────────────────
+  test:
+    name: Test and lint
+    needs: scan
+    # A fork run may skip this job with `skip_tests` so the release pipeline
+    # runs without waiting on the full matrix. The skip is inert on the
+    # upstream repo, so a real release still gates on test + lint.
+    if: ${{ !(inputs.skip_tests == true && github.event.repository.fork == true) }}
+    uses: ./.github/workflows/rust-test-lint.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.scan.outputs.release_sha }}
+
+  build:
+    name: Build ${{ matrix.target.triple }}
+    needs: scan
+    runs-on: ${{ matrix.target.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # Ubuntu 22.04 for a lower baseline glibc. The Linux targets build
+          # for bring-up and are not released; inspect publishes macOS only.
+          - triple: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - triple: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - triple: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.scan.outputs.release_sha }}
+          persist-credentials: false
+
+      - name: Install aarch64 cross linker (linux)
+        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.target.triple }}
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-edit
+
+      - name: Stamp the release version into the crates
+        # Stamp the release version onto the shipped crates; this also rewrites
+        # Cargo.lock, so the --locked build still passes.
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cargo set-version -p strands-box -p strands-box-containment "$VERSION"
+
+      - name: Build strands-box (release)
+        # box, sock-alias, and contain-trampoline must ship together; the box
+        # resolves the trampoline from beside its own executable and refuses
+        # to start without it.
+        run: |
+          cargo build --release --locked --all-features \
+            --target ${{ matrix.target.triple }} \
+            -p strands-box \
+            -p strands-box-containment
+
+      - name: Package tarball
+        # Stage the exact ./box-core layout, then tar its contents. Add a file
+        # here to ship it; the downloader extracts whatever is in the tarball.
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          TRIPLE: ${{ matrix.target.triple }}
+        run: |
+          set -euo pipefail
+          asset="box-${NEW_TAG}-${TRIPLE}.tar.gz"
+          stage="stage/box-core"
+          mkdir -p "$stage" dist
+          cp "target/${TRIPLE}/release/strands-box" "$stage/box"
+          cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
+          cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
+          chmod 0755 "$stage"/*
+          tar -C "$stage" -czf "dist/${asset}" .
+          tar -tzf "dist/${asset}"
+
+      - name: Assert the packaged binary reports the stamped version
+        # Each leg stamps its own crates, so the released leg checks its own binary.
+        # TODO: when Linux is released, also check x86_64-unknown-linux-gnu.
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          out=$(stage/box-core/box --version)
+          echo "box --version: $out"
+          if ! grep -Eq "(^| )${VERSION}( |$)" <<<"$out"; then
+            echo "::error::box --version ('$out') does not report $VERSION"
+            exit 1
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: box-${{ needs.scan.outputs.new_tag }}-${{ matrix.target.triple }}
+          path: dist/box-${{ needs.scan.outputs.new_tag }}-${{ matrix.target.triple }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Inspect the built tarballs, then re-upload the verified bundle ──────
+  # The release job publishes only from this bundle, so the bytes on the run
+  # page are the bytes attached to the release.
+  inspect:
+    name: Inspect release tarballs
+    needs: [scan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: assets
+
+      - name: Collect tarballs and compute SHA256SUMS.txt
+        # Every target lands in built/. Only the macOS tarball is copied into
+        # release/, which is the bundle the release job publishes.
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p built release
+          find assets -type f -name '*.tar.gz' -exec cp {} built/ \;
+          darwin="built/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          if [ ! -f "$darwin" ]; then
+            echo "::error::missing the macOS tarball $darwin"
+            exit 1
+          fi
+          cp "$darwin" release/
+          (cd release && sha256sum *.tar.gz | sort -k 2 > SHA256SUMS.txt)
+          echo "Built tarballs:"
+          ls -la built
+          echo
+          echo "Release contents:"
+          ls -la release
+          echo
+          cat release/SHA256SUMS.txt
+
+      - name: Assert the expected tarballs, each carrying box
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "box-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+            "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          )
+          for asset in "${expected[@]}"; do
+            if [ ! -f "built/$asset" ]; then
+              echo "::error::missing expected asset built/$asset"
+              exit 1
+            fi
+            # Files in the tarball, with the leading ./ and the dir entry stripped.
+            names=$(tar -tzf "built/$asset" | sed 's#^\./##' | grep -v '^$' | sort | tr '\n' ' ')
+            echo "$asset: $names"
+            case " $names " in
+              *" box "*) ;;
+              *) echo "::error::$asset does not contain box (got: $names)"; exit 1;;
+            esac
+          done
+          count=$(find built -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')
+          if [ "$count" != "${#expected[@]}" ]; then
+            echo "::error::expected ${#expected[@]} built tarballs, found $count"
+            exit 1
+          fi
+          # The release bundle holds the macOS tarball and nothing else.
+          released=$(cd release && ls -- *.tar.gz)
+          if [ "$released" != "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" ]; then
+            echo "::error::release bundle must hold only the macOS tarball (got: $released)"
+            exit 1
+          fi
+
+      - name: Upload verified release bundle for publish
+        uses: actions/upload-artifact@v7
+        with:
+          name: box-release-bundle
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── Reviewer approval (skipped on Dry-Run) ─────────────────────────────
+  # The release gate: runs only for a real release, and only after scan +
+  # build + inspect pass. The test gate is required, except a fork run may
+  # skip it with `skip_tests` (see the test job); a skipped test job satisfies
+  # the gate only on a fork, so the upstream repo always runs it.
+  approve-release:
+    name: Wait for reviewer approvals
+    needs: [scan, test, build, inspect]
+    if: |
+      always() &&
+      inputs.dry_run != true &&
+      needs.scan.result == 'success' &&
+      (needs.test.result == 'success' ||
+        (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
+      needs.build.result == 'success' &&
+      needs.inspect.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      # Configure reviewers + main-only deployment branches in repo settings.
+      # A fork has no reviewer config here, so this just passes on a fork; the
+      # release still goes to the fork's own repo.
+      name: release-gate
+    permissions: {}
+    steps:
+      - name: Acknowledge approval
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          echo "Approved to release $NEW_TAG at $RELEASE_SHA."
+
+  # ── Tag + publish the GitHub Release ───────────────────────────────────
+  # The tag is the source of truth: it is pushed before the release is
+  # published, and both steps are idempotent, so re-running after a partial
+  # failure is safe.
+  release:
+    name: Publish GitHub Release
+    needs: [scan, approve-release, inspect]
+    # always() is required: a skipped `test` (via skip_tests) poisons every
+    # downstream job that does not use it, so gate on the explicit results
+    # instead. approve-release already encodes the test-skip rule.
+    if: |
+      always() &&
+      inputs.dry_run != true &&
+      needs.scan.result == 'success' &&
+      needs.inspect.result == 'success' &&
+      needs.approve-release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.scan.outputs.release_sha }}
+          persist-credentials: true
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: box-release-bundle
+          path: release
+
+      - name: Compose release body (install block)
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<EOF
+          ## Download
+
+          Box Core is an engine, not something you install. Download the binaries into a local directory on macOS (Apple Silicon):
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+          \`\`\`
+
+          Pin this exact release:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION=${NEW_TAG} sh
+          \`\`\`
+
+          The downloader picks a tarball from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
+
+          ## Assets
+
+          \`box-${NEW_TAG}-aarch64-apple-darwin.tar.gz\` unpacks to the \`./box-core\` layout: \`box\` beside its helper binaries. \`SHA256SUMS.txt\` is the aggregate checksum file the downloader verifies against.
+          EOF
+
+      - name: Tag the pinned SHA
+        # Push the tag over git rather than through the releases API: that path
+        # returns 403 for the GITHUB_TOKEN (cli/cli#9514); a ref push works.
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$NEW_TAG" >/dev/null 2>&1; then
+            git tag -a "$NEW_TAG" -m "Release $NEW_TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/$NEW_TAG"
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.scan.outputs.new_tag }}
+          name: ${{ needs.scan.outputs.new_tag }}
+          target_commitish: ${{ needs.scan.outputs.release_sha }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: release/*
+          body_path: body.md
+
+      - name: Print release summary
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          {
+            echo "## strands-box ${NEW_TAG}"
+            echo ""
+            echo "Commit: \`${RELEASE_SHA}\`"
+            echo ""
+            echo "Assets:"
+            for f in release/*; do
+              echo "- \`$(basename "$f")\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Post-publish smoke check ───────────────────────────────────────────
+  verify-published:
+    name: Verify release assets
+    needs: [scan, release]
+    if: |
+      always() &&
+      inputs.dry_run != true &&
+      needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Poll the release for its tag and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "SHA256SUMS.txt"
+          )
+          for i in $(seq 1 30); do
+            if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
+              missing=0
+              for a in "${expected[@]}"; do
+                grep -qx "$a" <<<"$names" || { echo "attempt $i/30: asset $a not present yet"; missing=1; break; }
+              done
+              if [ "$missing" = "0" ]; then
+                if [ "$(sort <<<"$names")" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
+                  echo "::error::$NEW_TAG publishes assets beyond the expected set: $(tr '\n' ' ' <<<"$names")"
+                  exit 1
+                fi
+                echo "$NEW_TAG is published with all ${#expected[@]} assets."
+                exit 0
+              fi
+            else
+              echo "attempt $i/30: release $NEW_TAG not visible yet"
+            fi
+            sleep 10
+          done
+          echo "::error::$NEW_TAG not fully published (missing assets) after 5 minutes."
+          exit 1

@@ -1,0 +1,201 @@
+name: "Containment: Deterministic"
+
+# The black-box deterministic containment suite (test-integ/). Unlike the unit
+# tests in rust-test-lint.yml, every case here drives the BUILT `strands-box`
+# binary as a subprocess and asserts on what the cage actually refuses, so this
+# workflow must build the box first and put it on PATH.
+#
+# Needs NO secrets and NO cloud credentials. That is what lets it run on the
+# plain `pull_request` trigger -- a fork PR gets a read-only token, no secret
+# access, and therefore needs no approval gate to be safe. (An earlier design
+# called out to AWS Step Functions, which forced `pull_request_target` + OIDC +
+# an environment gate; removing the cloud dependency removes all three.)
+#
+# Shape: a reusable workflow (`workflow_call`) called from ci.yml, so branch
+# protection can keep requiring a single CI Gate status.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same disk-pressure guard as rust-test-lint.yml: hosted runners give ~14 GB
+  # free and full DWARF on the dev profile has overflowed it.
+  RUSTFLAGS: "-C debuginfo=0"
+
+jobs:
+  deterministic:
+    name: Deterministic (${{ matrix.os }})
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    # The box build dominates: ~7 min cold, ~1 min warm with the cargo cache.
+    # The suite itself is ~1 min for 73 cases. 45 min caps a hung case rather
+    # than running to the 6-hour default -- CN-* cases spawn real subprocesses
+    # under a cage, and a wedged one would otherwise burn the whole budget.
+    timeout-minutes: 45
+    # The two legs differ: macOS BLOCKS, Linux is advisory. See
+    # test-integ/README.md.
+    #
+    #   macos-latest — BLOCKING. No case is quarantined on macOS. This is
+    #     the platform the suite was written against and the only one that binds
+    #     `file-graft`, so a regression here is a real defect and must stop the
+    #     merge.
+    #
+    #   ubuntu-24.04-arm — ADVISORY, and it MUST be an arm64 runner. Linux
+    #     containment is aarch64-only by construction: facade.rs maps
+    #     `Platform::Linux if architecture == "aarch64"` to the namespace
+    #     mechanism and refuses everything else, so on x86_64 the trampoline
+    #     exits with "Linux containment supports ARM64 (aarch64), not x86_64"
+    #     and every case errors out at the harness's positive control. A first CI
+    #     run on `ubuntu-latest` (x86_64) confirmed this: 57 errors, 0 passes.
+    #     Advisory because no arm64 run has gone green yet, not because the
+    #     platform is expected to fail. Flip it by deleting the expression below
+    #     once it has a green baseline.
+    #
+    #     Note the AppArmor question is settled and was NOT the blocker: the
+    #     sysctl step below demonstrably works (the run logged `before: 1` ->
+    #     `after: 0` and `unshare(CLONE_NEWUSER): OK`). It stays because Ubuntu
+    #     24.04 restricts unprivileged user namespaces on arm64 too, and the
+    #     cage needs that primitive either way.
+    #
+    # NOTE: a leg being advisory is not the same as a leg being watched. Neither
+    # a red advisory leg nor a red blocking leg notifies anyone; the blocking one
+    # at least fails CI Gate. Adding CI Gate as a required status check on the
+    # `block-main` ruleset is a separate, admin-only step.
+    #
+    # The Linux-only conditions below match on the runner FAMILY rather than the
+    # exact label, so changing the Ubuntu image again cannot silently strand a
+    # step behind a stale `== 'ubuntu-latest'`.
+    continue-on-error: ${{ startsWith(matrix.os, 'ubuntu') }}
+    strategy:
+      # Report every OS's outcome even if one fails. A Linux failure is not a
+      # reason to hide the macOS one.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # Same reclaim rust-test-lint.yml does before its Rust build: the Linux
+      # runner starts with very little free disk, and a Rust link of this
+      # workspace can exhaust it (`No space left on device`, or lld taking a
+      # bus error on its mmap-ed output). This job links less than that one --
+      # two release binaries, then the harness's own test binaries -- but it
+      # links them twice over, from two separate target directories. Deleting
+      # the preinstalled Android and .NET SDKs, which nothing here uses,
+      # reclaims about 17 GB on the x86_64 image. The arm64 image ships a
+      # smaller toolset and may not carry either, in which case this is a no-op
+      # rather than an error -- `rm -rf` on an absent path succeeds. Kept
+      # unconditionally so the step does not need to know which image it is on.
+      # The runner is a single-use VM, so the delete is local to this job.
+      - name: Free disk (linux only)
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      # The Linux cage cannot be built without unprivileged user namespaces.
+      # Ubuntu 23.10+ gates them behind an AppArmor profile; hosted runners
+      # grant passwordless sudo, so the restriction can be lifted for the job.
+      # Reported, not silently assumed: if the knob is absent or the write is
+      # refused, the log says so and the suite's own failure explains why.
+      - name: Allow unprivileged user namespaces (linux only)
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            echo "before: $(cat "$knob")"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+              echo "WARNING: could not clear the AppArmor userns restriction"
+            echo "after:  $(cat "$knob")"
+          else
+            echo "knob absent -- this kernel does not restrict unprivileged userns"
+          fi
+          # Independent confirmation that the primitive the cage needs works
+          # now. Non-fatal: the suite is the real signal, this is the diagnosis.
+          unshare --user --map-root-user true \
+            && echo "unshare(CLONE_NEWUSER): OK" \
+            || echo "WARNING: unshare(CLONE_NEWUSER) still refused"
+
+      - name: Cache cargo
+        # rust-cache keys include the runner OS. A distinct shared-key keeps this
+        # workflow's cache separate from the unit-test leg's: the two build
+        # different target sets (here: two release binaries plus a standalone
+        # crate with its own lockfile) and would otherwise evict each other.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: containment-deterministic
+          # Restore on every run, but only WRITE a cache entry on a push to the
+          # default branch. Steps after this one execute code from `inputs.ref`,
+          # so if they could also write a cache entry, a run in the default
+          # branch's context could poison a cache that later trusted builds
+          # restore (CodeQL `actions/cache-poisoning/poisonable-step`, which
+          # names the `workflow_dispatch` path specifically -- a dispatch runs
+          # privileged, whereas a `pull_request` run is already confined to the
+          # PR branch's scope). Restoring is safe and is what makes a PR fast, so
+          # gating the write costs nothing a reviewer would notice.
+          #
+          # Note CodeQL evaluates the workflow statically and cannot see through
+          # this expression, so the three alerts on the steps below persist. They
+          # are the same shape as the ones already open against
+          # rust-test-lint.yml and deploy-box-artifact.yml: a test workflow
+          # exists to build and run the proposed code, so "do not execute
+          # untrusted code" is not available to it. What IS available is denying
+          # that code any way to write the cache, which is what this does.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            test-integ
+
+      # Only the two binaries the suite drives, not the whole workspace. `test-support` adds the
+      # fixtures the MCP cases run beside `strands-box`: `box-mcp-fetch-server`, `box-mcp-call-probe`,
+      # and `box-egress-probe`.
+      - name: Build strands-box and the containment trampoline
+        run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      # On Linux the MCP cases install their fixture server into /usr/bin, because a leaf's filesystem
+      # table cannot grant exec there. The runner is not root, so create each file
+      # it names in advance, owned by the runner user; the case then copies over it and sets its mode.
+      - name: Pre-create the Linux MCP fixture paths
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          for name in $(grep -hoE '"box-mcp-fetch(-[a-z0-9]+)*-linux"' test-integ/tests/containment/*.rs | tr -d '"' | sort -u); do
+            sudo install -o "$(id -u)" -g "$(id -g)" -m 0755 /dev/null "/usr/bin/$name"
+          done
+
+      # The harness resolves `strands-box` from PATH first (test-integ/src/lib.rs).
+      # The trampoline must sit beside it, which the shared target dir gives us.
+      - name: Run the deterministic suite
+        id: suite
+        env:
+          DET_RESULTS_DIR: ${{ github.workspace }}/det-results
+          PLATFORM: ${{ matrix.os == 'macos-latest' && 'macos' || 'linux' }}
+        run: |
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          command -v strands-box
+          bash test-integ/run.sh
+
+      # Always: a RED verdict is the case this reporting exists for.
+      - name: Summarize the verdict
+        if: always()
+        run: python3 test-integ/tools/summarize-verdict.py "$GITHUB_WORKSPACE/det-results/verdict.json"
+
+      - name: Upload verdict and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.os }}
+          path: |
+            det-results/verdict.json
+            det-results/cargo-test.log
+            det-results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14

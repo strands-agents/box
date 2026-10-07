@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      containment: ${{ steps.filter.outputs.containment }}
+      verdict: ${{ steps.filter.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        with:
+          # `**/!(*.md)` excludes docs-only changes from the matrix; keep it an
+          # extglob, not a `!**/*.md` negation (paths-filter OR-s patterns, so a
+          # bare negation fires on everything).
+          filters: |
+            rust:
+              - 'crates/**/!(*.md)'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/rust-*'
+              - '.github/workflows/ci.yml'
+            containment:
+              - 'crates/**/!(*.md)'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'test-integ/**/!(*.md)'
+              # test-integ re-exports the shared decision-journal reader, so a
+              # change there changes what every containment case parses.
+              - 'test-common/**/!(*.md)'
+              - '.github/workflows/containment-deterministic.yml'
+              - '.github/workflows/ci.yml'
+            verdict:
+              - 'test-common/**/!(*.md)'
+              - 'test-workload/verdict/**/!(*.md)'
+              - '.github/workflows/verdict-hermetic.yml'
+              - '.github/workflows/ci.yml'
+
+  rust:
+    name: Rust
+    needs: detect-changes
+    # On push and workflow_dispatch, detect-changes still runs but its filter
+    # outputs are unset — run rust unconditionally in those cases.
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' }}
+    uses: ./.github/workflows/rust-test-lint.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  containment:
+    name: Containment
+    needs: detect-changes
+    # Same unconditional-on-push rule as `rust`: detect-changes runs but its
+    # filter outputs are unset outside a pull_request.
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.containment == 'true' }}
+    uses: ./.github/workflows/containment-deterministic.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  verdict:
+    name: Verdict
+    needs: detect-changes
+    # Same unconditional-on-push rule as the legs above.
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.verdict == 'true' }}
+    uses: ./.github/workflows/verdict-hermetic.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [detect-changes, rust, containment, verdict]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
+        with:
+          allowed-skips: rust, containment, verdict
+          jobs: ${{ toJSON(needs) }}

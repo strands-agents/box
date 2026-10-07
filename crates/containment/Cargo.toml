@@ -1,0 +1,109 @@
+[package]
+name = "strands-box-containment"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Fail-closed process containment via private platform-native backends."
+
+[lib]
+name = "containment"
+path = "src/lib.rs"
+
+[features]
+# Opt-in test doubles (see src/test_support.rs). Not enabled by default so shipped
+# binaries never carry mocks.
+test-support = []
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Both are Linux-only: libc backs the clone/mount/kill/waitpid the namespace
+# launcher issues, and seccompiler compiles the static seccomp-BPF filters the
+# launcher installs. Kept off macOS/Windows builds so the crate still compiles
+# cross-platform.
+libc = "0.2"
+seccompiler = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
+# The Linux gateway fail-closed test exercises egress integration.
+strands-box-credentials = { path = "../credentials" }
+strands-box-egress-gateway = { path = "../egress-gateway" }
+
+# The Linux integration tests fork and issue raw syscalls around the shipped
+# apply() path. The crate's own [target...linux] libc dependency is not visible
+# to tests/, so it is declared again here for the same target.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
+# The `containment-test-probe` helper binary backs Linux enforcement tests.
+[[bin]]
+name = "containment-test-probe"
+path = "tests/support/test_probe.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "strands-box-contain-trampoline"
+path = "src/bin/contain_trampoline/main.rs"
+
+# The lifecycle integration test exercises MockBackend, which lives behind
+# the `test-support` feature. `required-features` gates it so `cargo test`
+# without the feature quietly skips this target rather than failing to build.
+[[test]]
+name = "lifecycle"
+path = "tests/lifecycle.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "backend_seatbelt"
+path = "tests/backend_seatbelt.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "profile_conformance"
+path = "tests/profile_conformance.rs"
+required-features = ["test-support"]
+
+# The renderer suite needs no macOS kernel, so the file carries no platform gate. It
+# still reaches `generate_seatbelt_profile`, which lives behind `test-support`, so it
+# needs this entry: without one, cargo auto-discovers the file as a target with no
+# required features and a default build fails to compile it.
+[[test]]
+name = "profile_read_write_roots"
+path = "tests/profile_read_write_roots.rs"
+required-features = ["test-support"]
+
+# These integration tests spawn the `containment-test-probe` helper binary,
+# which is itself gated on `test-support`. Without the same gate, a plain
+# `cargo test` builds and runs them but the probe binary is absent, so every
+# spawn panics with `NotFound`. `required-features` makes them skip cleanly
+# instead (matching the lifecycle/backend_seatbelt/profile_conformance targets).
+[[test]]
+name = "inherited_handles_linux"
+path = "tests/inherited_handles_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "inherited_handles_macos"
+path = "tests/inherited_handles_macos.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "preflight_new_cells_macos"
+path = "tests/preflight_new_cells_macos.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "child_ipc"
+path = "tests/child_ipc.rs"
+required-features = ["test-support"]
+
+[lints.rust]
+unused_must_use = "deny"

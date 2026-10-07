@@ -1,0 +1,46 @@
+# To author or change the policy next to this file, point your coding agent at the skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+# The box's name, and where it keeps its own state. The agent can't reach box_dir.
+name = "pi"
+box_dir = "<HOME>/box-tutorial/pi/state"
+# The policy file, next to this one.
+policy = "policy.dw"
+
+[agent]
+# The program the box starts: Node, running the pi release its installer put under ~/.pi. Node
+# loads the preload file first. The task comes from the command line, after `--`.
+command = [
+  "/opt/homebrew/bin/node",
+  "--import=<HOME>/box-tutorial/pi/box-preload.mjs",
+  "<HOME>/.pi/agent/install/releases/<VERSION>/node_modules/.bin/pi",
+]
+# The directory the agent starts in. This alone grants nothing.
+workspace = "<HOME>/box-tutorial/my-project"
+
+# The agent gets these variables, plus the ones the box adds. Nothing comes from your shell.
+[agent.env]
+PATH = "/usr/bin:/bin"
+# pi calls Bedrock in this region.
+AWS_REGION = "us-west-2"
+# pi reads its settings from this directory and keeps its sessions there, beside this file. It
+# holds the agent's own state, and the project stays out of it.
+PI_CODING_AGENT_DIR = "<HOME>/box-tutorial/pi/agent"
+# Node keeps its compile cache here.
+TMPDIR = "<HOME>/box-tutorial/pi/tmp"
+
+# What the agent's own process can touch without asking the policy. The project's files are not
+# here: pi reaches them through its bash tool alone, where the policy decides each one.
+[agent.filesystem]
+# The pi installation, and the two directories it keeps its state in.
+read = ["~/.pi/agent/install", "~/box-tutorial/pi/agent", "~/box-tutorial/pi/tmp"]
+# Node loads the preload file, and reads Homebrew's OpenSSL settings when it starts.
+read_file = ["~/box-tutorial/pi/box-preload.mjs", "/opt/homebrew/etc/openssl@3/openssl.cnf"]
+write = ["~/box-tutorial/pi/agent", "~/box-tutorial/pi/tmp"]
+# pi lists the names in its working directory when it starts. It can't open the files itself.
+list = ["~/box-tutorial/my-project"]
+
+# The box adds your Bedrock API key to each request to Bedrock. The agent gets a stand-in value.
+[egress.model]
+destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"

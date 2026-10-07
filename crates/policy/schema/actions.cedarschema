@@ -1,0 +1,308 @@
+// The fixed action vocabulary enforced by strands-box.
+//
+// The action names the mechanism. The principal and resource are fixed identities, and
+// every per-call argument lives under `context.input`.
+//
+// Two constraints shape every declaration:
+//
+// - The `input` group is required by the engine: the temporal extension derives an
+//   event's declared fields from the action's `input` record and nothing else, so a
+//   flat context makes every `when temporal { … }` predicate a hard load error.
+// - Cedar treats each context declaration as a closed record, and the schema is bound
+//   to every request, so a missing, extra, or mistyped field is a hard error instead
+//   of a silent policy miss.
+//
+// A binding whose inputs are all fixed at composition time is configuration, not an
+// action, and is declared in strands-box.toml instead.
+
+namespace Box {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── Fixed identities ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The agent is the principal
+entity Agent;
+
+// Dogwood requires a resource. The runtime always supplies Box::Resource::"unused"
+entity Resource;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ── Filesystem ────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Granular operations for the different filesystem calls using the Kernel verbs.
+// Each action declares its own operation enum, so a verb the enum does not declare is a
+// load error, not a rule that quietly never matches. This allows customers to write
+// policies like this one:
+//
+//   forbid (principal, action == Box::Action::"fs:write", resource)
+//   when { context.input.operation == Box::FsWriteOperation::"set_permissions" };
+//
+// Every filesystem input declares `operation`, and no other input does. `fs:move` raises
+// one verb today. `fs:other` is declared, never produced: no kernel verb maps to it, and it
+// is reserved for a verb upstream has not yet added. Their enums exist so a verb added
+// later is an addition, not a new field.
+
+entity FsReadOperation enum [
+  "read_content", 
+  "read_metadata", 
+  "enumerate", 
+  "read_link", 
+  "change_dir", 
+  "exec"
+];
+
+entity FsWriteOperation enum [
+  "write_content",
+  "create_dir", 
+  "set_permissions", 
+  "symlink"
+];
+
+entity FsDeleteOperation enum [ 
+  "remove_file", 
+  "remove_dir" 
+];
+
+entity FsMoveOperation enum [
+  "rename"
+];
+
+entity FsOtherOperation enum [
+  "other"
+];
+
+// How an effect ended, on the `output` of a filesystem response event. A failed
+// effect raises `::error` instead, so there is no failure value here; a response
+// means the effect happened or may have happened. An open issues a descriptor whose
+// bytes move later, and a dropped permit records `indeterminate`, so a rule that
+// counts completed effects reads `output.result` and excludes both.
+entity FsResponseResult enum ["completed", "descriptor_issued", "indeterminate"];
+
+type FsResponseOutput = {
+  result: FsResponseResult
+};
+
+type FsReadInput = {
+  path: String, // the target, trusted-canonicalized before authorization
+  operation: FsReadOperation
+};
+
+type FsWriteInput = {
+  path: String,
+  operation: FsWriteOperation
+};
+
+type FsDeleteInput = {
+  path: String,
+  operation: FsDeleteOperation
+};
+
+type FsMoveInput = {
+  path: String,
+  operation: FsMoveOperation
+};
+
+type FsOtherInput = {
+  path: String,
+  operation: FsOtherOperation
+};
+
+// Read content or metadata, enumerate a directory, read a link, change directory, or
+// test executability. Running a program is a shell decision, never a filesystem one.
+action "fs:read" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: FsReadInput, output?: FsResponseOutput }
+};
+
+// Write content, create a directory, change permission bits, or create a symlink.
+action "fs:write" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: FsWriteInput, output?: FsResponseOutput }
+};
+
+// Remove a file or an empty directory. A recursive delete decomposes into one decision
+// per entry.
+action "fs:delete" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: FsDeleteInput, output?: FsResponseOutput }
+};
+
+// Rename or move a path. Each identity is judged separately — one decision per path —
+// so a rule bounds a move by bounding each side.
+action "fs:move" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: FsMoveInput, output?: FsResponseOutput }
+};
+
+// Declared, never produced: an operation the four verbs do not name, reserved for a verb
+// upstream has not yet added. A rule reaches it only by naming `fs:other`, so an unmapped
+// verb never inherits a permit.
+action "fs:other" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: FsOtherInput, output?: FsResponseOutput }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── Network ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The L4 connect input. `ip` is the pinned address after resolution, absent before it.
+type NetworkConnectInput = {
+  host: String,
+  ip?: String,
+  port: Long
+};
+
+// The L7 HTTP input. `body_bytes` is the offer on a `::request` and the delivery on a
+// `::response`, so an outbound budget sums `::response`.
+type NetworkRequestInput = {
+  host: String,
+  port: Long,
+  method: String,
+  // The URL path. The same name is a filesystem path on `fs:*`, so guard a filesystem
+  // rule with `context.input has operation`.
+  path: String,
+  body_bytes: Long,
+  // Whether the gateway terminated TLS and parsed the exchange.
+  intercepted: Bool
+};
+
+// The reply, on the `output` of an `http:request` response event. `status` is the
+// upstream's status code. A `::response` with no `output` is a request that left the box
+// and got no reply, so a rule on `output.status` does not match it.
+type NetworkResponseOutput = {
+  status: Long
+};
+
+// The L4 connect, raised once per pinned address. Holds even against an agent that
+// links its own TLS.
+action "net:connect" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: NetworkConnectInput }
+};
+
+// The L7 HTTP decision. The reply decides nothing. One exchange records exactly one
+// `http:request::response`, at reply time, carrying the delivered `input.body_bytes` and
+// the reply's `output.status` — a safe one-per-exchange key for a counting rule.
+action "http:request" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── Shell ────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A command line is judged once, after the Shell has parsed it, expanded it, and
+// resolved its first word to a program — at every dispatch route, so `sh <file>`,
+// traps, `find -exec`, `xargs`, and `io.popen` each get their own decision
+// (docs/design/decisions.md#one-admission-point-after-resolution). A resolved line
+// raises exactly one of `shell:exec` or `shell:spawn`.
+
+// The resolved command line. `program` is what the first word RESOLVED to, never how
+// it was spelled — `alias safe=rm` makes the spelling `safe`. `arg1`/`arg2` are named
+// fields because Cedar's `Set` is unordered with no index operator; `arg_count` lets a
+// rule refuse a line longer than the positions this schema exposes. A rule MUST guard
+// `arg1`/`arg2` with `has` — an unguarded read is a load error. `cwd` is tracked by
+// the box (`cd` is admitted as `fs:read`), never reported by the workload.
+type ShellExecInput = {
+  command: String,
+  program: String,
+  arg1?: String,
+  arg2?: String,
+  arg_count: Long,
+  cwd: String
+};
+
+// `ShellExecInput` plus `program_path`, the resolved absolute path of the binary that
+// will run. Deliberately not `path`: that name already means a filesystem path on
+// `fs:*` and a URL path on `http:request`.
+type ShellSpawnInput = {
+  command: String,
+  program: String,
+  program_path: String,
+  credential_reads?: Set<String>,
+  arg1?: String,
+  arg2?: String,
+  arg_count: Long,
+  cwd: String
+};
+
+// The end of a command, on the `output` of a `shell:exec` or `shell:spawn` response
+// event. `status` is the exit status of the command, and a non-zero status is still a
+// `::response`. A process that a signal ends reports 128 plus the signal number. A
+// permitted host binary that the box cannot start reports 126. A command that ends with
+// no reported status, because its deadline or its client stopped it, reports -1. A
+// background command (`&`) records its own status when it ends, not when it starts.
+// The workload can set the status of a `shell:exec` command, for example with a shell
+// function of the same name. A rule that needs the status of a host binary reads
+// `shell:spawn` and pins `program_path`.
+type ShellResponseOutput = {
+  status: Long
+};
+
+// A resolved command line whose program the Shell implements.
+action "shell:exec" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: ShellExecInput, output?: ShellResponseOutput }
+};
+
+// A resolved command line handed to a host binary inside the containment domain. A
+// separate action, so a permit on `shell:exec` cannot silently grant host-binary
+// execution. The binary runs against the kernel: no `fs:*` decision fires for anything
+// it does and one verdict covers its process tree; its network still meets the egress
+// gateway.
+action "shell:spawn" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: ShellSpawnInput, output?: ShellResponseOutput }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── MCP ──────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One request to a connected MCP server, for every MCP method. `server` is the name
+// the operator's file assigns; `method` is the JSON-RPC method. The per-item identity
+// is optional and present only for the method that carries it: `tool` for `tools/call`,
+// `prompt` for `prompts/get`, `uri` for `resources/read`. A `*/list` or other method
+// with no per-item identity carries `server` and `method` alone.
+type McpCallInput = {
+  server: String,
+  method: String,
+  tool?: String,
+  prompt?: String,
+  uri?: String
+};
+
+// One action with a typed context, for EVERY MCP method, NOT one generated action per
+// tool: a generated group action is never raised, so a temporal rule against it counts
+// nothing — a fail-open (groups removed by commit `cbd983e`). The
+// rule shapes fire:
+//
+//   every request on one server:  when { context.input.server == "issues-mcp" }
+//   one method on a server:        when { context.input.method == "resources/read" }
+//   one tool refused by name:      forbid … when { context.input has tool && context.input.tool == "AddComment" }
+//   one resource by uri:           forbid … when { context.input has uri && context.input.uri like "file:///etc/*" }
+action "mcp:call" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: McpCallInput }
+};
+
+// ── Per-tool typed actions ──────────────────────────────────────────────────
+//
+// Each server-namespaced tool action is emitted by `box policy generate-schema` from a server's
+// `tools/list` and composed onto this canonical schema at load.
+
+}

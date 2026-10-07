@@ -1,0 +1,27 @@
+{
+  "description": "The operating system's own paths on macOS, in two sets named for the containment that receives each. `agent` is agent containment: what any process needs to load and run. `leaf` is leaf containment: what a host tool needs in addition to agent containment. `box` selects the containment through `RuntimeReach`. Each list names one cell, so a set states no exec grant and writes nothing but the null device. Per platform, because a path present on both platforms is not always granted on both: Linux withholds /usr/share/icu, /usr/share/locale and /usr/share/terminfo although all three exist there. The paths no grant may reach are a second file, and one list rather than two, because a config authored on one platform can be applied on another.",
+  "agent": {
+    "description": "What any process on this operating system needs to load and run, whatever it is. A process that only runs its own program receives this set alone.",
+    "read_root": ["/usr/share/icu", "/usr/share/zoneinfo", "/System/Library"],
+    "read_dir": ["/"],
+    "read_file": ["/dev/null", "/etc/localtime", "/usr/lib/libffi-trampolines.dylib"],
+    "write_file": ["/dev/null"],
+    "metadata_root": ["/private/tmp"],
+    "metadata_dir": ["/etc", "/var"]
+  },
+  "leaf": {
+    "description": "What leaf containment needs in addition to agent containment: the frameworks and dynamic libraries a compiler, a version-control tool or a package manager loads, the terminal and locale databases they read, and the entropy devices a runtime seeds from.",
+    "read_root": [
+      "/usr/share/locale",
+      "/usr/share/terminfo",
+      "/System/Cryptexes",
+      "/Library/Frameworks",
+      "/usr/lib",
+      "/var/db/dyld",
+      "/var/db/timezone",
+      "/var/select",
+      "/etc/ssl"
+    ],
+    "read_file": ["/dev/urandom", "/dev/random", "/dev/zero"]
+  }
+}

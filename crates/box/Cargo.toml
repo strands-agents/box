@@ -1,0 +1,163 @@
+[package]
+name = "strands-box"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The standalone workload-only Strands zero-trust box CLI."
+
+# Box is a binary with no library target
+# (docs/design/decisions.md#box-is-a-process-and-reads-one-complete-configuration).
+[[bin]]
+name = "strands-box"
+path = "src/main.rs"
+
+# Every alias the contained workload execs is this one image, dispatched by `argv[0]`
+# (see the module docs): every name forwards to `run/box.sock`, and the `Open` frame says which
+# interpreter. Named for what it does — connect to a socket and relay one
+# request — because it hosts neither interpreter. A product binary, not a test helper:
+# a box that routes shell commands cannot run without it.
+[[bin]]
+name = "strands-box-sock-alias"
+path = "src/bin/strands-box-sock-alias.rs"
+
+[dependencies]
+async-trait = "0.1"
+containment = { package = "strands-box-containment", path = "../containment" }
+credentials = { package = "strands-box-credentials", path = "../credentials" }
+egress-gateway = { package = "strands-box-egress-gateway", path = "../egress-gateway" }
+# One policy crate, three enforcement points: `egress-adapter` backs the proxy's,
+# `shell-adapter` the hosted Shell's, and `script-adapter` the Monty broker's. All three
+# consume the *same* `Arc<PolicyEngine>` in the `run` process
+# (docs/design/decisions.md#one-policy-engine-per-box), so the adapters are three views of one
+# authority rather than three authorities.
+policy = { package = "strands-box-policy", path = "../policy", features = [
+    "egress-adapter",
+    "shell-adapter",
+    "script-adapter",
+] }
+telemetry = { package = "strands-box-telemetry", path = "../telemetry" }
+strands-shell = { path = "../shell" }
+# The interpreter behind the `python3`/`python` aliases
+# (docs/design/decisions.md#interpreters-are-brokered-aliases). Published crates, not
+# a fork: `monty` drives the run loop and `monty-types` carries the OS-call vocabulary the
+# adapter maps. Pinned to match what `policy`'s `script-adapter` was built against.
+monty = "1.0.0"
+monty-types = "1.0.0"
+# The routed HTTP client for a Monty `fetch(url)`
+# (docs/design/decisions.md#a-monty-script-reaches-the-network-through-one-fetch-function). It
+# dials this box's egress gateway and trusts only its intercept CA, mirroring the vendored Shell's
+# proxy path. Same pin and features as `shell`, already in the lockfile via that crate, so
+# this adds no version the lockfile does not already hold.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+# Transport payloads
+# (docs/design/decisions.md#the-broker-protocol-is-framed-versioned-and-refuses-with-a-reason-code).
+# JSON has no byte type, and a Program's output is not
+# guaranteed UTF-8 — a REPL or a build can emit arbitrary bytes — so `Input`/`Out` carry
+# base64. Already in the lockfile via `credentials` and `egress-gateway`, so this adds
+# nothing the lockfile does not already hold.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+# `Bytes` is the payload type the vendored Shell's channel descriptors carry
+# (`FdKind::ChannelWriter { tx: mpsc::Sender<Bytes> }`), so a Program's streaming ends
+# speak it directly rather than copying through a second representation.
+bytes = "1"
+tempfile = "3"
+thiserror = "2"
+toml = "1"
+
+# Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS
+# listener for the recording upstream the credential end-to-end tests run against.
+rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+rustls-pemfile = { version = "2", optional = true }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "time",
+] }
+
+# `box-egress-probe` is the test-only workload the credential end-to-end tests run
+# inside the box. Gated on a non-default feature so a normal build never produces it,
+# matching `containment`'s `containment-test-probe`.
+[features]
+# Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
+# binary, so its TLS deps are optional dependencies this feature enables rather than
+# dev-dependencies (a `[[bin]]` cannot see those).
+test-support = ["dep:rcgen", "dep:rustls", "dep:rustls-pemfile"]
+
+[[bin]]
+name = "box-egress-probe"
+path = "tests/support/egress_probe.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "box-exit-probe"
+path = "tests/support/exit_probe.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "box-inherited-handles-probe"
+path = "tests/support/inherited_handles_probe.rs"
+required-features = ["test-support"]
+
+# A stdio MCP server (`reach` tool; proxy-unaware direct + proxy-aware $HTTPS_PROXY modes) and the
+# transport client that drives it. Test-only fixtures for the native-egress / gateway MCP tests, so
+# they carry the same gate and never ship as product binaries.
+[[bin]]
+name = "box-mcp-fetch-server"
+path = "tests/support/mcp_fetch_server.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "box-mcp-call-probe"
+path = "tests/support/mcp_call_probe.rs"
+required-features = ["test-support"]
+
+# Each end-to-end suite below spawns a test-only binary, so each carries the same gate: without it
+# a plain `cargo test` would build the suite while its probe is absent and fail on a missing binary.
+#
+# `box_shell` was missing this gate when it gained its first egress assertion, and the
+# omission hid behind a stale probe left in `target/` by an earlier `--features
+# test-support` build. A `/simplify` reuse review caught it; the reproduction is to delete
+# `target/debug/box-egress-probe` and run the suite ungated.
+[[test]]
+name = "box_credentials"
+path = "tests/box_credentials.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_shell"
+path = "tests/box_shell.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_inherited_handles"
+path = "tests/box_inherited_handles.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_direct_filesystem"
+path = "tests/box_direct_filesystem.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "credential_method_scope"
+path = "tests/credential_method_scope.rs"
+required-features = ["test-support"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+cedar-policy = "=4.11.0"
+containment = { package = "strands-box-containment", path = "../containment", features = ["test-support"] }
+
+[lints.rust]
+unused_must_use = "deny"

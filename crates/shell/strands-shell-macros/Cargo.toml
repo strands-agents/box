@@ -1,0 +1,23 @@
+# Modified by Amazon. Original source: https://github.com/strands-agents/shell
+# Local changes are recorded in crates/shell/UPSTREAM.md.
+
+[package]
+name = "strands-shell-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for strands-shell"
+license = "Apache-2.0"
+repository = "https://github.com/strands-agents/shell"
+homepage = "https://github.com/strands-agents/shell"
+
+# Not published to crates.io. Every sibling crate sets this, and the build output
+# here is consumed in-workspace by `strands-box`, so `false` is correct.
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }
+proc-macro2 = "1"

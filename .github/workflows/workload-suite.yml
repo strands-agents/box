@@ -1,0 +1,272 @@
+name: "Workload: Agent Suite (gated)"
+
+# The agent-driven suite in `test-workload/` -- the one that puts a real coding agent
+# in a box and asks whether the box holds. SCAFFOLD: see "Not yet runnable" below.
+#
+# ## Why this is gated and the deterministic suite is not
+#
+# `containment-deterministic.yml` runs on the plain `pull_request` trigger because it
+# needs no secret and no cloud credential, so a fork PR's read-only token is already
+# the whole security boundary. This suite needs all four of the things that design
+# removed (test-workload/README.md, "Why this suite is not in CI"):
+#
+#   1. Two EC2 instances, one of them a mac2.metal Dedicated Host.
+#   2. Credentials for a test account.
+#   3. An S3 bucket for the source tarball and the verdict ledger.
+#   4. A live model, called once per cell.
+#
+# It therefore builds and executes the named ref's code on real compute with real
+# credentials, and bills a 24-hour Mac Dedicated Host minimum to do it. Dispatch
+# permission is repo `write`; the `manual-approval` environment below narrows that to
+# the `strands-box-maintainers` team, so a contributor can request a run but only a
+# maintainer can let it spend. Do not remove the `environment:` key.
+#
+# ## Non-blocking on merge, by construction
+#
+# This workflow is deliberately NOT called from ci.yml and is NOT in the CI Gate. It
+# has no PR trigger at all, so it reports no check on a pull request and cannot
+# block one. (No ruleset on this repo requires any status check either.)
+#
+# ## Not yet runnable
+#
+# Every account-specific value is a required input with no default,
+# and `require_inputs` (common/lib.sh) refuses a driver missing any. None of those
+# exists as a repository secret yet, so an approved run currently fails fast at
+# `require_inputs` with the list of what is missing. That failure is honest and
+# non-blocking; it is not a containment result. To make this workflow functional a
+# maintainer must populate the secrets in the "Required secrets" table and stand up
+# the OIDC role, VPC, security group, instance profile, AMIs, and bucket in a test
+# account. The approval gate itself needs no setup — `manual-approval` already exists
+# with its reviewer rule — so the gate is in force even while the run cannot succeed.
+#
+# As of this scaffold the suite has never run from this repository. Treat the first
+# green run as a new baseline, not a regression check.
+#
+# ## Required secrets
+#
+# | Secret | What it is |
+# |---|---|
+# | `WORKLOAD_AWS_ROLE` | Role ARN this workflow assumes by OIDC. Needs EC2 run/allocate/terminate, S3 read+write on the ledger bucket, and Bedrock invoke. |
+# | `WORKLOAD_AWS_ACCOUNT` | Account id. Display only -- the credential chain selects the account. |
+# | `WORKLOAD_KEY_PAIR` | EC2 key pair name. |
+# | `WORKLOAD_VPC_ID` | VPC the instances launch into. |
+# | `WORKLOAD_SECURITY_GROUP` | Security group id. |
+# | `WORKLOAD_INSTANCE_PROFILE` | Instance profile granting the hosts their own S3/Bedrock access. |
+# | `WORKLOAD_LINUX_AMI` | AL2023, kernel 6.1, arm64. |
+# | `WORKLOAD_MACOS_AMI` | macOS, arm64. |
+# | `WORKLOAD_ARTIFACTS_BUCKET` | The ledger bucket. |
+#
+# Cost is real and worth stating: mac2.metal bills a 24-hour minimum (~$16 per
+# allocation), so an approved run is not free. `manual/teardown.sh --full` releases
+# the Dedicated Host.
+
+on:
+  # Human-triggered ONLY. No automatic trigger: a run exists only because someone
+  # asked for it, against a ref they named. Do not add `pull_request`/`_target` --
+  # an earlier revision did and prompted maintainers on unrelated PRs.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to run against: a branch, tag, SHA, or refs/pull/<N>/head for a PR (the only form that resolves a fork)."
+        required: true
+        type: string
+      platform:
+        description: "Which leg to run."
+        required: true
+        type: choice
+        options: [both, linux, macos]
+        default: both
+      case:
+        description: "Dimension. `workloads` runs the 7x3 cooperative suite; a single name runs that adversarial case."
+        required: false
+        type: string
+        default: network-egress
+      teardown:
+        description: "Terminate instances and release the Dedicated Host when the run ends."
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  # One run at a time. These provision instances under fixed Name tags and a shared
+  # Dedicated Host, and teardown filters on the Project tag, so a second concurrent
+  # run would adopt and then terminate the first one's host.
+  group: workload-suite
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: Agent suite (${{ inputs.platform }})
+    # THE GATE: `manual-approval` carries a `required_reviewers` rule bound to the
+    # `strands-box-maintainers` team, narrowing dispatch (repo `write`) to maintainers.
+    #
+    # Do NOT substitute another name. GitHub creates a referenced environment
+    # implicitly with ZERO protection rules, which does not gate at all -- an earlier
+    # revision named a nonexistent `workload-cloud` and had exactly that hole.
+    # `auto-approve` is likewise ungated; never use it here.
+    environment:
+      name: manual-approval
+      deployment: false
+    permissions:
+      contents: read
+      # OIDC: a short-lived role assumption instead of a stored access key.
+      id-token: write
+    runs-on: ubuntu-latest
+    # The macOS leg provisions a Dedicated Host, which can take many minutes before
+    # the suite's own 90-minute deadline (WL_DEADLINE_S) even starts.
+    timeout-minutes: 240
+    steps:
+      # The dispatcher names the ref; executing it is safe only because reaching this
+      # step required a maintainer's approval.
+      - name: Checkout the ref under test
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Report what is being run
+        run: |
+          echo "ref:      ${{ inputs.ref }}"
+          echo "platform: ${{ inputs.platform }}"
+          echo "case:     ${{ inputs.case }}"
+          echo "actor:    ${{ github.actor }}"
+
+      # Fail with the list of missing inputs BEFORE assuming a role or launching
+      # anything, so an unconfigured repository costs nothing and says why.
+      - name: Check required inputs are configured
+        env:
+          AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
+          KEY_PAIR: ${{ secrets.WORKLOAD_KEY_PAIR }}
+          VPC_ID: ${{ secrets.WORKLOAD_VPC_ID }}
+          SECURITY_GROUP: ${{ secrets.WORKLOAD_SECURITY_GROUP }}
+          INSTANCE_PROFILE: ${{ secrets.WORKLOAD_INSTANCE_PROFILE }}
+          LINUX_AMI: ${{ secrets.WORKLOAD_LINUX_AMI }}
+          MACOS_AMI: ${{ secrets.WORKLOAD_MACOS_AMI }}
+          ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
+        run: |
+          set -uo pipefail
+          # Reuse the suite's own gate rather than re-implementing the list here:
+          # one source of truth for what an operator must supply.
+          source test-workload/common/lib.sh 2>/dev/null || true
+          if ! require_inputs AWS_ACCOUNT KEY_PAIR VPC_ID SECURITY_GROUP \
+                 INSTANCE_PROFILE LINUX_AMI MACOS_AMI ARTIFACTS_BUCKET; then
+            echo ""
+            echo "This workflow is a SCAFFOLD: the repository has no test account wired up yet."
+            echo "See the 'Required secrets' table in this workflow file."
+            echo "This failure is not a containment result and does not block the merge."
+            exit 1
+          fi
+          echo "all required inputs present"
+
+      - name: Assume the test-account role
+        id: creds
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ secrets.WORKLOAD_AWS_ROLE }}
+          aws-region: us-west-2
+          role-session-name: workload-suite-${{ github.run_id }}
+
+      # The drivers upload a source tarball rather than cloning on the instance, and
+      # the exclude list matches manual/setup.sh's documented recipe.
+      - name: Build the source tarball
+        run: |
+          tar czf /tmp/strands-box-src.tar.gz \
+            --exclude='.git' --exclude='target' --exclude='build' \
+            --exclude='rust-toolchain.toml' --exclude='.cargo' .
+          ls -l /tmp/strands-box-src.tar.gz
+
+      # The drivers reach the instances over an SSM session, not a public address,
+      # so ssh's ProxyCommand needs this plugin on the runner.
+      - name: Install the SSM session-manager plugin
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/session-manager-plugin.deb \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Provision, install, and run
+        env:
+          AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
+          AWS_REGION: us-west-2
+          KEY_PAIR: ${{ secrets.WORKLOAD_KEY_PAIR }}
+          VPC_ID: ${{ secrets.WORKLOAD_VPC_ID }}
+          SECURITY_GROUP: ${{ secrets.WORKLOAD_SECURITY_GROUP }}
+          INSTANCE_PROFILE: ${{ secrets.WORKLOAD_INSTANCE_PROFILE }}
+          LINUX_AMI: ${{ secrets.WORKLOAD_LINUX_AMI }}
+          MACOS_AMI: ${{ secrets.WORKLOAD_MACOS_AMI }}
+          ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
+          BOX_COMMIT: ${{ inputs.ref }}
+          RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+          CASE: ${{ inputs.case }}
+        run: |
+          set -euo pipefail
+          platform="${{ inputs.platform }}"
+          if [ "$platform" = "both" ]; then
+            bash test-workload/manual/setup.sh --run
+          else
+            bash test-workload/manual/setup.sh "$platform" --run
+          fi
+
+      # An aborted run that leaves a Dedicated Host allocated keeps billing. Gated on
+      # `creds` because a failure before the role assumption cannot have provisioned
+      # anything, and the warning below would then be a false alarm on every such run.
+      - name: Teardown
+        if: ${{ always() && inputs.teardown && steps.creds.outcome == 'success' }}
+        env:
+          AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
+          AWS_REGION: us-west-2
+          ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
+        run: |
+          bash test-workload/manual/teardown.sh --full || \
+            echo "::error::Teardown FAILED. Check for instances and Dedicated Hosts tagged Project=strands-box-containment-tests in $AWS_REGION -- a Dedicated Host keeps billing until released."
+
+      # The ledger in S3 is the durable record; this is the convenience copy on the
+      # run itself, so a reviewer can read a verdict without bucket access.
+      - name: Upload the verdict tree
+        id: verdicts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: workload-verdicts-${{ github.run_id }}
+          path: |
+            **/verdict.json
+            **/finding.json
+            **/validation_report.md
+            **/method_report.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      # State where the evidence went. The probe's report is the only record of
+      # what the agent did, so an operator should not have to hunt for it -- and
+      # when nothing uploaded, that is worth saying plainly too.
+      - name: Say where the report is
+        if: ${{ always() }}
+        env:
+          ARTIFACT_URL: ${{ steps.verdicts.outputs.artifact-url }}
+        run: |
+          REPORTS=$(find test-workload/run-reports -type f 2>/dev/null | sort || true)
+          {
+            echo "### Workload suite — ${{ inputs.platform }}"
+            echo
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "Report artifact: [workload-verdicts-${{ github.run_id }}]($ARTIFACT_URL) — kept 14 days."
+            else
+              echo "Report artifact: **none uploaded** (the run failed before the probe produced one)."
+            fi
+            echo
+            if [ -n "$REPORTS" ]; then
+              echo "Files in the artifact:"
+              echo "$REPORTS" | sed 's|^test-workload/run-reports/|- `|; s|$|`|'
+            else
+              echo "No report files were written."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ARTIFACT_URL" ]; then
+            echo "::notice title=Workload report::$ARTIFACT_URL"
+          else
+            echo "::warning title=Workload report::no report artifact was produced by this run"
+          fi

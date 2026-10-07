@@ -1,0 +1,35 @@
+[package]
+name = "strands-det-harness"
+version = "0.1.0"
+edition = "2024"
+# Aligns with the main workspace (all its crates are edition 2024,
+# rustc >= 1.85). The test env is bare EC2 — see rust-toolchain.toml.
+rust-version = "1.85"
+description = "Deterministic containment suite for strands-box. Add a case = add one file under tests/."
+publish = false
+
+# The shared harness contributors `use` from their test files.
+[lib]
+name = "strands_det_harness"
+path = "src/lib.rs"
+
+# Reduces the per-test JSONL rows into the pipeline's verdict.json.
+[[bin]]
+name = "emit-verdict"
+path = "src/bin/emit-verdict.rs"
+
+[dependencies]
+regex = "1"
+# The shared journal reader. Path, not version: it is a sibling test crate, excluded
+# from the workspace for the same reason this package is.
+test-common = { path = "../test-common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
+
+# Standalone: never absorbed into an enclosing workspace (a stray Cargo.toml above the
+# checkout would otherwise stop the crate from building at all).
+[workspace]

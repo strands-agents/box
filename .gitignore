@@ -1,0 +1,69 @@
+# Cargo.lock IS committed here, deliberately.
+# The published Monty interpreter reaches `ruff_python_ast 0.0.3`, which derives from
+# `get-size2` while depending on an older `compact_str`; past `get-size2 0.10.0` the two
+# disagree and it fails to compile. The manifest caps the version, and the lockfile is
+# what makes that resolution reproducible rather than re-derived per machine. Remove both
+# when the upstream mismatch is fixed.
+
+target/
+
+# Don't check in the local rustup toolchain override.
+/rust-toolchain.toml
+
+# don't check in local env config
+.cargo/
+
+# Local editor config
+.vscode/
+
+# macOS Finder metadata
+.DS_Store
+
+# .attach_pid{n} pop up frequently
+# if you have older (<17) JDK versions in your dependency closure
+# and generally should not be commited to git
+# ref: https://bugs.openjdk.java.net/browse/JDK-8214300
+.attach_*
+
+# Local Claude Code agent and workflow definitions
+.claude/agents/
+.claude/workflows/
+.claude/settings.json
+.claude/settings.local.json
+
+# Python bytecode from test fixtures.
+__pycache__/
+*.pyc
+
+# Research notes (`.exp.md`) and their generated index. The corpus is agent working
+# material, so it stays local instead of shipping with the code.
+/.agents/explorations/
+
+# Proof-of-concept and throwaway code, one directory per POC. The tree is outside the
+# Cargo workspace, so a normal build never compiles it. Its lockfiles, its compiled
+# probes, and its sources all stay local with it.
+/.agents/pocs/
+
+# Draft decisions and specs from the `kd` and `spec` skills. Both are local working material: a
+# decided decision is appended to `docs/design/decisions.md`, and a spec is never committed.
+/.agents/drafts/
+
+# Local scratch. Durable research belongs in .agents/explorations/ instead. An
+# exploration that cites a clone under here records the commit it read.
+/.tmp/
+
+# Source binaries built for POCs.
+#
+# **Anchored, because a bare `sources/` matches that directory name at ANY depth.** It silently
+# ignored `crates/credentials/src/sources/`, which is a tracked Rust module: the files
+# already committed were unaffected, but every NEW file added there vanished from `git status` and
+# from any commit. Measured — a new credential source went missing that way.
+/pocs/**/sources/
+
+# Spec task trackers. A `*.tasks.json` is per-effort execution state, so it stays local with the
+# spec it tracks.
+*.tasks.json
+
+# Probe reports from a workload-suite run. Generated per run and uploaded as a
+# GitHub artifact, so they stay local. Anchored, to match only this one dir.
+/test-workload/run-reports/
