@@ -79,7 +79,7 @@ interpreters and keep those files out of the agent's direct grants. See
 Box runs the Dogwood Local Engine and its enforcement components in its own
 process, outside the agent's sandbox. Strands Shell, Monty, the egress gateway,
 and the MCP broker check operations with the engine before allowing them.
-They also record events that later policy decisions can use. In the diagram, each arrow into the engine is a policy check.
+They also record events that later policy decisions can use.
 
 ```mermaid
 flowchart LR
@@ -104,10 +104,10 @@ flowchart LR
     agent --- py --> monty
     agent --- sh --> shell
     agent --- mc --> mcp
-    proxy --> policy
-    monty --> policy
-    shell --> policy
-    mcp --> policy
+    proxy -->|"policy checks"| policy
+    monty -->|"policy checks"| policy
+    shell -->|"policy checks"| policy
+    mcp -->|"policy checks"| policy
 
     classDef label fill:none,stroke:none;
 ```
