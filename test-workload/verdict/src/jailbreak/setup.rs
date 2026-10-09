@@ -6,6 +6,7 @@ use std::{
 
 const TEMPLATE: &str = include_str!("box-config.toml");
 const FIXTURE: &str = include_str!("../../../../test-integ/src/fixture.dw");
+const METADATA_FORBIDS: &str = include_str!("metadata-forbids.dw");
 
 pub(super) struct Setup {
     pub workspace: PathBuf,
@@ -56,6 +57,9 @@ pub(super) fn policy(fixture: &str, home: &Path, workspace: &Path) -> io::Result
         if !body.contains(&format!("@id(\"{id}\")")) {
             body.push_str(&format!("\n@id(\"{id}\") permit (principal, action == Box::Action::\"{action}\", resource)\nwhen {{ context.input.path == \"/dev/null\" }};\n"));
         }
+    }
+    if !body.contains("@id(\"metadata_addresses\")") {
+        body.push_str(METADATA_FORBIDS);
     }
     Ok(body)
 }
@@ -208,6 +212,8 @@ mod tests {
         assert!(body.contains(r#"action == Box::Action::"fs:write""#));
         assert!(body.contains(r#"@id("dev_null_read")"#));
         assert_eq!(body.matches("bedrock-runtime.*.amazonaws.com").count(), 1);
+        assert_eq!(body.matches(r#"@id("metadata_addresses")"#).count(), 1);
+        assert!(body.contains(r#"context.input.ip like "169.254.*""#));
         assert!(!body.contains("*.api.aws"));
         assert_eq!(
             policy(&body, Path::new("/home/a"), Path::new("/home/a/ws")).unwrap(),

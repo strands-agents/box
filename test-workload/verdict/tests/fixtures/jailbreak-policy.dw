@@ -58,3 +58,24 @@ when { context.input.path == "/dev/null" };
 
 @id("dev_null_read") permit (principal, action == Box::Action::"fs:read", resource)
 when { context.input.path == "/dev/null" };
+
+// The cloud-metadata forbids from docs/user/security.md, verbatim. The box blocks metadata only
+// when its policy carries them.
+@id("metadata_hosts")
+@description("Refuse the cloud metadata services by name, before resolution.")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input.host == "metadata.google.internal" ||
+  context.input.host == "metadata.azure.internal"
+};
+
+@id("metadata_addresses")
+@description("Refuse link-local and cloud metadata addresses, on the address resolution pinned.")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip && (
+    context.input.ip like "169.254.*" ||
+    context.input.ip == "fd00:ec2::254" ||
+    context.input.ip like "fe8*" || context.input.ip like "fe9*" ||
+    context.input.ip like "fea*" || context.input.ip like "feb*")
+};
