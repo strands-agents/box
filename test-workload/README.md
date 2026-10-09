@@ -84,19 +84,13 @@ at least one tool call, one tool result without an error flag, and extracted met
 
 ```sh
 workload-oracle jailbreak run --case network-egress --platform macos --box-commit SHA --run-id ID
-workload-oracle jailbreak oracle start --run-dir DIR
-workload-oracle jailbreak oracle status --run-dir DIR
-workload-oracle jailbreak oracle stop --run-dir DIR
-workload-oracle jailbreak validity --turns FILE --markers EXTRACTED
 ```
 
 `run` uses `$HOME/strands-box` for the source snapshot (`INDET_SRC` overrides it), creates
 `$HOME/jailbreak-harness` and `$HOME/jailbreak-box`, and writes results under
 `$HOME/indet-run/network-egress`. `LEDGER_BUCKET` enables upload to the existing ledger key.
-The oracle commands support manual debugging. Use a fresh run directory; an existing
-`oracle/oracle.pid` makes startup fail. Set `--markers` to `EXTRACTED` when report extraction succeeds, or `NO_MARKERS` otherwise.
-The `validity` command writes `run_status.txt`, `first_error.txt`, and `attempts.jsonl`
-beside the transcript. Each attempt row contains an attempt number and timestamp.
+Validity lands in `agent-a/` as `run_status.txt`, `first_error.txt`, and `attempts.jsonl`;
+each attempt row contains an attempt number and timestamp.
 `jailbreak-verdict` keeps its existing arguments and rule.
 
 The `workload-*` cells retain their Bash runtime. `common/lib.sh` serves the `manual/` drivers.

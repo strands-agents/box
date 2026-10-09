@@ -1,9 +1,13 @@
-use super::{OwnedChild, sample, sockets::FORBIDDEN};
+use super::super::{
+    process::{self, Owned},
+    worker::Worker,
+};
+use super::{sample, sockets::FORBIDDEN};
 use std::{
     fs, io,
     net::{IpAddr, SocketAddr, TcpStream},
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -26,68 +30,67 @@ pub(super) fn run(dir: &Path, interval: Duration) -> io::Result<Outcome> {
             "control sink must be in the forbidden range and must not be IMDS",
         ));
     }
-    let port = std::env::var("ORACLE_CONTROL_PORT").unwrap_or_else(|_| "80".into());
+    let port = std::env::var("ORACLE_CONTROL_PORT")
+        .map_or(Ok(80), |p| p.parse().map_err(io::Error::other))?;
     let timeout = super::seconds("ORACLE_CONTROL_TIMEOUT", 12.0)?;
     let state = dir.join("control-state");
     fs::write(&state, "pending")?;
-    let child = Command::new(std::env::current_exe()?)
-        .args([
-            "jailbreak",
-            "control-worker",
-            "--target",
-            &target,
-            "--port",
-            &port,
-            "--timeout",
-            &timeout.as_secs_f64().to_string(),
-            "--state",
-        ])
-        .arg(&state)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    observe(dir, OwnedChild(child), interval, timeout, sample)
+    let worker = Worker::Control {
+        target: address,
+        port,
+        timeout,
+        state: state.clone(),
+    };
+    let child = Owned::spawn(
+        worker
+            .command()?
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    observe(dir, child, interval, timeout, sample)
 }
 
 fn observe(
     dir: &Path,
-    child: OwnedChild,
+    child: Owned,
     interval: Duration,
     timeout: Duration,
     mut sample: impl FnMut(&[u32]) -> io::Result<Vec<super::sockets::Socket>>,
 ) -> io::Result<Outcome> {
     let state = dir.join("control-state");
-    let roots = [child.0.id()];
+    let roots = [child.id()];
     fs::write(dir.join("control-roots"), format!("{}\n", roots[0]))?;
     let deadline = Instant::now() + timeout;
-    let result = loop {
-        super::super::shutdown::check()?;
+    let settled = process::wait_until(deadline, interval, || {
         if let Some(hit) = sample(&roots)?.into_iter().next() {
-            break Outcome::Detected(format!(
+            return Ok(Some(Outcome::Detected(format!(
                 "{} pid={} peer={} state={}",
                 hit.command, hit.pid, hit.peer, hit.state
-            ));
+            ))));
         }
         let current = fs::read_to_string(&state)?;
-        if current.starts_with("unreachable") {
-            break Outcome::Unreachable(current);
-        }
-        if Instant::now() >= deadline {
-            break if current == "opened" {
-                Outcome::Missed
-            } else {
-                Outcome::Unreachable(current)
-            };
-        }
-        thread::sleep(interval);
-    };
+        Ok(current
+            .starts_with("unreachable")
+            .then_some(Outcome::Unreachable(current)))
+    })?;
     drop(child);
-    Ok(result)
+    Ok(match settled {
+        Some(outcome) => outcome,
+        None => match fs::read_to_string(&state)? {
+            opened if opened == "opened" => Outcome::Missed,
+            current => Outcome::Unreachable(current),
+        },
+    })
 }
 
-pub(super) fn connect(target: &str, port: u16, timeout: Duration, state: &Path) -> io::Result<()> {
-    let addr = SocketAddr::new(target.parse().map_err(io::Error::other)?, port);
+pub(super) fn connect(
+    target: IpAddr,
+    port: u16,
+    timeout: Duration,
+    state: &Path,
+) -> io::Result<()> {
+    let addr = SocketAddr::new(target, port);
     match TcpStream::connect_timeout(&addr, timeout) {
         Ok(_stream) => {
             fs::write(state, "opened")?;
@@ -103,17 +106,18 @@ pub(super) fn connect(target: &str, port: u16, timeout: Duration, state: &Path) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     #[test]
-    fn control_registration_stays_out_of_live_roots_and_reaps_its_child() {
+    fn own_roots_and_reaped() {
         let dir = std::env::temp_dir().join(format!("jailbreak-control-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("subtree-roots"), "").unwrap();
         fs::write(dir.join("control-state"), "pending").unwrap();
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let child = Owned::spawn(Command::new("sleep").arg("30")).unwrap();
         let pid = child.id();
         let result = observe(
             &dir,
-            OwnedChild(child),
+            child,
             Duration::from_millis(1),
             Duration::from_secs(1),
             |roots| {

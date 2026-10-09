@@ -1,8 +1,16 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Debug, Deserialize)]
+/// One stream-json line from the agent, with its content blocks parsed once.
+#[derive(Debug)]
 pub(super) struct Event {
+    kind: String,
+    blocks: Vec<Block>,
+    result: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct RawEvent {
     #[serde(rename = "type", default)]
     kind: String,
     message: Option<Value>,
@@ -11,7 +19,7 @@ pub(super) struct Event {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub(super) enum Block {
+enum Block {
     #[serde(rename = "tool_use")]
     ToolUse {
         name: Option<String>,
@@ -30,25 +38,29 @@ pub(super) enum Block {
 
 impl Event {
     pub(super) fn parse(line: &str) -> Option<Self> {
-        serde_json::from_str(line).ok()
-    }
-    pub(super) fn blocks(&self) -> Vec<Block> {
-        self.message
+        let raw: RawEvent = serde_json::from_str(line).ok()?;
+        let blocks = raw
+            .message
             .as_ref()
             .and_then(|m| m.get("content"))
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|b| serde_json::from_value(b.clone()).ok())
-            .collect()
+            .filter_map(|b| Block::deserialize(b).ok())
+            .collect();
+        Some(Self {
+            kind: raw.kind,
+            blocks,
+            result: raw.result,
+        })
     }
-    pub(super) fn text(&self) -> Vec<String> {
+    fn text(&self) -> Vec<&str> {
         match self.kind.as_str() {
             "assistant" => self
-                .blocks()
-                .into_iter()
+                .blocks
+                .iter()
                 .filter_map(|b| match b {
-                    Block::Text { text } => Some(text),
+                    Block::Text { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect(),
@@ -56,7 +68,6 @@ impl Event {
                 .result
                 .as_ref()
                 .and_then(Value::as_str)
-                .map(str::to_owned)
                 .into_iter()
                 .collect(),
             _ => vec![],
@@ -64,18 +75,18 @@ impl Event {
     }
     pub(super) fn pretty(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
-            .blocks()
-            .into_iter()
+            .blocks
+            .iter()
             .filter_map(|b| match b {
                 Block::ToolUse { name, input } => Some(format!(
                     "[tool_use] {}({})",
-                    name.unwrap_or_default(),
-                    input.unwrap_or_default()
+                    name.as_deref().unwrap_or_default(),
+                    input.as_ref().unwrap_or(&Value::Null)
                 )),
                 Block::ToolResult { is_error, content } => Some(format!(
                     "[tool_result error={}] {}",
                     is_error.unwrap_or(false),
-                    content.unwrap_or_default()
+                    content.as_ref().unwrap_or(&Value::Null)
                 )),
                 Block::Text { text } => Some(format!("[assistant] {text}")),
                 Block::Other => None,
@@ -94,13 +105,39 @@ impl Event {
     }
 }
 
-pub(super) fn report(turns: &str) -> Option<String> {
-    let text = turns
-        .lines()
-        .filter_map(Event::parse)
-        .flat_map(|e| e.text())
-        .collect::<Vec<_>>()
-        .join("\n");
+/// What a finished stream-json transcript says about the campaign.
+#[derive(Debug, Default)]
+pub(super) struct Transcript {
+    /// Tool calls the agent made.
+    pub tool_uses: usize,
+    /// Tool results without an error flag, i.e. commands the box actually ran.
+    pub ran: usize,
+    /// The method report between the agent's markers, if it printed one.
+    pub report: Option<String>,
+}
+
+impl Transcript {
+    pub(super) fn parse(turns: &str) -> Self {
+        let mut transcript = Self::default();
+        let mut text: Vec<String> = vec![];
+        for event in turns.lines().filter_map(Event::parse) {
+            for block in &event.blocks {
+                match block {
+                    Block::ToolUse { .. } => transcript.tool_uses += 1,
+                    Block::ToolResult { is_error, .. } if !is_error.unwrap_or(false) => {
+                        transcript.ran += 1
+                    }
+                    _ => (),
+                }
+            }
+            text.extend(event.text().into_iter().map(str::to_owned));
+        }
+        transcript.report = report(&text.join("\n"));
+        transcript
+    }
+}
+
+fn report(text: &str) -> Option<String> {
     let (_, rest) = text.split_once("===METHOD_REPORT_BEGIN===")?;
     let (body, _) = rest.split_once("===METHOD_REPORT_END===")?;
     Some(format!("{}\n", body.trim()))
@@ -110,23 +147,29 @@ pub(super) fn report(turns: &str) -> Option<String> {
 mod tests {
     use super::*;
     #[test]
-    fn report_from_assistant_or_result() {
+    fn report_markers() {
         for event in [
             serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"===METHOD_REPORT_BEGIN===\nreport\n===METHOD_REPORT_END==="}]}}),
             serde_json::json!({"type":"result","result":"===METHOD_REPORT_BEGIN===\nreport\n===METHOD_REPORT_END==="}),
         ] {
-            assert_eq!(report(&event.to_string()).as_deref(), Some("report\n"));
+            assert_eq!(
+                Transcript::parse(&event.to_string()).report.as_deref(),
+                Some("report\n")
+            );
         }
-        assert_eq!(report("broken\n{}\n[]"), None);
+        assert_eq!(Transcript::parse("broken\n{}\n[]").report, None);
         assert_eq!(
-            report(r#"{"type":"result","result":"===METHOD_REPORT_BEGIN=== incomplete"}"#),
+            Transcript::parse(
+                r#"{"type":"result","result":"===METHOD_REPORT_BEGIN=== incomplete"}"#
+            )
+            .report,
             None
         );
     }
     #[test]
-    fn malformed_blocks_do_not_hide_valid_blocks() {
+    fn skips_malformed_blocks() {
         let event = Event::parse(r#"{"type":"assistant","message":{"content":[null,42,{"type":"tool_use","name":"Bash"}]}}"#).unwrap();
-        assert_eq!(event.blocks().len(), 1);
+        assert_eq!(event.blocks.len(), 1);
         assert!(event.pretty()[0].contains("Bash"));
     }
 }

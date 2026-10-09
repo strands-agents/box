@@ -1,27 +1,19 @@
-use super::{setup::Setup, stream::Event};
+use super::{
+    process::{self, Owned},
+    setup::Setup,
+    stream::Event,
+    worker::Worker,
+};
 use std::{
     fs,
     io::{self, BufRead, Read, Write},
     os::unix::process::CommandExt,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
-
-struct Agent(Child);
-impl Drop for Agent {
-    fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", self.0.id())])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn prompt(goal: &str, workspace: &Path) -> String {
     format!(
@@ -54,33 +46,30 @@ pub(super) fn run(run_dir: &Path, setup: &Setup, goal: &str, platform: &str) -> 
         .append(true)
         .open(run_dir.join("agent-a.log"))?;
     let mut turns = fs::File::create(run_dir.join("agent-a/turns.jsonl"))?;
-    let child = Command::new(std::env::current_exe()?)
-        .args(["jailbreak", "agent-worker", "--config"])
-        .arg(&setup.config)
-        .arg("--workspace")
-        .arg(&setup.workspace)
-        .arg("--prompt")
-        .arg(prompt(goal, &setup.workspace))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(log.try_clone()?)
-        .process_group(0)
-        .spawn()?;
-    let mut child = Agent(child);
+    let worker = Worker::Agent {
+        config: setup.config.clone(),
+        workspace: setup.workspace.clone(),
+        prompt: prompt(goal, &setup.workspace),
+    };
+    let mut child = Owned::spawn_group(
+        worker
+            .command()?
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log.try_clone()?),
+    )?;
     let mut roots = fs::OpenOptions::new()
         .append(true)
         .open(run_dir.join("oracle/subtree-roots"))?;
-    writeln!(roots, "{}", child.0.id())?;
+    writeln!(roots, "{}", child.id())?;
     roots.sync_all()?;
     child
-        .0
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("agent launch pipe missing"))?
         .write_all(b"1")?;
-    writeln!(log, "registered box subtree root pid={}", child.0.id())?;
+    writeln!(log, "registered box subtree root pid={}", child.id())?;
     let stdout = child
-        .0
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("agent output missing"))?;
@@ -111,10 +100,7 @@ pub(super) fn run(run_dir: &Path, setup: &Setup, goal: &str, platform: &str) -> 
     loop {
         super::shutdown::check()?;
         if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "agent exceeded 40 minutes",
-            ));
+            return Err(process::timed_out("agent exceeded 40 minutes"));
         }
         match rx.recv_timeout(
             Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
@@ -136,20 +122,10 @@ pub(super) fn run(run_dir: &Path, setup: &Setup, goal: &str, platform: &str) -> 
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
         }
     }
-    loop {
-        super::shutdown::check()?;
-        if let Some(status) = child.0.try_wait()? {
-            writeln!(log, "agent exit: {status}")?;
-            return Ok(status.code().unwrap_or(1));
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "box did not exit within 40 minutes",
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    let status = process::wait_until(deadline, Duration::from_millis(50), || child.try_wait())?
+        .ok_or_else(|| process::timed_out("box did not exit within 40 minutes"))?;
+    writeln!(log, "agent exit: {status}")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 pub(super) fn worker(config: &Path, workspace: &Path, prompt: &str) -> io::Result<()> {

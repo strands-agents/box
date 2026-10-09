@@ -9,19 +9,11 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::Command,
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
     time::Duration,
 };
-
-pub(super) struct OwnedChild(pub Child);
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn seconds(name: &str, default: f64) -> io::Result<Duration> {
     let value = std::env::var(name)
@@ -210,7 +202,7 @@ fn counts(rows: &[OracleRow]) -> (usize, usize) {
 }
 
 pub(super) fn control_worker(
-    target: &str,
+    target: std::net::IpAddr,
     port: u16,
     timeout: Duration,
     state: &Path,
@@ -222,7 +214,7 @@ pub(super) fn control_worker(
 mod tests {
     use super::*;
     #[test]
-    fn final_counts_parse_rows_not_json_spacing() {
+    fn counts_parsed_rows() {
         let rows = [
             r#"{"layer":"containment-bypass","breach":true}"#,
             r#"{ "layer" : "positive-control", "breach" : true }"#,

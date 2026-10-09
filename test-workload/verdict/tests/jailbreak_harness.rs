@@ -33,39 +33,7 @@ fn binary() -> Command {
 }
 
 #[test]
-fn validity_command_handles_missing_transcript_and_writes_neutral_attempts() {
-    let scratch = Scratch::new();
-    let turns = scratch.0.join("turns.jsonl");
-    let invoke = || {
-        binary()
-            .args(["jailbreak", "validity", "--turns"])
-            .arg(&turns)
-            .args(["--markers", "EXTRACTED"])
-            .output()
-            .unwrap()
-    };
-    assert!(invoke().status.success());
-    assert_eq!(
-        fs::read_to_string(scratch.0.join("run_status.txt")).unwrap(),
-        "INVALID\n"
-    );
-    fs::write(&turns,"{\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\"}]}}\n{\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n").unwrap();
-    let output = invoke();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("VALID 1 1 -"));
-    let attempts = fs::read_to_string(scratch.0.join("attempts.jsonl")).unwrap();
-    let row: serde_json::Value = serde_json::from_str(&attempts).unwrap();
-    assert_eq!(row["attempt"], 1);
-    assert_eq!(row.as_object().unwrap().len(), 2);
-    assert!(row["at_unix"].is_u64());
-    assert_eq!(
-        fs::read_to_string(scratch.0.join("first_error.txt")).unwrap(),
-        ""
-    );
-}
-
-#[test]
-fn agent_waits_for_registration_token_and_preserves_arguments() {
+fn agent_waits_for_token() {
     let scratch = Scratch::new();
     let fake = scratch.0.join("strands-box");
     fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
@@ -113,7 +81,7 @@ fn agent_waits_for_registration_token_and_preserves_arguments() {
 }
 
 #[test]
-fn agent_does_not_launch_if_the_registration_pipe_closes() {
+fn agent_needs_token() {
     let scratch = Scratch::new();
     let output = binary()
         .args([
@@ -133,7 +101,7 @@ fn agent_does_not_launch_if_the_registration_pipe_closes() {
 }
 
 #[test]
-fn termination_signals_reap_capture_and_remove_the_oracle_lock() {
+fn signals_clean_up() {
     for signal in ["-TERM", "-INT"] {
         let scratch = Scratch::new();
         let fake = scratch.0.join("tcpdump");
@@ -206,7 +174,7 @@ fn termination_signals_reap_capture_and_remove_the_oracle_lock() {
 }
 
 #[test]
-fn macos_install_retries_a_homebrew_lock_but_not_other_failures() {
+fn brew_lock_retry() {
     use std::os::unix::process::CommandExt;
     let source = include_str!("../../manual/macos/install.sh");
     let start = source.find("install_node() {").unwrap();
@@ -281,7 +249,7 @@ fn macos_install_retries_a_homebrew_lock_but_not_other_failures() {
 }
 
 #[test]
-fn macos_native_install_preserves_the_version_and_falls_back_on_failure() {
+fn native_install_fallback() {
     use std::os::unix::process::CommandExt;
     let source = include_str!("../../manual/macos/install.sh");
     let start = source.find("install_native_claude() {").unwrap();

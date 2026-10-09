@@ -1,15 +1,15 @@
-use super::{OwnedChild, sockets::FORBIDDEN};
+use super::super::process::{self, Owned};
+use super::sockets::FORBIDDEN;
 use std::{
     fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
 pub(super) struct Capture {
-    child: OwnedChild,
+    child: Owned,
     path: PathBuf,
     empty_pcapng: bool,
 }
@@ -40,41 +40,45 @@ impl Capture {
             .append(true)
             .open(&log_path)?;
         let log_offset = log.metadata()?.len();
-        let child = command
-            .args(["-i", "any", "-n", "-U", "-w"])
-            .arg(&path)
-            .arg(FORBIDDEN.filter())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()?;
+        let child = Owned::spawn(
+            command
+                .args(["-i", "any", "-n", "-U", "-w"])
+                .arg(&path)
+                .arg(FORBIDDEN.filter())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(log),
+        )?;
         let mut capture = Self {
-            child: OwnedChild(child),
+            child,
             path,
             empty_pcapng,
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            super::super::shutdown::check()?;
-            capture.check()?;
-            let mut current_log = String::new();
+        let current_log = || -> io::Result<String> {
+            let mut text = String::new();
             let mut log = fs::File::open(&log_path)?;
             log.seek(SeekFrom::Start(log_offset))?;
-            log.read_to_string(&mut current_log)?;
-            if fs::metadata(&capture.path).is_ok_and(|m| ready(m.len(), &current_log, empty_pcapng))
-            {
-                return Ok(capture);
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::other(format!(
-                    "tcpdump did not initialize its capture file: {current_log}"
-                )));
-            }
-            thread::sleep(Duration::from_millis(100));
+            log.read_to_string(&mut text)?;
+            Ok(text)
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let started = process::wait_until(deadline, Duration::from_millis(100), || {
+            capture.check()?;
+            let log = current_log()?;
+            Ok(fs::metadata(&capture.path)
+                .is_ok_and(|m| ready(m.len(), &log, empty_pcapng))
+                .then_some(()))
+        })?;
+        match started {
+            Some(()) => Ok(capture),
+            None => Err(io::Error::other(format!(
+                "tcpdump did not initialize its capture file: {}",
+                current_log()?
+            ))),
         }
     }
     pub(super) fn check(&mut self) -> io::Result<()> {
-        if let Some(status) = self.child.0.try_wait()? {
+        if let Some(status) = self.child.try_wait()? {
             return Err(io::Error::other(format!(
                 "tcpdump exited during observation: {status}"
             )));
@@ -104,27 +108,18 @@ impl Capture {
     }
     pub(super) fn stop(mut self) -> io::Result<usize> {
         self.check()?;
-        let status = Command::new("kill")
-            .args(["-INT", &self.child.0.id().to_string()])
-            .status()?;
-        if !status.success() {
-            return Err(io::Error::other("could not stop tcpdump"));
-        }
+        self.child.interrupt()?;
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = self.child.0.try_wait()? {
-                if !status.success() {
-                    return Err(io::Error::other(format!(
-                        "tcpdump shutdown failed: {status}"
-                    )));
-                }
-                return self.count();
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::other("tcpdump did not stop"));
-            }
-            thread::sleep(Duration::from_millis(50));
+        let status = process::wait_until(deadline, Duration::from_millis(50), || {
+            self.child.try_wait()
+        })?
+        .ok_or_else(|| process::timed_out("tcpdump did not stop"))?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "tcpdump shutdown failed: {status}"
+            )));
         }
+        self.count()
     }
 }
 
@@ -164,7 +159,7 @@ fn ready(bytes: u64, current_log: &str, empty_pcapng: bool) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn packet_summary_keeps_addresses_and_bounds_diagnostic_output() {
+    fn bounded_summary() {
         let packet = "1791506911.000001 (en0, proc timed:123, out) IP 10.0.0.1.49152 > 169.254.169.123.123: UDP, length 48";
         let output = std::iter::repeat_n(packet, 12)
             .collect::<Vec<_>>()
@@ -176,7 +171,7 @@ mod tests {
         assert_eq!(packet_summary(&"é".repeat(3000)).len(), 4096);
     }
     #[test]
-    fn empty_pktap_capture_starts_after_the_listener_is_ready() {
+    fn empty_pktap_starts() {
         let dir = std::env::temp_dir().join(format!("jailbreak-pktap-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         let mut command = Command::new("sh");
@@ -190,7 +185,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn empty_capture_requires_pktap_and_a_current_listener_banner() {
+    fn ready_rules() {
         assert!(!ready(0, "", true));
         assert!(!ready(0, "tcpdump: listening on any", false));
         assert!(!ready(12, "tcpdump: listening on any", true));

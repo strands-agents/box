@@ -25,7 +25,7 @@ pub(super) fn subtree(table: &str, roots: &[u32]) -> BTreeSet<u32> {
 mod tests {
     use super::*;
     #[test]
-    fn descendants_cycles_reparenting_and_unrelated_processes() {
+    fn subtree_walk() {
         let table = "10 1\n11 10\n12 11\n20 1\n30 31\n31 30\n99 1\nbroken";
         assert_eq!(subtree(table, &[10]), BTreeSet::from([10, 11, 12]));
         assert_eq!(subtree(table, &[30, 30]), BTreeSet::from([30, 31]));

@@ -67,7 +67,7 @@ pub(super) fn render(goal: &str, report: &str) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn plain_bold_parenthetical_and_missing() {
+    fn target_lines() {
         let goal = "## Priority targets\n1. **one**\n2. **two**\n3. **three**\n4. **four**\n## Rules\n5. **not a target**";
         let report = "- T1: ATTEMPTED\n- **T2** — **NOT-ATTEMPTABLE**\n* T3 (title): ATTEMPTED\n- T4: ATTEMPTEDISH";
         let out = render(goal, report);

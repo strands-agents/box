@@ -1,4 +1,4 @@
-use super::stream::{Block, Event};
+use super::stream::Transcript;
 use std::{
     fs,
     io::{self, Write},
@@ -6,76 +6,93 @@ use std::{
 };
 
 pub(super) struct Validity {
-    pub status: &'static str,
     pub uses: usize,
-    pub ran: usize,
-    pub cause: String,
+    /// Why the campaign is invalid; `None` means it is valid.
+    pub cause: Option<String>,
 }
 
-pub(super) fn assess(turns: &str, markers: bool) -> Validity {
-    let (mut uses, mut ran) = (0, 0);
-    for block in turns
-        .lines()
-        .filter_map(Event::parse)
-        .flat_map(|e| e.blocks())
-    {
-        match block {
-            Block::ToolUse { .. } => uses += 1,
-            Block::ToolResult { is_error, .. } if !is_error.unwrap_or(false) => ran += 1,
-            _ => (),
-        }
-    }
-    let cause = if uses == 0 {
-        "no attempts executed"
+/// How the agent process ended, for runs that launched one.
+pub(super) struct Exit<'a> {
+    pub log: &'a str,
+    pub code: i32,
+    /// A harness failure while running the agent. It invalidates the campaign.
+    pub error: Option<String>,
+}
+
+/// Judge whether the campaign ran.
+pub(super) fn assess(transcript: &Transcript, exit: &Exit) -> Validity {
+    let (uses, ran) = (transcript.tool_uses, transcript.ran);
+    let cause = if let Some(error) = &exit.error {
+        Some(error.clone())
+    } else if uses == 0 {
+        Some(launch_failure(exit).unwrap_or_else(|| "no attempts executed".into()))
     } else if ran == 0 {
-        "every tool call was refused or failed, so the box never ran a command"
-    } else if !markers {
-        "the agent never printed its method report, so the campaign did not finish"
+        Some("every tool call was refused or failed, so the box never ran a command".into())
+    } else if transcript.report.is_none() {
+        Some("the agent never printed its method report, so the campaign did not finish".into())
     } else {
-        ""
+        None
     };
-    Validity {
-        status: if cause.is_empty() { "VALID" } else { "INVALID" },
-        uses,
-        ran,
-        cause: cause.into(),
+    Validity { uses, cause }
+}
+
+/// Explain an agent that made no tool calls from its log, when the log says why.
+fn launch_failure(exit: &Exit) -> Option<String> {
+    let refused = [
+        "error: the following required arguments",
+        "Usage: strands-box",
+        "strands-box: error:",
+        "strands-box: refusing to run:",
+    ];
+    let unreachable = [
+        "api error",
+        "failedtoopensocket",
+        "can't reach the api",
+        "connection error",
+        "credit balance",
+        "authentication",
+    ];
+    let lower = exit.log.to_lowercase();
+    if exit
+        .log
+        .lines()
+        .any(|l| refused.iter().any(|p| l.starts_with(p)))
+    {
+        Some(format!(
+            "the box never started (CLI or load refusal, exit {})",
+            exit.code
+        ))
+    } else if unreachable.iter().any(|p| lower.contains(p)) {
+        Some("could not reach the model API".into())
+    } else {
+        None
     }
 }
 
 impl Validity {
-    pub(super) fn classify(&mut self, log: &str, exit: i32) {
-        if self.uses != 0 {
-            return;
+    pub(super) fn status(&self) -> &'static str {
+        if self.cause.is_none() {
+            "VALID"
+        } else {
+            "INVALID"
         }
-        if log.lines().any(|l| {
-            [
-                "error: the following required arguments",
-                "Usage: strands-box",
-                "strands-box: error:",
-                "strands-box: refusing to run:",
-            ]
-            .iter()
-            .any(|p| l.starts_with(p))
-        }) {
-            self.cause = format!("the box never started (CLI or load refusal, exit {exit})");
-        } else if [
-            "api error",
-            "failedtoopensocket",
-            "can't reach the api",
-            "connection error",
-            "credit balance",
-            "authentication",
-        ]
-        .iter()
-        .any(|p| log.to_lowercase().contains(p))
-        {
-            self.cause = "could not reach the model API".into();
-        }
+    }
+    /// The method report the harness writes when the agent printed none.
+    pub(super) fn fallback_report(&self, exit: i32) -> String {
+        format!(
+            "# Method Report (fallback)\n\nrun_status: {}\nexit_code: {exit}\ntool_uses: {}\n\n{}\n",
+            self.status(),
+            self.uses,
+            self.cause.as_deref().unwrap_or_default()
+        )
     }
     pub(super) fn write(&self, dir: &Path) -> io::Result<()> {
         fs::create_dir_all(dir)?;
-        fs::write(dir.join("run_status.txt"), format!("{}\n", self.status))?;
-        fs::write(dir.join("first_error.txt"), &self.cause)?;
+        fs::write(dir.join("run_status.txt"), format!("{}\n", self.status()))?;
+        fs::write(
+            dir.join("first_error.txt"),
+            self.cause.as_deref().unwrap_or_default(),
+        )?;
         let mut out = fs::File::create(dir.join("attempts.jsonl"))?;
         for attempt in 1..=self.uses {
             writeln!(
@@ -93,46 +110,79 @@ mod tests {
     use super::*;
     const USE: &str =
         r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#;
-    fn with_result(error: &str) -> String {
-        format!(
-            "{USE}\n{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",{error}\"content\":\"output\"}}]}}}}"
-        )
+    const REPORT: &str =
+        r#"{"type":"result","result":"===METHOD_REPORT_BEGIN===\nr\n===METHOD_REPORT_END==="}"#;
+    fn turns(result: &str, report: bool) -> Transcript {
+        let result = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result",{result}"content":"out"}}]}}}}"#
+        );
+        Transcript::parse(&[USE, &result, if report { REPORT } else { "" }].join("\n"))
+    }
+    fn exit<'a>(log: &'a str, error: Option<&str>) -> Exit<'a> {
+        Exit {
+            log,
+            code: 2,
+            error: error.map(str::to_owned),
+        }
+    }
+    fn cause(transcript: &Transcript, exit: &Exit) -> Option<String> {
+        assess(transcript, exit).cause
     }
     #[test]
-    fn no_calls_or_missing_transcript_is_invalid() {
-        let v = assess("", true);
-        assert_eq!(v.status, "INVALID");
-        assert_eq!(v.cause, "no attempts executed");
+    fn valid() {
+        let v = assess(&turns(r#""is_error":false,"#, true), &exit("", None));
+        assert_eq!(v.status(), "VALID");
+        assert_eq!(v.uses, 1);
+        assert_eq!(assess(&turns("", true), &exit("", None)).status(), "VALID");
     }
     #[test]
-    fn all_refused_is_invalid_with_cause() {
-        let v = assess(&with_result("\"is_error\":true,"), true);
-        assert_eq!(v.status, "INVALID");
-        assert!(v.cause.contains("refused"));
-        assert_eq!(v.ran, 0);
+    fn invalid_causes() {
+        let none = Transcript::default();
+        let quiet = exit("", None);
+        assert_eq!(
+            cause(&none, &quiet).as_deref(),
+            Some("no attempts executed")
+        );
+        let refused = cause(&turns(r#""is_error":true,"#, true), &quiet).unwrap();
+        assert!(refused.contains("refused"));
+        assert!(
+            cause(&turns("", false), &quiet)
+                .unwrap()
+                .contains("method report")
+        );
+        let harness = exit("", Some("agent exceeded 40 minutes"));
+        assert_eq!(
+            cause(&turns("", true), &harness).as_deref(),
+            Some("agent exceeded 40 minutes")
+        );
     }
     #[test]
-    fn no_markers_is_invalid() {
-        let v = assess(&with_result("\"is_error\":false,"), false);
-        assert_eq!(v.status, "INVALID");
-        assert!(v.cause.contains("method report"));
+    fn launch_failures() {
+        let none = Transcript::default();
+        let refused = exit("strands-box: refusing to run: config", None);
+        assert!(cause(&none, &refused).unwrap().contains("refusal, exit 2"));
+        let api = exit("API Error: authentication", None);
+        assert_eq!(
+            cause(&none, &api).as_deref(),
+            Some("could not reach the model API")
+        );
     }
     #[test]
-    fn successful_campaign_is_valid() {
-        let v = assess(&with_result("\"is_error\":false,"), true);
-        assert_eq!(v.status, "VALID");
-        assert_eq!((v.uses, v.ran), (1, 1));
-    }
-    #[test]
-    fn omitted_is_error_is_success() {
-        assert_eq!(assess(&with_result(""), true).status, "VALID");
-    }
-    #[test]
-    fn error_causes_are_classified() {
-        let mut v = assess("", false);
-        v.classify("strands-box: refusing to run: config", 2);
-        assert!(v.cause.contains("never started"));
-        v.classify("API Error: authentication", 1);
-        assert_eq!(v.cause, "could not reach the model API");
+    fn writes_neutral_attempts() {
+        let dir = std::env::temp_dir().join(format!("jailbreak-validity-{}", std::process::id()));
+        assess(&turns("", true), &exit("", None))
+            .write(&dir)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("run_status.txt")).unwrap(),
+            "VALID\n"
+        );
+        assert_eq!(fs::read_to_string(dir.join("first_error.txt")).unwrap(), "");
+        let row: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("attempts.jsonl")).unwrap()).unwrap();
+        assert_eq!(row["attempt"], 1);
+        assert!(row["at_unix"].is_u64());
+        assert_eq!(row.as_object().unwrap().len(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

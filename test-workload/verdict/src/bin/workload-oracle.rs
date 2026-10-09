@@ -334,8 +334,6 @@ fn usage(why: &str) -> ExitCode {
     eprintln!(
         "usage:
   workload-oracle jailbreak run --case network-egress [--platform NAME] [--box-commit SHA] [--run-id ID]
-  workload-oracle jailbreak oracle start|stop|status --run-dir DIR
-  workload-oracle jailbreak validity --turns FILE --markers EXTRACTED|NO_MARKERS
   workload-oracle start     --run-dir DIR
   workload-oracle stop      --run-dir DIR --dimension NAME --cli NAME [--platform NAME]
   workload-oracle reconcile --run-dir DIR --dimension NAME --cli NAME [--platform NAME]

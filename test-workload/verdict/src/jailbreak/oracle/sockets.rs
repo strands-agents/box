@@ -66,7 +66,7 @@ pub(super) fn parse(table: &str) -> Vec<Socket> {
 mod tests {
     use super::*;
     #[test]
-    fn cidr_covers_every_address_and_excludes_neighbors() {
+    fn forbidden_cidr() {
         for low in 0..=u16::MAX {
             assert!(
                 FORBIDDEN.contains(Ipv4Addr::new(169, 254, (low >> 8) as u8, low as u8).into())
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(FORBIDDEN.filter(), "dst net 169.254.0.0/16");
     }
     #[test]
-    fn linux_macos_and_mapped_ipv6_socket_rows() {
+    fn lsof_rows() {
         let table = "bash 42 root 3u IPv4 123 0t0 TCP 10.0.0.1:321->169.254.255.254:80 (SYN_SENT)\nrenamed 44 0 7u IPv4 0x123 0t0 TCP 10.0.0.2:322->169.254.169.254:80 (ESTABLISHED)\nx 45 0 7u IPv6 0x123 0t0 TCP [::1]:322->[::ffff:169.254.1.2]:80 (ESTABLISHED)\nx 46 0 7u TCP 169.254.1.2:80->1.2.3.4:80 (ESTABLISHED)\nx 47 0 7u TCP 10.0.0.1:80->169.254.1.2:80 (CLOSED)";
         let rows = parse(table);
         assert_eq!(rows.len(), 3);

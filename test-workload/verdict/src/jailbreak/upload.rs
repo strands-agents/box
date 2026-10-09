@@ -1,9 +1,12 @@
 use super::Run;
 use std::{
-    fs, io,
-    path::Path,
+    io,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+/// Written by bootstrap.sh's build step, outside the run directory.
+const BUILD_LOG: &str = "/tmp/box-build.log";
 
 const ARTIFACTS: &[(&str, &str)] = &[
     ("verdict.json", "verdict.json"),
@@ -21,15 +24,6 @@ const ARTIFACTS: &[(&str, &str)] = &[
 ];
 
 pub(super) fn upload(dir: &Path, run: &Run, bucket: &str) -> io::Result<()> {
-    if !dir.join("verdict.json").is_file() {
-        fs::write(
-            dir.join("verdict.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "mode":"indeterministic","platform":run.platform,"dimension":run.dimension,
-                "verdict":"UNCERTAIN","risk_score":0,"run_status":"INVALID","note":"no verdict produced"
-            }))?,
-        )?;
-    }
     let destination = format!(
         "s3://{bucket}/reports/{}/{}/indeterministic/{}/{}",
         run.box_commit.as_deref().unwrap_or("unknown"),
@@ -38,12 +32,11 @@ pub(super) fn upload(dir: &Path, run: &Run, bucket: &str) -> io::Result<()> {
         run.dimension
     );
     let mut failed = vec![];
-    for (source, key) in ARTIFACTS
+    let sources = ARTIFACTS
         .iter()
-        .copied()
-        .chain([("/tmp/box-build.log", "box-build.log")])
-    {
-        let source = dir.join(source);
+        .map(|&(source, key)| (dir.join(source), key))
+        .chain([(PathBuf::from(BUILD_LOG), "box-build.log")]);
+    for (source, key) in sources {
         if !source.is_file() {
             continue;
         }

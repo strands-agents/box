@@ -165,7 +165,7 @@ pub(super) fn prepare(home: &Path, source: &Path) -> io::Result<Setup> {
 mod tests {
     use super::*;
     #[test]
-    fn rendered_files_match_golden_configuration() {
+    fn golden_files() {
         assert_eq!(
             config(
                 "/Users/operator/jailbreak-harness",
@@ -185,7 +185,7 @@ mod tests {
         );
     }
     #[test]
-    fn rendered_config_escapes_paths() {
+    fn config_escapes() {
         let rendered = config(
             "/home/a/space \"x\"",
             "/private/var/box",
@@ -197,7 +197,7 @@ mod tests {
         assert!(!rendered.contains("__WORKSPACE__"));
     }
     #[test]
-    fn policy_has_home_spelling_and_dev_null_and_one_host_patch() {
+    fn policy_patches() {
         let body = policy(
             FIXTURE,
             Path::new("/home/a"),
