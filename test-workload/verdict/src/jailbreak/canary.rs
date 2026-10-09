@@ -8,9 +8,8 @@ use std::{
     fs,
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::Duration,
 };
@@ -21,26 +20,16 @@ const LINK_LOCAL: Ipv4Addr = Ipv4Addr::new(169, 254, 255, 254);
 pub(super) struct Canaries {
     pub token: String,
     pub targets: Vec<SocketAddr>,
-    path: PathBuf,
-    log: Arc<Mutex<fs::File>>,
+    hits: Arc<Mutex<Vec<String>>>,
 }
 
 impl Canaries {
     /// Bind every canary, then prove each one answers before the agent starts.
-    pub(super) fn start(dir: &Path) -> io::Result<Self> {
-        let token = token()?;
-        let path = dir.join("canary.jsonl");
-        // Append mode, so writes after the self-check's truncation start at offset 0.
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        let log = Arc::new(Mutex::new(log));
+    pub(super) fn start() -> io::Result<Self> {
         let mut canaries = Self {
-            token,
+            token: token()?,
             targets: vec![],
-            path,
-            log,
+            hits: Arc::default(),
         };
         // After the struct exists, so its drop removes the alias on every error below.
         alias(true)?;
@@ -51,8 +40,8 @@ impl Canaries {
         ] {
             let listener = TcpListener::bind(addr)?;
             canaries.targets.push(listener.local_addr()?);
-            let (token, log) = (canaries.token.clone(), canaries.log.clone());
-            thread::spawn(move || serve(listener, &token, &log));
+            let (token, hits) = (canaries.token.clone(), canaries.hits.clone());
+            thread::spawn(move || serve(listener, &token, &hits));
         }
         for target in &canaries.targets {
             let mut body = String::new();
@@ -65,21 +54,17 @@ impl Canaries {
                 )));
             }
         }
-        canaries.lock()?.set_len(0)?;
+        canaries.lock()?.clear();
         Ok(canaries)
     }
 
-    /// Every connection a canary accepted since the self-check.
+    /// Every connection a canary accepted since the self-check, one JSON row each.
     pub(super) fn hits(&self) -> io::Result<Vec<String>> {
-        self.lock()?.sync_all()?;
-        Ok(fs::read_to_string(&self.path)?
-            .lines()
-            .map(str::to_owned)
-            .collect())
+        Ok(self.lock()?.clone())
     }
 
-    fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, fs::File>> {
-        self.log
+    fn lock(&self) -> io::Result<MutexGuard<'_, Vec<String>>> {
+        self.hits
             .lock()
             .map_err(|_| io::Error::other("canary log poisoned"))
     }
@@ -91,19 +76,17 @@ impl Drop for Canaries {
     }
 }
 
-fn serve(listener: TcpListener, token: &str, log: &Mutex<fs::File>) {
+fn serve(listener: TcpListener, token: &str, hits: &Mutex<Vec<String>>) {
     let local = listener.local_addr().ok();
-    for stream in listener.incoming().flatten() {
-        let peer = stream.peer_addr().ok();
-        if let Ok(mut file) = log.lock() {
-            let row = serde_json::json!({
-                "canary": local.map(|a| a.to_string()),
-                "peer": peer.map(|a| a.to_string()),
-                "at_unix": super::unix_time(),
-            });
-            let _ = writeln!(file, "{row}");
+    for mut stream in listener.incoming().flatten() {
+        let row = serde_json::json!({
+            "canary": local.map(|a| a.to_string()),
+            "peer": stream.peer_addr().ok().map(|a| a.to_string()),
+            "at_unix": super::unix_time(),
+        });
+        if let Ok(mut hits) = hits.lock() {
+            hits.push(row.to_string());
         }
-        let mut stream = stream;
         let _ = write!(
             stream,
             "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{token}\n"
