@@ -310,26 +310,35 @@ This suite needs all four of the things that design removed:
 3. An S3 bucket for the source tarball and the verdict ledger.
 4. A live model, called once per cell.
 
-It therefore runs behind `.github/workflows/workload-suite.yml`, which has **no automatic trigger**:
-a maintainer dispatches it (`workflow_dispatch`) against a named ref — a branch, tag, SHA, or
-`refs/pull/<N>/head` for a pull request. The approval is the security boundary, not a formality:
-dispatch permission is repo `write`, and the `manual-approval` environment (whose
+It therefore runs behind `.github/workflows/workload-suite.yml`, which has **no pull request
+trigger**: a maintainer dispatches it (`workflow_dispatch`) against a named ref — a branch, tag,
+SHA, or `refs/pull/<N>/head` for a pull request. The approval is the security boundary, not a
+formality: dispatch permission is repo `write`, and the `manual-approval` environment (whose
 `required_reviewers` rule names the `strands-box-maintainers` team) narrows execution to
 maintainers — a contributor can request a run, only a maintainer can let it spend. The job then
 builds and executes the named ref's own code on real compute with real credentials.
+
+It also runs **nightly** (`schedule`, 11:17 UTC) against the default branch with `platform=both`,
+to catch drift in the runner images, the agents' own releases, and the model. A scheduled run names
+no ref, so there is nothing for a reviewer to vet: it takes a separate `nightly` environment with
+no reviewer rule, which only `schedule` can reach. Dispatch is unaffected and still gated.
 
 The workflow is **non-blocking by construction**, for three independent reasons: it has no pull
 request trigger, so it reports no check on a pull request at all; `ci.yml` does not call it and
 `ci-gate` does not list it; and no ruleset on this repository requires any status check. A failed or
 unapproved run cannot stop a merge.
 
-**It is a scaffold, and it cannot pass yet.** Every account value is a required input with no
-default, and `require_inputs` refuses a driver that lacks one, so an approved run fails in seconds
-until a maintainer populates nine repository secrets and stands up the OIDC role, VPC, security
-group, instance profile, AMIs, and bucket. That failure is honest and non-blocking; it is not a
-containment result. The secret names are listed in the workflow's own header. Until then the only
-path that can actually run the suite is a local one — `manual/setup.sh` against an operator's own
-account — or an out-of-band pipeline.
+The nine repository secrets, the OIDC role, VPC, security group, instance profile, AMIs, and bucket
+are **populated**, and the suite runs green on both legs, so the nightly has a baseline to regress
+against. `require_inputs` still refuses a driver that lacks any account value, so a
+misconfiguration fails in seconds with the list of what is missing rather than part-way through a
+provisioned run. That failure is honest and non-blocking; it is not a containment result. The secret
+names are listed in the workflow's own header. `manual/setup.sh` against an operator's own account
+remains the local path.
+
+The agent's model is **pinned** in `verdict/src/jailbreak/box-config.toml` (`ANTHROPIC_MODEL`). An unpinned agent
+picks its own default, and a default moving under the suite looks exactly like a containment
+regression — so the pin is what makes a red nightly worth reading.
 
 The suite's **verdict layer** does run in CI, free and on no approval:
 `.github/workflows/verdict-hermetic.yml` tests `test-workload/verdict/` and `test-common/`, which

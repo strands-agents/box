@@ -1,7 +1,7 @@
 name: "Workload: Agent Suite (gated)"
 
 # The agent-driven suite in `test-workload/` -- the one that puts a real coding agent
-# in a box and asks whether the box holds. See "Running it" below.
+# in a box and asks whether the box holds. Runs nightly; see "Running it" below.
 #
 # ## Why this is gated and the deterministic suite is not
 #
@@ -34,6 +34,16 @@ name: "Workload: Agent Suite (gated)"
 # passes only when the agent ran a valid campaign and reached none of the harness's
 # canaries (test-workload/README.md).
 #
+# ## Nightly
+#
+# A nightly runs the default branch with `platform=both`, `case=network-egress`, and
+# teardown on. It reuses the Dedicated Host when one is still allocated, so the steady
+# state is roughly one host continuously allocated.
+#
+# The model is pinned in `test-workload/verdict/src/jailbreak/box-config.toml`, on
+# purpose: an agent silently changing model looks exactly like a containment
+# regression, and this suite is nondeterministic enough already.
+#
 # ## Required secrets
 #
 # | Secret | What it is |
@@ -53,9 +63,15 @@ name: "Workload: Agent Suite (gated)"
 # the Dedicated Host.
 
 on:
-  # Human-triggered ONLY. No automatic trigger: a run exists only because someone
-  # asked for it, against a ref they named. Do not add `pull_request`/`_target` --
-  # an earlier revision did and prompted maintainers on unrelated PRs.
+  # Nightly against the default branch, so agent-visible drift is caught on its own:
+  # the runner images, the agents' own latest releases, and the model all move with no
+  # commit here. Off-the-hour -- scheduled runs are delayed most at :00.
+  schedule:
+    - cron: "17 11 * * *"
+  # Otherwise human-triggered, against a ref the dispatcher names. Do not add
+  # `pull_request`/`_target` -- an earlier revision did and prompted maintainers on
+  # unrelated PRs. `schedule` is exempt from that rule because it names no ref: it
+  # always runs the default branch, which no contributor can write to unreviewed.
   workflow_dispatch:
     inputs:
       ref:
@@ -91,21 +107,35 @@ permissions:
 
 jobs:
   suite:
-    name: Agent suite (${{ inputs.platform }})
-    # THE GATE: `manual-approval` carries a `required_reviewers` rule bound to the
-    # `strands-box-maintainers` team, narrowing dispatch (repo `write`) to maintainers.
+    name: Agent suite (${{ github.event_name == 'schedule' && 'both' || inputs.platform }})
+    # THE GATE, for dispatch: `manual-approval` carries a `required_reviewers` rule
+    # bound to the `strands-box-maintainers` team, narrowing dispatch (repo `write`)
+    # to maintainers.
     #
-    # Do NOT substitute another name. GitHub creates a referenced environment
-    # implicitly with ZERO protection rules, which does not gate at all -- an earlier
-    # revision named a nonexistent `workload-cloud` and had exactly that hole.
-    # `auto-approve` is likewise ungated; never use it here.
+    # A scheduled run takes `nightly` instead, and must: the gate exists to stop an
+    # attacker-named ref executing with credentials, but `schedule` names no ref and
+    # always runs the default branch, so there is nothing for a reviewer to vet. It
+    # would also deadlock -- `waiting` holds the single concurrency group below, so an
+    # unapproved nightly would block every manual dispatch until someone cancelled it.
+    #
+    # `nightly` is reachable ONLY from `schedule`, which only GitHub emits. That is
+    # what makes it safe for GitHub to auto-create it with zero protection rules, the
+    # hazard an earlier revision hit with a nonexistent `workload-cloud`. Do NOT point
+    # the dispatch arm at it, and never use the ungated `auto-approve` here.
     environment:
-      name: manual-approval
+      name: ${{ github.event_name == 'schedule' && 'nightly' || 'manual-approval' }}
       deployment: false
     permissions:
       contents: read
       # OIDC: a short-lived role assumption instead of a stored access key.
       id-token: write
+    # A schedule event carries no inputs, so each needs its nightly value. Keyed on
+    # the event rather than `inputs.x || default`, which would read a deliberate
+    # `teardown: false` as unset and silently turn teardown back on.
+    env:
+      REF: ${{ github.event_name == 'schedule' && 'main' || inputs.ref }}
+      PLATFORM: ${{ github.event_name == 'schedule' && 'both' || inputs.platform }}
+      CASE: ${{ github.event_name == 'schedule' && 'network-egress' || inputs.case }}
     runs-on: ubuntu-latest
     # The macOS leg provisions a Dedicated Host, which can take many minutes before
     # the suite's own 90-minute deadline (WL_DEADLINE_S) even starts.
@@ -116,15 +146,18 @@ jobs:
       - name: Checkout the ref under test
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ env.REF }}
           persist-credentials: false
 
       - name: Report what is being run
         run: |
-          echo "ref:      ${{ inputs.ref }}"
-          echo "platform: ${{ inputs.platform }}"
-          echo "case:     ${{ inputs.case }}"
-          echo "actor:    ${{ github.actor }}"
+          # Read through the environment rather than interpolating the inputs here:
+          # `ref` and `case` are free-form and would otherwise be injected as shell.
+          echo "trigger:  $GITHUB_EVENT_NAME"
+          echo "ref:      $REF"
+          echo "platform: $PLATFORM"
+          echo "case:     $CASE"
+          echo "actor:    $GITHUB_ACTOR"
 
       # Fail with the list of missing inputs BEFORE assuming a role or launching
       # anything, so an unconfigured repository costs nothing and says why.
@@ -191,16 +224,15 @@ jobs:
           LINUX_AMI: ${{ secrets.WORKLOAD_LINUX_AMI }}
           MACOS_AMI: ${{ secrets.WORKLOAD_MACOS_AMI }}
           ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
-          BOX_COMMIT: ${{ inputs.ref }}
+          BOX_COMMIT: ${{ env.REF }}
           RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
-          CASE: ${{ inputs.case }}
+          CASE: ${{ env.CASE }}
         run: |
           set -euo pipefail
-          platform="${{ inputs.platform }}"
-          if [ "$platform" = "both" ]; then
+          if [ "$PLATFORM" = "both" ]; then
             bash test-workload/manual/setup.sh --run
           else
-            bash test-workload/manual/setup.sh "$platform" --run
+            bash test-workload/manual/setup.sh "$PLATFORM" --run
           fi
 
       # The ledger in S3 is the durable record; this is the convenience copy on the
@@ -227,7 +259,7 @@ jobs:
         run: |
           REPORTS=$(find test-workload/run-reports -type f 2>/dev/null | sort || true)
           {
-            echo "### Workload suite — ${{ inputs.platform }}"
+            echo "### Workload suite — $PLATFORM"
             echo
             if [ -n "$ARTIFACT_URL" ]; then
               echo "Report artifact: [workload-verdicts-${{ github.run_id }}]($ARTIFACT_URL) — kept 14 days."
@@ -252,7 +284,7 @@ jobs:
       # `creds` because a failure before the role assumption cannot have provisioned
       # anything, and the warning below would then be a false alarm on every such run.
       - name: Teardown
-        if: ${{ always() && inputs.teardown && steps.creds.outcome == 'success' }}
+        if: ${{ always() && (github.event_name == 'schedule' || inputs.teardown) && steps.creds.outcome == 'success' }}
         env:
           AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
           AWS_REGION: us-west-2
