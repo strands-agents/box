@@ -307,7 +307,7 @@ The production facade selects on the platform and, on Linux, on the architecture
 | host | selection |
 |------|-----------|
 | macOS | Seatbelt, and the one checked-in profile above. |
-| Linux, ARM64 (`aarch64`) | The namespace launcher under `src/backend/linux/namespace/`. |
+| Linux, ARM64 (`aarch64`) or x86_64 | The namespace launcher under `src/backend/linux/namespace/`. |
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
 

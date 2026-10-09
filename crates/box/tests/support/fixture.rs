@@ -622,9 +622,9 @@ pub fn namespace_launcher_is_usable() -> bool {
 /// reaper the way the real launcher does.
 #[cfg(target_os = "linux")]
 pub fn namespace_launcher_is_usable() -> bool {
-    // The box selects the namespace backend only on aarch64 and refuses every other Linux
-    // architecture by name, so no box runs on x86_64 whatever the kernel permits.
-    if !cfg!(target_arch = "aarch64") {
+    // The box selects the namespace backend only on aarch64 and x86_64 and refuses every other
+    // Linux architecture by name, so no box runs there whatever the kernel permits.
+    if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return false;
     }
     use std::sync::OnceLock;

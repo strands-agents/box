@@ -754,14 +754,62 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
+        #[cfg(target_arch = "x86_64")]
+        Some("--x86-64-syscall-surface") => x86_64_syscall_surface(&args[2..]),
         _ => {
             eprintln!(
                 "usage: containment-test-probe \
-                 (--unix-ipc | --shell-child | --verify-no-inherited-handles) ..."
+                 (--unix-ipc | --shell-child | --verify-no-inherited-handles \
+                 | --x86-64-syscall-surface) ..."
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// Report how the kernel answers each x86-64 legacy and kernel-programming call.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn x86_64_syscall_surface(args: &[String]) -> ExitCode {
+    /// The bit that selects the x32 ABI, which shares `AUDIT_ARCH_X86_64`.
+    const X32_SYSCALL_BIT: libc::c_long = 0x4000_0000;
+
+    let [path] = args else {
+        eprintln!("usage: containment-test-probe --x86-64-syscall-surface <readable-file>");
+        return ExitCode::from(2);
+    };
+    let Ok(path) = std::ffi::CString::new(path.as_str()) else {
+        eprintln!("probe: the readable file path holds a NUL byte");
+        return ExitCode::from(2);
+    };
+    let read_only = libc::O_RDONLY as libc::c_long;
+    let path_pointer = path.as_ptr() as libc::c_long;
+    let calls: [(&str, libc::c_long, [libc::c_long; 3]); 6] = [
+        ("open", libc::SYS_open, [path_pointer, read_only, 0]),
+        (
+            "x32-open",
+            libc::SYS_open | X32_SYSCALL_BIT,
+            [path_pointer, read_only, 0],
+        ),
+        ("modify_ldt", libc::SYS_modify_ldt, [0, 0, 0]),
+        ("iopl", libc::SYS_iopl, [0, 0, 0]),
+        ("ioperm", libc::SYS_ioperm, [0x80, 1, 0]),
+        ("uselib", libc::SYS_uselib, [0, 0, 0]),
+    ];
+    for (label, number, [first, second, third]) in calls {
+        // SAFETY: every call takes at most three scalar or pointer arguments, and `path` outlives it.
+        let rc = unsafe { libc::syscall(number, first, second, third) };
+        let errno = if rc < 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        };
+        if label.ends_with("open") && rc >= 0 {
+            // SAFETY: a successful open returned this descriptor, and nothing else holds it.
+            unsafe { libc::close(rc as libc::c_int) };
+        }
+        println!("{label} rc {rc} errno {errno}");
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(target_os = "linux")]

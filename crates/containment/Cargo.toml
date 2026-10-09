@@ -105,5 +105,10 @@ name = "child_ipc"
 path = "tests/child_ipc.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "x86_64_syscall_surface_linux"
+path = "tests/x86_64_syscall_surface_linux.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unused_must_use = "deny"

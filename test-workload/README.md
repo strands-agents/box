@@ -106,8 +106,8 @@ LEDGER_BUCKET=<your-bucket> BOX_COMMIT=<sha> RUN_ID=<id> \
   bash test-workload/common/workload-bootstrap.sh
 ```
 
-Linux must be **arm64**, for the same reason `test-integ/` must be: Linux containment uses the
-namespace mechanism, and that mechanism is aarch64-only.
+Linux must be **arm64**, because the scripts install the arm64 builds of the agents and the Rust
+toolchain. Linux containment itself also runs on x86_64.
 
 ### Inputs
 

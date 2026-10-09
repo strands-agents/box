@@ -953,8 +953,11 @@ On Linux, Box builds the boundary from namespaces, a mount view, and a syscall p
 rejects Landlock as the baseline, because no Landlock right denies all network at any ABI version, so a
 contained child would keep unrestricted network. Box also probes no kernel ABI version: a gate on a
 probed version once refused every kernel Box ships on. Platform and architecture alone select the
-mechanism: macOS selects Seatbelt, Linux selects the namespace launcher on ARM64, and Box refuses every
-other Linux architecture by name.
+mechanism: macOS selects Seatbelt, Linux selects the namespace launcher on ARM64 and x86_64, and Box
+refuses every other Linux architecture by name. On x86_64 the permit filter also allows the legacy
+spellings that ARM64's table removed, but only where the spelling's modern twin is already permitted, so
+no spelling reaches more than its twin does. The one exception is `arch_prctl`, which glibc needs at
+startup and which changes only the calling process.
 
 <a id="containment-ends-with-the-contained-process"></a>
 ### The sandbox ends with the contained process

@@ -1,8 +1,8 @@
 //! Linux behavior for `strands-box-contain-trampoline`: real containment, at the kernel.
 //!
-//! On Linux, `Containment::apply` selects the namespace launcher on ARM64, contains the process,
-//! and execs the target. `facade.rs::an_arm64_kernel_selects_the_namespace_launcher` pins the
-//! selection.
+//! On Linux, `Containment::apply` selects the namespace launcher on ARM64 and x86_64, contains the
+//! process, and execs the target. `facade.rs::an_arm64_kernel_selects_the_namespace_launcher` and
+//! `facade.rs::an_x86_64_kernel_selects_the_namespace_launcher` pin the selection.
 //!
 //! What is proven here is the trampoline's end of the contract — that the target is
 //! born contained and that a setup failure never becomes a workload run. The
