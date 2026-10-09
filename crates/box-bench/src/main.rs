@@ -14,85 +14,17 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const HELP: &str = "\
-Usage: box-bench --box-bin PATH [--iterations N] [--output DIRECTORY] [--timeout-secs N]
+const USAGE: &str = "\
+Usage: box-bench PATH-TO-STRANDS-BOX
 
-Measure fresh box state with warm operating system caches.
-Use release builds of Box, its sibling binaries, and both benchmark binaries.
-Build this crate with:
-  cargo build --release --all-features --manifest-path crates/box-bench/Cargo.toml
-
---box-bin PATH       Built strands-box executable; required.
---iterations N       Measured pairs after one warmup pair; default 100.
---output DIRECTORY   New result directory; default target/results/<run> in this crate.
---timeout-secs N     Deadline for readiness and, separately, exit; default 30.
-
+Build Box and this crate in release mode, then run box-bench with the strands-box binary.
 Each pair runs box-bench-probe startup in a fresh box and directly, alternating order.
-The clock starts before spawn and stops when the runner reads READY from stdout.
-Configuration, warmup, and shutdown are outside the reported startup duration.
-Stderr goes to per-launch files. Samples and metadata remain in the result directory.
-Only a fully successful run produces samples.csv and summary.txt.
+The clock stops when the runner reads READY. Shutdown is outside the measured startup.
+Results go to target/results/<run> in this crate.
 ";
 
-struct Options {
-    box_binary: PathBuf,
-    iterations: usize,
-    output: PathBuf,
-    timeout: Duration,
-}
-
-impl Options {
-    fn parse() -> io::Result<Option<Self>> {
-        let mut args = env::args_os().skip(1);
-        let mut box_binary = None;
-        let mut iterations = 100;
-        let mut timeout = 30;
-        let mut output = None;
-        while let Some(flag) = args.next() {
-            if flag == "--help" || flag == "-h" {
-                print!("{HELP}");
-                return Ok(None);
-            }
-            let value = args
-                .next()
-                .ok_or_else(|| io::Error::other(format!("missing value for {flag:?}")))?;
-            match flag.to_str() {
-                Some("--box-bin") => box_binary = Some(PathBuf::from(value)),
-                Some("--output") => output = Some(PathBuf::from(value)),
-                Some("--iterations") => {
-                    iterations = value
-                        .to_string_lossy()
-                        .parse::<usize>()
-                        .map_err(io::Error::other)?;
-                }
-                Some("--timeout-secs") => {
-                    timeout = value
-                        .to_string_lossy()
-                        .parse::<u64>()
-                        .map_err(io::Error::other)?;
-                }
-                _ => return Err(io::Error::other(format!("unknown option {flag:?}"))),
-            }
-        }
-        if iterations == 0 || iterations > 100_000 || !(1..=3600).contains(&timeout) {
-            return Err(io::Error::other(
-                "iterations must be 1..=100000; timeout must be 1..=3600 seconds",
-            ));
-        }
-        Ok(Some(Self {
-            box_binary: box_binary
-                .ok_or_else(|| io::Error::other("--box-bin is required; use --help"))?
-                .canonicalize()?,
-            iterations,
-            output: output.unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("target/results")
-                    .join(run_id())
-            }),
-            timeout: Duration::from_secs(timeout),
-        }))
-    }
-}
+const ITERATIONS: usize = 100;
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn run_id() -> String {
     let nanos = SystemTime::now()
@@ -244,59 +176,6 @@ fn measure(mut command: Command, log: &Path, timeout: Duration) -> io::Result<Du
     }
 }
 
-fn sha256(path: &Path) -> io::Result<String> {
-    let output = match Command::new("sha256sum").arg(path).output() {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Command::new("shasum")
-            .args(["-a", "256"])
-            .arg(path)
-            .output()?,
-        result => result?,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let hash = text.split_whitespace().next().unwrap_or("");
-    if !output.status.success()
-        || hash.len() != 64
-        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(io::Error::other(format!("cannot hash {}", path.display())));
-    }
-    Ok(hash.to_owned())
-}
-
-struct Pinned(Vec<(PathBuf, String)>);
-
-impl Pinned {
-    fn new(binaries: Vec<PathBuf>) -> io::Result<Self> {
-        binaries
-            .into_iter()
-            .map(|path| {
-                let hash = sha256(&path)?;
-                Ok((path, hash))
-            })
-            .collect::<io::Result<_>>()
-            .map(Self)
-    }
-
-    fn record(&self, output: &mut impl Write) -> io::Result<()> {
-        for (binary, hash) in &self.0 {
-            writeln!(output, "binary={binary:?} sha256={hash}")?;
-        }
-        Ok(())
-    }
-
-    fn verify(&self) -> io::Result<()> {
-        for (binary, hash) in &self.0 {
-            if sha256(binary)? != *hash {
-                return Err(io::Error::other(format!(
-                    "binary changed during measurement: {}",
-                    binary.display()
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 fn summary(label: &str, values: &mut [f64]) -> String {
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
@@ -309,60 +188,27 @@ fn summary(label: &str, values: &mut [f64]) -> String {
     format!("{label}: median {median:.3} ms, p95 {p95:.3} ms")
 }
 
-fn benchmark(options: &Options) -> io::Result<()> {
-    let runner = env::current_exe()?.canonicalize()?;
-    let probe = runner.with_file_name("box-bench-probe").canonicalize()?;
-    let pinned = Pinned::new(vec![
-        options.box_binary.clone(),
-        options
-            .box_binary
-            .with_file_name("strands-box-sock-alias")
-            .canonicalize()?,
-        options
-            .box_binary
-            .with_file_name("strands-box-contain-trampoline")
-            .canonicalize()?,
-        runner,
-        probe.clone(),
-    ])?;
-    let mut metadata = File::create(options.output.join("metadata.txt"))?;
-    writeln!(
-        metadata,
-        "case=fresh-state-startup\ncache=warm\nwarmup_pairs=1\nmeasured_pairs={}\n\
-        timeout_seconds={}\nos={}\narchitecture={}\nrunner_profile={}\n\
-        policy=forbid-all\nfilesystem_grants=none\ntelemetry=default\nstderr=per-launch-file\n\
-        probe_mode={}\n\
-        timing=parent-before-spawn-to-reader-READY\np95=nearest-rank",
-        options.iterations,
-        options.timeout.as_secs(),
-        env::consts::OS,
-        env::consts::ARCH,
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
-        protocol::STARTUP,
+fn benchmark(box_binary: &Path, output: &Path) -> io::Result<()> {
+    let probe = env::current_exe()?
+        .with_file_name("box-bench-probe")
+        .canonicalize()?;
+    fs::write(
+        output.join("metadata.txt"),
+        format!(
+            "os={}\narchitecture={}\n",
+            env::consts::OS,
+            env::consts::ARCH
+        ),
     )?;
-    let os = Command::new("uname").args(["-srv"]).output()?;
-    if !os.status.success() {
-        return Err(io::Error::other("uname failed"));
-    }
-    writeln!(
-        metadata,
-        "os_version={}",
-        String::from_utf8_lossy(&os.stdout).trim()
-    )?;
-    pinned.record(&mut metadata)?;
     let fixtures = Fixtures::new()?;
-    let mut samples = File::create(options.output.join("samples.partial.csv"))?;
+    let mut samples = File::create(output.join("samples.partial.csv"))?;
     writeln!(samples, "pair,phase,first,box_ns,direct_ns,added_ns")?;
     let mut boxed = Vec::new();
     let mut direct = Vec::new();
     let mut added = Vec::new();
-    for index in 0..=options.iterations {
+    for index in 0..=ITERATIONS {
         let (config, directory) = fixtures.prepare(index, &probe)?;
-        let mut box_command = Command::new(&options.box_binary);
+        let mut box_command = Command::new(box_binary);
         box_command
             .args(["run", "--config"])
             .arg(config)
@@ -372,20 +218,17 @@ fn benchmark(options: &Options) -> io::Result<()> {
             .arg(protocol::STARTUP)
             .env_clear()
             .current_dir(&directory);
-        let box_log = options.output.join(format!("{index}-box.stderr"));
-        let direct_log = options.output.join(format!("{index}-direct.stderr"));
+        let box_log = output.join(format!("{index}-box.stderr"));
+        let direct_log = output.join(format!("{index}-direct.stderr"));
         let box_first = index % 2 == 0;
         let (box_time, direct_time) = if box_first {
             (
-                measure(box_command, &box_log, options.timeout)?,
-                measure(direct_command, &direct_log, options.timeout)?,
+                measure(box_command, &box_log, TIMEOUT)?,
+                measure(direct_command, &direct_log, TIMEOUT)?,
             )
         } else {
-            let direct_time = measure(direct_command, &direct_log, options.timeout)?;
-            (
-                measure(box_command, &box_log, options.timeout)?,
-                direct_time,
-            )
+            let direct_time = measure(direct_command, &direct_log, TIMEOUT)?;
+            (measure(box_command, &box_log, TIMEOUT)?, direct_time)
         };
         let difference = box_time.as_nanos() as i128 - direct_time.as_nanos() as i128;
         writeln!(
@@ -403,48 +246,42 @@ fn benchmark(options: &Options) -> io::Result<()> {
             added.push(difference as f64 / 1_000_000.0);
         }
         if index % 10 == 0 {
-            eprintln!("completed {index}/{} measured pairs", options.iterations);
+            eprintln!("completed {index}/{ITERATIONS} measured pairs");
         }
     }
-    pinned.verify()?;
     let report = format!(
-        "Fresh box state; warm operating system caches; {} measured pairs.\n{}\n{}\n{}\n",
-        options.iterations,
+        "Fresh box state; warm operating system caches; {ITERATIONS} measured pairs.\n{}\n{}\n{}\n",
         summary("Box startup", &mut boxed),
         summary("Direct startup", &mut direct),
         summary("Paired added startup", &mut added)
     );
-    fs::write(options.output.join("summary.txt"), &report)?;
+    fs::write(output.join("summary.txt"), &report)?;
     drop(samples);
     fs::rename(
-        options.output.join("samples.partial.csv"),
-        options.output.join("samples.csv"),
+        output.join("samples.partial.csv"),
+        output.join("samples.csv"),
     )?;
     print!("{report}");
     Ok(())
 }
 
 fn run() -> io::Result<()> {
-    let Some(mut options) = Options::parse()? else {
-        return Ok(());
+    let mut args = env::args_os().skip(1);
+    let (Some(box_binary), None) = (args.next(), args.next()) else {
+        return Err(io::Error::other(USAGE));
     };
-    if let Some(parent) = options
-        .output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    private_directory(&options.output)?;
-    options.output = options.output.canonicalize()?;
-    eprintln!("results: {}", options.output.display());
-    match benchmark(&options) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            fs::write(options.output.join("failure.txt"), error.to_string())?;
-            Err(error)
-        }
-    }
+    let box_binary = PathBuf::from(box_binary)
+        .canonicalize()
+        .map_err(|error| io::Error::other(format!("{error}\n{USAGE}")))?;
+    let output = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/results")
+        .join(run_id());
+    fs::create_dir_all(output.parent().expect("results directory"))?;
+    private_directory(&output)?;
+    eprintln!("results: {}", output.display());
+    benchmark(&box_binary, &output).inspect_err(|error| {
+        let _ = fs::write(output.join("failure.txt"), error.to_string());
+    })
 }
 
 fn main() {
