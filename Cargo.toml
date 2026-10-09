@@ -32,8 +32,7 @@ exclude = [
     "test-common",
     "test-integ",
     "test-workload/verdict",
-    # The startup benchmark. It is test code, not part of the shipped artefact, and
-    # it drives the BUILT `strands-box` binary. See crates/box-bench/AGENTS.md.
+    # A small perf benchmark. It is test code, not part of the shipped artifact
     "crates/box-bench",
 ]
 
