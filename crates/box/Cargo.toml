@@ -87,6 +87,9 @@ tokio = { version = "1", features = [
 # inside the box. Gated on a non-default feature so a normal build never produces it,
 # matching `containment`'s `containment-test-probe`.
 [features]
+# Builds the inactive native policy adapter; it does not install kernel interception.
+kernel-policy-integration = []
+
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).

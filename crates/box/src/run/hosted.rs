@@ -473,6 +473,10 @@ pub(crate) struct HostedBox {
     /// Every process table's filesystem reach, judged once when this run started.
     approved: Arc<ApprovedReach>,
 
+    /// The inactive native adapter shares this run's existing authority.
+    #[cfg(feature = "kernel-policy-integration")]
+    _native_policy: super::native_policy::NativePolicy,
+
     /// The live record, withdrawn before the lock frees, so no reader finds a record whose lock is
     /// already available.
     _record: PublishedRecord,
@@ -685,6 +689,11 @@ impl HostedBox {
             _collector: collector,
             attachment,
             approved,
+            #[cfg(feature = "kernel-policy-integration")]
+            _native_policy: super::native_policy::NativePolicy::new(
+                policy,
+                GovernedBox::assigned(root.name()),
+            ),
             _record: published,
             _owned: owned,
         })
@@ -838,6 +847,71 @@ mod tests {
             ))
             .expect("the collector opens"),
         )
+    }
+
+    #[cfg(feature = "kernel-policy-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_adapter_submits_to_the_hosted_authority() {
+        let operator = tempfile::tempdir().unwrap();
+        let root = crate::record::layout::testing::box_root(operator.path(), "native-test");
+        let home = operator.path().canonicalize().unwrap();
+        let policy = HostedBox::prepare_policy(
+            &root,
+            &policy::Operator::unanchored(),
+            vec![policy::Policy {
+                origin: root.policy(),
+                text: r#"
+permit(principal, action == Box::Action::"fs:write", resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when { context.input.path == "~/probe" }
+when temporal {
+    formerly within 3600s (Box::Action::"fs:write"::request{ input.path: "~/marker" })
+};"#
+                .to_string(),
+            }],
+        )
+        .unwrap();
+        let owned = Lock::try_acquire(&root.lock()).unwrap().unwrap();
+        let record = record_with_mcp(&root, vec![]);
+        let hosted = crate::test_support::with_operator_home(operator.path(), || {
+            HostedBox::open(
+                &root,
+                &record,
+                Arc::clone(&policy),
+                collector(operator.path()),
+                &[],
+                owned,
+                &home,
+                &home,
+            )
+            .unwrap()
+        });
+        let resolver = policy::PathResolver::over([home.clone()])
+            .unwrap()
+            .reporting_under(&home);
+        let probe = resolver.approve_host(&home.join("probe")).unwrap();
+        let governed = GovernedBox::assigned(root.name());
+        let request = policy::Request::Fs {
+            path: &probe,
+            operation: policy::FsOperation::WriteContent,
+        };
+        assert!(
+            policy
+                .decide(&governed, &Principal::agent(), &request)
+                .is_allow()
+        );
+        let marker = resolver.approve_host(&home.join("marker")).unwrap();
+        assert!(
+            hosted
+                ._native_policy
+                .decide(&marker, policy::FsOperation::WriteContent)
+                .is_allow()
+        );
+        assert!(
+            !policy
+                .decide(&governed, &Principal::agent(), &request)
+                .is_allow()
+        );
     }
 
     fn open_hosted(operator: &tempfile::TempDir, root: &BoxRoot, record: &Record) -> HostedBox {
