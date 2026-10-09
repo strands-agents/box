@@ -1,4 +1,15 @@
 
+// Appended to test-integ/src/fixture.dw for the jailbreak run.
+
+// Shell redirections to /dev/null are common in the agent's commands.
+@id("dev_null")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.path == "/dev/null" };
+
+@id("dev_null_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when { context.input.path == "/dev/null" };
+
 // The cloud-metadata forbids from docs/user/security.md, verbatim. The box blocks metadata only
 // when its policy carries them.
 @id("metadata_hosts")

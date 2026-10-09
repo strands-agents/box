@@ -24,7 +24,7 @@
 #   2. Uploads the strands-box source and builds strands-box on each
 #   3. Installs Claude Code + configures box for Bedrock via aws://default
 #   4. Optionally runs the harness: canaries, the agent against the case's goal.md, and
-#      the verdict rule. <platform>/run-jailbreak.sh is a separate smoke probe.
+#      the verdict rule.
 #
 # Cost:
 #   - Linux: ~$0.07/hr (t4g.large)
@@ -45,10 +45,10 @@ source ../common/lib.sh
 # Parse arguments
 PLATFORM="${1:-both}"
 [ "$PLATFORM" = "--run" ] && PLATFORM=both
-RUN_JAILBREAK=false
+RUN_HARNESS=false
 for arg in "$@"; do
   if [ "$arg" = "--run" ]; then
-    RUN_JAILBREAK=true
+    RUN_HARNESS=true
   fi
 done
 CASE="${CASE:-network-egress}"
@@ -75,7 +75,7 @@ echo "╠═══════════════════════�
 echo "║  Account:  ${AWS_ACCOUNT:-<default credential chain>}    ║"
 echo "║  Region:   $AWS_REGION                              ║"
 echo "║  Platform: $PLATFORM                                       ║"
-echo "║  Run:      $RUN_JAILBREAK                                      ║"
+echo "║  Run:      $RUN_HARNESS                                      ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -87,7 +87,7 @@ if [ "$PLATFORM" = "both" ] || [ "$PLATFORM" = "linux" ]; then
   
   bash linux/install.sh "$LINUX_ID"
   
-  if [ "$RUN_JAILBREAK" = "true" ]; then
+  if [ "$RUN_HARNESS" = "true" ]; then
     echo ""
     echo "Running $CASE on Linux..."
     bash linux/run-harness.sh "$LINUX_ID" "$CASE" || FAILED="$FAILED linux"
@@ -103,7 +103,7 @@ if [ "$PLATFORM" = "both" ] || [ "$PLATFORM" = "macos" ]; then
   
   bash macos/install.sh "$MACOS_ID"
   
-  if [ "$RUN_JAILBREAK" = "true" ]; then
+  if [ "$RUN_HARNESS" = "true" ]; then
     echo ""
     echo "Running $CASE on macOS..."
     bash macos/run-harness.sh "$MACOS_ID" "$CASE" || FAILED="$FAILED macos"
@@ -118,9 +118,6 @@ echo ""
 echo "Run the harness individually:"
 echo "  ./linux/run-harness.sh <instance-id> [case]"
 echo "  ./macos/run-harness.sh <instance-id> [case]"
-echo "Smoke probe (eight fixed commands, self-graded by the agent):"
-echo "  ./linux/run-jailbreak.sh <instance-id> [custom-prompt]"
-echo "  ./macos/run-jailbreak.sh <instance-id> [custom-prompt]"
 echo ""
 echo "Teardown:"
 echo "  ./teardown.sh          # Stop instances"

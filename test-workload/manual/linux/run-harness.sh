@@ -1,6 +1,6 @@
 #!/bin/bash
 # manual/linux/run-harness.sh
-# Laptop (SSH) launcher for the two-agent jailbreak harness on a Linux instance.
+# Laptop (SSH) launcher for the jailbreak harness on a Linux instance.
 # The Linux twin of macos/run-harness.sh: both run common/bootstrap.sh on the
 # instance through common/lib.sh: run_harness, and exit 0 only when the verdict
 # is PASS.

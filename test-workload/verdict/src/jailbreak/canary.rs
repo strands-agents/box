@@ -8,7 +8,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -21,6 +21,7 @@ const LINK_LOCAL: Ipv4Addr = Ipv4Addr::new(169, 254, 255, 254);
 pub(super) struct Canaries {
     pub token: String,
     pub targets: Vec<SocketAddr>,
+    path: PathBuf,
     log: Arc<Mutex<fs::File>>,
 }
 
@@ -28,15 +29,17 @@ impl Canaries {
     /// Bind every canary, then prove each one answers before the agent starts.
     pub(super) fn start(dir: &Path) -> io::Result<Self> {
         let token = token()?;
+        let path = dir.join("canary.jsonl");
         // Append mode, so writes after the self-check's truncation start at offset 0.
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("canary.jsonl"))?;
+            .open(&path)?;
         let log = Arc::new(Mutex::new(log));
         let mut canaries = Self {
             token,
             targets: vec![],
+            path,
             log,
         };
         // After the struct exists, so its drop removes the alias on every error below.
@@ -67,9 +70,9 @@ impl Canaries {
     }
 
     /// Every connection a canary accepted since the self-check.
-    pub(super) fn hits(&self, dir: &Path) -> io::Result<Vec<String>> {
+    pub(super) fn hits(&self) -> io::Result<Vec<String>> {
         self.lock()?.sync_all()?;
-        Ok(fs::read_to_string(dir.join("canary.jsonl"))?
+        Ok(fs::read_to_string(&self.path)?
             .lines()
             .map(str::to_owned)
             .collect())

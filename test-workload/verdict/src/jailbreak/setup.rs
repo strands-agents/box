@@ -6,7 +6,7 @@ use std::{
 
 const TEMPLATE: &str = include_str!("box-config.toml");
 const FIXTURE: &str = include_str!("../../../../test-integ/src/fixture.dw");
-const METADATA_FORBIDS: &str = include_str!("metadata-forbids.dw");
+const ADDITIONS: &str = include_str!("policy-additions.dw");
 
 pub(super) struct Setup {
     pub workspace: PathBuf,
@@ -32,36 +32,31 @@ fn quoted(text: &str) -> String {
     json[1..json.len() - 1].to_owned()
 }
 
-pub(super) fn config(workspace: &str, box_dir: &str, agent: &str) -> String {
+fn config(workspace: &str, box_dir: &str, agent: &str) -> String {
     TEMPLATE
         .replace("__WORKSPACE__", &quoted(workspace))
         .replace("__BOX_DIR__", &quoted(box_dir))
         .replace("__AGENT_COMMAND__", &quoted(agent))
 }
 
-pub(super) fn policy(fixture: &str, home: &Path, workspace: &Path) -> io::Result<String> {
+/// The integration fixture, scoped to this workspace and the model endpoint, plus
+/// the jailbreak additions.
+fn policy(home: &Path, workspace: &Path) -> io::Result<String> {
     let relative = workspace.strip_prefix(home).map_err(io::Error::other)?;
     let path = format!("~/{}", relative.display())
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('*', "\\*");
-    let mut body = fixture.replace("{{WORKSPACE}}", &path);
-    let old = "context.input.host like \"*.api.aws\"";
-    let new = "context.input.host like \"bedrock-runtime.*.amazonaws.com\"";
-    if body.contains(old) {
-        body = body.replacen(old, new, 1);
-    } else if !body.contains(new) {
+    let model_host = "context.input.host like \"*.api.aws\"";
+    if !FIXTURE.contains(model_host) {
         return Err(io::Error::other("fixture has no model host rule"));
     }
-    for (id, action) in [("dev_null", "fs:write"), ("dev_null_read", "fs:read")] {
-        if !body.contains(&format!("@id(\"{id}\")")) {
-            body.push_str(&format!("\n@id(\"{id}\") permit (principal, action == Box::Action::\"{action}\", resource)\nwhen {{ context.input.path == \"/dev/null\" }};\n"));
-        }
-    }
-    if !body.contains("@id(\"metadata_addresses\")") {
-        body.push_str(METADATA_FORBIDS);
-    }
-    Ok(body)
+    let body = FIXTURE.replace("{{WORKSPACE}}", &path).replacen(
+        model_host,
+        "context.input.host like \"bedrock-runtime.*.amazonaws.com\"",
+        1,
+    );
+    Ok(body + ADDITIONS)
 }
 
 fn writable_tree(path: &Path) -> io::Result<()> {
@@ -129,7 +124,7 @@ pub(super) fn prepare(home: &Path, source: &Path) -> io::Result<Setup> {
     )?;
     fs::write(
         workspace.join(".strands-box/policy.dw"),
-        policy(FIXTURE, &home, &workspace)?,
+        policy(&home, &workspace)?,
     )?;
     let snap = workspace.join("box-src");
     fs::create_dir_all(snap.join("crates"))?;

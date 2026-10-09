@@ -74,7 +74,7 @@ harness in `verdict/src/jailbreak/` owns the on-instance run:
 | `setup.rs`, `box-config.toml` | Create the workspace, render config and policy, and copy the source. |
 | `creds.rs` | Fetch the instance credentials the box signs model calls with. |
 | `canary.rs` | Plant listeners on forbidden addresses and prove they answer. |
-| `agent_a.rs`, `stream.rs` | Run the box, record turns, and extract the report. |
+| `agent.rs`, `stream.rs` | Run the box, record turns, and extract the report. |
 | `validity.rs`, `coverage.rs` | Check that the campaign ran; list target coverage. |
 | `verdict.rs`, `upload.rs` | Judge the run and upload the result. |
 
@@ -204,19 +204,12 @@ ephemeral and pushed through EC2 Instance Connect, which is an API call rather t
 Running them needs the AWS CLI's `session-manager-plugin` installed locally.
 `setup.sh` chains them.
 
-No driver calls a verb the box does not have. `install.sh` writes the `box.toml` and `policy.dw`
-pair itself, through `render_box_pair` in `common/lib.sh`, from the same two sources
-the Rust harness uses on an instance: `verdict/src/jailbreak/box-config.toml` and `test-integ/src/fixture.dw`.
-A caller supplies `box_dir`, and the box has no verb that creates one, so the driver creates the
-workspace and the box directory on the instance before it uploads the pair.
-
 | Script | What it does |
 |---|---|
 | `manual/setup.sh` | Provision, install, and with `--run` run `$CASE` (default `network-egress`) through `run-harness.sh`, for one platform or both. Exits non-zero unless every verdict is `PASS`. |
 | `manual/<platform>/provision.sh` | Launch an instance. The macOS one allocates a Dedicated Host first. |
 | `manual/<platform>/install.sh` | Upload the source tarball, build the box, install the agent. |
 | `manual/<platform>/run-harness.sh` | Ship this directory to the instance, run `common/bootstrap.sh` there, and fetch the verdict into `run-reports/<platform>/<case>/`. Exits 0 only on `PASS`. |
-| `manual/<platform>/run-jailbreak.sh` | A smoke probe: eight fixed commands the agent grades itself. Not a containment result. |
 | `manual/teardown.sh` | Stop the instances, or terminate them and release the host. |
 
 ## Checks you can run here

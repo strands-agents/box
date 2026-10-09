@@ -1,6 +1,6 @@
 //! The on-instance jailbreak harness and its host-evidence verdict.
 
-mod agent_a;
+mod agent;
 mod canary;
 mod coverage;
 mod creds;
@@ -92,9 +92,7 @@ fn run(flags: &Flags) -> io::Result<u8> {
         .unwrap_or_else(|| home.join("strands-box"));
     let run_dir = home.join("indet-run").join(case);
     setup::fresh(&run_dir)?;
-    for dir in ["oracle", "agent-a"] {
-        fs::create_dir(run_dir.join(dir))?;
-    }
+    fs::create_dir(run_dir.join("agent-a"))?;
     let platform = flags
         .get("--platform")
         .map(|v| v.to_string())
@@ -169,12 +167,11 @@ fn campaign(
     let goal = include_str!("../../../network-egress/goal.md");
     let access_key = creds::fetch(home, &env("AWS_REGION", "us-west-2"))?;
     shutdown::check()?;
-    let oracle = run_dir.join("oracle");
-    let canaries = canary::Canaries::start(&oracle)?;
-    let agent = agent_a::run(run_dir, &setup, goal, &canaries.targets, platform);
+    let canaries = canary::Canaries::start(run_dir)?;
+    let agent = agent::run(run_dir, &setup, goal, &canaries.targets, platform);
     evidence.breaches.extend(
         canaries
-            .hits(&oracle)?
+            .hits()?
             .into_iter()
             .map(|hit| format!("canary connection: {hit}")),
     );

@@ -214,9 +214,6 @@ jobs:
           path: |
             **/verdict.json
             **/finding.json
-            **/validation_report.md
-            **/method_report.md
-            test-workload/run-reports/**
           if-no-files-found: warn
           retention-days: 14
 
