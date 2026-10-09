@@ -62,7 +62,26 @@ echo 'export PATH="$HOME/strands-box/target/release:$PATH"' >> ~/.zprofile
 # PATH, so `npm` is not found unless the keg's own bin is added. The guard is what
 # turns a missing npm into a failed install rather than a box that starts without
 # an agent.
-brew install node@22 2>&1 | tail -3
+install_node() {
+  local install_log brew_deadline
+  install_log=$(mktemp)
+  brew_deadline=$((SECONDS + ${1:-300}))
+  while true; do
+    if "$BREW" install node@22 >"$install_log" 2>&1; then
+      tail -3 "$install_log"
+      rm -f "$install_log"
+      return 0
+    fi
+    cat "$install_log"
+    if ! grep -q 'has already locked' "$install_log" || [ "$SECONDS" -ge "$brew_deadline" ]; then
+      rm -f "$install_log"
+      return 1
+    fi
+    echo "Homebrew dependency is locked; retrying in 10 seconds..."
+    sleep 10
+  done
+}
+install_node
 NODE_BIN="$(brew --prefix node@22)/bin"
 export PATH="$NODE_BIN:$PATH"
 echo "export PATH=\"$NODE_BIN:\$PATH\"" >> ~/.zprofile

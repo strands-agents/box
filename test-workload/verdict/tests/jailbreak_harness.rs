@@ -204,3 +204,78 @@ fn termination_signals_reap_capture_and_remove_the_oracle_lock() {
         );
     }
 }
+
+#[test]
+fn macos_install_retries_a_homebrew_lock_but_not_other_failures() {
+    use std::os::unix::process::CommandExt;
+    let source = include_str!("../../manual/macos/install.sh");
+    let start = source.find("install_node() {").unwrap();
+    let end = source[start..].find("\n}\n").unwrap() + start + 3;
+    for (case, timeout, success, expected_calls) in [
+        ("transient", 300, true, 2),
+        ("other", 300, false, 1),
+        ("locked", 0, false, 1),
+    ] {
+        let script = format!("set -e\n{}\ninstall_node {timeout}\n", &source[start..end]);
+        let scratch = Scratch::new();
+        let brew = scratch.0.join("brew");
+        let body = match case {
+            "transient" => {
+                "#!/bin/sh\nif [ ! -f \"$CALLS\" ]; then echo first > \"$CALLS\"; echo 'Error: a brew install process has already locked openssl@3'; exit 1; fi\necho retry >> \"$CALLS\"\necho installed\n"
+            }
+            "locked" => {
+                "#!/bin/sh\necho first >> \"$CALLS\"\necho 'Error: a brew install process has already locked openssl@3'\nexit 1\n"
+            }
+            _ => {
+                "#!/bin/sh\necho first >> \"$CALLS\"\necho 'Error: unrelated download failure'\nexit 1\n"
+            }
+        };
+        fs::write(&brew, body).unwrap();
+        fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+        let sleep = scratch.0.join("sleep");
+        fs::write(&sleep, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+        let calls = scratch.0.join("calls");
+        let mut child = Command::new("bash")
+            .args(["-c", &script])
+            .env("BREW", &brew)
+            .env("CALLS", &calls)
+            .env("TMPDIR", &scratch.0)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    scratch.0.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("installer did not finish fixture {case} within three seconds");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(calls).unwrap().lines().count(),
+            expected_calls
+        );
+    }
+}
