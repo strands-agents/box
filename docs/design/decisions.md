@@ -872,6 +872,20 @@ signature changed. An adapter may narrow a verdict and must never manufacture an
 loading profile needs a change inside the crate, and a public extension point needs a named external
 consumer before it is added.
 
+<a id="kernel-policy-adaptation-belongs-in-the-policy-crate"></a>
+### Kernel policy adaptation belongs in the policy crate
+
+`adapters/kernel.rs` owns `KernelPolicyAdapter`, behind the off-by-default `kernel-adapter` build feature.
+The Box crate's `HostedBox` constructs it with the existing engine and box identity.
+The Box feature `kernel-policy-integration` enables that policy feature.
+Operating-system callbacks and process supervision stay outside the policy crate.
+
+Keeping this adapter inside Box would separate it from the Shell, Egress, and script adapters that own equivalent policy integration.
+The cost is one additional feature-gated public type, with construction, permission checks, and outcome recording methods.
+The user approved this interface change on October 9, 2026.
+The adapter installs no kernel hooks.
+`kernel_adapter_submits_to_the_hosted_authority` and `shell_and_kernel_checks_share_one_history` test engine reuse.
+
 <a id="the-observation-seam-is-write-only"></a>
 ### The one observation seam is write-only
 

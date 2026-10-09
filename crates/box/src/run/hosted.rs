@@ -473,9 +473,9 @@ pub(crate) struct HostedBox {
     /// Every process table's filesystem reach, judged once when this run started.
     approved: Arc<ApprovedReach>,
 
-    /// The inactive native adapter shares this run's existing authority.
+    /// The inactive kernel policy adapter shares this run's existing authority.
     #[cfg(feature = "kernel-policy-integration")]
-    _native_policy: super::native_policy::NativePolicy,
+    _kernel_policy: policy::KernelPolicyAdapter,
 
     /// The live record, withdrawn before the lock frees, so no reader finds a record whose lock is
     /// already available.
@@ -690,7 +690,7 @@ impl HostedBox {
             attachment,
             approved,
             #[cfg(feature = "kernel-policy-integration")]
-            _native_policy: super::native_policy::NativePolicy::new(
+            _kernel_policy: policy::KernelPolicyAdapter::new(
                 policy,
                 GovernedBox::assigned(root.name()),
             ),
@@ -851,9 +851,9 @@ mod tests {
 
     #[cfg(feature = "kernel-policy-integration")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn native_adapter_submits_to_the_hosted_authority() {
+    async fn kernel_adapter_submits_to_the_hosted_authority() {
         let operator = tempfile::tempdir().unwrap();
-        let root = crate::record::layout::testing::box_root(operator.path(), "native-test");
+        let root = crate::record::layout::testing::box_root(operator.path(), "kernel-test");
         let home = operator.path().canonicalize().unwrap();
         let policy = HostedBox::prepare_policy(
             &root,
@@ -903,7 +903,7 @@ when temporal {
         let marker = resolver.approve_host(&home.join("marker")).unwrap();
         assert!(
             hosted
-                ._native_policy
+                ._kernel_policy
                 .decide(&marker, policy::FsOperation::WriteContent)
                 .is_allow()
         );

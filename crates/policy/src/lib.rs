@@ -22,6 +22,8 @@ mod spelling;
 
 #[cfg(feature = "egress-adapter")]
 pub use adapters::egress::EgressPolicyInterceptor;
+#[cfg(feature = "kernel-adapter")]
+pub use adapters::kernel::KernelPolicyAdapter;
 #[cfg(feature = "script-adapter")]
 pub use adapters::script::{
     RenameDestination, ScriptPermit, ScriptPolicyInterceptor, ScriptRefusal,

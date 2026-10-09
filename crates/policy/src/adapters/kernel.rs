@@ -1,15 +1,15 @@
-//! An inactive adapter that submits native filesystem requests to the hosted authority without installing kernel hooks.
+//! Adapter from kernel filesystem integration to the shared policy engine.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use policy::{
+use crate::{
     ApprovedPath, Decision, FsOperation, FsResult, GovernedBox, Outcome, PolicyEngine, PolicyError,
     Principal, Request,
 };
 
 /// Submits individual filesystem checks to the authority the hosted box already owns.
-pub(super) struct NativePolicy {
+pub struct KernelPolicyAdapter {
     policy: Arc<PolicyEngine>,
     governed: GovernedBox,
     record_outcome: RecordOutcome,
@@ -18,8 +18,9 @@ pub(super) struct NativePolicy {
 type RecordOutcome =
     fn(&PolicyEngine, &GovernedBox, &Principal, &Outcome<'_>) -> Result<(), PolicyError>;
 
-impl NativePolicy {
-    pub(super) fn new(policy: Arc<PolicyEngine>, governed: GovernedBox) -> Self {
+impl KernelPolicyAdapter {
+    /// Binds kernel filesystem checks to the hosted box's existing engine and identity.
+    pub fn new(policy: Arc<PolicyEngine>, governed: GovernedBox) -> Self {
         Self {
             policy,
             governed,
@@ -29,11 +30,7 @@ impl NativePolicy {
 
     /// Records a permission request without performing an operation or recording its outcome.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Native callbacks are not connected yet")
-    )]
-    pub(super) fn decide(&self, path: &ApprovedPath, operation: FsOperation) -> Decision {
+    pub fn decide(&self, path: &ApprovedPath, operation: FsOperation) -> Decision {
         self.policy.decide(
             &self.governed,
             &Principal::agent(),
@@ -42,11 +39,7 @@ impl NativePolicy {
     }
 
     /// Records the caller's observed outcome with the same path spelling as the request.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Native callbacks are not connected yet")
-    )]
-    pub(super) fn record(
+    pub fn record(
         &self,
         path: &ApprovedPath,
         operation: FsOperation,
@@ -68,8 +61,7 @@ impl NativePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use policy::{DenyReason, PathResolver, Policy, ShellPolicyInterceptor};
-    use strands_shell::Shell;
+    use crate::{DenyReason, PathResolver, Policy};
 
     fn engine(directory: &Path, source: &str) -> Arc<PolicyEngine> {
         Arc::new(
@@ -93,10 +85,10 @@ mod tests {
     }
 
     #[test]
-    fn native_checks_keep_the_existing_actions_identity_and_path_spelling() {
+    fn kernel_checks_keep_the_existing_actions_identity_and_path_spelling() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
-        let adapter = NativePolicy::new(
+        let adapter = KernelPolicyAdapter::new(
             engine(
                 &home,
                 r#"
@@ -110,7 +102,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:delete", reso
 when { context.input.path == "~/delete" && context.input.operation == Box::FsDeleteOperation::"remove_file" };
 "#,
             ),
-            GovernedBox::assigned("native-test"),
+            GovernedBox::assigned("kernel-test"),
         );
         for (name, operation) in [
             ("read", FsOperation::ReadContent),
@@ -163,8 +155,10 @@ when temporal {{
 }};
 "#
             );
-            let adapter =
-                NativePolicy::new(engine(&home, &source), GovernedBox::assigned("native-test"));
+            let adapter = KernelPolicyAdapter::new(
+                engine(&home, &source),
+                GovernedBox::assigned("kernel-test"),
+            );
             let source = path(&home, "source");
             let probe = path(&home, "probe");
             assert!(
@@ -197,12 +191,12 @@ when temporal {{
     fn a_recording_error_reaches_the_caller() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
-        let mut adapter = NativePolicy::new(
+        let mut adapter = KernelPolicyAdapter::new(
             engine(
                 &home,
                 r#"permit(principal, action == Box::Action::"fs:write", resource);"#,
             ),
-            GovernedBox::assigned("native-test"),
+            GovernedBox::assigned("kernel-test"),
         );
         let target = path(&home, "source");
         assert!(
@@ -224,8 +218,12 @@ when temporal {{
         );
     }
 
+    #[cfg(feature = "shell-adapter")]
     #[tokio::test(flavor = "current_thread")]
-    async fn shell_and_native_checks_share_one_history() {
+    async fn shell_and_kernel_checks_share_one_history() {
+        use crate::ShellPolicyInterceptor;
+        use strands_shell::Shell;
+
         tokio::task::LocalSet::new()
             .run_until(async {
                 let directory = tempfile::tempdir().unwrap();
@@ -245,12 +243,12 @@ when temporal {
 forbid(principal, action == Box::Action::"fs:read", resource)
 when { context.input.path == "~/source" }
 when temporal {
-    formerly within 3600s (Box::Action::"fs:write"::request{ input.path: "~/native-marker" })
+    formerly within 3600s (Box::Action::"fs:write"::request{ input.path: "~/kernel-marker" })
 };
 "#,
                 );
-                let governed = GovernedBox::assigned("native-test");
-                let adapter = NativePolicy::new(Arc::clone(&policy), governed.clone());
+                let governed = GovernedBox::assigned("kernel-test");
+                let adapter = KernelPolicyAdapter::new(Arc::clone(&policy), governed.clone());
                 let interceptor = ShellPolicyInterceptor::into_handle_reporting_under(
                     policy,
                     Principal::agent(),
@@ -270,11 +268,11 @@ when temporal {
                 assert!(!adapter.decide(&probe, FsOperation::WriteContent).is_allow());
                 assert!(
                     adapter
-                        .decide(&path(&home, "native-marker"), FsOperation::WriteContent)
+                        .decide(&path(&home, "kernel-marker"), FsOperation::WriteContent)
                         .is_allow()
                 );
                 let output = shell.run(&read).await;
-                assert_ne!(output.status, 0, "Shell must see the native request");
+                assert_ne!(output.status, 0, "Shell must see the kernel request");
             })
             .await;
     }

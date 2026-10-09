@@ -31,12 +31,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` sits off it and returns no authority.
-- The root `pub use` set is the whole API: `Policy`, `PolicyEngine`, `PolicyError`, `Request`,
-  `FsOperation`, `FsAccess`, `Principal`, `Decision`, `DenyReason`, `RuleId`, `Outcome`,
-  `Delivery`, `FsResult`, `EffectivePolicy`, `ENGINE_ID`, `SELF_DEFENDED_FILES`, `ApprovedPath`,
-  `PathRefusal`, `PathResolver`, `GovernedBox`, `EgressPolicyInterceptor`,
-  `ScriptPolicyInterceptor`, `ScriptPermit`, `ShellPolicyInterceptor`. That is 24 names with
-  `--all-features` and 20 by default; recompute it when you touch the façade.
+- The root `pub use` set in `src/lib.rs` is the whole API: 49 names with
+  `--all-features` and 42 by default. Recompute it when you touch the façade.
+- `KernelPolicyAdapter` is available only with `kernel-adapter`. Its consumer is the Box
+  crate's `HostedBox`, enabled through `kernel-policy-integration`.
 - Keep modules private. Keep every `dogwood_language` and `cedar_policy` type out of the façade.
 - Keep `cedar-policy = "=4.11.0"` exact: the schema and the request gate are Cedar types, and
   Dogwood's own constraint is a caret range.
