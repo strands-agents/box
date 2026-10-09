@@ -32,6 +32,9 @@ exclude = [
     "test-common",
     "test-integ",
     "test-workload/verdict",
+    # The startup benchmark. It is test code, not part of the shipped artefact, and
+    # it drives the BUILT `strands-box` binary. See crates/box-bench/AGENTS.md.
+    "crates/box-bench",
 ]
 
 # Profiles are workspace-wide (they can only be set at the workspace root). By
