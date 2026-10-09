@@ -37,11 +37,14 @@ pub(super) fn run(
         }
         let packets = capture.count()?;
         if !yellow && packets > 0 {
+            let summary = capture
+                .summary()
+                .unwrap_or_else(|error| format!("packet summary unavailable: {error}"));
             write_row(
                 dir,
                 LAYER_NOISE,
                 format!(
-                    "capture saw {packets} forbidden packet(s); packet attribution is unresolved"
+                    "capture saw {packets} forbidden packet(s); packet attribution is unresolved\n{summary}"
                 ),
                 "YELLOW",
                 false,

@@ -211,19 +211,6 @@ jobs:
             bash test-workload/manual/setup.sh "$platform" --run
           fi
 
-      # An aborted run that leaves a Dedicated Host allocated keeps billing. Gated on
-      # `creds` because a failure before the role assumption cannot have provisioned
-      # anything, and the warning below would then be a false alarm on every such run.
-      - name: Teardown
-        if: ${{ always() && inputs.teardown && steps.creds.outcome == 'success' }}
-        env:
-          AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
-          AWS_REGION: us-west-2
-          ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
-        run: |
-          bash test-workload/manual/teardown.sh --full || \
-            echo "::error::Teardown FAILED. Check for instances and Dedicated Hosts tagged Project=strands-box-containment-tests in $AWS_REGION -- a Dedicated Host keeps billing until released."
-
       # The ledger in S3 is the durable record; this is the convenience copy on the
       # run itself, so a reviewer can read a verdict without bucket access.
       - name: Upload the verdict tree
@@ -271,3 +258,16 @@ jobs:
           else
             echo "::warning title=Workload report::no report artifact was produced by this run"
           fi
+
+      # An aborted run that leaves a Dedicated Host allocated keeps billing. Gated on
+      # `creds` because a failure before the role assumption cannot have provisioned
+      # anything, and the warning below would then be a false alarm on every such run.
+      - name: Teardown
+        if: ${{ always() && inputs.teardown && steps.creds.outcome == 'success' }}
+        env:
+          AWS_ACCOUNT: ${{ secrets.WORKLOAD_AWS_ACCOUNT }}
+          AWS_REGION: us-west-2
+          ARTIFACTS_BUCKET: ${{ secrets.WORKLOAD_ARTIFACTS_BUCKET }}
+        run: |
+          bash test-workload/manual/teardown.sh --full || \
+            echo "::error::Teardown FAILED. Check for instances and Dedicated Hosts tagged Project=strands-box-containment-tests in $AWS_REGION -- a Dedicated Host keeps billing until released."

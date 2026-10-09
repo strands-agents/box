@@ -87,6 +87,21 @@ impl Capture {
         }
         count(&self.path)
     }
+    pub(super) fn summary(&self) -> io::Result<String> {
+        let mut command = Command::new("tcpdump");
+        command.args(["-nn", "-q", "-tt"]);
+        if self.empty_pcapng {
+            command.args(["-k", "INPD"]);
+        }
+        let output = command.arg("-r").arg(&self.path).output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "packet summary failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(packet_summary(&String::from_utf8_lossy(&output.stdout)))
+    }
     pub(super) fn stop(mut self) -> io::Result<usize> {
         self.check()?;
         let status = Command::new("kill")
@@ -130,6 +145,17 @@ fn count(path: &Path) -> io::Result<usize> {
         .count())
 }
 
+fn packet_summary(output: &str) -> String {
+    let mut summary = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::truncate_on_boundary(&mut summary, 4096);
+    summary
+}
+
 fn ready(bytes: u64, current_log: &str, empty_pcapng: bool) -> bool {
     bytes >= 24 || (bytes == 0 && empty_pcapng && current_log.contains("listening on "))
 }
@@ -137,6 +163,18 @@ fn ready(bytes: u64, current_log: &str, empty_pcapng: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packet_summary_keeps_addresses_and_bounds_diagnostic_output() {
+        let packet = "1791506911.000001 (en0, proc timed:123, out) IP 10.0.0.1.49152 > 169.254.169.123.123: UDP, length 48";
+        let output = std::iter::repeat_n(packet, 12)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = packet_summary(&output);
+        assert_eq!(summary.lines().count(), 8);
+        assert!(summary.contains("169.254.169.123.123"));
+        assert!(summary.contains("timed:123"));
+        assert_eq!(packet_summary(&"é".repeat(3000)).len(), 4096);
+    }
     #[test]
     fn empty_pktap_capture_starts_after_the_listener_is_ready() {
         let dir = std::env::temp_dir().join(format!("jailbreak-pktap-{}", std::process::id()));
