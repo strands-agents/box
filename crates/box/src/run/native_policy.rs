@@ -12,11 +12,9 @@ use policy::{
 pub(super) struct NativePolicy {
     policy: Arc<PolicyEngine>,
     governed: GovernedBox,
-    #[cfg(test)]
     record_outcome: RecordOutcome,
 }
 
-#[cfg(test)]
 type RecordOutcome =
     fn(&PolicyEngine, &GovernedBox, &Principal, &Outcome<'_>) -> Result<(), PolicyError>;
 
@@ -25,7 +23,6 @@ impl NativePolicy {
         Self {
             policy,
             governed,
-            #[cfg(test)]
             record_outcome: PolicyEngine::record,
         }
     }
@@ -55,11 +52,7 @@ impl NativePolicy {
         operation: FsOperation,
         result: FsResult,
     ) -> Result<(), PolicyError> {
-        #[cfg(not(test))]
-        let record = PolicyEngine::record;
-        #[cfg(test)]
-        let record = self.record_outcome;
-        record(
+        (self.record_outcome)(
             &self.policy,
             &self.governed,
             &Principal::agent(),
