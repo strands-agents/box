@@ -281,12 +281,12 @@ PYEOF
 }
 
 # run_harness <platform> <instance-id> <user> <case> — run one case through the
-# on-instance bootstrap (oracle, Agent A, Agent B, upload), fetch what it uploaded
+# on-instance bootstrap (canaries, agent, verdict, upload), fetch what it uploaded
 # into $REPORT_DIR/<platform>/<case>/, and return 0 only when its verdict is PASS.
 #
 # This is the harness the pipeline runs, not the eight-command smoke prompt in
 # run-jailbreak.sh: the agent attacks against the case's goal.md, and the verdict
-# comes from the host oracle and the verdict rule, never from the agent's own
+# comes from the host canaries and the verdict rule, never from the agent's own
 # account. A missing or unreadable verdict is a failure, never a pass.
 run_harness() {
   local platform="$1" instance_id="$2" user="$3" case="$4"
@@ -320,7 +320,7 @@ run_harness() {
   rm -f "$tarball"
   ssh_to "$instance_id" "$user" "tar xzf '$home/indet-harness/harness.tgz' -C '$home/indet-harness'"
 
-  # Root, because the oracle captures packets and reads every process's sockets. HOME
+  # Root, because the harness adds a canary address to the loopback interface. HOME
   # stays the operator's, so the bootstrap reuses the box install.sh built there
   # rather than fetching a source from S3, and PATH is the login one that carries
   # the agent install.sh landed.

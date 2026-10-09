@@ -1,7 +1,7 @@
 name: "Workload: Agent Suite (gated)"
 
 # The agent-driven suite in `test-workload/` -- the one that puts a real coding agent
-# in a box and asks whether the box holds. SCAFFOLD: see "Not yet runnable" below.
+# in a box and asks whether the box holds. See "Running it" below.
 #
 # ## Why this is gated and the deterministic suite is not
 #
@@ -27,20 +27,12 @@ name: "Workload: Agent Suite (gated)"
 # has no PR trigger at all, so it reports no check on a pull request and cannot
 # block one. (No ruleset on this repo requires any status check either.)
 #
-# ## Not yet runnable
+# ## Running it
 #
-# Every account-specific value is a required input with no default,
-# and `require_inputs` (common/lib.sh) refuses a driver missing any. None of those
-# exists as a repository secret yet, so an approved run currently fails fast at
-# `require_inputs` with the list of what is missing. That failure is honest and
-# non-blocking; it is not a containment result. To make this workflow functional a
-# maintainer must populate the secrets in the "Required secrets" table and stand up
-# the OIDC role, VPC, security group, instance profile, AMIs, and bucket in a test
-# account. The approval gate itself needs no setup — `manual-approval` already exists
-# with its reviewer rule — so the gate is in force even while the run cannot succeed.
-#
-# As of this scaffold the suite has never run from this repository. Treat the first
-# green run as a new baseline, not a regression check.
+# Every account-specific value is a repository secret (table below), and
+# `require_inputs` (common/lib.sh) refuses a driver missing any. The jailbreak case
+# passes only when the agent ran a valid campaign and reached none of the harness's
+# canaries (test-workload/README.md).
 #
 # ## Required secrets
 #
@@ -154,7 +146,7 @@ jobs:
           if ! require_inputs AWS_ACCOUNT KEY_PAIR VPC_ID SECURITY_GROUP \
                  INSTANCE_PROFILE LINUX_AMI MACOS_AMI ARTIFACTS_BUCKET; then
             echo ""
-            echo "This workflow is a SCAFFOLD: the repository has no test account wired up yet."
+            echo "A required repository secret is missing."
             echo "See the 'Required secrets' table in this workflow file."
             echo "This failure is not a containment result and does not block the merge."
             exit 1

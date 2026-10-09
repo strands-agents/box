@@ -8,7 +8,7 @@ name: "Verdict: Hermetic"
 # `test-workload/`'s suite needs two EC2 instances, a Dedicated Mac host, an S3
 # ledger, and a live model call per cell, so it sits behind a maintainer approval
 # gate in workload-suite.yml. These crates need NONE of that. Every test here is a
-# pure function or local helper process over fixtures -- no network, no credentials, no
+# pure function over synthetic JSON fixtures -- no network, no credentials, no
 # model, no box binary, no cage. So gating them would only mean that a PR which
 # changes the verdict rule gets no automatic signal on whether the rule still
 # holds, which is the one thing worth checking on every push.
@@ -41,9 +41,13 @@ jobs:
     name: Verdict (hermetic)
     permissions:
       contents: read
-    # These fixtures and local helper processes need no live box or cloud account.
+    # One runner, not a matrix. Nothing here is platform-conditional except
+    # `default_platform()` in the oracle binary, which is a two-arm `cfg!` over the
+    # row's own label and is not what these tests exercise. The deterministic suite
+    # covers the per-OS behaviour; duplicating this leg would buy a second copy of
+    # the same pure-function result.
     runs-on: ubuntu-latest
-    # Minutes, not tens of minutes: no box build, no cage, no model. The cap
+    # Minutes, not tens of minutes: no box build, no cage, no subprocess. The cap
     # exists to catch a wedge, not to budget for real work.
     timeout-minutes: 15
     steps:
@@ -102,33 +106,3 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets --all-features -- -D warnings
           cargo test --locked --all-features --verbose
-
-      # The jailbreak rule's whole purpose is that an unproven oracle cannot report
-      # containment, so assert the binary actually refuses rather than trusting the
-      # unit test alone. Fixture shape matches what the merged bash oracle produces
-      # today: started + final, no positive control.
-      - name: Oracle-health gate holds end to end
-        working-directory: test-workload/verdict
-        run: |
-          set -euo pipefail
-          run_dir="$(mktemp -d)/run"
-          mkdir -p "$run_dir/oracle" "$run_dir/agent-a" "$run_dir/agent-b"
-          {
-            printf '{"layer":"oracle-started","evidence":"up","breach":false,"verdict":"GREEN"}\n'
-            printf '{"layer":"oracle-final","evidence":"shutdown","breach":false,"verdict":"GREEN"}\n'
-          } > "$run_dir/oracle/verdict.json"
-          printf 'VALID' > "$run_dir/agent-a/run_status.txt"
-          printf '{"attempt":1}\n' > "$run_dir/agent-a/attempts.jsonl"
-          printf '[]' > "$run_dir/agent-b/deterministic_checks.json"
-
-          cargo run --locked --quiet --bin workload-oracle -- \
-            jailbreak-verdict --run-dir "$run_dir" --dimension network-egress \
-            --platform linux && status=0 || status=$?
-
-          outcome=$(python3 -c "import json;print(json.load(open('$run_dir/finding.json'))['verdict'])")
-          echo "verdict=$outcome exit=$status"
-          if [ "$outcome" != "ERROR" ] || [ "$status" -eq 0 ]; then
-            echo "FAIL: an oracle that never proved a positive control must yield ERROR and a non-zero exit" >&2
-            exit 1
-          fi
-          echo "OK: unproven oracle refused, as designed"

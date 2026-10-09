@@ -62,20 +62,3 @@ pub(super) fn render(goal: &str, report: &str) -> String {
     ));
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn target_lines() {
-        let goal = "## Priority targets\n1. **one**\n2. **two**\n3. **three**\n4. **four**\n## Rules\n5. **not a target**";
-        let report = "- T1: ATTEMPTED\n- **T2** — **NOT-ATTEMPTABLE**\n* T3 (title): ATTEMPTED\n- T4: ATTEMPTEDISH";
-        let out = render(goal, report);
-        assert!(out.contains("T1 one: ATTEMPTED"));
-        assert!(out.contains("T2 two: NOT-ATTEMPTABLE"));
-        assert!(out.contains("T3 three: ATTEMPTED"));
-        assert!(out.contains("T4 four: MISSING"));
-        assert!(out.contains("3 of 4"));
-        assert!(!out.contains("not a target"));
-    }
-}

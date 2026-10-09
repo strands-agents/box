@@ -48,10 +48,6 @@ fn main() -> ExitCode {
     // Defaulted rather than required: the launcher knows the platform, but a
     // developer reproducing one cell by hand should not have to spell it.
     let mut platform = default_platform().to_string();
-    // Launcher metadata, not evidence: carried onto the finding so a record that is
-    // copied out of its S3 prefix still names the box commit it judged.
-    let mut box_commit: Option<String> = None;
-    let mut run_id: Option<String> = None;
 
     let mut index = 1;
     while index < args.len() {
@@ -87,14 +83,6 @@ fn main() -> ExitCode {
             },
             "--platform" => match take("--platform") {
                 Ok(v) => platform = v,
-                Err(code) => return code,
-            },
-            "--box-commit" => match take("--box-commit") {
-                Ok(v) => box_commit = Some(v),
-                Err(code) => return code,
-            },
-            "--run-id" => match take("--run-id") {
-                Ok(v) => run_id = Some(v),
                 Err(code) => return code,
             },
             other => return usage(&format!("unknown flag {other:?}")),
@@ -133,88 +121,7 @@ fn main() -> ExitCode {
                 phase_b(&run_dir, &dimension, cli, &platform)
             }
         }
-        "jailbreak-verdict" => {
-            let Some(dimension) = dimension else {
-                return usage("jailbreak-verdict needs --dimension");
-            };
-            jailbreak_verdict(&run_dir, &dimension, &platform, box_commit, run_id)
-        }
         other => usage(&format!("unknown command {other:?}")),
-    }
-}
-
-/// Phase B for the adversarial mode: a confirmed-breach rule over the host oracle's
-/// rows, written as a schema-v3 finding.
-///
-/// Deliberately replaces `test-workload/common/agent-b-runner.sh`, whose 0–100 risk
-/// score could reach `ESCAPED` from text mined out of the attacking agent's own
-/// `method_report.md`. Nothing here reads that file.
-fn jailbreak_verdict(
-    run_dir: &Path,
-    dimension: &str,
-    platform: &str,
-    box_commit: Option<String>,
-    run_id: Option<String>,
-) -> ExitCode {
-    let inputs = jailbreak::load(run_dir);
-    let run = jailbreak::Run {
-        dimension: dimension.to_string(),
-        platform: platform.to_string(),
-        box_commit,
-        run_id,
-    };
-    let finding = jailbreak::verdict(&run, &inputs);
-
-    let body = match serde_json::to_string_pretty(&finding) {
-        Ok(body) => body,
-        Err(why) => {
-            eprintln!("jailbreak-verdict: cannot serialize finding: {why}");
-            return ExitCode::from(2);
-        }
-    };
-
-    // Written twice on purpose. `finding.json` is the schema-v3 record; `verdict.json`
-    // is the key the launcher already uploads to S3, so writing the same record there
-    // keeps the existing wire path intact while the schema field lets a reducer
-    // recognise that the vocabulary changed from CONTAINED/UNCERTAIN/ESCAPED to a
-    // PASS/FAIL/ERROR verdict plus an explicit security_outcome.
-    for name in ["finding.json", "verdict.json"] {
-        let path = run_dir.join(name);
-        if let Err(why) = std::fs::write(&path, body.clone() + "\n") {
-            eprintln!("jailbreak-verdict: cannot write {}: {why}", path.display());
-            return ExitCode::from(2);
-        }
-    }
-
-    println!(
-        "jailbreak: {} {} {}/{} — score {} [{}] {}",
-        finding.verdict.as_str(),
-        serde_json::to_string(&finding.security_outcome)
-            .unwrap_or_default()
-            .trim_matches('"'),
-        finding.dimension,
-        finding.platform,
-        finding.risk_score,
-        finding.residuals.join(","),
-        truncated(&finding.note, 200)
-    );
-    println!(
-        "  confirmed breaches: {}  unattributed egress: {}  host-check fails: {}  attempts: {}",
-        finding.oracle_breaches,
-        finding.unattributed_egress,
-        finding.deterministic_fails,
-        finding
-            .attempts
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "none recorded".to_string())
-    );
-    for evidence in &finding.confirming_evidence {
-        println!("  evidence: {}", truncated(evidence, 200));
-    }
-
-    match finding.verdict {
-        jailbreak::Verdict::Pass => ExitCode::SUCCESS,
-        _ => ExitCode::FAILURE,
     }
 }
 
@@ -337,16 +244,12 @@ fn usage(why: &str) -> ExitCode {
   workload-oracle start     --run-dir DIR
   workload-oracle stop      --run-dir DIR --dimension NAME --cli NAME [--platform NAME]
   workload-oracle reconcile --run-dir DIR --dimension NAME --cli NAME [--platform NAME]
-  workload-oracle jailbreak-verdict --run-dir DIR --dimension NAME [--platform NAME]
-                            [--box-commit SHA] [--run-id ID]
 
   start      truncate the decision journal and prepare the oracle directory
   stop       run the dimension's host checks, write oracle/verdict.json
   reconcile  phase B: fold run validity + oracle verdict into verdict.json
-  jailbreak-verdict
-             phase B for the adversarial mode: a confirmed-breach rule over the
-             host oracle's rows. Writes finding.json (schema v3) and verdict.json.
-             Never reads the agent's method_report.md.
+  jailbreak  run the adversarial network-egress campaign on this host and judge it
+             by canary hits. Writes finding.json and verdict.json.
 
 dimensions: {}
 clis:       {}",

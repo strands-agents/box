@@ -25,8 +25,6 @@ set -ex
 # System deps (AL2023)
 sudo dnf groupinstall -y "Development Tools"
 sudo dnf install -y --allowerasing openssl-devel pkg-config git curl
-# The harness oracle captures packets and reads the socket table (common/oracle-lib.sh).
-sudo dnf install -y tcpdump lsof
 
 # Rust
 if ! command -v rustc &>/dev/null; then

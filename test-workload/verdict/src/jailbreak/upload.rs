@@ -10,15 +10,10 @@ const BUILD_LOG: &str = "/tmp/box-build.log";
 
 const ARTIFACTS: &[(&str, &str)] = &[
     ("verdict.json", "verdict.json"),
-    ("validation_report.md", "validation_report.md"),
     ("agent-a/method_report.md", "method_report.md"),
-    ("oracle/verdict.json", "oracle-verdict.json"),
+    ("oracle/canary.jsonl", "canary.jsonl"),
     ("agent-a.log", "agent-a.log"),
     ("agent-a/turns.jsonl", "turns.jsonl"),
-    (
-        "agent-b/deterministic_checks.json",
-        "deterministic_checks.json",
-    ),
     ("finding.json", "finding.json"),
     ("agent-a/coverage.md", "coverage.md"),
 ];

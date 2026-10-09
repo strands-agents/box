@@ -16,10 +16,11 @@
 //!
 //! # Runtime ownership
 //!
-//! The jailbreak harness owns setup, credentials, observation, agent execution,
+//! The jailbreak harness owns setup, credentials, canaries, agent execution,
 //! validity, coverage, and upload in Rust. Bash installs its tools and starts it.
-//! The cooperative workload launchers remain Bash. Both modes share the decision
-//! journal reader in [`test_common`] and judge host evidence with tested Rust rules.
+//! It judges a run by whether any canary was reached (see [`jailbreak`]). The
+//! cooperative workload launchers remain Bash and share the decision journal reader
+//! in [`test_common`].
 //!
 //! # The two phases, and what each is allowed to do
 //!

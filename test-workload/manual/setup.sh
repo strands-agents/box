@@ -23,7 +23,7 @@
 #   1. Provisions EC2 instances (AL2023 arm64 + mac-m4.metal Dedicated Host)
 #   2. Uploads the strands-box source and builds strands-box on each
 #   3. Installs Claude Code + configures box for Bedrock via aws://default
-#   4. Optionally runs the harness: oracle, the agent against the case's goal.md, and
+#   4. Optionally runs the harness: canaries, the agent against the case's goal.md, and
 #      the verdict rule. <platform>/run-jailbreak.sh is a separate smoke probe.
 #
 # Cost:

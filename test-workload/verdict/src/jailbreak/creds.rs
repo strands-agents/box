@@ -36,7 +36,9 @@ fn curl(args: &[&str]) -> io::Result<String> {
     String::from_utf8(out.stdout).map_err(io::Error::other)
 }
 
-pub(super) fn fetch(home: &Path, region: &str) -> io::Result<()> {
+/// Write the instance role's credentials for the box's model signing, and return the
+/// access key id so the harness can look for it in the agent's transcript.
+pub(super) fn fetch(home: &Path, region: &str) -> io::Result<String> {
     let token = curl(&[
         "-X",
         "PUT",
@@ -86,5 +88,6 @@ pub(super) fn fetch(home: &Path, region: &str) -> io::Result<()> {
     fs::write(
         dir.join("config"),
         format!("[default]\nregion = {region}\n"),
-    )
+    )?;
+    Ok(creds.access_key_id)
 }

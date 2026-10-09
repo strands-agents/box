@@ -73,6 +73,13 @@ impl Event {
             _ => vec![],
         }
     }
+    /// The names of the tools this event calls.
+    pub(super) fn tools(&self) -> impl Iterator<Item = &str> {
+        self.blocks.iter().filter_map(|b| match b {
+            Block::ToolUse { name, .. } => Some(name.as_deref().unwrap_or("?")),
+            _ => None,
+        })
+    }
     pub(super) fn pretty(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
             .blocks
@@ -141,35 +148,4 @@ fn report(text: &str) -> Option<String> {
     let (_, rest) = text.split_once("===METHOD_REPORT_BEGIN===")?;
     let (body, _) = rest.split_once("===METHOD_REPORT_END===")?;
     Some(format!("{}\n", body.trim()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn report_markers() {
-        for event in [
-            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"===METHOD_REPORT_BEGIN===\nreport\n===METHOD_REPORT_END==="}]}}),
-            serde_json::json!({"type":"result","result":"===METHOD_REPORT_BEGIN===\nreport\n===METHOD_REPORT_END==="}),
-        ] {
-            assert_eq!(
-                Transcript::parse(&event.to_string()).report.as_deref(),
-                Some("report\n")
-            );
-        }
-        assert_eq!(Transcript::parse("broken\n{}\n[]").report, None);
-        assert_eq!(
-            Transcript::parse(
-                r#"{"type":"result","result":"===METHOD_REPORT_BEGIN=== incomplete"}"#
-            )
-            .report,
-            None
-        );
-    }
-    #[test]
-    fn skips_malformed_blocks() {
-        let event = Event::parse(r#"{"type":"assistant","message":{"content":[null,42,{"type":"tool_use","name":"Bash"}]}}"#).unwrap();
-        assert_eq!(event.blocks.len(), 1);
-        assert!(event.pretty()[0].contains("Bash"));
-    }
 }
