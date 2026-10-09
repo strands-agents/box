@@ -102,7 +102,7 @@ if [ -d "$HARNESS_ROOT/verdict" ]; then
 fi
 # shellcheck disable=SC1091
 source "$HOME/.cargo/env" 2>/dev/null || true
-export PATH="$SRC/target/release:$VERDICT_BIN:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$SRC/target/release:$VERDICT_BIN:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
 
 # 3. Claude Code via the official standalone installer (cross-platform, no npm/node
 #    dependency). It drops a self-contained binary at ~/.local/bin/claude on BOTH

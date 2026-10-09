@@ -24,7 +24,7 @@ set -ex
 # /usr/local on Intel. The default macOS PATH carries neither, and the mac-m4 default
 # made the Intel-only spelling below a silent no-op, so brew is located rather than
 # assumed -- without this, node never installs and the box starts with no agent.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 find_brew() {
   for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
     if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
@@ -58,10 +58,19 @@ cargo build --workspace --release 2>&1 | tail -5
 export PATH="$HOME/strands-box/target/release:$PATH"
 echo 'export PATH="$HOME/strands-box/target/release:$PATH"' >> ~/.zprofile
 
-# Node.js + Claude Code. `node@22` is keg-only: brew does not link its bin into
-# PATH, so `npm` is not found unless the keg's own bin is added. The guard is what
-# turns a missing npm into a failed install rather than a box that starts without
-# an agent.
+# Install Claude Code from the native installer, with Node/npm as a fallback.
+install_native_claude() {
+  local installer version
+  installer=$(mktemp) || return 1
+  version="${CLAUDE_SPEC#@}"
+  if ! curl -fsSL --max-time 60 https://claude.ai/install.sh -o "$installer" ||
+     ! bash "$installer" "${version:-latest}"; then
+    rm -f "$installer"
+    return 1
+  fi
+  rm -f "$installer"
+  "$HOME/.local/bin/claude" --version
+}
 install_node() {
   local install_log brew_deadline
   install_log=$(mktemp)
@@ -81,22 +90,31 @@ install_node() {
     sleep 10
   done
 }
-install_node
-NODE_BIN="$(brew --prefix node@22)/bin"
-export PATH="$NODE_BIN:$PATH"
-echo "export PATH=\"$NODE_BIN:\$PATH\"" >> ~/.zprofile
-command -v npm >/dev/null || {
-  echo "FATAL: npm is not on PATH after installing node@22 (looked in $NODE_BIN)" >&2
-  exit 1
+install_claude() {
+  if install_native_claude; then
+    export PATH="$HOME/.local/bin:$PATH"
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+    return 0
+  fi
+  rm -f "$HOME/.local/bin/claude" || return 1
+  install_node || return 1
+  NODE_BIN="$(brew --prefix node@22)/bin"
+  export PATH="$NODE_BIN:$PATH"
+  echo "export PATH=\"$NODE_BIN:\$PATH\"" >> ~/.zprofile
+  command -v npm >/dev/null || {
+    echo "FATAL: npm is not on PATH after installing node@22 (looked in $NODE_BIN)" >&2
+    return 1
+  }
+  npm install -g "@anthropic-ai/claude-code${CLAUDE_SPEC}"
 }
-npm install -g "@anthropic-ai/claude-code${CLAUDE_SPEC}" 2>&1 | tail -3
+install_claude
 
 # The workspace and the private box directory the pair names. `run --config`
 # reads box.toml alone and performs no discovery, so both exist before the box
 # starts, and the box directory is empty and mode 0700. `.tmp` and
 # `.claude-config` are where box.toml points Claude Code's scratch and
 # configuration, inside the workspace.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 mkdir -p ~/jailbreak-harness/.strands-box ~/jailbreak-harness/.tmp ~/jailbreak-harness/.claude-config
 rm -rf ~/jailbreak-box && mkdir -p ~/jailbreak-box && chmod 700 ~/jailbreak-box
 

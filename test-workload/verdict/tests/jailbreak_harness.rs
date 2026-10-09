@@ -279,3 +279,98 @@ fn macos_install_retries_a_homebrew_lock_but_not_other_failures() {
         );
     }
 }
+
+#[test]
+fn macos_native_install_preserves_the_version_and_falls_back_on_failure() {
+    use std::os::unix::process::CommandExt;
+    let source = include_str!("../../manual/macos/install.sh");
+    let start = source.find("install_native_claude() {").unwrap();
+    let end = source[start..].find("\ninstall_claude\n").unwrap() + start;
+    for (case, spec, native) in [
+        ("ok", "@2.1.3", true),
+        ("ok", "", true),
+        ("download", "@2.1.3", false),
+        ("missing", "@2.1.3", false),
+        ("broken", "@2.1.3", false),
+    ] {
+        let scratch = Scratch::new();
+        let bin = scratch.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let installer = scratch.0.join("installer");
+        fs::write(
+            &installer,
+            "#!/bin/bash\nprintf '%s' \"$1\" > \"$HOME/version\"\n[ \"$INSTALL_CASE\" != missing ] || exit 0\nmkdir -p \"$HOME/.local/bin\"\nstatus=0; [ \"$INSTALL_CASE\" != broken ] || status=1\nprintf '#!/bin/sh\\nexit %s\\n' \"$status\" > \"$HOME/.local/bin/claude\"\nchmod +x \"$HOME/.local/bin/claude\"\n",
+        )
+        .unwrap();
+        for (name, body) in [
+            (
+                "curl",
+                "#!/bin/sh\n[ \"$INSTALL_CASE\" != download ] || exit 1\nwhile [ \"$1\" != -o ]; do shift; done\ncp \"$HOME/installer\" \"$2\"\n",
+            ),
+            (
+                "brew",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/brew-calls\"\nif [ \"$1\" = --prefix ]; then printf '%s\\n' \"$HOME\"; fi\n",
+            ),
+            (
+                "npm",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HOME/npm-calls\"\nprintf '#!/bin/sh\\nexit 0\\n' > \"$HOME/bin/claude\"\nchmod +x \"$HOME/bin/claude\"\n",
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let script = format!(
+            "set -e\n{}\ninstall_claude\nexport PATH=\"$HOME/.local/bin:$PATH\"\nclaude --version\n",
+            &source[start..end]
+        );
+        let mut child = Command::new("bash")
+            .args(["-c", &script])
+            .env("HOME", &scratch.0)
+            .env("INSTALL_CASE", case)
+            .env("CLAUDE_SPEC", spec)
+            .env("BREW", bin.join("brew"))
+            .env("TMPDIR", &scratch.0)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("native installer did not finish fixture {case}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if native {
+            assert!(!scratch.0.join("brew-calls").exists());
+            assert!(!scratch.0.join("npm-calls").exists());
+            assert_eq!(
+                fs::read_to_string(scratch.0.join("version")).unwrap(),
+                if spec.is_empty() {
+                    "latest"
+                } else {
+                    &spec[1..]
+                }
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(scratch.0.join("npm-calls")).unwrap(),
+                format!("install -g @anthropic-ai/claude-code{spec}\n")
+            );
+        }
+    }
+}

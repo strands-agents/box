@@ -206,8 +206,8 @@ scp_to() {
 agent_command_on_instance() {
   local instance_id="$1" user="$2" resolved
   resolved=$(ssh_to "$instance_id" "$user" \
-    'for c in "$(command -v claude 2>/dev/null)" /opt/homebrew/bin/claude \
-              /usr/local/bin/claude "$HOME/.local/bin/claude" /usr/bin/claude; do
+    'for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)" \
+              /opt/homebrew/bin/claude /usr/local/bin/claude /usr/bin/claude; do
        [ -n "$c" ] && [ -x "$c" ] || continue
        python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$c"
        exit 0
