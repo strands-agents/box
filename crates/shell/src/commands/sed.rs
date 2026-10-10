@@ -540,9 +540,6 @@ async fn process_stream<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         if has_newline {
             buf.pop();
         }
-        if buf.ends_with('\r') {
-            buf.pop();
-        }
         all_lines.push(buf.clone());
     }
 
