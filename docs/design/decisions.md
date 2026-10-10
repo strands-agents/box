@@ -309,6 +309,29 @@ every resolved secret. The cost is real: the read root over the interpreter tree
 no policy decision in the path, so an operator who keeps a secret inside a virtualenv has handed it to
 the agent.
 
+<a id="the-linux-view-reproduces-a-grants-link-chain"></a>
+### The Linux view reproduces a grant's link chain
+
+The namespace view plans each link that a grant's lookup traverses as a link with the host's own
+text, and binds only the identity. The route above then resolves inside the view the way it resolves
+on the host. When the view bound a link spelling as a second file, the program ran as that spelling:
+`/proc/self/exe` and the loader's `$ORIGIN` named the spelling's directory, so a virtualenv `python`
+built with `RUNPATH $ORIGIN/../lib` lost `libpython`. A hop that no grant names, such as
+`/usr/local/bin/python3` between a venv and its interpreter, was not in the view at all, so `exec`
+failed with `ENOENT`. A link node is a host link whose parent is canonical. A node that a directory
+bind brings in is left to that bind. A node under a read-only empty directory is refused, because it
+cannot be made there. An entry spelled beneath a node, such as the loader `/lib/ld-linux-*.so.1`
+on a host where `/lib` is a link, is planned at the host's resolution of it, because its mountpoint
+would otherwise be made through the link. A link on the read-only root cannot be changed by the workload. One under the writable
+`/tmp` can be replaced, but only after the trampoline's exec, and the workload could already make a
+link there to anything in its view. A grant whose chain changed after it was judged is refused at
+apply, and a link whose text no longer leads to a node the grant judged is refused at plan. The cost: a spelling that reaches its
+file through a linked *ancestor*, such as `#!/bin/sh` on a merged-`/usr` host, keeps a bind at the
+spelling and its `$ORIGIN` mismatch, because mirroring `/bin` would move every bind beneath it. A
+`command` never hits this, because its directory is canonicalized first.
+`view.rs::a_two_link_chain_plans_each_unenclosed_hop_as_a_link` and
+`contains_exec_target_linux.rs::a_program_through_a_link_chain_runs_as_its_identity` pin it.
+
 <a id="one-process-spec-and-one-translator"></a>
 ### One process specification states every process, and one translator applies it
 

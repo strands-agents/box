@@ -787,3 +787,47 @@ fn a_bare_name_on_path_reaches_a_granted_program() {
         stderr(&ungranted)
     );
 }
+
+/// **A virtualenv-shaped `[agent] command` starts on Linux and runs as its identity** (#30 part A).
+/// The chain leaves the granted venv for a prefix no list names, the way a venv's `python` reaches
+/// `/usr/local/bin/python3`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_venv_shaped_command_runs_as_its_identity() {
+    if !fixture::namespace_launcher_is_usable() {
+        println!("skipping: this host cannot run the namespace launcher");
+        return;
+    }
+    let request = Request::with_policy("fs-venv-chain", PERMIT_EVERY_EFFECT);
+    let home = request.operator_home().to_path_buf();
+    let prefix_bin = home.join("prefix/bin");
+    let venv = home.join("venv");
+    std::fs::create_dir_all(&prefix_bin).expect("prefix");
+    std::fs::create_dir_all(venv.join("bin")).expect("venv");
+    let readlink = ["/usr/bin/readlink", "/bin/readlink"]
+        .iter()
+        .map(Path::new)
+        .find(|candidate| candidate.is_file())
+        .expect("coreutils readlink");
+    let real = prefix_bin.join("real");
+    std::fs::copy(readlink, &real).expect("program");
+    let middle = prefix_bin.join("p3");
+    std::os::unix::fs::symlink("real", &middle).expect("hop 3");
+    std::os::unix::fs::symlink(&middle, venv.join("bin/p3")).expect("hop 2");
+    let route = venv.join("bin/p");
+    std::os::unix::fs::symlink("p3", &route).expect("hop 1");
+
+    let venv_text = venv.display().to_string();
+    let box_ = request.agent_list("read", &[&venv_text]).expect();
+    let route_text = route.display().to_string();
+    let output = box_.run(&[route_text.as_str(), "/proc/self/exe"]);
+    let real = real.canonicalize().expect("canonical program");
+    assert!(
+        output.status.success() && stdout(&output).trim() == real.display().to_string(),
+        "the chain must exec and run as {}: status={:?} stdout={} stderr={}",
+        real.display(),
+        output.status,
+        stdout(&output),
+        stderr(&output)
+    );
+}
