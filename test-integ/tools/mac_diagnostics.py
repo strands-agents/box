@@ -201,10 +201,23 @@ class Capture:
         cases.update(verdict_present=True, platform=verdict.get("platform"), box_commit=verdict.get("box_commit"),
                      verdict=verdict.get("verdict"), counts=verdict.get("counts"))
         alias_paths = set()
-        for row in verdict.get("results") or []:
+        rows = verdict.get("results")
+        if rows is None:
+            rows = []
+        if not isinstance(rows, list):
+            self.error("verdict.json results is not a list")
+            cases["malformed"] = True
+            return cases
+        for index, row in enumerate(rows):
             if not isinstance(row, dict):
+                self.error(f"verdict.json results[{index}] is not an object")
                 continue
-            note = row.get("note") or ""
+            note = row.get("note")
+            if note is None:
+                note = ""
+            if not isinstance(note, str):
+                self.error(f"verdict.json results[{index}].note is not a string")
+                continue
             if row.get("result") in ("FAIL", "ERROR"):
                 cases["failed_cases"].append({"id": row.get("id"), "result": row.get("result"),
                                              "note_head": note[:200]})
