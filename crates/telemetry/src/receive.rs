@@ -154,7 +154,11 @@ where
     let json = headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json"));
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        });
 
     if json {
         serde_json::from_slice(body.as_ref()).ok()
@@ -395,6 +399,8 @@ fn text_attribute(key: &str, value: &str) -> KeyValue {
 
 #[cfg(test)]
 mod tests {
+    use opentelemetry_proto::tonic::logs::v1::ResourceLogs;
+
     use super::*;
     use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
     use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
@@ -482,6 +488,52 @@ mod tests {
             written.contains(crate::export::SOURCE_AGENT),
             "the relayed metric carries its provenance: {written}"
         );
+    }
+
+    #[tokio::test]
+    async fn json_media_types_are_case_insensitive_on_every_route() {
+        for content_type in ["Application/JSON", "application/JSON; charset=utf-8"] {
+            let bodies = [
+                (
+                    TRACES,
+                    serde_json::to_vec(&ExportTraceServiceRequest {
+                        resource_spans: vec![ResourceSpans::default()],
+                    })
+                    .unwrap(),
+                ),
+                (
+                    LOGS,
+                    serde_json::to_vec(&ExportLogsServiceRequest {
+                        resource_logs: vec![ResourceLogs::default()],
+                    })
+                    .unwrap(),
+                ),
+                (
+                    METRICS,
+                    serde_json::to_vec(&ExportMetricsServiceRequest {
+                        resource_metrics: vec![gauge_of(Vec::new())],
+                    })
+                    .unwrap(),
+                ),
+            ];
+            for (route, body) in bodies {
+                let (port, _directory, path) = live().await;
+                assert_eq!(post_to(port, route, content_type, body).await, 200);
+                assert!(
+                    std::fs::read_to_string(path)
+                        .unwrap()
+                        .contains(crate::export::SOURCE_AGENT)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_media_type_with_a_json_prefix_is_not_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/jsonp".parse().unwrap());
+        let body = Bytes::from_static(b"{\"resourceSpans\":[]}");
+        assert!(decoded::<ExportTraceServiceRequest>(&headers, &body).is_none());
     }
 
     /// A route the receiver does not serve answers `404`.
