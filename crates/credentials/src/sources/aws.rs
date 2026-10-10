@@ -290,18 +290,16 @@ fn uri_encode(s: &str, encode_slash: bool) -> String {
     out
 }
 
-/// Build the canonical query string: split on `&`, URI-encode each key and value (encoding `/`
-/// too), sort by encoded key/value, and rejoin with `&`. An empty query yields an empty string.
+/// Sort the URL's encoded query pairs by key and value.
 fn canonical_query(query: &str) -> String {
     if query.is_empty() {
         return String::new();
     }
     let mut pairs: Vec<(String, String)> = query
         .split('&')
-        .filter(|kv| !kv.is_empty())
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (uri_encode(k, true), uri_encode(v, true))
+            (k.to_string(), v.to_string())
         })
         .collect();
     pairs.sort();
@@ -312,23 +310,9 @@ fn canonical_query(query: &str) -> String {
         .join("&")
 }
 
-/// Canonicalize a header value: trim surrounding whitespace and collapse internal runs of spaces to
-/// a single space (SigV4's trimall). Interior structure otherwise survives.
+/// Trim a header value and collapse each whitespace run to one space.
 fn canonical_header_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut prev_space = false;
-    for c in value.trim().chars() {
-        if c == ' ' {
-            if !prev_space {
-                out.push(' ');
-            }
-            prev_space = true;
-        } else {
-            out.push(c);
-            prev_space = false;
-        }
-    }
-    out
+    value.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Split a URL into `(authority, path, query)`. `authority` is the host (with port if present) used
@@ -869,6 +853,55 @@ mod tests {
             "the payload hash must be signed, not merely attached: {}",
             authorization.1.as_str()
         );
+    }
+
+    #[test]
+    fn encoded_query_and_header_whitespace_match_sigv4_canonicalization() {
+        assert_eq!(
+            canonical_query("prefix=a%20b&marker=x%2Fy&prefix=c%2Bd"),
+            "marker=x%2Fy&prefix=a%20b&prefix=c%2Bd"
+        );
+        assert_eq!(canonical_query("b=1&a=/+&a=%2f"), "a=%2f&a=/+&b=1");
+        assert_eq!(canonical_query("b=1&&a=2"), "=&a=2&b=1");
+        assert_eq!(canonical_header_value(" a\t  b \t c "), "a b c");
+        let time = SigningTime::from_unix_secs(1_440_938_160);
+        let headers = [("Host".to_string(), "example.amazonaws.com".to_string())];
+        let signed = sign_request_at(
+            &fixed_creds(),
+            "service",
+            "us-east-1",
+            "GET",
+            "https://example.amazonaws.com/?prefix=a%20b&marker=x%2Fy&prefix=c%2Bd",
+            &headers,
+            b"",
+            &time,
+        )
+        .unwrap();
+        let authorization = signed
+            .iter()
+            .find(|(name, _)| name == "Authorization")
+            .unwrap();
+        assert!(authorization.1.ends_with(
+            "Signature=106b05d0ddfbf90249ce1f30ee3da7bd20f2a898dc1dc08de2c801e2433027a8"
+        ));
+        let mut tabbed = headers.to_vec();
+        tabbed.push(("X-Test".into(), " a\t  b \t c ".into()));
+        let mut normalized = headers.to_vec();
+        normalized.push(("X-Test".into(), "a b c".into()));
+        let sign = |headers: &[(String, String)]| {
+            sign_request_at(
+                &fixed_creds(),
+                "service",
+                "us-east-1",
+                "GET",
+                "https://example.amazonaws.com/",
+                headers,
+                b"",
+                &time,
+            )
+            .unwrap()
+        };
+        assert_eq!(sign(&tabbed), sign(&normalized));
     }
 
     /// ...and only for S3. The AWS SDKs scope the header to an S3-specific signer
