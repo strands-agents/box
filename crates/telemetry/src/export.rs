@@ -206,7 +206,7 @@ impl TargetExporter {
                 client,
                 secret,
             } => {
-                let url = format!("{base}{route}");
+                let url = format!("{}{route}", base.trim_end_matches('/'));
                 let mut sending = client
                     .post(&url)
                     .header("content-type", "application/x-protobuf")
@@ -381,6 +381,8 @@ fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OT
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncReadExt as _;
+
     use super::*;
 
     /// A file target opens under a directory that does not exist yet.
@@ -468,6 +470,37 @@ mod tests {
             asked.is_err(),
             "the redirect was followed, and the host it named was reached: {asked:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_trailing_slash_keeps_each_otlp_route_at_the_base_path() {
+        for route in ["/v1/logs", "/v1/traces", "/v1/metrics"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let received = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(stream.read_u8().await.unwrap());
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+                String::from_utf8(head).unwrap()
+            });
+            let target = Target::new(TargetKind::Otlp, format!("http://{address}/collector/"));
+            let exporter = TargetExporter::open(&target, std::sync::Arc::default()).unwrap();
+            exporter
+                .deliver(route, &ExportTraceServiceRequest::default())
+                .await
+                .unwrap();
+            let head = received.await.unwrap();
+            assert_eq!(
+                head.lines().next(),
+                Some(format!("POST /collector{route} HTTP/1.1").as_str())
+            );
+        }
     }
 
     /// The exporter never prints the credential it carries.
