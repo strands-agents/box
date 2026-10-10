@@ -88,7 +88,10 @@ async fn cmd_cut(os: &Mediated, args: &[String]) -> CommandResult {
         let l = line.trim_end_matches('\n');
         if by_field {
             let fields: Vec<&str> = l.split(delim).collect();
-            if fields.len() == 1 && suppress {
+            if fields.len() == 1 {
+                if !suppress {
+                    wprintln!(w, "{}", l)?;
+                }
                 continue;
             }
             let selected: Vec<&str> = fields

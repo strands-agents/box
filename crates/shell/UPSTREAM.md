@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+
+### Local command correctness: cut-undelimited-lines
+
+Field selection dropped records that contained no delimiter. The command now emits those records unchanged unless `-s` suppresses them.
+The regression is in `tests/box_cut_undelimited_lines.rs`.
