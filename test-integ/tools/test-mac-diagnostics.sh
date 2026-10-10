@@ -23,7 +23,7 @@ fail() { echo "  FAILURE: $*"; FAILED=1; }
 
 echo "== syntax"
 bash -n "$WRAPPER" && ok "mac-diagnostics.sh parses" || fail "mac-diagnostics.sh syntax"
-bash -n "$HERE/../bootstrap.sh" && ok "bootstrap.sh parses" || fail "bootstrap.sh syntax"
+bash -n "$HERE/../../test-workload/common/bootstrap.sh" && ok "bootstrap.sh parses" || fail "bootstrap.sh syntax"
 bash -n "$HERE/fault-inject.sh" && ok "fault-inject.sh parses" || fail "fault-inject.sh syntax"
 "$PY" -m py_compile "$HELPER" && ok "mac_diagnostics.py compiles" || fail "mac_diagnostics.py compile"
 if command -v shellcheck >/dev/null 2>&1; then
@@ -35,6 +35,26 @@ fi
 W="$(mktemp -d "${TMPDIR:-/tmp}/macdiag-XXXXXX")"
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/results" "$W/bin" "$W/realhome/Library/Logs/DiagnosticReports" "$W/fakehome"
+
+cat > "$W/isolated-helper.py" <<'PYEOF'
+import importlib.util
+import os
+import sys
+spec = importlib.util.spec_from_file_location("diagnostics", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+original_report_dirs = helper.Capture.report_dirs
+fixture = os.path.realpath(os.path.dirname(__file__)) + os.sep
+
+def fixture_report_dirs(capture):
+    return [path for path in original_report_dirs(capture)
+            if os.path.realpath(path).startswith(fixture)]
+
+helper.Capture.report_dirs = fixture_report_dirs
+sys.exit(helper.main(sys.argv[1:]))
+PYEOF
+printf '#!/bin/bash\nexec "%s" "%s" "$@"\n' "$PY" "$W/isolated-helper.py" > "$W/bin/python3"
+chmod +x "$W/bin/python3"
 
 "$PY" - "$W/results/verdict.json" <<'PYEOF'
 import json, sys
@@ -70,7 +90,7 @@ EOF
 run_helper() { # <outdir> [env assignments...]
   local out="$1"; shift
   env HOME="$W/fakehome" PATH="$W/bin:$PATH" DIAG_FORCE=1 DIAG_PLATFORM=Darwin DIAG_ALIAS_IMAGE="$W/alias-image" "$@" \
-    "$PY" "$HELPER" "$W/results" "$out" "$(( $(date +%s) - 3600 ))"
+    "$PY" "$W/isolated-helper.py" "$HELPER" "$W/results" "$out" "$(( $(date +%s) - 3600 ))"
 }
 json_ok() { "$PY" -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null; }
 
@@ -92,6 +112,8 @@ assert c["killed"] == [{"case": "CN-F1-01", "pid": 2298, "argv0": "zsh",
     "command": "zsh -c '/private/var/tmp/det-home/.det-harness-boxes/det-box-0RE7me/workspace/out/free-hello from-the-agent'"}]
 assert any(p.endswith("/state/bin/zsh") for p in c["alias_paths_named"])
 assert s["crash_reports"]["matched"] == 1 and s["crash_reports"]["candidates_in_window"] == 2
+assert os.path.exists(os.path.join(out, "crash-reports", "zsh-2026-09-22-072010.ips"))
+assert not os.path.exists(os.path.join(out, "crash-reports", "other-2026-09-22-070000.ips"))
 ex = json.load(open(os.path.join(out, "crash-reports", "extracted.json")))
 assert ex[0]["pid"] == 2298 and ex[0]["termination"]["byProc"] == "stub-sender"
 assert "processID == 2298" in open(os.path.join(out, "log-pid-2298.txt")).read()
