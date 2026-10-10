@@ -25,7 +25,16 @@ async fn cmd_basename(_os: &Mediated, args: &[String]) -> CommandResult {
         return Err("basename: missing operand".into());
     }
     let name = values[0].trim_end_matches('/');
-    let mut base = name.rsplit('/').next().unwrap_or(name);
+    let name = if name.is_empty() && !values[0].is_empty() {
+        "/"
+    } else {
+        name
+    };
+    let mut base = name
+        .rsplit('/')
+        .next()
+        .filter(|base| !base.is_empty())
+        .unwrap_or(name);
     if let Some(suffix) = values.get(1)
         && !suffix.is_empty()
         && base.len() > suffix.len()

@@ -22,10 +22,17 @@ async fn cmd_dirname(_os: &Mediated, args: &[String]) -> CommandResult {
         }
     }
     let name = name.ok_or("dirname: missing operand")?;
-    let dir = match name.rfind('/') {
-        Some(0) => "/",
-        Some(i) => &name[..i],
-        None => ".",
+    let trimmed = name.trim_end_matches('/');
+    let dir = if trimmed.is_empty() && !name.is_empty() {
+        "/"
+    } else {
+        match trimmed.rfind('/') {
+            Some(i) => {
+                let prefix = trimmed[..i].trim_end_matches('/');
+                if prefix.is_empty() { "/" } else { prefix }
+            }
+            None => ".",
+        }
     };
     let mut w = io::stdout()?;
     wprintln!(w, "{}", dir)?;

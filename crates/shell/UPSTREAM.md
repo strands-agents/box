@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+
+### Local command correctness: pathname-operands
+
+Slash-only operands produced an empty basename or dirname, and dirname treated trailing slashes as a final component. Slash-only operands now yield `/`, and dirname removes trailing slashes before selecting the parent.
+The regression is in `tests/box_pathname_operands.rs`.
