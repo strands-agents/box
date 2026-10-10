@@ -71,42 +71,49 @@ async fn cmd_cut(os: &Mediated, args: &[String]) -> CommandResult {
     });
     let by_field = !field_spec.is_empty();
 
-    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if files.is_empty() {
-        Box::new(io::stdin()?)
-    } else {
-        let fd = io::open(os, &files[0], OpenFlags::read()).await?;
-        Box::new(io::take_reader(fd)?)
-    };
-    let mut reader = BufReader::new(reader);
     let mut w = io::stdout()?;
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).await? == 0 {
-            break;
-        }
-        let l = line.trim_end_matches('\n');
-        if by_field {
-            let fields: Vec<&str> = l.split(delim).collect();
-            if fields.len() == 1 && suppress {
-                continue;
-            }
-            let selected: Vec<&str> = fields
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| in_ranges(i + 1, &ranges))
-                .map(|(_, s)| *s)
-                .collect();
-            wprintln!(w, "{}", selected.join(&delim.to_string()))?;
+    let inputs: Vec<Option<&String>> = if files.is_empty() {
+        vec![None]
+    } else {
+        files.iter().map(Some).collect()
+    };
+    for path in inputs {
+        let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(path) = path {
+            let fd = io::open(os, path, OpenFlags::read()).await?;
+            Box::new(io::take_reader(fd)?)
         } else {
-            let chars: Vec<char> = l.chars().collect();
-            let selected: String = chars
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| in_ranges(i + 1, &ranges))
-                .map(|(_, c)| *c)
-                .collect();
-            wprintln!(w, "{}", selected)?;
+            Box::new(io::stdin()?)
+        };
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await? == 0 {
+                break;
+            }
+            let l = line.trim_end_matches('\n');
+            if by_field {
+                let fields: Vec<&str> = l.split(delim).collect();
+                if fields.len() == 1 && suppress {
+                    continue;
+                }
+                let selected: Vec<&str> = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| in_ranges(i + 1, &ranges))
+                    .map(|(_, s)| *s)
+                    .collect();
+                wprintln!(w, "{}", selected.join(&delim.to_string()))?;
+            } else {
+                let chars: Vec<char> = l.chars().collect();
+                let selected: String = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| in_ranges(i + 1, &ranges))
+                    .map(|(_, c)| *c)
+                    .collect();
+                wprintln!(w, "{}", selected)?;
+            }
         }
     }
     Ok(0)

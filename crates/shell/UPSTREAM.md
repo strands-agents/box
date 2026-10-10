@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: cut-multiple-files
+
+Cut now processes every declared file operand in order instead of silently ignoring files after the first. Character and field selection reuse the same per-stream loop.
+Regression coverage: tests/box_cut_multiple_files.rs. Existing interfaces and effect admission remain unchanged.
