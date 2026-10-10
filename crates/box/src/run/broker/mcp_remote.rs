@@ -88,6 +88,7 @@ pub(crate) async fn list_tools(url: &str, auth: Option<(String, String)>) -> io:
     .await?;
 
     let mut tools = Vec::new();
+    let mut definitions = serde_json::Map::new();
     let mut cursor: Option<String> = None;
     for id in 0..MAX_PAGES {
         let params = cursor
@@ -112,9 +113,34 @@ pub(crate) async fn list_tools(url: &str, auth: Option<(String, String)>) -> io:
             .and_then(Value::as_array)
             .ok_or_else(|| invalid("MCP tools/list result has no tools array"))?;
         tools.extend(page.iter().cloned());
+        if let Some(page_definitions) = result.get("$defs") {
+            let page_definitions = page_definitions
+                .as_object()
+                .ok_or_else(|| invalid("MCP tools/list $defs is not an object"))?;
+            for (name, definition) in page_definitions {
+                match definitions.get(name) {
+                    Some(previous) if previous != definition => {
+                        return Err(invalid(format!(
+                            "MCP tools/list changed the $defs entry {name:?} between pages"
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        definitions.insert(name.clone(), definition.clone());
+                    }
+                }
+            }
+        }
         match result.get("nextCursor").and_then(Value::as_str) {
             Some(next) => cursor = Some(next.to_string()),
-            None => return Ok(json!({"result": {"tools": tools}})),
+            None => {
+                let mut result = serde_json::Map::new();
+                result.insert("tools".to_string(), Value::Array(tools));
+                if !definitions.is_empty() {
+                    result.insert("$defs".to_string(), Value::Object(definitions));
+                }
+                return Ok(json!({"result": result}));
+            }
         }
     }
     Err(invalid(format!(
@@ -191,4 +217,120 @@ fn other<E: std::fmt::Display>(error: E) -> io::Error {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod remote_shared_definitions_tests {
+    use super::*;
+    use std::io::{BufRead as _, Read as _, Write as _};
+
+    fn server(replies: Vec<(&'static str, Value)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = io::BufReader::new(&stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                if reader.read_exact(&mut request).is_err() {
+                    return;
+                }
+                let body = body.to_string();
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        format!("http://{address}/mcp")
+    }
+
+    fn initialized() -> Value {
+        json!({"jsonrpc":"2.0", "id":1, "result": {
+            "protocolVersion":"2025-06-18", "capabilities":{"tools":{}},
+            "serverInfo":{"name":"fixture", "version":"1"}
+        }})
+    }
+
+    #[tokio::test]
+    async fn remote_discovery_retains_shared_schema_definitions() {
+        let url = server(vec![
+            ("200 OK", initialized()),
+            ("202 Accepted", json!({})),
+            (
+                "200 OK",
+                json!({"jsonrpc":"2.0", "id":2, "result": {
+                    "tools":[{"name":"read", "inputSchema": {
+                        "type":"object", "properties":{"shared":{"$ref":"#/$defs/SharedText"}},
+                        "required":["shared"]
+                    }}], "$defs":{"SharedText":{"type":"string"}}, "nextCursor":"next"
+                }}),
+            ),
+            (
+                "200 OK",
+                json!({"jsonrpc":"2.0", "id":3, "result": {
+                    "tools":[], "$defs":{"Other":{"type":"integer"}}
+                }}),
+            ),
+        ]);
+        let catalog = list_tools(&url, None).await.unwrap();
+        assert_eq!(catalog["result"]["$defs"]["SharedText"]["type"], "string");
+        assert_eq!(catalog["result"]["$defs"]["Other"]["type"], "integer");
+        policy::generate_mcp_schema("fixture", &catalog.to_string())
+            .expect("references must resolve");
+    }
+
+    #[tokio::test]
+    async fn conflicting_remote_definitions_are_refused() {
+        let url = server(vec![
+            ("200 OK", initialized()),
+            ("202 Accepted", json!({})),
+            (
+                "200 OK",
+                json!({"result":{"tools":[], "$defs":{"Shared":{"type":"string"}}, "nextCursor":"next"}}),
+            ),
+            (
+                "200 OK",
+                json!({"result":{"tools":[], "$defs":{"Shared":{"type":"integer"}}}}),
+            ),
+        ]);
+        let error = list_tools(&url, None)
+            .await
+            .expect_err("a reference cannot change between pages");
+        assert!(
+            error.to_string().contains("changed the $defs entry"),
+            "{error}"
+        );
+    }
 }
