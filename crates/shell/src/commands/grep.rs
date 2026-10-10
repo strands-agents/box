@@ -237,12 +237,32 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
     let mut need_sep = false;
 
     loop {
+        if opts.max_count == Some(0) {
+            break;
+        }
         line.clear();
         if buf_reader.read_line(&mut line).await? == 0 {
             break;
         }
         lineno += 1;
         let text = line.trim_end_matches('\n').trim_end_matches('\r');
+        if opts.max_count.is_some_and(|max| match_count >= max) {
+            if after_remaining == 0 {
+                break;
+            }
+            after_remaining -= 1;
+            if !prefix.is_empty() {
+                wprint!(w, "{}-", prefix)?;
+            }
+            if opts.line_number {
+                wprint!(w, "{}-", lineno)?;
+            }
+            wprintln!(w, "{}", text)?;
+            if after_remaining == 0 {
+                break;
+            }
+            continue;
+        }
         let matched = re.is_match(text) ^ opts.invert;
 
         if matched {
@@ -299,6 +319,7 @@ async fn grep_reader<R: tokio::io::AsyncRead + Unpin + Send>(
 
             if let Some(max) = opts.max_count
                 && match_count >= max
+                && after_remaining == 0
             {
                 break;
             }

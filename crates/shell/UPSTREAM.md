@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: grep-max-count-context
+
+Grep honors a zero match limit and emits the requested trailing context after reaching a nonzero limit. Further matching lines in that context do not increment the match count.
+Regression coverage: tests/box_grep_max_count_context.rs. Existing interfaces and effect admission remain unchanged.
