@@ -178,7 +178,10 @@ async fn cmd_jq(os: &Mediated, args: &[String]) -> CommandResult {
             Short('c') | Long("compact") => compact = true,
             Short('e') | Long("exit-status") => exit_status = true,
             Short('n') | Long("null-input") => null_input = true,
-            Short('j') | Long("join-output") => join_output = true,
+            Short('j') | Long("join-output") => {
+                join_output = true;
+                raw_output = true;
+            }
             Short('h') | Long("help") => {
                 let mut w = io::stdout()?;
                 wprintln!(w, "{}", HELP)?;

@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: jq-join-raw-output
+
+The existing join-output option now enables raw string formatting as well as suppressing per-result newlines.
+Contract source: https://jqlang.org/manual/.
+Regression coverage: tests/box_jq_join_raw_output.rs. Existing interfaces and safe env/halt stubs remain unchanged.
