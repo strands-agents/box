@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: tail-count-state
+
+Repeated tail -n options now reset the +N mode. Head and tail legacy count rewriting leaves operands after -- and explicit count-option values unchanged.
+Regression coverage: tests/box_tail_count_state.rs. Existing interfaces and effect admission remain unchanged.

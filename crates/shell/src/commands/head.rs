@@ -58,7 +58,19 @@ async fn cmd_head(os: &Mediated, args: &[String]) -> CommandResult {
 /// `-N` spelled as `-n N`, the obsolete form coreutils still accepts.
 fn legacy_count(args: &[String]) -> Vec<String> {
     let mut rewritten = Vec::with_capacity(args.len() + 1);
+    let mut operands = false;
+    let mut count_value = false;
     for arg in args {
+        if operands || count_value {
+            rewritten.push(arg.clone());
+            count_value = false;
+            continue;
+        }
+        if arg == "--" {
+            operands = true;
+        } else if matches!(arg.as_str(), "-n" | "--lines" | "-c" | "--bytes") {
+            count_value = true;
+        }
         match arg.strip_prefix('-') {
             Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
                 rewritten.push("-n".to_string());
