@@ -26,13 +26,26 @@ def main() -> int:
     try:
         with open(path, encoding="utf-8") as fh:
             v = json.load(fh)
+        if not isinstance(v, dict):
+            raise ValueError("verdict must be an object")
+        for key in ("counts", "integrity"):
+            if v.get(key) is not None and not isinstance(v[key], dict):
+                raise ValueError(f"{key} must be an object")
+        if not isinstance(v.get("verdict", "UNKNOWN"), str):
+            raise ValueError("verdict must be a string")
+        results = v.get("results", [])
+        if not isinstance(results, list) or any(not isinstance(row, dict) for row in results):
+            raise ValueError("results must be a list of objects")
+        problems = (v.get("integrity") or {}).get("problems")
+        if problems is not None and not isinstance(problems, list):
+            raise ValueError("integrity.problems must be a list")
     except FileNotFoundError:
         emit(out, "### Deterministic suite: no verdict produced")
         emit(out)
         emit(out, f"`{path}` does not exist. The harness did not get far enough "
                   "to write one -- check the suite step's log for a build error.")
         return 0
-    except (json.JSONDecodeError, OSError) as err:
+    except (ValueError, OSError) as err:
         emit(out, "### Deterministic suite: verdict unreadable")
         emit(out)
         emit(out, f"`{path}`: {err}")
