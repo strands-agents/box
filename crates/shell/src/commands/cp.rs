@@ -21,7 +21,9 @@ async fn copy_file(os: &Mediated, src: &str, dst: &str) -> std::io::Result<()> {
 async fn copy_recursive(os: &Mediated, src: &str, dst: &str) -> std::io::Result<()> {
     let st = io::stat(os, src).await;
     if st.is_dir {
-        io::create_dir(os, dst).await?;
+        if !io::stat(os, dst).await.is_dir {
+            io::create_dir(os, dst).await?;
+        }
         for entry in io::list_dir(os, src).await? {
             let s = format!("{}/{}", src, entry.name);
             let d = format!("{}/{}", dst, entry.name);

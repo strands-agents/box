@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: cp-existing-directory
+
+The vendored recursive copy rejected an existing destination subdirectory. It now merges into existing directories while retaining mediated reads and writes and errors for non-directory collisions.
+Regression coverage is in `tests/box_cp_existing_directory.rs`.
