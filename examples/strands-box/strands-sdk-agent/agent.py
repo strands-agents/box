@@ -25,7 +25,7 @@ def shell(command: str) -> str:
         print(done.stderr.rstrip(), file=sys.stderr)
     if done.returncode == 0:
         return done.stdout or "(no output)"
-    return f"exit {done.returncode}\n{done.stderr}"
+    return f"exit {done.returncode}\n{done.stdout}{done.stderr}"
 
 
 @tool
