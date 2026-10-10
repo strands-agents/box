@@ -71,7 +71,12 @@ async fn cmd_uniq(os: &Mediated, args: &[String]) -> CommandResult {
         Box::new(io::take_reader(fd)?)
     };
     let mut reader = BufReader::new(reader);
-    let mut w = io::stdout()?;
+    let mut w = if let Some(path) = files.get(1) {
+        let fd = io::open(os, path, OpenFlags::write()).await?;
+        io::take_writer(fd)?
+    } else {
+        io::stdout()?
+    };
 
     let key = |line: &str| -> String {
         let mut s = line;

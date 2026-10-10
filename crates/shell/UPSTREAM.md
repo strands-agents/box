@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: uniq-output-operand
+
+Uniq now opens the existing optional OUTPUT operand through mediated I/O and writes filtered records there instead of ignoring that operand.
+Regression coverage: tests/box_uniq_output_operand.rs. Existing interfaces and effect admission remain unchanged.
