@@ -136,8 +136,8 @@ impl Correlation {
         }
         #[derive(Deserialize, Default)]
         struct Meta {
-            traceparent: Option<String>,
-            tracestate: Option<String>,
+            traceparent: Option<serde_json::Value>,
+            tracestate: Option<serde_json::Value>,
         }
         let Ok(message) = serde_json::from_str::<Message>(frame) else {
             return Self::default();
@@ -151,8 +151,13 @@ impl Correlation {
             serde_json::Value::Number(id) => Some(id.to_string()),
             _ => None,
         });
-        Self::from_headers(meta.traceparent.as_deref(), meta.tracestate.as_deref())
-            .mcp(id.as_deref())
+        Self::from_headers(
+            meta.traceparent
+                .as_ref()
+                .and_then(serde_json::Value::as_str),
+            meta.tracestate.as_ref().and_then(serde_json::Value::as_str),
+        )
+        .mcp(id.as_deref())
     }
 
     /// Read the context of the operation currently being polled.
@@ -409,6 +414,37 @@ mod tests {
         let empty = Correlation::from_headers(Some(PARENT), Some(" , \t,"));
         assert!(empty.parent().is_valid());
         assert!(empty.parent().trace_state().header().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_mcp_trace_field_preserves_the_request_identifier() {
+        for invalid in [
+            serde_json::json!(7),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            let frame = serde_json::json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/list",
+                "params": {"_meta": {"traceparent": invalid}}
+            });
+            let correlation = Correlation::from_mcp(&frame.to_string());
+            assert_eq!(
+                correlation.attributes(),
+                vec![("jsonrpc.request.id", "7".into())]
+            );
+            assert!(!correlation.parent().is_valid());
+        }
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": "call-8", "method": "tools/list",
+            "params": {"_meta": {"traceparent": PARENT, "tracestate": 7}}
+        });
+        let correlation = Correlation::from_mcp(&frame.to_string());
+        assert_eq!(
+            correlation.attributes(),
+            vec![("jsonrpc.request.id", "call-8".into())]
+        );
+        assert!(correlation.parent().is_valid());
+        assert!(correlation.parent().trace_state().header().is_empty());
     }
 
     #[test]
