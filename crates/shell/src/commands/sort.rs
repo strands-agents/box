@@ -114,7 +114,7 @@ fn parse_key_spec(s: &str) -> Result<KeySpec, Box<dyn std::error::Error + Send +
     Ok(ks)
 }
 
-fn extract_key(line: &str, field: usize, sep: Option<char>) -> &str {
+fn extract_key(line: &str, field: usize, end_field: Option<usize>, sep: Option<char>) -> &str {
     if field == 0 {
         return line;
     }
@@ -123,7 +123,17 @@ fn extract_key(line: &str, field: usize, sep: Option<char>) -> &str {
     } else {
         line.split_whitespace().collect()
     };
-    parts.get(field - 1).copied().unwrap_or("")
+    let Some(start) = parts.get(field - 1) else {
+        return "";
+    };
+    let start_offset = start.as_ptr() as usize - line.as_ptr() as usize;
+    let end_offset = end_field
+        .and_then(|end| end.checked_sub(1))
+        .and_then(|end| parts.get(end))
+        .map_or(line.len(), |end| {
+            end.as_ptr() as usize - line.as_ptr() as usize + end.len()
+        });
+    line.get(start_offset..end_offset).unwrap_or("")
 }
 
 #[command("sort")]
@@ -175,11 +185,16 @@ async fn cmd_sort(os: &Mediated, args: &[String]) -> CommandResult {
         .as_ref()
         .map_or(ignore_blanks, |k| k.ignore_blanks || ignore_blanks);
 
+    let end_field = if eff_numeric {
+        Some(field)
+    } else {
+        key_spec.as_ref().and_then(|k| k.end_field)
+    };
     let mut lines = read_lines(os, &files).await?;
 
     let cmp = |a: &String, b: &String| -> std::cmp::Ordering {
-        let mut ka = extract_key(a, field, sep);
-        let mut kb = extract_key(b, field, sep);
+        let mut ka = extract_key(a, field, end_field, sep);
+        let mut kb = extract_key(b, field, end_field, sep);
         if eff_blanks {
             ka = ka.trim_start();
             kb = kb.trim_start();
@@ -204,8 +219,8 @@ async fn cmd_sort(os: &Mediated, args: &[String]) -> CommandResult {
 
     if unique {
         lines.dedup_by(|a, b| {
-            let ka = extract_key(a, field, sep);
-            let kb = extract_key(b, field, sep);
+            let ka = extract_key(a, field, end_field, sep);
+            let kb = extract_key(b, field, end_field, sep);
             if eff_fold {
                 ka.to_lowercase() == kb.to_lowercase()
             } else {

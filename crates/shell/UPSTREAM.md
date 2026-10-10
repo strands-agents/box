@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: sort-key-span
+
+Textual key selection compared only the starting field, ignoring a requested range or the remaining fields. Textual keys now use the requested span; numeric keys retain the existing single-field interpretation.
+The regression is in `tests/box_sort_key_span.rs`.
