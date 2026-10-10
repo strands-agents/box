@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: date-percent-escape
+
+Date formats now consume percent directives once, preserving escaped percent signs instead of replacing directives inside %% escapes.
+Regression coverage: tests/box_date_percent_escape.rs. Existing interfaces and effect admission remain unchanged.

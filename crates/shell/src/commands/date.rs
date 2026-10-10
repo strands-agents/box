@@ -105,18 +105,24 @@ async fn cmd_date(os: &Mediated, args: &[String]) -> CommandResult {
     ];
 
     let fmt = if format.is_empty() { "%c" } else { &format };
-    let result = fmt
-        .replace("%Y", &format!("{:04}", year))
-        .replace("%m", &format!("{:02}", month))
-        .replace("%d", &format!("{:02}", day))
-        .replace("%H", &format!("{:02}", hour))
-        .replace("%M", &format!("{:02}", min))
-        .replace("%S", &format!("{:02}", sec))
-        .replace("%a", wday_names[wday])
-        .replace("%b", month_names[(month - 1) as usize])
-        .replace(
-            "%c",
-            &format!(
+    let mut result = String::new();
+    let mut chars = fmt.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => result.push('%'),
+            Some('Y') => result.push_str(&format!("{:04}", year)),
+            Some('m') => result.push_str(&format!("{:02}", month)),
+            Some('d') => result.push_str(&format!("{:02}", day)),
+            Some('H') => result.push_str(&format!("{:02}", hour)),
+            Some('M') => result.push_str(&format!("{:02}", min)),
+            Some('S') => result.push_str(&format!("{:02}", sec)),
+            Some('a') => result.push_str(wday_names[wday]),
+            Some('b') => result.push_str(month_names[(month - 1) as usize]),
+            Some('c') => result.push_str(&format!(
                 "{} {} {:2} {:02}:{:02}:{:02} UTC {}",
                 wday_names[wday],
                 month_names[(month - 1) as usize],
@@ -125,8 +131,14 @@ async fn cmd_date(os: &Mediated, args: &[String]) -> CommandResult {
                 min,
                 sec,
                 year
-            ),
-        );
+            )),
+            Some(other) => {
+                result.push('%');
+                result.push(other);
+            }
+            None => result.push('%'),
+        }
+    }
 
     let mut w = io::stdout()?;
     wprintln!(w, "{}", result)?;
