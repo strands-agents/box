@@ -40,7 +40,10 @@ o = load("oracle/verdict.json", {})
 gen = load("generated.json", {})
 residuals = list(gen.get("residuals", []))
 checks = o.get("checks", [])
-failed = o.get("failed", [])
+failed = list(o.get("failed", []))
+for check in checks:
+    if not check["ok"] and check["id"] not in failed:
+        failed.append(check["id"])
 
 if not a:
     verdict, why = "ERROR", "agent A wrote no result (harness fault)"

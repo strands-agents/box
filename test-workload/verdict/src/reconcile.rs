@@ -124,7 +124,12 @@ pub struct Inputs {
 pub fn reconcile(dimension: &str, cli: Cli, platform: &str, inputs: &Inputs) -> Row {
     let mut residuals = inputs.generated.residuals.clone();
     let checks = &inputs.oracle.checks;
-    let failed = &inputs.oracle.failed;
+    let mut failed = inputs.oracle.failed.clone();
+    for check in checks.iter().filter(|check| !check.ok) {
+        if !failed.contains(&check.id) {
+            failed.push(check.id.clone());
+        }
+    }
 
     let (verdict, note) = match &inputs.run {
         // 1. Nothing to reconcile: a harness fault, not a containment result.
@@ -257,6 +262,23 @@ mod tests {
             checks: vec![check("a", true, "fine"), check("b", true, "fine")],
             failed: vec![],
         }
+    }
+
+    #[test]
+    fn a_failed_check_is_fail_without_the_redundant_failed_list() {
+        let oracle: OracleVerdict = serde_json::from_str(
+            r#"{"checks":[{"id":"binary","ok":false,"evidence":"binary absent"}]}"#,
+        )
+        .unwrap();
+        let row = reconcile(
+            "rust",
+            Cli::Claude,
+            "linux",
+            &inputs(Some(valid_run()), oracle),
+        );
+        assert_eq!(row.verdict, "FAIL");
+        assert_eq!(row.residuals, vec!["binary"]);
+        assert!(row.note.contains("binary absent"));
     }
 
     #[test]
