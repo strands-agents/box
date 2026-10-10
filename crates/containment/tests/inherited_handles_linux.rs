@@ -91,8 +91,6 @@ fn containment_and_reexec_remove_inherited_handles() {
         .arg(config_file.path())
         .arg("--config-sha256")
         .arg(config_sha256)
-        .arg("--target-env-json")
-        .arg("{}")
         .arg("--")
         .arg(probe)
         .args([

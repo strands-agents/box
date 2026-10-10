@@ -8,6 +8,9 @@ use std::process::{Command, Output};
 use containment::{ContainmentConfig, Network, Operation, Scope};
 use sha2::{Digest as _, Sha256};
 
+#[path = "support/target_env.rs"]
+mod target_env;
+
 const TRUST_BUNDLE_PEM: &str =
     "-----BEGIN CERTIFICATE-----\nMIIBfixture\n-----END CERTIFICATE-----\n";
 
@@ -104,11 +107,9 @@ fn contained(
         .arg("--config")
         .arg(&config_path)
         .arg("--config-sha256")
-        .arg(digest)
-        .arg("--target-env-json")
-        .arg(serde_json::to_string(&environment).expect("target environment"))
-        .arg("--")
-        .arg(executable);
+        .arg(digest);
+    let _environment = target_env::attach(&mut command, &environment);
+    command.arg("--").arg(executable);
     for argument in arguments {
         command.arg(argument);
     }

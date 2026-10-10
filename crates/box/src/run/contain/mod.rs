@@ -11,6 +11,7 @@
 
 pub(crate) mod boundary;
 pub(crate) mod executable;
+pub(crate) mod masked_proc;
 pub(crate) mod runtime_minimum;
 pub(crate) mod supervise;
 pub(crate) mod terminal;

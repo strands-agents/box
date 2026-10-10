@@ -236,9 +236,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries eight top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
-  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, and `[telemetry.<kind>]`.** A ninth is a
-  fifth input until argued otherwise, the way `env` is argued above. `[agent]` and each
+  **`box.toml` carries nine top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`, and `[containment]`.**
+  A tenth is a fifth input until argued otherwise, the way `env` is argued above. `[containment]` is
+  argued in `four_inputs.rs`: it grants no authority and only widens what the workload observes. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is four fields — `command`, `workspace`, `env`,
   and `filesystem` — and `filesystem` holds the path lists: eight for `[agent]`, six
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
@@ -740,7 +741,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     trampoline or the workload.
   - **Root bypasses dumpable entirely.** This defends against same-uid peers, never root.
   - **`cmdline`, `stat`, `status`, `mountinfo`, `net/*`, and `task/*/{stat,status,cmdline}` stay
-    readable.** Only the address space is protected, never the process topology.
+    readable.** Only the address space is protected, never the process topology. Under
+    `[containment] private_proc = false` they are readable by every leaf too, because the leaves
+    share the container's `/proc`, and a leaf can **write** a same-uid process's `oom_score_adj`
+    (the box's included): dumpable guards the address space, not that file. Accepted as a
+    residual, pinned by `shared_proc_linux.rs`.
   - **It stops the *read*, not the *copy*.** Un-wiped plaintext copies on the request path are
     fixed in `credentials` and `egress-gateway`.
   - **Applied only for the spelling that holds a secret.** The other verbs are CLI clients, and

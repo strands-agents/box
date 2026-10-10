@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ContainmentConfig;
 use crate::error::ContainmentError;
-use crate::model::{Operation, Scope};
+use crate::model::{Operation, ProcessInfoMode, Scope};
 
 use super::MECHANISM;
 
@@ -19,6 +19,12 @@ pub(crate) enum MountKind {
         /// The filesystem type to mount, e.g. `tmpfs` or `proc`.
         fstype: &'static str,
     },
+    /// The container's own procfs, bound recursively so the runtime's masks come with it. Planned
+    /// only for `ProcessInfoMode::AllowAll`: on a host that masks `/proc`, the kernel refuses a fresh
+    /// procfs in a user namespace, and this is the `/proc` that remains. What keeps the processes it
+    /// lists out of reach is the user namespace (the capability check refuses ptrace-class access to
+    /// any process outside it) and the PID namespace (signals); see docs/design/decisions.md.
+    SharedProc,
     /// A fresh empty regular file, with no host contents.
     EmptyFile,
 }
@@ -79,13 +85,19 @@ impl MountView {
             origin: MountOrigin::Scaffold,
         }];
 
-        // A fresh `/proc` is what makes the PID namespace visible as isolation rather than merely
-        // present: without it the workload reads the host's procfs and sees every process on the
-        // machine.
+        // `Isolated`: a fresh `/proc` is what makes the PID namespace visible as isolation rather
+        // than merely present, because without it the workload reads the container's procfs and
+        // sees every process in it. `AllowAll`: the caller accepted exactly that, so the view
+        // reuses the container's procfs, which is the only one a masked host allows.
+        let shared = config.process_info_mode() == ProcessInfoMode::AllowAll;
         entries.push(MountEntry {
-            source: None,
+            source: shared.then(|| PathBuf::from("/proc")),
             target: PathBuf::from("/proc"),
-            kind: MountKind::Fresh { fstype: "proc" },
+            kind: if shared {
+                MountKind::SharedProc
+            } else {
+                MountKind::Fresh { fstype: "proc" }
+            },
             writable: true,
             executable: false,
             origin: MountOrigin::Scaffold,
@@ -565,8 +577,58 @@ impl MountView {
                     None,
                 )
                 .map_err(|e| {
+                    // A masked host refuses every private procfs. Say so, because the bare `EPERM`
+                    // reads as a permissions bug the operator can fix, and it is not.
+                    if fstype == "proc" && e.raw_os_error() == Some(libc::EPERM) {
+                        let points = std::fs::read_to_string("/proc/self/mounts")
+                            .map(|table| masked_proc_points(&table))
+                            .unwrap_or_default();
+                        if !points.is_empty() {
+                            return refusal(masked_proc_reason(&points, &e));
+                        }
+                    }
                     refusal(format!(
                         "mounting a fresh {fstype} at '{}': {e}",
+                        target.display()
+                    ))
+                })?;
+            }
+            MountKind::SharedProc => {
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| refusal(format!("creating '{}': {e}", target.display())))?;
+                // `MS_REC`, because the kernel refuses a plain bind of a mount whose children are
+                // locked, and the runtime's masks are exactly such children.
+                mount_syscall(
+                    Some(Path::new("/proc")),
+                    &target,
+                    None,
+                    libc::MS_BIND | libc::MS_REC,
+                    None,
+                )
+                .map_err(|e| {
+                    refusal(format!(
+                        "binding the container's /proc to '{}': {e}",
+                        target.display()
+                    ))
+                })?;
+                // Only the top mount is remounted. The masks beneath are locked, and remounting one
+                // fails; they already carry the runtime's own restrictions. Every flag the kernel
+                // may have locked is kept, and `nosuid`/`nodev` are added as on the fresh procfs.
+                let current = statvfs_flags(&target)?;
+                mount_syscall(
+                    None,
+                    &target,
+                    None,
+                    libc::MS_REMOUNT
+                        | libc::MS_BIND
+                        | libc::MS_NOSUID
+                        | libc::MS_NODEV
+                        | kept_mount_flags(current),
+                    None,
+                )
+                .map_err(|e| {
+                    refusal(format!(
+                        "remounting the container's /proc at '{}' nosuid,nodev: {e}",
                         target.display()
                     ))
                 })?;
@@ -873,6 +935,71 @@ fn remount_writable_noexec(target: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV;
     remount_recursive(target, FLAGS, "no-exec")
+}
+
+/// What the box matches to add its own hint. Changing it breaks that match: grep the workspace.
+const MASKED_PROC_MARKER: &str = "masks parts of /proc";
+
+/// The mount points strictly under `/proc` in a mount table: the container runtime's masks.
+fn masked_proc_points(table: &str) -> Vec<PathBuf> {
+    table
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .map(|raw| PathBuf::from(unescape_mount_field(raw)))
+        .filter(|point| point != Path::new("/proc") && point.starts_with("/proc"))
+        .collect()
+}
+
+/// The refusal for a fresh procfs the kernel refused on a host that masks `/proc`.
+fn masked_proc_reason(points: &[PathBuf], error: &std::io::Error) -> String {
+    let mut named: Vec<String> = points
+        .iter()
+        .take(2)
+        .map(|point| point.display().to_string())
+        .collect();
+    if points.len() > 2 {
+        named.push("…".to_string());
+    }
+    format!(
+        "this host {MASKED_PROC_MARKER} ({}), so the kernel refuses a private procfs in a user \
+         namespace; a caller that accepts showing the host's process list can request \
+         ProcessInfoMode::AllowAll: {error}",
+        named.join(", ")
+    )
+}
+
+/// The flags a bind remount must carry over from the mount it remounts, because the kernel may have
+/// locked them when the mount crossed into this user namespace. `nosuid` and `nodev` are not here:
+/// the caller adds both unconditionally.
+fn kept_mount_flags(f_flag: libc::c_ulong) -> libc::c_ulong {
+    [
+        (libc::ST_RDONLY, libc::MS_RDONLY),
+        (libc::ST_NOEXEC, libc::MS_NOEXEC),
+        (libc::ST_NOATIME, libc::MS_NOATIME),
+        (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+        (libc::ST_RELATIME, libc::MS_RELATIME),
+    ]
+    .into_iter()
+    .filter(|(st, _)| f_flag & st != 0)
+    .fold(0, |flags, (_, ms)| flags | ms)
+}
+
+/// `statvfs(2)`'s `f_flag` for the mount at `target`.
+fn statvfs_flags(target: &Path) -> Result<libc::c_ulong, ContainmentError> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| refusal(format!("'{}' contains a NUL byte", target.display())))?;
+    // SAFETY: `statvfs` is plain old data; all-zero is a valid value to overwrite.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `stat` is a valid out-pointer.
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return Err(refusal(format!(
+            "reading the mount flags of '{}': {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(stat.f_flag)
 }
 
 /// Remount `target` and every submount beneath it with `flags`.
@@ -1495,6 +1622,85 @@ fn refusal(reason: String) -> ContainmentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RUNC_MASKED: &str = "\
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+tmpfs /proc/acpi tmpfs ro,relatime 0 0
+tmpfs /dev/null tmpfs rw 0 0
+tmpfs /proc/kcore tmpfs rw,nosuid 0 0
+proc /proc/sys proc ro,nosuid,nodev,noexec,relatime 0 0
+";
+
+    #[test]
+    fn a_runtime_masked_table_is_detected() {
+        assert_eq!(
+            masked_proc_points(RUNC_MASKED),
+            [
+                PathBuf::from("/proc/acpi"),
+                PathBuf::from("/proc/kcore"),
+                PathBuf::from("/proc/sys")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clean_table_and_a_bare_proc_are_not_masked() {
+        assert!(masked_proc_points("proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n").is_empty());
+        // `/procfoo` is not under `/proc`.
+        assert!(masked_proc_points("tmpfs /procfoo tmpfs rw 0 0\n").is_empty());
+    }
+
+    #[test]
+    fn the_masked_reason_carries_the_marker_two_points_and_the_os_error() {
+        let points = masked_proc_points(RUNC_MASKED);
+        let error = std::io::Error::from_raw_os_error(libc::EPERM);
+        let reason = masked_proc_reason(&points, &error);
+        assert!(reason.contains(MASKED_PROC_MARKER), "{reason}");
+        assert!(reason.contains("/proc/acpi, /proc/kcore, …"), "{reason}");
+        assert!(reason.contains("ProcessInfoMode::AllowAll"), "{reason}");
+        assert!(reason.ends_with(&error.to_string()), "{reason}");
+    }
+
+    /// **`AllowAll` plans the container's `/proc`, bound with its masks**; `Isolated` keeps the
+    /// fresh procfs that `the_scaffold_is_always_planned_and_the_root_is_first` pins.
+    #[test]
+    fn allow_all_plans_the_shared_proc() {
+        let config =
+            ContainmentConfig::new().set_process_info_mode(crate::model::ProcessInfoMode::AllowAll);
+        let entries = planned(&config);
+        let proc = entry_for(&entries, Path::new("/proc"));
+
+        assert_eq!(proc.kind, MountKind::SharedProc);
+        assert_eq!(proc.source.as_deref(), Some(Path::new("/proc")));
+        assert_eq!(proc.origin, MountOrigin::Scaffold);
+        assert!(!proc.executable);
+    }
+
+    /// **A locked flag on the container's `/proc` survives the remount**, or the kernel answers
+    /// `EPERM` on exactly the hosts this mode exists for.
+    #[test]
+    fn kept_mount_flags_keep_every_lockable_flag() {
+        let all = libc::ST_RDONLY
+            | libc::ST_NOEXEC
+            | libc::ST_NOATIME
+            | libc::ST_NODIRATIME
+            | libc::ST_RELATIME;
+        assert_eq!(
+            kept_mount_flags(all),
+            libc::MS_RDONLY
+                | libc::MS_NOEXEC
+                | libc::MS_NOATIME
+                | libc::MS_NODIRATIME
+                | libc::MS_RELATIME
+        );
+    }
+
+    /// `nosuid` and `nodev` are the caller's to add, never "kept".
+    #[test]
+    fn kept_mount_flags_add_nothing_to_a_plain_mount() {
+        assert_eq!(kept_mount_flags(0), 0);
+        assert_eq!(kept_mount_flags(libc::ST_NOSUID | libc::ST_NODEV), 0);
+    }
 
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
     /// `/proc/self/mounts` escapes exactly four characters, all below 128.

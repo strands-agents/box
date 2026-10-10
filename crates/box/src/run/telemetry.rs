@@ -131,6 +131,12 @@ impl EffectiveDecision {
         }
     }
 
+    /// The record a leaf that shares the container's `/proc` leaves, so an operator can reconstruct
+    /// which leaves could list the container's processes.
+    pub(crate) fn shared_proc(resource: impl Into<String>) -> Self {
+        Self::enforcement_permit("proc:shared", resource, "shared-proc")
+    }
+
     /// Create a denial for a gate that does not retain the raw policy rule.
     pub(crate) fn enforcement_deny(
         action: impl Into<String>,

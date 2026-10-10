@@ -43,7 +43,7 @@ fn launch(root: &Path, config: &ContainmentConfig, args: &[&str]) -> Output {
             "--config-sha256",
             &digest,
         ])
-        .args(["--target-env-json", "{}", "--"])
+        .arg("--")
         .arg(env!("CARGO_BIN_EXE_containment-test-probe"))
         .args(args)
         .current_dir("/")

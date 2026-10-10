@@ -1483,3 +1483,92 @@ fn below_trace_an_agent_span_is_answered_and_discarded() {
         "a debug target must keep no agent span: {text}"
     );
 }
+
+/// A policy that permits every command and spawning `hostname`, so the agent can start one tool.
+#[cfg(target_os = "linux")]
+const SPAWN_HOSTNAME: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program == "hostname" };
+"#;
+
+/// The `strands.box.policy.resource` of every decision record whose action is `action`.
+#[cfg(target_os = "linux")]
+fn resources_recorded_for(text: &str, action: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines().filter(|line| line.contains(action)) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let records = value["resourceLogs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|resource| resource["scopeLogs"].as_array().into_iter().flatten())
+            .flat_map(|scope| scope["logRecords"].as_array().into_iter().flatten());
+        for record in records {
+            let attribute = |key: &str| {
+                record["attributes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|item| item["key"] == key)
+                    .and_then(|item| item["value"]["stringValue"].as_str())
+                    .map(str::to_string)
+            };
+            if attribute("strands.box.policy.action").as_deref() == Some(action)
+                && let Some(resource) = attribute("strands.box.policy.resource")
+            {
+                found.push(resource);
+            }
+        }
+    }
+    found
+}
+
+/// **Every leaf that shares the container's `/proc` says so in the record**: the agent and each tool
+/// it starts, so an operator can reconstruct which processes could list the container's processes.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shared_proc_box_records_proc_shared_for_the_agent_and_its_tools() {
+    needs_a_box!("a_shared_proc_box_records_proc_shared_for_the_agent_and_its_tools");
+    let configured = Request::with_config(
+        "telemetry-proc-shared",
+        SPAWN_HOSTNAME,
+        "[containment]\nprivate_proc = false\n\n[tool.hostname]\ncommand = [\"hostname\"]\n",
+    )
+    .expect();
+    let output = configured.bash(r#"zsh -lc "hostname""#);
+    assert!(output.status.success(), "{output:?}");
+
+    let text = std::fs::read_to_string(default_records(&configured.root())).expect("the records");
+    let resources = resources_recorded_for(&text, "proc:shared");
+    assert!(
+        resources.iter().any(|resource| resource == "agent"),
+        "the agent shares /proc and must say so: {resources:?}\n{text}"
+    );
+    assert!(
+        resources.iter().any(|resource| resource == "hostname"),
+        "the tool shares /proc and must say so: {resources:?}\n{text}"
+    );
+}
+
+/// **A box that keeps its private `/proc` records no `proc:shared`.**
+#[cfg(target_os = "linux")]
+#[test]
+fn a_private_proc_box_records_no_proc_shared() {
+    needs_a_box!("a_private_proc_box_records_no_proc_shared");
+    let configured = Request::with_config(
+        "telemetry-proc-private",
+        SPAWN_HOSTNAME,
+        "[tool.hostname]\ncommand = [\"hostname\"]\n",
+    )
+    .expect();
+    assert!(configured.bash(r#"zsh -lc "hostname""#).status.success());
+
+    let text = std::fs::read_to_string(default_records(&configured.root())).expect("the records");
+    assert!(
+        resources_recorded_for(&text, "proc:shared").is_empty(),
+        "{text}"
+    );
+}
