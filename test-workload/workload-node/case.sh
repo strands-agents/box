@@ -57,7 +57,7 @@ wl_checks() {
   wl_assert_file node-package "$proj/package.json" name
   wl_assert_glob node-dependency "$proj/node_modules/left-pad"
   wl_assert_file node-module "$proj/pad.js" "left-pad"
-  wl_assert_any node-test-output "$proj/test-out.txt" "# pass 1" "ok 1"
+  wl_assert_test_output node-test-output "$proj/test-out.txt" node
   wl_assert_journal node-journal-spawn permit "shell:spawn" node
   wl_note_codex_arg0 "$proj/test-out.txt"
 }

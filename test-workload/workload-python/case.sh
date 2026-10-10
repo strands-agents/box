@@ -38,7 +38,7 @@ wl_checks() {
   local proj="$1"
   wl_assert_file py-module "$proj/calc.py" "def add"
   wl_assert_file py-test-file "$proj/test_calc.py" "add("
-  wl_assert_file py-pytest-output "$proj/pytest-out.txt" "passed"
+  wl_assert_test_output py-pytest-output "$proj/pytest-out.txt" python
   if [ "$WL_PLATFORM" = macos ]; then
     wl_assert_glob py-pytest-installed "$proj/.venv/lib/*/site-packages/pytest*"
   else

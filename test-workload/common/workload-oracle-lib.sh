@@ -62,6 +62,42 @@ wl_assert_any() {
   wl_check "$id" 0 "$f has none of [$*]: $(head -c 200 "$f" | tr '\n' ' ')"
 }
 
+# wl_assert_test_output <id> <file> <python|node|rust> — a test summary passed without failures.
+wl_assert_test_output() {
+  local id="$1" f="$2" language="$3" ok
+  if [ ! -f "$f" ]; then wl_check "$id" 0 "absent: $f"; return; fi
+  ok="$(python3 - "$f" "$language" <<'PY'
+import re, sys
+lines = open(sys.argv[1], errors="replace").read().splitlines()
+language = sys.argv[2]
+passed = False
+failed = False
+def count(line, result):
+    found = re.search(r"\b(\d+)\s+" + result + r"\b", line)
+    return int(found.group(1)) if found else None
+for line in lines:
+    line = line.strip()
+    if language == "node":
+        failed |= line.startswith(("not ok ", "Bail out!"))
+        failed |= bool(re.match(r"# fail\s+[1-9]\d*\b", line))
+        failed |= (count(line, "failing") or 0) > 0
+        passed |= bool(re.match(r"ok\s+\d+\b", line))
+        passed |= bool(re.match(r"# pass\s+[1-9]\d*\b", line))
+        passed |= (count(line, "passing") or 0) > 0
+    elif language == "python":
+        failed |= line.startswith("FAILED") or (count(line, "failed") or 0) > 0
+        failed |= (count(line, "errors?") or 0) > 0
+        passed |= line == "OK" or (count(line, "passed") or 0) > 0
+    elif language == "rust":
+        failed |= "test result: FAILED" in line or (count(line, "failed") or 0) > 0
+        passed |= "test result: ok" in line or count(line, "failed") == 0
+print("1" if passed and not failed else "0")
+PY
+)"
+  if [ "$ok" = 1 ]; then wl_check "$id" 1 "$language tests passed: $f"
+  else wl_check "$id" 0 "$language tests did not pass: $f"; fi
+}
+
 # wl_assert_glob <id> <pattern> — at least one path matches (build artefacts).
 wl_assert_glob() {
   local id="$1" pat="$2" n

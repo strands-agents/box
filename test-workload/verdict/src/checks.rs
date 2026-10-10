@@ -114,23 +114,59 @@ fn node(oracle: &mut Oracle, project: &Path) {
     oracle.assert_file("node-source", &project.join("index.js"), None);
     // One outcome, two spellings: node's TAP reporter prints `# pass 1` where a
     // bare runner prints `ok 1`. Asserting one fails a true green.
-    oracle.assert_any(
-        "node-tests-passed",
-        &project.join("test-output.txt"),
-        &["# pass 1", "ok 1", "1 passing"],
-    );
+    let output_path = project.join("test-output.txt");
+    let output = std::fs::read(&output_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&output);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let failed = lines.iter().any(|line| {
+        line.starts_with("not ok ")
+            || line.starts_with("Bail out!")
+            || reported_count(line, "failing").is_some_and(|count| count > 0)
+            || line
+                .strip_prefix("# fail ")
+                .and_then(|count| count.parse::<usize>().ok())
+                .is_some_and(|count| count > 0)
+    });
+    let passed = lines.iter().any(|line| {
+        line.strip_prefix("# pass ")
+            .and_then(|count| count.parse::<usize>().ok())
+            .is_some_and(|count| count > 0)
+            || line.starts_with("ok 1 ")
+            || *line == "ok 1"
+            || reported_count(line, "passing").is_some_and(|count| count > 0)
+    });
+    oracle.check("node-tests-passed", passed && !failed, &text);
     oracle.assert_journal("node-journal-spawn", true, "shell:spawn", "node");
     oracle.assert_no_denial("node-no-project-denial", "project");
+}
+
+fn reported_count(line: &str, result: &str) -> Option<usize> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.windows(2).find_map(|pair| {
+        if pair[1].trim_matches(|character: char| !character.is_alphabetic()) == result {
+            pair[0].parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// A Python project in a virtualenv the box's policy names.
 fn python(oracle: &mut Oracle, project: &Path) {
     oracle.assert_file("python-source", &project.join("main.py"), None);
-    oracle.assert_any(
-        "python-tests-passed",
-        &project.join("test-output.txt"),
-        &["OK", "passed", "1 passed"],
-    );
+    let output = std::fs::read(project.join("test-output.txt")).unwrap_or_default();
+    let text = String::from_utf8_lossy(&output);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let failed = lines.iter().any(|line| {
+        line.starts_with("FAILED")
+            || reported_count(line, "failed").is_some_and(|count| count > 0)
+            || reported_count(line, "error").is_some_and(|count| count > 0)
+            || reported_count(line, "errors").is_some_and(|count| count > 0)
+    });
+    let passed = lines
+        .iter()
+        .any(|line| *line == "OK" || reported_count(line, "passed").is_some_and(|count| count > 0));
+    oracle.check("python-tests-passed", passed && !failed, &text);
     oracle.assert_journal("python-journal-spawn", true, "shell:spawn", "python");
     oracle.assert_no_denial("python-no-project-denial", "project");
 }
@@ -148,11 +184,17 @@ fn rust(oracle: &mut Oracle, project: &Path) {
             .join("*")
             .to_string_lossy(),
     );
-    oracle.assert_any(
-        "rust-tests-passed",
-        &project.join("test-output.txt"),
-        &["test result: ok", "0 failed"],
-    );
+    let output = std::fs::read(project.join("test-output.txt")).unwrap_or_default();
+    let text = String::from_utf8_lossy(&output);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let failed = lines.iter().any(|line| {
+        line.starts_with("test result: FAILED")
+            || reported_count(line, "failed").is_some_and(|count| count > 0)
+    });
+    let passed = lines.iter().any(|line| {
+        line.starts_with("test result: ok.") || reported_count(line, "failed") == Some(0)
+    });
+    oracle.check("rust-tests-passed", passed && !failed, &text);
     oracle.assert_journal("rust-journal-spawn", true, "shell:spawn", "cargo");
     oracle.assert_no_denial("rust-no-project-denial", "project");
 }
@@ -179,6 +221,90 @@ fn agent_hook(oracle: &mut Oracle, project: &Path) {
 mod tests {
     use super::*;
     use crate::Cli;
+
+    #[test]
+    fn a_failed_tap_test_does_not_count_as_a_pass() {
+        let dir = std::env::temp_dir().join(format!("wl-node-tap-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        for (output, expected) in [
+            ("not ok 1 - test\n# pass 0\n# fail 1\n", false),
+            (
+                "ok 1 - first\nnot ok 2 - second\n# pass 1\n# fail 1\n",
+                false,
+            ),
+            ("ok 1 - test\n# pass 1\n# fail 0\n", true),
+            ("1 passing (2ms)\n", true),
+            ("2 passing (2ms)\n", true),
+            ("1 passing (2ms)\n1 failing\n", false),
+        ] {
+            std::fs::write(project.join("test-output.txt"), output).unwrap();
+            let mut oracle = Oracle::with_journal(&dir, "node", Cli::Claude, "");
+            node(&mut oracle, &project);
+            assert_eq!(
+                oracle
+                    .verdict()
+                    .checks
+                    .iter()
+                    .find(|check| check.id == "node-tests-passed")
+                    .unwrap()
+                    .ok,
+                expected,
+                "{output}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_python_and_rust_summaries_do_not_pass() {
+        let dir = std::env::temp_dir().join(format!("wl-result-summaries-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        for (dimension, output, expected) in [
+            ("python", "=== 1 failed, 1 passed in 0.1s ===\n", false),
+            ("python", "=== 0 passed, 1 error in 0.1s ===\n", false),
+            ("python", "=== 2 passed in 0.1s ===\n", true),
+            ("python", "Ran 1 test in 0.001s\n\nOK\n", true),
+            (
+                "python",
+                "Ran 1 test in 0.001s\nFAILED (failures=1)\n",
+                false,
+            ),
+            (
+                "rust",
+                "test result: FAILED. 1 passed; 10 failed; 0 ignored;\n",
+                false,
+            ),
+            (
+                "rust",
+                "test result: ok. 1 passed; 0 failed; 0 ignored;\n",
+                true,
+            ),
+            (
+                "rust",
+                "test result: ok. 1 passed; 0 failed;\ntest result: FAILED. 0 passed; 1 failed;\n",
+                false,
+            ),
+        ] {
+            std::fs::write(project.join("test-output.txt"), output).unwrap();
+            let mut oracle = Oracle::with_journal(&dir, dimension, Cli::Claude, "");
+            run(&mut oracle, dimension);
+            let id = format!("{dimension}-tests-passed");
+            assert_eq!(
+                oracle
+                    .verdict()
+                    .checks
+                    .iter()
+                    .find(|check| check.id == id)
+                    .unwrap()
+                    .ok,
+                expected,
+                "{output}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn every_declared_dimension_dispatches() {

@@ -37,7 +37,7 @@ wl_checks() {
   wl_assert_glob rust-build-artefact "$proj/target/debug/libboxdemo.* $proj/target/debug/deps/boxdemo*"
   wl_assert_file rust-build-output "$proj/build-out.txt" "Finished"
   if [ "$WL_PLATFORM" = macos ]; then
-    wl_assert_file rust-test-passed "$proj/test-out.txt" "test result: ok"
+    wl_assert_test_output rust-test-passed "$proj/test-out.txt" rust
   else
     # F59: the link step cannot complete here, so the Linux row asserts that the
     # attempt was made and left its output behind — not what that output says. The
