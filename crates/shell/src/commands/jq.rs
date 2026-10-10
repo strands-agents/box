@@ -25,7 +25,7 @@ fn run_filter(
     slurp: bool,
     raw_output: bool,
     compact: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, i32), String> {
     use jaq_core::load::{Arena, File, Loader};
 
     let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
@@ -94,7 +94,7 @@ fn run_filter(
     } else {
         let trimmed = input_str.trim();
         if trimmed.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 4));
         }
         let mut vals = Vec::new();
         let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
@@ -144,17 +144,12 @@ fn run_filter(
         }
     }
 
-    // Encode exit_status info as a special marker if needed
-    // We'll handle this in the caller
-    if let Some(ref v) = last_json {
-        if v.is_null() || *v == serde_json::Value::Bool(false) {
-            output.push("\x00EXIT_FALSE".to_string());
-        }
-    } else {
-        output.push("\x00EXIT_FALSE".to_string());
-    }
-
-    Ok(output)
+    let status = match last_json {
+        None => 4,
+        Some(serde_json::Value::Null | serde_json::Value::Bool(false)) => 1,
+        Some(_) => 0,
+    };
+    Ok((output, status))
 }
 
 #[command("jq")]
@@ -234,23 +229,15 @@ async fn cmd_jq(os: &Mediated, args: &[String]) -> CommandResult {
     );
 
     match result {
-        Ok(lines) => {
+        Ok((lines, status)) => {
             let mut w = io::stdout()?;
-            let mut saw_exit_false = false;
             for line in &lines {
-                if line == "\x00EXIT_FALSE" {
-                    saw_exit_false = true;
-                    continue;
-                }
                 wprint!(w, "{}", line)?;
                 if !join_output {
                     wprintln!(w)?;
                 }
             }
-            if exit_status && saw_exit_false {
-                return Ok(1);
-            }
-            Ok(0)
+            Ok(if exit_status { status } else { 0 })
         }
         Err(msg) => {
             let mut e = io::stderr()?;

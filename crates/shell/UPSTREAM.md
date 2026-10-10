@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: jq-output-status
+
+Jq filter results now carry exit status separately from output text. Valid raw text cannot collide with an internal marker; -e distinguishes no results from a false or null final result.
+Contract source: https://jqlang.org/manual/.
+Regression coverage: tests/box_jq_output_status.rs. Existing interfaces and safe env/halt stubs remain unchanged.
