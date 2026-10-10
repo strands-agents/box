@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: sed-numeric-ranges
+
+The vendored sed kept a numeric address range active when its end was at or before its start. It now closes that range on its first selected line, while preserving regular expression range behavior.
+Regression coverage is in `tests/box_sed_numeric_ranges.rs`.

@@ -569,7 +569,7 @@ async fn process_stream<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
                 (Some(a1), Some(a2)) => {
                     if !in_range[ci] {
                         if addr_matches(a1, lineno, &current, is_last) {
-                            in_range[ci] = true;
+                            in_range[ci] = !matches!(a2, Addr::Line(end) if lineno >= *end);
                             true
                         } else {
                             false
