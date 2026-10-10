@@ -58,10 +58,19 @@ async fn cmd_cat(os: &Mediated, args: &[String]) -> CommandResult {
         }
         return Ok(0);
     }
+    let mut stdin = None;
     for path in &files {
-        let fd = io::open(os, path, OpenFlags::read()).await?;
-        let mut r = io::take_reader(fd)?;
-        cat_stream(&mut r, &mut w, number, &mut lineno).await?;
+        if path == "-" {
+            if stdin.is_none() {
+                stdin = Some(io::stdin()?);
+            }
+            let reader = stdin.as_mut().ok_or("cat: standard input unavailable")?;
+            cat_stream(reader, &mut w, number, &mut lineno).await?;
+        } else {
+            let fd = io::open(os, path, OpenFlags::read()).await?;
+            let mut reader = io::take_reader(fd)?;
+            cat_stream(&mut reader, &mut w, number, &mut lineno).await?;
+        }
     }
     Ok(0)
 }

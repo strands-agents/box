@@ -1657,3 +1657,8 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: cat-standard-input
+
+The vendored cat opened the standard input operand as a file named dash. It now reads that operand from existing process standard input while preserving file order and line numbering.
+Regression coverage is in `tests/box_cat_standard_input.rs`.
