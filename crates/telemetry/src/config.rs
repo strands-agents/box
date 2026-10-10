@@ -156,6 +156,7 @@ impl Target {
 pub struct TelemetryConfig {
     box_name: String,
     targets: Vec<Target>,
+    resource_attributes: String,
 }
 
 impl TelemetryConfig {
@@ -165,6 +166,7 @@ impl TelemetryConfig {
         Self {
             box_name: box_name.into(),
             targets: Vec::new(),
+            resource_attributes: String::new(),
         }
     }
 
@@ -172,6 +174,13 @@ impl TelemetryConfig {
     #[must_use]
     pub fn with_target(mut self, target: Target) -> Self {
         self.targets.push(target);
+        self
+    }
+
+    /// Add the operator's resource attributes, in `OTEL_RESOURCE_ATTRIBUTES` syntax.
+    #[must_use]
+    pub fn with_resource_attributes(mut self, text: impl Into<String>) -> Self {
+        self.resource_attributes = text.into();
         self
     }
 
@@ -183,6 +192,10 @@ impl TelemetryConfig {
         &self.targets
     }
 
+    pub(crate) fn resource_attributes(&self) -> Result<Vec<(String, String)>> {
+        parsed_resource_attributes(&self.resource_attributes)
+    }
+
     /// Refuse a config no run could honour. The one owner of every rule about a target.
     pub fn validate(&self) -> Result<()> {
         if self.box_name.is_empty() {
@@ -190,6 +203,7 @@ impl TelemetryConfig {
                 reason: "the box name is empty".to_string(),
             });
         }
+        self.resource_attributes()?;
         for target in &self.targets {
             if target.destination.is_empty() {
                 return Err(TelemetryError::Config {
@@ -276,6 +290,79 @@ fn reaches_only_this_host(destination: &str) -> bool {
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
         None => false,
     }
+}
+
+/// The most bytes `OTEL_RESOURCE_ATTRIBUTES` may hold, because every relayed resource carries it.
+const RESOURCE_ATTRIBUTES_LIMIT: usize = 1024;
+
+/// The operator's resource attributes, in order, or the refusal for the first bad entry.
+fn parsed_resource_attributes(text: &str) -> Result<Vec<(String, String)>> {
+    let refuse = |entry: &str, why: &str| TelemetryError::Config {
+        reason: format!("OTEL_RESOURCE_ATTRIBUTES entry {entry:?} {why}"),
+    };
+    if text.len() > RESOURCE_ATTRIBUTES_LIMIT {
+        return Err(TelemetryError::Config {
+            reason: format!(
+                "OTEL_RESOURCE_ATTRIBUTES is {} bytes; write at most {RESOURCE_ATTRIBUTES_LIMIT}",
+                text.len()
+            ),
+        });
+    }
+    let mut parsed: Vec<(String, String)> = Vec::new();
+    for entry in text
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some((key, value)) = entry.split_once('=') else {
+            return Err(refuse(entry, "has no `=`; write key=value"));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(refuse(entry, "has an empty key"));
+        }
+        if key == "service.name" || key.starts_with(crate::export::RESERVED_PREFIX) {
+            return Err(refuse(
+                entry,
+                "names a reserved key; the box writes `service.name` and every `strands.box.` key itself",
+            ));
+        }
+        if parsed.iter().any(|(seen, _)| seen == key) {
+            return Err(TelemetryError::Config {
+                reason: format!("OTEL_RESOURCE_ATTRIBUTES names the key {key:?} twice"),
+            });
+        }
+        let Some(value) = percent_decoded(value.trim()) else {
+            return Err(refuse(
+                entry,
+                "has an invalid percent escape or a value that is not UTF-8",
+            ));
+        };
+        parsed.push((key.to_string(), value));
+    }
+    Ok(parsed)
+}
+
+/// `text` with each `%XX` decoded, or `None` for a bad escape or bytes that are not UTF-8.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let hex = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 #[cfg(test)]
@@ -439,5 +526,103 @@ mod tests {
         let rendered = format!("{secret:?}");
         assert!(!rendered.contains("vendor-key"), "{rendered}");
         assert!(rendered.contains("x-honeycomb-team"));
+    }
+
+    fn attributes(text: &str) -> Result<Vec<(String, String)>> {
+        TelemetryConfig::for_box("b")
+            .with_resource_attributes(text)
+            .resource_attributes()
+    }
+
+    fn refusal(text: &str) -> String {
+        let refused = TelemetryConfig::for_box("b")
+            .with_resource_attributes(text)
+            .validate()
+            .expect_err("this value must refuse");
+        refused.to_string()
+    }
+
+    #[test]
+    fn operator_resource_attributes_parse_and_percent_decode() {
+        let parsed = attributes(" tenant.id = acme ,conversation.id=c%2C42,token=a=b").unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                ("tenant.id".to_string(), "acme".to_string()),
+                ("conversation.id".to_string(), "c,42".to_string()),
+                ("token".to_string(), "a=b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unset_or_empty_value_adds_no_attribute() {
+        assert!(
+            TelemetryConfig::for_box("b")
+                .resource_attributes()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(attributes("").unwrap().is_empty());
+        assert!(attributes("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_blank_segment_is_ignored() {
+        assert_eq!(
+            attributes("a=1,,b=2,").unwrap(),
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_operator_attribute_refuses() {
+        for (text, entry) in [("tenant", "tenant"), ("a=1,=2", "=2")] {
+            let reason = refusal(text);
+            assert!(reason.contains("OTEL_RESOURCE_ATTRIBUTES"), "{reason}");
+            assert!(reason.contains(&format!("{entry:?}")), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_operator_attribute_refuses() {
+        let reason = refusal("a=1,a=2");
+        assert!(
+            reason.contains("\"a\"") && reason.contains("twice"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_reserved_operator_attribute_refuses() {
+        for text in [
+            "service.name=x",
+            "strands.box.name=x",
+            "strands.box.policy.verdict=permit",
+        ] {
+            let reason = refusal(text);
+            assert!(reason.contains(&format!("{text:?}")), "{reason}");
+            assert!(reason.contains("reserved"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_percent_escape_refuses() {
+        for text in ["a=%", "a=%4", "a=%zz", "a=%ff", "a=%+f"] {
+            let reason = refusal(text);
+            assert!(reason.contains("percent"), "{text}: {reason}");
+        }
+    }
+
+    #[test]
+    fn an_operator_attribute_value_over_the_bound_refuses() {
+        let at_the_bound = format!("a={}", "x".repeat(RESOURCE_ATTRIBUTES_LIMIT - 2));
+        assert_eq!(attributes(&at_the_bound).unwrap().len(), 1);
+        let reason = refusal(&format!("{at_the_bound}y"));
+        assert!(reason.contains("OTEL_RESOURCE_ATTRIBUTES"), "{reason}");
+        assert!(reason.contains("1024"), "{reason}");
     }
 }

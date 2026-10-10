@@ -255,7 +255,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   because the stamp pushes heap-allocated attributes into every entry. The extra 707 MB is this crate's,
   not the library's, and the workload triggers it at will against the process holding the CA private
   key. The permit is therefore taken **before** the decode, and
-  `a_body_naming_too_many_resources_is_refused_on_every_route` pins the bound. Do not move the permit
+  `a_body_naming_too_many_resources_is_refused_on_every_route` pins the bound. The operator's
+  `OTEL_RESOURCE_ATTRIBUTES` adds to every stamped entry, so `RESOURCE_ATTRIBUTES_LIMIT` caps it at
+  1024 bytes, and `an_operator_attribute_value_over_the_bound_refuses` pins the cap. The stamp's peak
+  with the cap reached is not measured. Do not move the permit
   back below the decode, and do not raise the limit without re-measuring.
 - **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's `Mutex<tokio::fs::File>` is held across
   `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay

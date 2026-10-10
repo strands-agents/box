@@ -1483,3 +1483,112 @@ fn below_trace_an_agent_span_is_answered_and_discarded() {
         "a debug target must keep no agent span: {text}"
     );
 }
+
+/// Every resource in a records file, as `(key, string value)` pairs.
+fn record_resources(text: &str) -> Vec<Vec<(String, String)>> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let batch: serde_json::Value =
+            serde_json::from_str(line).expect("one OTLP request per line");
+        for lane in ["resourceLogs", "resourceSpans"] {
+            for resource in batch[lane].as_array().into_iter().flatten() {
+                found.push(
+                    resource["resource"]["attributes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|kv| {
+                            (
+                                kv["key"].as_str().unwrap_or("").to_string(),
+                                kv["value"]["stringValue"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                            )
+                        })
+                        .collect(),
+                );
+            }
+        }
+    }
+    found
+}
+
+/// **Every record a run writes carries the operator's resource attributes.**
+#[test]
+fn operator_resource_attributes_reach_every_record() {
+    needs_a_box!("operator_resource_attributes_reach_every_record");
+    let configured = Request::with_policy("tel-op-every", READ_ONE_FILE)
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "tenant.id=acme,conversation.id=c%2C42",
+        )
+        .expect();
+    std::fs::write(configured.box_home().join("allowed.txt"), "public").expect("the allowed file");
+    assert!(
+        configured
+            .bash("zsh -c 'cat $HOME/allowed.txt'")
+            .status
+            .success()
+    );
+
+    let text = std::fs::read_to_string(default_records(&configured.root())).expect("the records");
+    let resources = record_resources(&text);
+    assert!(
+        resources.len() >= 2,
+        "a start record and a decision at least: {text}"
+    );
+    for resource in &resources {
+        for (key, expected) in [("tenant.id", "acme"), ("conversation.id", "c,42")] {
+            let values: Vec<_> = resource
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(values, [expected], "{key} on {resource:?}");
+        }
+    }
+}
+
+/// **A reserved key refuses the run, and the workload never starts.**
+#[test]
+fn a_reserved_operator_attribute_refuses_before_the_workload_starts() {
+    needs_a_box!("a_reserved_operator_attribute_refuses_before_the_workload_starts");
+    let configured = Request::with_policy("tel-op-reserved", READ_ONE_FILE).expect();
+    let output = configured
+        .command_for("/bin/bash")
+        .env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "strands.box.policy.verdict=permit",
+        )
+        .args(["-c", "echo workload-ran"])
+        .output()
+        .expect("spawn strands-box run");
+    assert!(
+        !output.status.success(),
+        "a reserved key must refuse the run"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("OTEL_RESOURCE_ATTRIBUTES"), "{stderr}");
+    assert!(
+        stderr.contains("strands.box.policy.verdict=permit"),
+        "{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("workload-ran"),
+        "the workload must never start"
+    );
+}
+
+/// **The operator's variable stays in `run`, and the workload does not see it.**
+#[test]
+fn the_workload_does_not_see_operator_resource_attributes() {
+    needs_a_box!("the_workload_does_not_see_operator_resource_attributes");
+    let configured = Request::with_policy("tel-op-hidden", READ_ONE_FILE)
+        .env("OTEL_RESOURCE_ATTRIBUTES", "tenant.id=acme")
+        .expect();
+    let output = configured.bash("echo \"[${OTEL_RESOURCE_ATTRIBUTES-absent}]\"");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[absent]"), "{stdout}");
+}

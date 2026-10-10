@@ -1780,6 +1780,18 @@ read as a permit the box had granted. The reserve is `strands.box.` and not all 
 the Strands Agents SDK writes its own attributes under `strands.`. Any future box-owned key must sit
 under `strands.box.`.
 
+<a id="the-operator-adds-resource-identity-through-the-environment"></a>
+### The operator adds resource identity through `OTEL_RESOURCE_ATTRIBUTES`, and the agent cannot override it
+
+The `run` process reads `OTEL_RESOURCE_ATTRIBUTES` once, and every box record and every relayed
+payload carries those keys on its resource, so a backend attributes a decision to a tenant or a
+conversation without a header the workload chose to send. The box's own keys and `service.name` cannot
+be set this way, and a malformed value stops the run before the workload starts. On a relayed payload,
+an agent attribute under an operator key is removed before the stamp. A `box run` flag and a
+`[telemetry]` field were rejected: the first moves the CLI, and the second is fixed per box and takes a
+name from the target labels. The cost: the identity is per process environment, so a caller that
+starts many runs from one shell must set it per run.
+
 <a id="the-collector-listens-on-a-second-loopback-port"></a>
 ### The collector listens on a second loopback port
 
