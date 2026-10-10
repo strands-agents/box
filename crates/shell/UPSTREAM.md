@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+
+### Local command correctness: uniq-empty-lines
+
+An empty string doubled as the sentinel for no pending record, so blank-line groups disappeared. The pending count now distinguishes no record from a blank record, preserving blank groups and their counts.
+The regression is in `tests/box_uniq_empty_lines.rs`.

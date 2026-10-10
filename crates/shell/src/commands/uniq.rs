@@ -22,7 +22,7 @@ async fn flush_line(
     only_dup: bool,
     only_uniq: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if prev.is_empty() {
+    if cnt == 0 {
         return Ok(());
     }
     let show = (!only_dup && !only_uniq) || (only_dup && cnt > 1) || (only_uniq && cnt == 1);
