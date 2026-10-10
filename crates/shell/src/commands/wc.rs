@@ -35,7 +35,7 @@ async fn count_stream<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> std::io::Re
             if b == b'\n' {
                 c.lines += 1;
             }
-            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+            if matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c') {
                 in_word = false;
             } else if !in_word {
                 in_word = true;

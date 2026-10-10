@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+
+### Local command correctness: wc-ascii-whitespace
+
+Word counts did not recognize ASCII vertical tab and form feed as separators. Both bytes now delimit words, while byte and newline counts keep their existing behavior.
+The regression is in `tests/box_wc_ascii_whitespace.rs`.
