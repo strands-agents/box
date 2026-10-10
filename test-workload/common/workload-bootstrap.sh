@@ -325,18 +325,28 @@ for DIM in $CASES; do
     bash "$CASE_DIR/agent-a.sh" "$RUN_DIR" >>"$RUN_DIR/case.log" 2>&1 || log "$CELL: agent-a nonzero (captured)"
     bash "$CASE_DIR/oracle.sh" stop    >>"$RUN_DIR/case.log" 2>&1 || log "$CELL: oracle stop note"
     bash "$CASE_DIR/agent-b.sh" "$RUN_DIR" >>"$RUN_DIR/case.log" 2>&1 || log "$CELL: agent-b nonzero (captured)"
-    # Guarded on the row being re-serialized, not on the file existing: a
-    # verdict.json that exists but does not parse would otherwise drop the
-    # cell from the aggregate silently.
-    if [ -f "$RUN_DIR/verdict.json" ] \
-       && python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' \
-            "$RUN_DIR/verdict.json" >> "$ROWS"; then
-      log "$CELL: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["verdict"], d.get("residuals"), d.get("note","")[:120])' "$RUN_DIR/verdict.json")"
-    else
-      printf '{"mode":"workload","platform":"%s","dimension":"%s","agent":"%s","verdict":"ERROR","residuals":["no-verdict"],"note":"case produced no parseable verdict.json"}\n' \
-        "$PLATFORM" "$DIM" "$AGENT" >> "$ROWS"
-      log "$CELL: ERROR — no parseable verdict.json"
+    # Keep an invalid cell visible instead of letting it pass or disappear.
+    if ! CELL_ROW="$(python3 - "$RUN_DIR/verdict.json" "$PLATFORM" "$DIM" "$AGENT" <<'PY'
+import json, sys
+path, platform, dimension, agent = sys.argv[1:5]
+try:
+    with open(path) as source:
+        row = json.load(source)
+    if not isinstance(row, dict):
+        raise ValueError("verdict must be an object")
+    if row.get("verdict") not in ("PASS", "FAIL", "ERROR", "SKIP"):
+        raise ValueError("unknown verdict: %r" % row.get("verdict"))
+except Exception as exc:
+    row = {"mode": "workload", "platform": platform, "dimension": dimension,
+           "agent": agent, "verdict": "ERROR", "residuals": ["no-verdict"],
+           "note": "case produced no valid verdict.json: " + str(exc)[:240]}
+print(json.dumps(row))
+PY
+)"; then
+      CELL_ROW='{"verdict":"ERROR","residuals":["no-verdict"],"note":"case verdict validator failed"}'
     fi
+    printf '%s\n' "$CELL_ROW" >> "$ROWS"
+    log "$CELL: $(printf '%s' "$CELL_ROW" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["verdict"], d.get("residuals"), d.get("note","")[:120])')"
   done
 done
 
@@ -346,13 +356,19 @@ python3 - "$ROWS" "$AGG" "$PLATFORM" "$EFFECTIVE_COMMIT" "$RUN_ID" <<'PY'
 import json, sys
 rows_path, out, plat, commit, run_id = sys.argv[1:6]
 rows = []
-for line in open(rows_path):
+for number, line in enumerate(open(rows_path), 1):
     line = line.strip()
     if line:
         try:
-            rows.append(json.loads(line))
-        except Exception:
-            pass
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("verdict must be an object")
+            if row.get("verdict") not in ("PASS", "FAIL", "ERROR", "SKIP"):
+                raise ValueError("unknown verdict: %r" % row.get("verdict"))
+        except Exception as exc:
+            row = {"verdict": "ERROR", "residuals": ["invalid-cell-verdict"],
+                   "note": "invalid aggregate row %d: %s" % (number, str(exc)[:240])}
+        rows.append(row)
 counts = {}
 for r in rows:
     counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
