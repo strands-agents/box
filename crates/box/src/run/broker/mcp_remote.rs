@@ -157,6 +157,18 @@ async fn reply(response: reqwest::Response) -> io::Result<Value> {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|content_type| content_type.contains("text/event-stream"));
+    if event_stream && status.is_success() {
+        let mut response = response;
+        let mut parser = SseReply::default();
+        while let Some(chunk) = response.chunk().await.map_err(other)? {
+            for byte in chunk {
+                if let Some(message) = parser.push(byte) {
+                    return Ok(message);
+                }
+            }
+        }
+        return Err(invalid("no JSON-RPC response found in the MCP SSE stream"));
+    }
     let body = response.text().await.map_err(other)?;
     if !status.is_success() {
         return Err(invalid(format!(
@@ -164,25 +176,45 @@ async fn reply(response: reqwest::Response) -> io::Result<Value> {
             body.trim()
         )));
     }
-    if event_stream {
-        // Streamable HTTP carries the JSON-RPC message in an SSE `data:` line. Return the first
-        // one that is a response (a `result` or an `error`), skipping any keep-alive or progress.
-        for line in body.lines() {
-            let Some(data) = line.trim_start().strip_prefix("data:") else {
-                continue;
-            };
-            if let Ok(message) = serde_json::from_str::<Value>(data.trim())
-                && (message.get("result").is_some() || message.get("error").is_some())
-            {
-                return Ok(message);
-            }
-        }
-        return Err(invalid("no JSON-RPC response found in the MCP SSE stream"));
-    }
     if body.trim().is_empty() {
         return Ok(json!({}));
     }
     serde_json::from_str(&body).map_err(other)
+}
+
+#[derive(Default)]
+struct SseReply {
+    line: Vec<u8>,
+    data: Vec<u8>,
+    skip_lf: bool,
+}
+
+impl SseReply {
+    fn push(&mut self, byte: u8) -> Option<Value> {
+        if std::mem::take(&mut self.skip_lf) && byte == b'\n' {
+            return None;
+        }
+        if byte != b'\r' && byte != b'\n' {
+            self.line.push(byte);
+            return None;
+        }
+        self.skip_lf = byte == b'\r';
+        let line = std::mem::take(&mut self.line);
+        if line.is_empty() {
+            let data = std::mem::take(&mut self.data);
+            let message: Value = serde_json::from_slice(&data).ok()?;
+            return (message.get("result").is_some() || message.get("error").is_some())
+                .then_some(message);
+        }
+        if let Some(data) = line.strip_prefix(b"data:") {
+            if !self.data.is_empty() {
+                self.data.push(b'\n');
+            }
+            self.data
+                .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+        }
+        None
+    }
 }
 
 fn other<E: std::fmt::Display>(error: E) -> io::Error {
@@ -191,4 +223,82 @@ fn other<E: std::fmt::Display>(error: E) -> io::Error {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod remote_sse_events_tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+
+    #[tokio::test]
+    async fn multiline_sse_data_is_one_json_message() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let event = format!(
+                "event: message{ending}data: {{\"jsonrpc\":\"2.0\",{ending}data: \"id\":1, \"result\":{{\"tools\":[]}}}}{ending}{ending}"
+            );
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}", event.len()).unwrap();
+            });
+            let response = reqwest::Client::new()
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            let message = reply(response)
+                .await
+                .expect("data fields belong to one event");
+            server.join().unwrap();
+            assert_eq!(message["id"], 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_reply_returns_before_the_http_stream_closes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            let event = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+            write!(stream, "{:x}\r\n", event.len()).unwrap();
+            stream.write_all(event).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+            stream.flush().unwrap();
+            let _ = released.recv_timeout(Duration::from_secs(2));
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(500), reply(response)).await;
+        let _ = release.send(());
+        server.join().unwrap();
+        let message = result
+            .expect("an event response must not wait for HTTP EOF")
+            .unwrap();
+        assert_eq!(message["result"]["tools"], json!([]));
+    }
 }
