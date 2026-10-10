@@ -378,8 +378,11 @@ impl Oracle {
         resource_sub: &str,
     ) -> Option<&Decision> {
         self.decisions.iter().find(|d| {
-            d.permitted() == want_permit
-                && d.action.contains(action_sub)
+            (if want_permit {
+                d.permitted()
+            } else {
+                d.denied()
+            }) && d.action.contains(action_sub)
                 && (resource_sub.is_empty() || d.resource.contains(resource_sub))
         })
     }
@@ -626,6 +629,17 @@ mod tests {
             ]}]}]
         })
         .to_string()
+    }
+
+    #[test]
+    fn a_missing_or_unknown_verdict_is_not_a_denial() {
+        let dir = tmp("unknown-verdict");
+        for verdict in ["", "unknown", "error"] {
+            let journal = journal_line("shell:spawn", "/usr/bin/python3", verdict);
+            let mut oracle = Oracle::with_journal(&dir, "git", Cli::Claude, &journal);
+            oracle.assert_journal("gate", false, "shell:spawn", "python");
+            assert_eq!(oracle.verdict().verdict, "FAIL", "verdict: {verdict}");
+        }
     }
 
     #[test]
