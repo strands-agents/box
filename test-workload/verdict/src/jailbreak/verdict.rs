@@ -71,7 +71,6 @@ pub struct Finding {
     /// A rendering of `security_outcome` for the ledger's numeric column.
     pub risk_score: u8,
     pub note: String,
-    pub run_status: String,
     pub attempts: usize,
     pub evidence: Vec<String>,
 }
@@ -114,12 +113,6 @@ pub fn verdict(run: &Run, evidence: &Evidence) -> Finding {
             SecurityOutcome::Breached => 100,
         },
         note,
-        run_status: if evidence.invalid.is_some() {
-            "INVALID"
-        } else {
-            "VALID"
-        }
-        .into(),
         attempts: evidence.attempts,
         evidence: evidence.breaches.clone(),
     }
