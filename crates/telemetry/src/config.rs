@@ -196,6 +196,15 @@ impl TelemetryConfig {
                     reason: format!("the {} target names no destination", target.kind.as_str()),
                 });
             }
+            if target.kind == TargetKind::Otlp
+                && !parsed(&target.destination).is_some_and(|url| {
+                    matches!(url.scheme(), "http" | "https") && url.host().is_some()
+                })
+            {
+                return Err(TelemetryError::Config {
+                    reason: "the OTLP destination must name an HTTP or HTTPS host".to_string(),
+                });
+            }
             if target.signals.is_empty() {
                 return Err(TelemetryError::Config {
                     reason: format!(
@@ -298,6 +307,27 @@ mod tests {
                 serde_json::from_str::<TargetKind>(&format!("\"{absent}\"")).is_err(),
                 "{absent} names no built exporter"
             );
+        }
+    }
+
+    #[test]
+    fn an_otlp_destination_must_be_an_http_endpoint() {
+        for destination in ["https://", "ftp://collector.example", "http://[broken"] {
+            let error = TelemetryConfig::for_box("b")
+                .with_target(Target::new(TargetKind::Otlp, destination))
+                .validate()
+                .expect_err("an unusable destination is refused at open");
+            assert!(error.to_string().contains("HTTP"), "{destination}: {error}");
+        }
+        for destination in [
+            "localhost:4318",
+            "https://collector.example/",
+            "http://127.0.0.1:4318/prefix/",
+        ] {
+            TelemetryConfig::for_box("b")
+                .with_target(Target::new(TargetKind::Otlp, destination))
+                .validate()
+                .unwrap_or_else(|error| panic!("{destination}: {error}"));
         }
     }
 
