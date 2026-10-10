@@ -82,20 +82,16 @@ fn run_filter(
     let inputs: Vec<serde_json::Value> = if null_input {
         vec![serde_json::Value::Null]
     } else if raw_input {
-        let lines: Vec<serde_json::Value> = input_str
-            .lines()
-            .map(|l| serde_json::Value::String(l.to_string()))
-            .collect();
         if slurp {
-            vec![serde_json::Value::Array(lines)]
+            vec![serde_json::Value::String(input_str.to_string())]
         } else {
-            lines
+            input_str
+                .lines()
+                .map(|l| serde_json::Value::String(l.to_string()))
+                .collect()
         }
     } else {
         let trimmed = input_str.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut vals = Vec::new();
         let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
         for result in stream {

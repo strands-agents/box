@@ -1657,3 +1657,9 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+### Local command correctness: jq-slurp-input
+
+Raw slurp now supplies the complete input string including newlines. JSON slurp runs the filter over an empty array when no JSON values were read.
+Contract source: https://jqlang.org/manual/.
+Regression coverage: tests/box_jq_slurp_input.rs. Existing interfaces and safe env/halt stubs remain unchanged.
