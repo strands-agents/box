@@ -129,6 +129,8 @@ class Capture:
                     reason = f"timed out after {limit:.0f}s"
                     break
                 time.sleep(0.05)
+        if reason is None and self.group_alive(proc.pid):
+            reason = "command exited with live descendants"
         if reason is not None:
             self.terminate_group(proc, label)
             self.error(f"{label}: {reason} (partial output kept; process group terminated)")
