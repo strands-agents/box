@@ -25,8 +25,8 @@ pub(crate) async fn generate_schema(
     let home = operator_home_directory()?;
 
     let mut generated = Vec::with_capacity(servers.len());
-    for server in &servers {
-        let response = crate::run::broker::mcp::list_tools(server, &home, &working)
+    for (server, spec) in &servers {
+        let response = crate::run::broker::mcp::list_tools(server, spec, &home, &working)
             .await
             .map_err(|source| McpSchemaError::Discover {
                 server: server.name.clone(),

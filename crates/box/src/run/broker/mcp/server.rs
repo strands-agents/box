@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt as _;
 
 use crate::record::config::mcp::McpServer;
+use crate::record::config::process::ProcessSpec;
 
 /// The MCP protocol version the offline `tools/list` client requests.
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -68,13 +69,19 @@ pub(crate) enum McpToolDiscoveryError {
 }
 
 /// Start one declared MCP server, initialize it, and return its `tools/list` response.
-pub(crate) async fn list_tools(admitted: &McpServer, home: &Path, cwd: &Path) -> io::Result<Value> {
+pub(crate) async fn list_tools(
+    admitted: &McpServer,
+    spec: &ProcessSpec,
+    home: &Path,
+    cwd: &Path,
+) -> io::Result<Value> {
     match list_tools_until_cancelled(
         admitted,
         home,
-        cwd,
+        spec.workspace.as_deref().unwrap_or(cwd),
         std::future::pending(),
         MAXIMUM_DISCOVERY_RESPONSE_BYTES,
+        Some(spec),
     )
     .await
     {
@@ -95,8 +102,9 @@ async fn list_tools_until_cancelled(
     cwd: &Path,
     cancellation: impl std::future::Future<Output = ()>,
     maximum_response_bytes: usize,
+    spec: Option<&ProcessSpec>,
 ) -> Result<Value, McpToolDiscoveryError> {
-    let (running, stdout) = RunningMcpServer::start(admitted, home, cwd)
+    let (running, stdout) = RunningMcpServer::start_with(admitted, home, Some(cwd), None, spec)
         .await
         .map_err(McpToolDiscoveryError::Discovery)?;
     list_tools_from_running_server_until_cancelled(
@@ -443,7 +451,7 @@ impl RunningMcpServer {
         home: &Path,
         cwd: &Path,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        Self::start_with(admitted, home, Some(cwd), None).await
+        Self::start_with(admitted, home, Some(cwd), None, None).await
     }
 
     /// Start an admitted server in an already-open working directory.
@@ -452,7 +460,7 @@ impl RunningMcpServer {
         home: &Path,
         cwd: &std::fs::File,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        Self::start_with(admitted, home, None, Some(cwd)).await
+        Self::start_with(admitted, home, None, Some(cwd), None).await
     }
 
     async fn start_with(
@@ -460,6 +468,7 @@ impl RunningMcpServer {
         home: &Path,
         cwd: Option<&Path>,
         cwd_handle: Option<&std::fs::File>,
+        spec: Option<&ProcessSpec>,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
         let mut command = tokio::process::Command::new(admitted.program());
         command
@@ -474,6 +483,9 @@ impl RunningMcpServer {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        if let Some(spec) = spec {
+            command.envs(&spec.env);
+        }
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
@@ -921,6 +933,7 @@ done
             Path::new("/tmp"),
             std::future::pending(),
             page_bytes - 1,
+            None,
         )
         .await
         .expect_err("the aggregate response bytes must be bounded");

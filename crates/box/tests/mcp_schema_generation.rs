@@ -1366,3 +1366,47 @@ fn one_server_failure_leaves_every_existing_schema_unchanged() {
     );
     assert_existing_artifacts(&existing);
 }
+
+#[test]
+fn stdio_schema_discovery_uses_declared_workspace_and_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let working = root.path().join("caller");
+    let declared = root.path().join("declared");
+    let bin = root.path().join("bin");
+    for directory in [&home, &working, &declared, &bin] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    let config = root.path().join("box.toml");
+    let mut script = server_script("declared-mcp", &tools_response("read", "value"));
+    script = script.replacen(
+        "set -eu",
+        "set -eu\ntest \"$SCHEMA_LABEL\" = selected\ntest -z \"${UNDECLARED_OPERATOR_VALUE-}\"",
+        1,
+    );
+    install_script(&bin.join("declared-mcp"), &script);
+    let content = format!(
+        "name = \"schema\"\nbox_dir = \"/nonexistent/discovery\"\n[mcp.selected]\ntype = \"stdio\"\ncommand = [\"declared-mcp\"]\nworkspace = {:?}\nenv = {{ SCHEMA_LABEL = \"selected\", PATH = {:?} }}\n",
+        declared.to_str().unwrap(),
+        bin.to_str().unwrap()
+    );
+    std::fs::write(&config, content).unwrap();
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("UNDECLARED_OPERATOR_VALUE", "must-not-inherit")
+        .current_dir(&working)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(trace(&declared, "declared-mcp").len(), 3);
+    assert!(!working.join("declared-mcp.trace").exists());
+    assert!(working.join("schemas/actions.cedarschema").exists());
+}

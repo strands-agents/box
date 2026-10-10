@@ -81,9 +81,21 @@ pub(super) const INJECT_PHANTOM: &str = "phantom";
 pub(super) const INJECT_ALWAYS: &str = "always";
 
 /// Read the MCP servers declared in one workspace config.
-pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxError> {
+pub(crate) fn read_mcp_servers(
+    path: &Path,
+) -> Result<Vec<(mcp::McpServer, ProcessSpec)>, BoxError> {
     let file = ConfigFile::read(path)?;
-    mcp::from_entries(&file.mcp)
+    mcp::from_entries(&file.mcp)?;
+    Ok(mcp::contained_specs(&file.mcp)
+        .into_iter()
+        .map(|(name, contained)| {
+            let server = mcp::McpServer {
+                name,
+                command: contained.spec.command.clone(),
+            };
+            (server, contained.spec)
+        })
+        .collect())
 }
 
 /// A remote MCP server: an `[egress.<name>]` entry speaking `mcp`, resolved to a discovery URL.
