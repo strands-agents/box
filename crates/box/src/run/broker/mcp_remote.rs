@@ -70,14 +70,17 @@ pub(crate) async fn list_tools(url: &str, auth: Option<(String, String)>) -> io:
         .map(str::to_string);
     // Adopt the version the server answered with, matching how a full MCP client negotiates. Absent
     // one, keep what was offered.
-    let negotiated = reply(init)
-        .await?
+    let initialized = reply(init).await?;
+    if let Some(error) = initialized.get("error") {
+        return Err(invalid(format!("MCP initialize failed: {error}")));
+    }
+    let negotiated = initialized
         .get("result")
         .and_then(|result| result.get("protocolVersion"))
         .and_then(Value::as_str)
         .map_or_else(|| PROTOCOL_VERSION.to_string(), str::to_string);
 
-    post(
+    let confirmed = post(
         &client,
         url,
         &negotiated,
@@ -86,6 +89,9 @@ pub(crate) async fn list_tools(url: &str, auth: Option<(String, String)>) -> io:
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
     )
     .await?;
+    if !confirmed.status().is_success() {
+        reply(confirmed).await?;
+    }
 
     let mut tools = Vec::new();
     let mut cursor: Option<String> = None;
@@ -191,4 +197,106 @@ fn other<E: std::fmt::Display>(error: E) -> io::Error {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod remote_handshake_refusal_tests {
+    use super::*;
+    use std::io::{BufRead as _, Read as _, Write as _};
+
+    fn server(replies: Vec<(&'static str, Value)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = io::BufReader::new(&stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                if reader.read_exact(&mut request).is_err() {
+                    return;
+                }
+                let body = body.to_string();
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        format!("http://{address}/mcp")
+    }
+
+    #[tokio::test]
+    async fn initialize_errors_stop_remote_discovery() {
+        let url = server(vec![
+            (
+                "200 OK",
+                json!({"jsonrpc":"2.0", "id":1,
+                "error":{"code":-32603, "message":"initialize refused"}}),
+            ),
+            ("202 Accepted", json!({})),
+            (
+                "200 OK",
+                json!({"jsonrpc":"2.0", "id":2, "result":{"tools":[]}}),
+            ),
+        ]);
+        let error = list_tools(&url, None)
+            .await
+            .expect_err("initialize must succeed before discovery");
+        assert!(error.to_string().contains("initialize refused"), "{error}");
+        assert!(error.to_string().contains("-32603"), "{error}");
+    }
+    fn initialized() -> Value {
+        json!({"jsonrpc":"2.0", "id":1, "result": {
+            "protocolVersion":"2025-06-18", "capabilities":{"tools":{}},
+            "serverInfo":{"name":"fixture", "version":"1"}
+        }})
+    }
+
+    #[tokio::test]
+    async fn an_initialized_http_refusal_stops_discovery() {
+        let url = server(vec![
+            ("200 OK", initialized()),
+            ("409 Conflict", json!({"message":"session expired"})),
+            (
+                "200 OK",
+                json!({"jsonrpc":"2.0", "id":2, "result":{"tools":[]}}),
+            ),
+        ]);
+        let error = list_tools(&url, None)
+            .await
+            .expect_err("a rejected handshake cannot discover tools");
+        assert!(error.to_string().contains("409"), "{error}");
+        assert!(error.to_string().contains("session expired"), "{error}");
+    }
 }
