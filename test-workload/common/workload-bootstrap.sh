@@ -143,7 +143,7 @@ WL_CODEX_VERSION="${WL_CODEX_VERSION:-}"
 # Claude Code: the standalone installer drops a self-contained binary under the
 # operator home, which is the identity the pairs name. It takes one released
 # version, and no argument installs the latest.
-if [ -z "${WL_CLAUDE:-}" ] || [ ! -x "${WL_CLAUDE:-/nonexistent}" ]; then
+if [ -n "$WL_CLAUDE_VERSION" ] || [ -z "${WL_CLAUDE:-}" ] || [ ! -x "${WL_CLAUDE:-/nonexistent}" ]; then
   if curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh 2>/tmp/claude-install.log; then
     HOME="$WL_HOME" bash /tmp/claude-install.sh ${WL_CLAUDE_VERSION:+"$WL_CLAUDE_VERSION"} >>/tmp/claude-install.log 2>&1 \
       || log "claude install FAILED (see /tmp/claude-install.log)"
@@ -155,7 +155,7 @@ fi
 # Node shim plus a vendored native binary; the shim is the route the cases run,
 # so no global npm bin needs to be on PATH.
 NPM_BIN="$(command -v npm || wl_first /opt/homebrew/opt/node@22/bin/npm /usr/bin/npm || true)"
-if [ -n "${NPM_BIN:-}" ] && { [ -z "${WL_CODEX_SHIM:-}" ] || [ ! -f "${WL_CODEX_SHIM:-/nonexistent}" ]; }; then
+if [ -n "${NPM_BIN:-}" ] && { [ -n "$WL_CODEX_VERSION" ] || [ -z "${WL_CODEX_SHIM:-}" ] || [ ! -f "${WL_CODEX_SHIM:-/nonexistent}" ]; }; then
   mkdir -p "$WL_TOOLS"
   HOME="$WL_HOME" "$NPM_BIN" install --prefix "$WL_TOOLS" "@openai/codex${WL_CODEX_VERSION:+@$WL_CODEX_VERSION}" \
     >/tmp/codex-install.log 2>&1 || log "codex npm install FAILED (see /tmp/codex-install.log)"
@@ -179,7 +179,8 @@ HOST_PY="${WL_PYTHON:-}"
 [ -n "$HOST_PY" ] || log "no canonical python3 resolved — the strands cells are ABSENT"
 strands_imports() {
   [ -n "$HOST_PY" ] \
-    && "$HOST_PY" -c "import sys; sys.path.insert(0, '$STRANDS_LIB'); import strands" >/dev/null 2>&1
+    && "$HOST_PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import strands; from importlib.metadata import version; sys.exit(version("strands-agents") != sys.argv[2])' \
+      "$STRANDS_LIB" "$WL_STRANDS_SDK_VERSION" >/dev/null 2>&1
 }
 if [ -n "$HOST_PY" ] && ! strands_imports; then
   mkdir -p "$STRANDS_LIB"
@@ -225,7 +226,7 @@ log "strands=$(wl_say "${WL_STRANDS:-}") strands_lib=$(wl_say "${WL_STRANDS_LIB:
 # Which agent build ran. Claude Code and Codex install at latest by default, so
 # this line is the only record of what a cell was measured against; it is read
 # from disk rather than by running an agent, which needs credentials.
-wl_claude_build() { [ -n "${WL_CLAUDE:-}" ] && [ -d "$WL_CLAUDE" ] && basename "$WL_CLAUDE" || echo unknown; }
+wl_claude_build() { [ -n "${WL_CLAUDE:-}" ] && [ -x "$WL_CLAUDE" ] && basename "$WL_CLAUDE" || echo unknown; }
 wl_codex_build() {
   local pkg
   [ -n "${WL_CODEX_SHIM:-}" ] || { echo unknown; return; }

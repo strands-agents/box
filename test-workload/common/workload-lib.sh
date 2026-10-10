@@ -85,7 +85,10 @@ wl_resolve_paths() {
   # Claude Code: the standalone installer drops a version directory; name the
   # directory itself (the launcher in ~/.local/bin is a symlink the box refuses).
   WL_CLAUDE=""
-  if [ -d "$WL_HOME/.local/share/claude/versions" ]; then
+  if [ -n "${WL_CLAUDE_VERSION:-}" ]; then
+    [ -x "$WL_HOME/.local/share/claude/versions/$WL_CLAUDE_VERSION" ] \
+      && WL_CLAUDE="$WL_HOME/.local/share/claude/versions/$WL_CLAUDE_VERSION"
+  elif [ -d "$WL_HOME/.local/share/claude/versions" ]; then
     WL_CLAUDE="$(ls -dt "$WL_HOME/.local/share/claude/versions"/* 2>/dev/null | head -1)"
   fi
 
