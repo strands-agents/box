@@ -137,7 +137,7 @@ async fn cmd_tr(os: &Mediated, args: &[String]) -> CommandResult {
                 } else {
                     c
                 };
-                if squeeze && last_out == Some(out) {
+                if squeeze && set2.contains(&out) && last_out == Some(out) {
                     continue;
                 }
                 wprint!(w, "{}", out)?;
