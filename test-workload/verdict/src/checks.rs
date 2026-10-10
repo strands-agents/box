@@ -23,6 +23,7 @@
 //! contained run from an uncontained one; journal evidence without artefacts cannot
 //! tell a working box from one that permitted everything and achieved nothing.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use super::Oracle;
@@ -140,13 +141,20 @@ fn python(oracle: &mut Oracle, project: &Path) {
 /// agent writing a plausible-looking log.
 fn rust(oracle: &mut Oracle, project: &Path) {
     oracle.assert_file("rust-manifest", &project.join("Cargo.toml"), None);
-    oracle.assert_glob(
+    let binary_directory = project.join("target").join("debug");
+    let has_binary = std::fs::read_dir(&binary_directory)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.metadata().ok())
+        .any(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+    oracle.check(
         "rust-binary",
-        &project
-            .join("target")
-            .join("debug")
-            .join("*")
-            .to_string_lossy(),
+        has_binary,
+        format!(
+            "executable file in {}: {has_binary}",
+            binary_directory.display()
+        ),
     );
     oracle.assert_any(
         "rust-tests-passed",
@@ -179,6 +187,42 @@ fn agent_hook(oracle: &mut Oracle, project: &Path) {
 mod tests {
     use super::*;
     use crate::Cli;
+
+    #[test]
+    fn rust_build_directories_do_not_count_as_a_binary() {
+        let dir = std::env::temp_dir().join(format!("wl-rust-artifact-{}", std::process::id()));
+        let project = dir.join("project");
+        let debug = project.join("target/debug");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        std::fs::write(debug.join("build.log"), "build failed").unwrap();
+        let mut oracle = Oracle::with_journal(&dir, "rust", Cli::Claude, "");
+        rust(&mut oracle, &project);
+        assert!(
+            !oracle
+                .verdict()
+                .checks
+                .iter()
+                .find(|check| check.id == "rust-binary")
+                .unwrap()
+                .ok
+        );
+        let executable = debug.join("hello");
+        std::fs::write(&executable, "binary fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut oracle = Oracle::with_journal(&dir, "rust", Cli::Claude, "");
+        rust(&mut oracle, &project);
+        assert!(
+            oracle
+                .verdict()
+                .checks
+                .iter()
+                .find(|check| check.id == "rust-binary")
+                .unwrap()
+                .ok
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn every_declared_dimension_dispatches() {
