@@ -42,9 +42,17 @@ cargo build --workspace --release 2>&1 | tail -5
 export PATH="$HOME/strands-box/target/release:$PATH"
 echo 'export PATH="$HOME/strands-box/target/release:$PATH"' >> ~/.bashrc
 
-# Node.js + Claude Code
-sudo dnf install -y nodejs20 npm
-sudo npm install -g "@anthropic-ai/claude-code${CLAUDE_SPEC}" 2>&1 | tail -3
+# Node.js + Claude Code. npm installs the newest release whose `engines` the
+# RUNNING Node satisfies, so Node 20 caps Claude Code at 2.1.197 -- a version
+# every current model rejects. `npm-22` runs under Node 22 regardless of which
+# version `alternatives` has active, which merely installing nodejs22 does not.
+sudo dnf install -y nodejs22 nodejs22-npm
+sudo npm-22 install -g "@anthropic-ai/claude-code${CLAUDE_SPEC}" 2>&1 | tail -3
+# Put the agent where lib.sh's resolver looks: npm-22's global bin is only on the
+# default PATH when nodejs22 is the active version, which is not guaranteed.
+CLAUDE_BIN="$(npm-22 prefix -g)/bin/claude"
+[ -x "$CLAUDE_BIN" ] || { echo "FATAL: npm-22 installed no claude at $CLAUDE_BIN" >&2; exit 1; }
+command -v claude >/dev/null || sudo ln -sf "$CLAUDE_BIN" /usr/local/bin/claude
 
 echo "=== INSTALL COMPLETE ==="
 uname -r
@@ -52,6 +60,13 @@ uname -r
 # install cleanly, but the pattern asserted success on failure here too.
 strands-box --version
 claude --version
+# A Claude Code older than this 400s on every current model, which reads as a
+# containment failure rather than a stale agent -- so fail here, where it is legible.
+CLAUDE_V="$(claude --version | awk '{print $1}')"
+[ "$(printf '%s\n2.1.280\n' "$CLAUDE_V" | sort -V | head -1)" = "2.1.280" ] || {
+  echo "FATAL: Claude Code $CLAUDE_V predates 2.1.280; ANTHROPIC_MODEL will 400" >&2
+  exit 1
+}
 REMOTE_SCRIPT
 
 echo "[2/3] Uploading install script..."

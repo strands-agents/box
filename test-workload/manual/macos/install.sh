@@ -118,6 +118,13 @@ sw_vers
 # lines fail the install instead.
 strands-box --version
 claude --version
+# A Claude Code older than this 400s on every current model, which reads as a
+# containment failure rather than a stale agent -- so fail here, where it is legible.
+CLAUDE_V="$(claude --version | awk '{print $1}')"
+[ "$(printf '%s\n2.1.280\n' "$CLAUDE_V" | sort -V | head -1)" = "2.1.280" ] || {
+  echo "FATAL: Claude Code $CLAUDE_V predates 2.1.280; ANTHROPIC_MODEL will 400" >&2
+  exit 1
+}
 REMOTE_SCRIPT
 
 echo "[2/3] Uploading install script..."
