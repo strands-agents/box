@@ -77,6 +77,7 @@ records the words in the list name:
 | `deny` | Every effective denial. |
 | `permit` | Every effective permit. |
 | `trace` | The workload's own spans, and this box's control-plane records. |
+| `kernel` | Each call the kernel refused beneath policy (Linux only). |
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits and the control-plane
 records.
@@ -88,6 +89,19 @@ workload itself exported.
 
 `trace` names two things at once. A target that omits `trace` receives no control-plane record, so this
 box's `box_started`, `policy_installed`, and `box_stopped` records are absent from it.
+
+A kernel refusal is not a decision. On Linux a call the syscall filter refuses arrives under the scope
+`strands-box.containment`, with the event name `strands.box.containment.refusal`, the call
+(`strands.box.containment.syscall`, such as `socket`), the arguments that decided it when a rule reads
+them (`strands.box.containment.arguments`, such as `family=AF_PACKET type=SOCK_RAW`), and the process.
+The box records the first refusal of a kind at once and counts repeats for ten seconds, so one record
+can stand for many calls: `strands.box.containment.suppressed` says how many more. A box tracks at
+most 256 kinds; past that, one `refusals_unobserved` control record says so, and later refusals are
+counted under their call alone, so each new call still gets a record. When the host cannot
+pass the box the kernel's notifications, the refusals still happen and one `refusals_unobserved`
+record names the reason. `refusals_unobserved` is a control record, so it reaches a target through
+`trace`, not `kernel`: a target that names `kernel` and not `trace` does not learn that refusals went
+unobserved.
 
 An empty list is refused, and so is a repeated word.
 

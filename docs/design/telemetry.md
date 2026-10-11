@@ -34,11 +34,14 @@ That check belongs to the box's own request path, and it is separate from operat
 decides what the workload's own syscalls reach. Recording the engine's verdict would therefore sometimes
 describe something that did not happen.
 
-A box writes two kinds of record, under two scopes a reader selects on:
+A box writes three kinds of record, under three scopes a reader selects on:
 
 - **Decisions**, under the scope `strands-box.policy`. One per effective answer.
 - **Control-plane records**, under the scope `strands-box.control`. One per change to the box's own
   authority.
+- **Kernel refusals**, under the scope `strands-box.containment`. One per kind of call the Linux
+  syscall filter refused, rate-limited, and not a decision ([a kernel refusal is observed, not
+  decided](decisions.md#a-kernel-refusal-is-observed-not-decided)).
 
 A decision names the action, the resource, the verdict, the cause, and every policy that determined it.
 Standard OpenTelemetry keys carry the detail for the kind of request: the server address and port, the
@@ -53,12 +56,15 @@ caller's trace context, which joins it to the agent's own work. The workload sup
 box bounds it, validates it, and never treats it as evidence of authority ([correlation context is a
 hint](decisions.md#correlation-context-is-a-hint-and-never-authority)).
 
-There are six control-plane records, because a box's authority settles as it starts: a policy installed
-or refused, a tool vocabulary installed, discovery complete, and the box started or stopped. They answer
-which authority was in force at a given moment, which is why they share a file with the decisions.
+There are seven control-plane records, because a box's authority settles as it starts: a policy installed
+or refused, a tool vocabulary installed, discovery complete, the box started or stopped, and a launch whose
+kernel refusals the box could not observe. They answer which authority was in force at a given moment,
+which is why they share a file with the decisions.
 
-Every box record is both a span and a log record, sharing one trace and span identifier ([every box
-record is both](decisions.md#every-box-record-is-both-a-span-and-a-log-record)). The log record is the
+Every decision and control-plane record is both a span and a log record, sharing one trace and span
+identifier ([every box record is both](decisions.md#every-box-record-is-both-a-span-and-a-log-record)). A
+kernel refusal is a log record only: it is not a step of the box's work, and a flood of them would crowd
+the workload's own timeline. The log record is the
 audit evidence, and the span puts the decision on a timeline beside the workload's own work. The span
 marks the instant the decision was submitted, so its start and end are equal.
 

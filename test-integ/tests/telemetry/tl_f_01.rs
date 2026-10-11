@@ -7,11 +7,12 @@ use strands_det_harness::telemetry::{CONTROL_SCOPE, POLICY_SCOPE, Payload};
 // the three signal keys, and no line is blank or partial.
 //
 // Shape no longer tells a box record from a harness payload, so a reader selects on the scope. The
-// box writes two scopes and no third, and a query that names neither reads the wrong record shape.
+// box writes three scopes and no fourth (policy, control, and containment's kernel refusals), and a
+// query that names none of them reads the wrong record shape.
 det_case! {
     name: tl_f_01,
     id:   "TL-F-01",
-    desc: "The default destination is one OTLP-JSON request per line, under the box's own two scopes and no third",
+    desc: "The default destination is one OTLP-JSON request per line, under the box's own three scopes and no fourth",
     run: |b| {
         b.reset_policy();
         let r = b.run_mediated("echo TL_RAN; cat readable.txt");

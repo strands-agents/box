@@ -92,6 +92,8 @@ pub(crate) enum SignalGroup {
     Logs,
     /// The agent's own metrics.
     Metrics,
+    /// The calls the kernel refused beneath policy.
+    Kernel,
 }
 
 impl SignalGroup {
@@ -103,17 +105,19 @@ impl SignalGroup {
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
             Self::Logs => vec![Signal::AgentLogs],
             Self::Metrics => vec![Signal::AgentMetrics],
+            Self::Kernel => vec![Signal::KernelRefused],
         }
     }
 
     /// Every word an operator may write, for a refusal that lists them.
-    fn every() -> [Self; 5] {
+    fn every() -> [Self; 6] {
         [
             Self::Deny,
             Self::Permit,
             Self::Trace,
             Self::Logs,
             Self::Metrics,
+            Self::Kernel,
         ]
     }
 
@@ -125,6 +129,7 @@ impl SignalGroup {
             Self::Trace => "trace",
             Self::Logs => "logs",
             Self::Metrics => "metrics",
+            Self::Kernel => "kernel",
         }
     }
 }
@@ -466,7 +471,7 @@ mod tests {
     /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log is
     /// not a span and an operator narrowing to spans must not silently also take metrics.
     #[test]
-    fn the_five_words_expand_through_the_production_path() {
+    fn the_six_words_expand_through_the_production_path() {
         assert_eq!(
             signals_for(&[SignalGroup::Deny]),
             vec![Signal::PolicyDenied]
@@ -483,6 +488,10 @@ mod tests {
         assert_eq!(
             signals_for(&[SignalGroup::Metrics]),
             vec![Signal::AgentMetrics]
+        );
+        assert_eq!(
+            signals_for(&[SignalGroup::Kernel]),
+            vec![Signal::KernelRefused]
         );
 
         // Counted against the crate's own set, so a seventh signal no word reaches fails here.
@@ -524,7 +533,7 @@ mod tests {
     /// **An empty `include` and a repeated word are both refused in the operator's own vocabulary**,
     /// because the collector's own messages name the record spellings instead.
     #[test]
-    fn an_empty_or_repeated_include_is_refused_naming_the_five_words() {
+    fn an_empty_or_repeated_include_is_refused_naming_the_six_words() {
         let entry = |include: Vec<SignalGroup>| TelemetryEntry {
             kind: TargetKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -539,7 +548,7 @@ mod tests {
         .expect_err("an empty include names no signal")
         .to_string();
         assert!(empty.contains("no signal"), "{empty}");
-        for word in ["deny", "permit", "trace", "logs", "metrics"] {
+        for word in ["deny", "permit", "trace", "logs", "metrics", "kernel"] {
             assert!(
                 empty.contains(word),
                 "the refusal must list {word}, which an operator may write: {empty}"
@@ -556,6 +565,33 @@ mod tests {
         .expect_err("a repeated word is refused rather than deduplicated in silence")
         .to_string();
         assert!(repeated.contains("deny twice"), "{repeated}");
+    }
+
+    /// **`kernel` is a word an operator writes, and a misspelling is refused naming it.** It names the
+    /// kernel refusals alone, and it round-trips through the stored record's own spelling.
+    #[test]
+    fn the_kernel_word_parses_round_trips_and_is_listed_when_misspelled() {
+        let entry: TelemetryEntry = toml::from_str(
+            "kind = \"file\"\ndestination = \"/tmp/r.jsonl\"\ninclude = [\"kernel\", \"deny\"]",
+        )
+        .expect("kernel is a word");
+        assert_eq!(
+            entry.include,
+            Some(vec![SignalGroup::Kernel, SignalGroup::Deny])
+        );
+        let stored = toml::to_string(&entry).expect("serializes");
+        assert!(stored.contains("\"kernel\""), "{stored}");
+        assert_eq!(
+            toml::from_str::<TelemetryEntry>(&stored).expect("reads back"),
+            entry
+        );
+
+        let misspelled = toml::from_str::<TelemetryEntry>(
+            "kind = \"file\"\ndestination = \"/tmp/r.jsonl\"\ninclude = [\"kernal\"]",
+        )
+        .expect_err("a misspelling is refused")
+        .to_string();
+        assert!(misspelled.contains("kernel"), "{misspelled}");
     }
 
     /// **An empty declaration is unrepresentable**, now that a name holds one target rather than an

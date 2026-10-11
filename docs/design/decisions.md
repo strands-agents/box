@@ -1760,9 +1760,10 @@ replaces the default instead of adding to it. The file grows without bound and n
 <a id="a-target-names-a-set-of-signals"></a>
 ### A target names a set of signals, and an absent list takes every signal
 
-`[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
-`trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
-`metrics` name the agent's relayed log and metric records. A target names a set, with no ordering, and
+`[telemetry.<label>] include` takes six words: `deny` and `permit` name the two effective verdicts,
+`trace` names the agent's relayed spans and the box's own control-plane records, `logs` and
+`metrics` name the agent's relayed log and metric records, and `kernel` names the box's records of
+calls the kernel refused beneath policy. A target names a set, with no ordering, and
 no signal contains another. A target that names no `include` receives every signal, which
 `an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word are
 each refused before the box exists. The box relays a harness signal and never produces one, so the
@@ -1825,7 +1826,10 @@ span ID. The span marks the instant the enforcement point submits the decision, 
 evaluation latency. The collector mints one trace ID and one root span when it opens, and every
 control-plane operation names that root as its parent, so one box life is one trace. A decision is
 exported even when the caller's parent is unsampled, because a sampling flag must not suppress policy
-evidence. `decisions_export_spans_and_matching_logs_with_request_parentage` pins the contract.
+evidence. `decisions_export_spans_and_matching_logs_with_request_parentage` pins the contract. A
+kernel refusal is the one exception: it is a log record only, because it is no step of the box's own
+work and a workload that loops a refused call would otherwise crowd its own timeline
+(`a_refusal_reaches_a_file_target_under_the_containment_scope`).
 
 <a id="correlation-context-is-a-hint-and-never-authority"></a>
 ### Correlation context is a hint, and never evidence of authority
@@ -1887,3 +1891,44 @@ contents into the record. A shape test alone was useless: `pipefail` and `hunter
 Provenance separates them, because a literal word already sits in a file the operator can read. The
 policy engine never receives provenance, because a decision is about what runs and not about how a word
 was spelled.
+
+<a id="a-kernel-refusal-is-observed-not-decided"></a>
+### A kernel refusal is observed, not decided
+
+On Linux every call the syscall filter refuses reaches the box as a seccomp notification, and the box
+answers it with the `EPERM` the filter returned before notifications existed. It never continues a
+call: the one response builder takes no value that could. The box then records the refusal as a
+`kernel_refused` record under `strands-box.containment`, which is not a policy decision, because
+containment evaluates no policy ([the sandbox evaluates no policy](#containment-evaluates-no-policy)).
+
+A task's filter chain takes one listener, and an `ERRNO` answer from any filter outranks a
+notification from another. So the permit allow-list and the argument-scoped restrictions are spliced
+into one program at compile time, every `EPERM` return rewritten to a notification, and the kernel's
+own verifier checks the result. The two programs stay what they were, because the fallback installs
+them unchanged.
+
+The workload may not `sendmsg`, so it cannot hand its own listener over. Namespace PID 1, which runs
+unfiltered and holds no capabilities, copies the listener out of the workload with `pidfd_getfd` and
+sends the copy to the box; the workload names the descriptor over a socket it only reads and writes.
+PID 1 first copies a descriptor that already exists, after the workload drops its capabilities, and
+that check decides whether the workload installs the observed program at all. Once installed, the
+observed program refuses `seccomp` like the restrictions it contains, so nothing can be stacked over
+it: a copy that passes the check and then fails refuses the apply rather than leaving refusals that
+would answer `ENOSYS`.
+
+When the check fails, or the kernel refuses the observed install, the workload starts under the two
+refusing filters and the box says so once with `refusals_unobserved`. This departs from "every failed
+apply refuses the workload" on purpose: what failed is telemetry, not enforcement, and the boundary is
+identical either way. It is not a version probe: the results of the operations the box needs anyway
+select the path. Observation needs `pidfd_getfd` (kernel 5.6) and a ptrace policy that lets a parent
+reach its child (Yama scope 0 or 1).
+
+Each refused call now costs a round trip to the box, about 60 µs measured on arm64 against about a
+microsecond for the filter alone; a call the filter permits costs nothing more. A workload chooses
+how often it is refused, so records are limited per (executable, call, arguments): the first at
+once, repeats counted for ten seconds, at most 256 keys a box. Past the cap a new key is counted under
+its call alone, with every call number from 1024 up in one bucket, so arguments a workload picks
+cannot hide a later kind of call and the coarse keys stay bounded. Every record stands for one call
+plus its `suppressed` count. Refusals the view or the network namespace make
+(`ENOENT`, `EROFS`, `ENETUNREACH`) have no hook short of tracing every call and stay unobserved, and
+macOS reads no sandbox reports yet.

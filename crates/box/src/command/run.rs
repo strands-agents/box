@@ -206,7 +206,8 @@ async fn hosted(
         &site,
     )?;
     eprintln!("{}", boundary.disclosure());
-    let contained = Contained::spawn(boundary, &locked.root, hosted).await?;
+    let refusals = hosted.refusals();
+    let contained = Contained::spawn(boundary, &locked.root, hosted, &refusals).await?;
     contained.wait().await
 }
 

@@ -540,7 +540,8 @@ pub(crate) struct Record {
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
 }
 
-/// The record format this build writes and accepts: version 21 adds `network` to each
+/// The record format this build writes and accepts: version 22 adds the `kernel` telemetry
+/// `include` word, which version 21 refused. Version 21 adds `network` to each
 /// `[tool.<name>]`, and stores a stdio MCP server's network in its spec's `network`, where version
 /// 20 kept a separate `native_egress` flag on `ContainedMcp`. Version 20 names a secret's injection mode
 /// `secret.inject`, taking `phantom` or `always`, where version 19 took `secret.phantom` with
@@ -550,7 +551,7 @@ pub(crate) struct Record {
 /// stdio server is now contained), so a v16 record that predates it is refused with a version
 /// mismatch rather than silently losing containment. Version 16 dropped the credsd `secret.type`
 /// key.
-pub(crate) const RECORD_VERSION: u32 = 21;
+pub(crate) const RECORD_VERSION: u32 = 22;
 
 /// A key an earlier build read, and what replaced it.
 struct RemovedKey {

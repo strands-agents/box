@@ -22,4 +22,5 @@ pub(crate) mod hosted;
 pub(crate) mod lock;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+pub(crate) mod refusal;
 pub(crate) mod telemetry;

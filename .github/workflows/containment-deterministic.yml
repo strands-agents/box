@@ -124,6 +124,18 @@ jobs:
             && echo "unshare(CLONE_NEWUSER): OK" \
             || echo "WARNING: unshare(CLONE_NEWUSER) still refused"
 
+      # The CN-K cases drive refused syscalls from CPython. The harness refuses a
+      # python under /usr/bin, and the runner image ships no other, so install
+      # uv's python-build-standalone build -- the same one the unit-test leg uses
+      # on macOS -- and put it first in PATH.
+      - name: Install standalone Python (linux only)
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          "$HOME/.local/bin/uv" python install 3.12
+          UV_PY_DIR=$(dirname "$("$HOME/.local/bin/uv" python find 3.12)")
+          echo "$UV_PY_DIR" >> "$GITHUB_PATH"
+
       - name: Cache cargo
         # rust-cache keys include the runner OS. A distinct shared-key keeps this
         # workflow's cache separate from the unit-test leg's: the two build

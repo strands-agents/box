@@ -182,9 +182,9 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   acceptance union first. That is the operator's list working as
   [a target names a set of signals](../../docs/design/decisions.md#a-target-names-a-set-of-signals) says it should.
   An absent list takes **every** signal, and a list that is written must name `trace` to keep
-  the control plane, because `trace` expands to both `agent_trace` and `control_plane`. The six
-  spellings here are this crate's own; `box.toml` takes five words — `deny`, `permit`, `trace`,
-  `logs`, `metrics` — and the box expands them.
+  the control plane, because `trace` expands to both `agent_trace` and `control_plane`. The seven
+  spellings here are this crate's own; `box.toml` takes six words — `deny`, `permit`, `trace`,
+  `logs`, `metrics`, `kernel` — and the box expands them.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log

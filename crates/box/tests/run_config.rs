@@ -977,7 +977,7 @@ fn box_identity_is_stable_and_does_not_locate_state() {
         toml::from_str(&std::fs::read_to_string(fixture.record()).expect("first record"))
             .expect("record parses");
     let box_id = first_record["box_id"].as_str().expect("box id").to_string();
-    assert_eq!(first_record["version"].as_integer(), Some(21));
+    assert_eq!(first_record["version"].as_integer(), Some(22));
     assert_eq!(
         first_record["box_dir"].as_str(),
         Some(fixture.box_directory.to_string_lossy().as_ref())

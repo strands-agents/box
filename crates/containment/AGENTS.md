@@ -861,6 +861,11 @@ bounding and ambient, set `no_new_privs`, then install seccomp **last**.
 
 - Post-fork code is syscall-only: no allocation, no `format!`, no panic, and `_exit` never `exit`.
 - `verify_closed` takes the attempted list, never a re-enumeration.
+- After seccomp the workload may only `read`/`write` its sync socket: it may not `sendmsg`, and the
+  observed program refuses `seccomp`, so nothing is stacked after it. PID 1 copies the listener out
+  with `pidfd_getfd` and sends it on the relay socket; the workload closes its relay copy right
+  after the fork and its listener before `exec`. PID 1's copy check runs only after the workload
+  drops its capabilities, or the capability-subset check refuses it.
 
 ## The trampoline
 

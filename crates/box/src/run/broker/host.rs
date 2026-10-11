@@ -338,7 +338,7 @@ async fn start_mcp_server(
             &credential_reads,
         )?;
         let leaf = launcher
-            .spawn(boundary)
+            .spawn(boundary, &server.name)
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
         // A native-egress server bypasses the gateway, so its outbound traffic is never mediated,
@@ -1441,8 +1441,8 @@ mod tests {
     fn the_native_egress_record_is_emitted_after_launch_succeeds() {
         let src = include_str!("host.rs");
         let launch = src
-            .find(".spawn(boundary)")
-            .expect("start_mcp_server calls launcher.spawn(boundary)");
+            .find(".spawn(boundary,")
+            .expect("start_mcp_server calls launcher.spawn(boundary, …)");
         let record = src
             .find("\"egress:native\"")
             .expect("start_mcp_server records the egress:native downgrade");

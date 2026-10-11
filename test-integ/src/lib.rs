@@ -1038,8 +1038,18 @@ impl BoxFixture {
     /// HOME names the existing writable workspace; the real operator home stays outside it. The
     /// declared search path is [`NATIVE_PROBE_SEARCH_PATH`], so the composed PATH is exact.
     pub fn probe_py(&self, script: &str) -> RunResult {
+        self.probe_py_with_config(|config| config, script)
+    }
+
+    /// [`BoxFixture::probe_py`] with `edit` applied to the probe's configuration first, for a case
+    /// that declares its own telemetry target.
+    pub fn probe_py_with_config<F: FnOnce(String) -> String>(
+        &self,
+        edit: F,
+        script: &str,
+    ) -> RunResult {
         let python = native_python();
-        let config = native_probe_config(&self.template, &self.ws, python);
+        let config = edit(native_probe_config(&self.template, &self.ws, python));
         self.install_config(config);
         let before = self.decisions().len();
         let result = self.capture(

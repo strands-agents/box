@@ -754,14 +754,54 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
+        Some("--refused-calls") => refused_calls(),
+        Some("--report-handles") => report_handles(&args[2..]),
         _ => {
             eprintln!(
                 "usage: containment-test-probe \
-                 (--unix-ipc | --shell-child | --verify-no-inherited-handles) ..."
+                 (--unix-ipc | --shell-child | --verify-no-inherited-handles | --refused-calls \
+                 | --report-handles <relay-fd>) ..."
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// Make two calls the filter refuses and print each errno: an argument-scoped one and an unlisted
+/// one.
+#[cfg(target_os = "linux")]
+fn refused_calls() -> ExitCode {
+    // SAFETY: plain syscalls with scalar arguments.
+    let socket = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
+    let socket_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    // SAFETY: `bpf` with a null attribute pointer is refused before it is read.
+    let bpf = unsafe { libc::syscall(libc::SYS_bpf, 0, std::ptr::null::<u8>(), 0) };
+    let bpf_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    println!("socket rc={socket} errno={socket_errno}");
+    println!("bpf rc={bpf} errno={bpf_errno}");
+    ExitCode::SUCCESS
+}
+
+/// Print how many open descriptors are seccomp listeners, and whether `relay` is open.
+#[cfg(target_os = "linux")]
+fn report_handles(args: &[String]) -> ExitCode {
+    let relay: i32 = args.first().and_then(|a| a.parse().ok()).unwrap_or(-1);
+    let mut listeners = 0;
+    let mut relay_open = false;
+    for entry in std::fs::read_dir("/proc/self/fd")
+        .expect("fd table")
+        .flatten()
+    {
+        let target = std::fs::read_link(entry.path()).unwrap_or_default();
+        if target.to_string_lossy().contains("seccomp notify") {
+            listeners += 1;
+        }
+        if entry.file_name().to_string_lossy() == relay.to_string() {
+            relay_open = true;
+        }
+    }
+    println!("listeners={listeners} relay_open={relay_open}");
+    ExitCode::SUCCESS
 }
 
 #[cfg(target_os = "linux")]
