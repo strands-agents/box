@@ -25,11 +25,8 @@ async-trait = "0.1"
 containment = { package = "strands-box-containment", path = "../containment" }
 credentials = { package = "strands-box-credentials", path = "../credentials" }
 egress-gateway = { package = "strands-box-egress-gateway", path = "../egress-gateway" }
-# One policy crate, three enforcement points: `egress-adapter` backs the proxy's,
-# `shell-adapter` the hosted Shell's, and `script-adapter` the Monty broker's. All three
-# consume the *same* `Arc<PolicyEngine>` in the `run` process
-# (docs/design/decisions.md#one-policy-engine-per-box), so the adapters are three views of one
-# authority rather than three authorities.
+# The adapters share one Arc<PolicyEngine> in the trusted run process.
+# The optional kernel adapter is enabled by kernel-policy-integration.
 policy = { package = "strands-box-policy", path = "../policy", features = [
     "egress-adapter",
     "shell-adapter",
@@ -87,6 +84,9 @@ tokio = { version = "1", features = [
 # inside the box. Gated on a non-default feature so a normal build never produces it,
 # matching `containment`'s `containment-test-probe`.
 [features]
+# Builds the inactive kernel policy adapter; it does not install kernel interception.
+kernel-policy-integration = ["policy/kernel-adapter"]
+
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).

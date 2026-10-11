@@ -16,6 +16,7 @@ path = "src/lib.rs"
 # dependency graph. egress-gateway's default `tls-intercept` feature is off
 # because the adapter contract is socket-free.
 egress-adapter = ["dep:strands-box-egress-gateway"]
+kernel-adapter = []
 shell-adapter = ["dep:async-trait", "dep:strands-shell"]
 # The Monty adapter answers the interpreter's OS-call suspensions. Synchronous and
 # socket-free, so it needs no async runtime — unlike the Shell adapter, whose
