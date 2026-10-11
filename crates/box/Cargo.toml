@@ -107,6 +107,16 @@ name = "box-inherited-handles-probe"
 path = "tests/support/inherited_handles_probe.rs"
 required-features = ["test-support"]
 
+# Drives `close_inherited_descriptors` and its fallbacks
+# (`crates/box/src/bin/strands-box-sock-alias/close_descriptors.rs`, included here by path) from a
+# freshly spawned process, so wiping the descriptor table above stderr -- the very thing under
+# test -- cannot disturb this probe's own caller the way running it in-process or in a forked
+# `cargo test` worker would.
+[[bin]]
+name = "box-close-range-probe"
+path = "tests/support/close_range_probe.rs"
+required-features = ["test-support"]
+
 # A stdio MCP server (`reach` tool; proxy-unaware direct + proxy-aware $HTTPS_PROXY modes) and the
 # transport client that drives it. Test-only fixtures for the native-egress / gateway MCP tests, so
 # they carry the same gate and never ship as product binaries.
@@ -140,6 +150,11 @@ required-features = ["test-support"]
 [[test]]
 name = "box_inherited_handles"
 path = "tests/box_inherited_handles.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_close_range"
+path = "tests/box_close_range.rs"
 required-features = ["test-support"]
 
 [[test]]
