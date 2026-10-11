@@ -19,10 +19,8 @@ command. [AGENTS.md](AGENTS.md) holds the repository rules.
 
 ## Using AI tools
 
-We accept code written by AI. We, the core maintainers, use coding agents exclusively. But we
-created an AI usage policy that explains how we think about this. Please read before contributing: 
-[Strands AI usage policy](https://github.com/strands-agents/harness-sdk/blob/main/team/AI_USAGE_POLICY.md). 
-In summary: 
+We accept code written by AI. So, we created an AI usage policy that explains how we think about this. 
+Please read before contributing: [Strands AI usage policy](https://github.com/strands-agents/harness-sdk/blob/main/team/AI_USAGE_POLICY.md): 
 
 - **You own every line.** Review and understand the whole change before you open the pull
   request, and be ready to explain why it works. The pull request template asks you to
