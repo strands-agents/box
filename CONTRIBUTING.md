@@ -17,6 +17,21 @@ A default rustup install also gives you the `clippy` and `rustfmt` components th
 [README.md](README.md) states what each test suite needs, and how to install a local `box`
 command. [AGENTS.md](AGENTS.md) holds the repository rules.
 
+## Using AI tools
+
+We accept code that AI tools helped write. The
+[Strands AI usage policy](https://github.com/strands-agents/harness-sdk/blob/main/team/AI_USAGE_POLICY.md)
+applies to every contribution, and three of its rules matter most here:
+
+- **You own every line.** Review and understand the whole change before you open the pull
+  request, and be ready to explain why it works. The pull request template asks you to
+  confirm this.
+- **Say when AI helped, and speak for yourself.** State in the pull request description that
+  AI helped. Write the description and your replies to reviewers in your own words.
+- **Start small.** Open an issue that explains the problem in your own words, then send one
+  focused pull request. We review a small number of careful changes before many generated
+  ones, and we close a batch that we cannot review.
+
 ## Before you open a pull request
 
 Run the gates with [`just`](https://github.com/casey/just):
