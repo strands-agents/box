@@ -19,18 +19,18 @@ command. [AGENTS.md](AGENTS.md) holds the repository rules.
 
 ## Using AI tools
 
-We accept code that AI tools helped write. The
-[Strands AI usage policy](https://github.com/strands-agents/harness-sdk/blob/main/team/AI_USAGE_POLICY.md)
-applies to every contribution, and three of its rules matter most here:
+We accept code written by AI. We, the core maintainers, use coding agents exclusively. But we
+created an AI usage policy that explains how we think about this. Please read before contributing: 
+[Strands AI usage policy](https://github.com/strands-agents/harness-sdk/blob/main/team/AI_USAGE_POLICY.md). 
+In summary: 
 
 - **You own every line.** Review and understand the whole change before you open the pull
   request, and be ready to explain why it works. The pull request template asks you to
   confirm this.
-- **Say when AI helped, and speak for yourself.** State in the pull request description that
-  AI helped. Write the description and your replies to reviewers in your own words.
-- **Start small.** Open an issue that explains the problem in your own words, then send one
-  focused pull request. We review a small number of careful changes before many generated
-  ones, and we close a batch that we cannot review.
+- **Speak for yourself.** Write the description in your own words. 
+- **Start small.** If you are a new contributor, start small. Open an issue that explains
+  the problem in your own words, then send one focused pull request. Please don't blast us
+  with dozens of PRs at once. 
 
 ## Before you open a pull request
 
