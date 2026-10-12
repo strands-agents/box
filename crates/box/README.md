@@ -63,9 +63,6 @@ to the loaded configuration and policy identities. Every run rereads the selecte
 opens the durable engine. An unchanged run avoids rewriting stored authority and recovers its
 `when temporal { … }` history. `run` never rewrites the selected files; it only reads them.
 
-The interim `rm` and `reset` commands apply only to the legacy named namespace. They refuse a
-running legacy box unless `--force` is present.
-
 **The selected configuration is the only configuration source.** `run` accepts
 `--config <file>` and reads no configuration from parent directories. The path can be relative to
 the process working directory. Box canonicalizes it before use.
