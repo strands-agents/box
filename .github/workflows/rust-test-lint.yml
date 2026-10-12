@@ -155,6 +155,10 @@ jobs:
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
+          # ubuntu-latest is a stock GitHub-hosted runner (kernel well above 5.9, no seccomp
+          # block), so close_range is available and the fast-path test must exercise it rather
+          # than skip. Setting this makes a skip there a hard failure instead of a quiet pass.
+          BOX_REQUIRE_CLOSE_RANGE: "1"
         run: |
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
             -- \
