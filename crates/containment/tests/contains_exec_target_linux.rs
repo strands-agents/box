@@ -246,3 +246,94 @@ fn the_host_can_build_a_view() -> bool {
     unsafe { libc::waitpid(child, &mut status, 0) };
     libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
 }
+
+/// A virtualenv-shaped chain whose program is a copy of `readlink`: `venv/bin/p → p3`,
+/// `venv/bin/p3 → <prefix>/bin/p3`, `<prefix>/bin/p3 → real`. Returns
+/// `(fixtures, venv, route, real)`; the chain lives as long as `fixtures`.
+fn readlink_chain() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let directory = tempfile::tempdir().expect("chain fixtures");
+    let root = directory.path().canonicalize().expect("canonical root");
+    let prefix_bin = root.join("prefix/bin");
+    let venv_bin = root.join("venv/bin");
+    std::fs::create_dir_all(&prefix_bin).expect("prefix");
+    std::fs::create_dir_all(&venv_bin).expect("venv");
+    let readlink = ["/usr/bin/readlink", "/bin/readlink"]
+        .iter()
+        .map(Path::new)
+        .find(|candidate| candidate.is_file())
+        .expect("coreutils readlink");
+    let real = prefix_bin.join("real");
+    std::fs::copy(readlink, &real).expect("program");
+    let middle = prefix_bin.join("p3");
+    std::os::unix::fs::symlink("real", &middle).expect("hop 3");
+    std::os::unix::fs::symlink(&middle, venv_bin.join("p3")).expect("hop 2");
+    let route = venv_bin.join("p");
+    std::os::unix::fs::symlink("p3", &route).expect("hop 1");
+    (directory, root.join("venv"), route, real)
+}
+
+/// Exec `route`, with the working directory granted, and the venv tree too when given.
+fn chain_config(route: &Path, work_dir: &Path, venv: Option<&Path>) -> ContainmentConfig {
+    let mut config = ContainmentConfig::new()
+        .allow(route, Operation::Exec, Scope::File)
+        .expect("exec through the chain")
+        .allow(work_dir, Operation::Read, Scope::Root)
+        .expect("grant the working directory")
+        .allow(work_dir, Operation::Write, Scope::Root)
+        .expect("grant the working directory");
+    if let Some(venv) = venv {
+        config = config
+            .allow(venv, Operation::Read, Scope::Root)
+            .expect("read the venv");
+    }
+    config
+}
+
+/// **A program exec'd through a link chain runs as its identity** (#30 A2): `/proc/self/exe`, and
+/// so the loader's `$ORIGIN`, name the file the closure walk resolved against.
+#[test]
+fn a_program_through_a_link_chain_runs_as_its_identity() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let (_fixtures, _, route, real) = readlink_chain();
+    let work_dir = tempfile::tempdir().expect("work directory");
+    let config = chain_config(&route, work_dir.path(), None);
+    let route_text = route.display().to_string();
+    let (code, stdout, stderr) =
+        run_contained(&config, work_dir.path(), &[&route_text, "/proc/self/exe"]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        real.display().to_string(),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// **A hop outside every grant is still in the view** (#30 A1): with the venv bound, its links come
+/// from the host and the hop under the prefix is reproduced.
+#[test]
+fn a_link_chain_leaving_a_bound_tree_execs() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let (_fixtures, venv, route, real) = readlink_chain();
+    let work_dir = tempfile::tempdir().expect("work directory");
+    let config = chain_config(&route, work_dir.path(), Some(&venv));
+    let route_text = route.display().to_string();
+    let (code, stdout, stderr) =
+        run_contained(&config, work_dir.path(), &[&route_text, "/proc/self/exe"]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        real.display().to_string(),
+        "stderr:\n{stderr}"
+    );
+}

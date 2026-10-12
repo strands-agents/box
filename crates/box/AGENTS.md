@@ -453,7 +453,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   rule at all — its exec set is whatever the mount view leaves runnable, which is every `+x` file
   on a read-only bind. Measured with one `bash` workload and four aliases: **14 execve-able paths
   against 5 grants**, the extras being the ELF loader, seven mode-`0755` libraries, and the
-  workload bound under both spellings. None can run workload-authored bytes, because W^X's
+  workload bound under both spellings (measured before the view reproduced link spellings as links;
+  a link spelling is no longer a second bind, so that extra remains only for a spelling reached
+  through a linked ancestor). None can run workload-authored bytes, because W^X's
   `noexec` refuses the mapping, so it is a premise gap rather than a hole.
   `containment`'s `view.rs::the_view_leaves_exactly_the_intended_paths_executable` bounds it, and
   narrowing it is deferred. Do not restate this bullet as a cross-platform guarantee.
