@@ -3247,7 +3247,7 @@ pub(crate) fn refuse_home_in_box_state(
         home.to_path_buf(),
         resolved_to_its_deepest_existing_ancestor(home),
     ] {
-        if roots.iter().any(|root| spelling.starts_with(root)) {
+        if roots.iter().any(|root| lies_within(&spelling, root)) {
             return Err(home_in_box_state(home, table));
         }
         // The other direction: a home ABOVE the box directory. `Reach` makes a declared home one of
@@ -3255,7 +3255,7 @@ pub(crate) fn refuse_home_in_box_state(
         // every sibling box's stored policy inside the reachable set.
         if box_spellings
             .iter()
-            .any(|box_spelling| box_spelling.starts_with(&spelling))
+            .any(|box_spelling| lies_within(box_spelling, &spelling))
         {
             return Err(ConfigError::Process {
                 table: table.to_string(),
@@ -3319,6 +3319,45 @@ pub(crate) fn resolved_to_its_deepest_existing_ancestor(path: &Path) -> PathBuf 
             _ => return path.to_path_buf(),
         }
     }
+}
+
+/// Whether `inner` is `outer` or beneath it, by spelling or by on-disk identity.
+pub(crate) fn lies_within(inner: &Path, outer: &Path) -> bool {
+    respelled_under(inner, outer).is_some()
+}
+
+/// `inner` in `outer`'s spelling, when `inner` is `outer` or beneath it on disk.
+pub(crate) fn respelled_under(inner: &Path, outer: &Path) -> Option<PathBuf> {
+    if inner.starts_with(outer) {
+        return Some(inner.to_path_buf());
+    }
+    let outer_identity = disk_identity(outer)?;
+    let ancestor = inner
+        .ancestors()
+        .find(|ancestor| disk_identity(ancestor) == Some(outer_identity))?;
+    let rest = inner.strip_prefix(ancestor).ok()?;
+    Some(if rest.as_os_str().is_empty() {
+        outer.to_path_buf()
+    } else {
+        outer.join(rest)
+    })
+}
+
+/// Whether `inner`, or an existing ancestor of it, has one of `identities`.
+pub(crate) fn has_ancestor_among(inner: &Path, identities: &[(u64, u64)]) -> bool {
+    !identities.is_empty()
+        && inner
+            .ancestors()
+            .filter_map(disk_identity)
+            .any(|ancestor| identities.contains(&ancestor))
+}
+
+/// The device and inode `path` resolves to, or `None` when it does not exist.
+pub(crate) fn disk_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
 }
 
 /// The canonical spelling of `path`, or the authored one when it does not resolve.
@@ -4664,6 +4703,70 @@ mod tests {
                 "a directory sharing the box directory's prefix is neither inside nor above it",
             );
         });
+    }
+
+    /// **A declared home in the macOS data-volume spelling is refused** inside or above a box
+    /// directory written in the ordinary spelling.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_volume_home_is_refused_inside_or_above_the_box_directory() {
+        let guard = tempfile::tempdir().expect("an operator home");
+        let operator = guard.path().canonicalize().expect("the home resolves");
+        let box_directory = operator.join("boxes/codex");
+        std::fs::create_dir_all(&box_directory).expect("the box directory");
+        let data_volume =
+            |path: &Path| Path::new("/System/Volumes/Data").join(path.strip_prefix("/").unwrap());
+
+        with_operator_home(&operator, || {
+            for (home, reason) in [
+                (
+                    data_volume(&box_directory).join("home"),
+                    "trusted Box state",
+                ),
+                (
+                    data_volume(&operator.join("boxes")),
+                    "encloses the box directory",
+                ),
+            ] {
+                let error = refuse_home_in_box_state(&home, &box_directory, "[agent]")
+                    .err()
+                    .unwrap_or_else(|| panic!("{} must be refused", home.display()));
+                assert!(
+                    error.to_string().contains(reason),
+                    "{}: {error}",
+                    home.display()
+                );
+            }
+        });
+    }
+
+    /// **Identity reaches through a second spelling**: a path under a link to `outer` lies within
+    /// it, an absent leaf is judged by its existing ancestor, and an unrelated or absent `outer`
+    /// encloses nothing.
+    #[cfg(unix)]
+    #[test]
+    fn lies_within_judges_identity_through_a_second_spelling() {
+        let guard = tempfile::tempdir().expect("a scratch directory");
+        let root = guard.path().canonicalize().expect("the scratch resolves");
+        let outer = root.join("state");
+        std::fs::create_dir_all(outer.join("private")).expect("the outer directory");
+        std::fs::create_dir(root.join("other")).expect("an unrelated directory");
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).expect("alias -> state");
+
+        assert!(lies_within(&alias.join("private/absent"), &outer));
+        assert_eq!(
+            respelled_under(&alias.join("private/absent"), &outer),
+            Some(outer.join("private/absent"))
+        );
+        assert_eq!(
+            respelled_under(&alias, &outer).map(PathBuf::into_os_string),
+            Some(outer.clone().into_os_string()),
+            "no trailing separator"
+        );
+        assert!(lies_within(&outer.join("private"), &alias));
+        assert!(!lies_within(&root.join("other/absent"), &alias));
+        assert!(!lies_within(&alias.join("private"), &root.join("absent")));
     }
 
     /// How many bytes `socket` costs below `enclosing`.

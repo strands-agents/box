@@ -333,7 +333,7 @@ impl RunContract {
             .map_err(|source| ConfigError::Contract {
                 reason: format!("cannot resolve `box_dir` {}: {source}", root.display()),
             })?;
-        if root == self.workspace || root.starts_with(&self.workspace) {
+        if crate::record::layout::lies_within(&root, &self.workspace) {
             return Err(ConfigError::Contract {
                 reason: format!(
                     "`box_dir` {} is equal to or below the agent's workspace {}",
@@ -343,7 +343,7 @@ impl RunContract {
             }
             .into());
         }
-        if self.source.path().starts_with(&root) {
+        if crate::record::layout::lies_within(self.source.path(), &root) {
             return Err(ConfigError::Contract {
                 reason: format!(
                     "configuration source {} is inside `box_dir` {}",
@@ -362,7 +362,7 @@ impl RunContract {
                         path: policy_path,
                         source,
                     })?;
-            if canonical.starts_with(&root) {
+            if crate::record::layout::lies_within(&canonical, &root) {
                 return Err(ConfigError::Contract {
                     reason: format!(
                         "policy source {} is inside `box_dir` {}",
@@ -389,7 +389,7 @@ impl RunContract {
             &policy_operator()?,
         )?;
         if let Some(source) = &policy_source
-            && source.path().starts_with(root.root())
+            && crate::record::layout::lies_within(source.path(), root.root())
         {
             return Err(ConfigError::Contract {
                 reason: format!(

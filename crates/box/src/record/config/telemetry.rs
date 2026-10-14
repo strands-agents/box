@@ -50,7 +50,9 @@ fn refuse_a_workload_reachable_destination(
     for root in &roots {
         let private = root.join(crate::record::layout::PRIVATE_DIRECTORY);
         for spelling in &spellings {
-            if spelling.starts_with(root) && !spelling.starts_with(&private) {
+            if crate::record::layout::lies_within(spelling, root)
+                && !crate::record::layout::lies_within(spelling, &private)
+            {
                 return Err(format!(
                     "{expanded:?} is inside the box directory {} but outside its private tree, \
                      where a process could truncate it; name a destination under `private/`, or \
@@ -406,6 +408,39 @@ mod tests {
 
         refuse_a_workload_reachable_destination("/var/log/box.jsonl", box_directory)
             .expect("a destination outside the box directory is allowed");
+    }
+
+    /// **A destination in the macOS data-volume spelling of the box directory is refused** outside
+    /// its private tree, and accepted inside it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_volume_destination_outside_private_is_refused() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let box_directory = scratch
+            .path()
+            .canonicalize()
+            .expect("resolves")
+            .join("codex");
+        std::fs::create_dir_all(box_directory.join("private")).expect("the box directory");
+        let data_volume =
+            Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
+
+        refuse_a_workload_reachable_destination(
+            data_volume
+                .join("bin/records.jsonl")
+                .to_str()
+                .expect("UTF-8"),
+            &box_directory,
+        )
+        .expect_err("a destination outside private/ is refused in either spelling");
+        refuse_a_workload_reachable_destination(
+            data_volume
+                .join("private/records.jsonl")
+                .to_str()
+                .expect("UTF-8"),
+            &box_directory,
+        )
+        .expect("a destination under private/ is accepted in either spelling");
     }
 
     /// A sibling whose path merely *starts with* the box directory's spelling is not inside it.

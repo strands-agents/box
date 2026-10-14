@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use policy::{PathRefusal, PathResolver};
 
 use crate::record::config::AuthoritySource;
+use crate::record::layout::{disk_identity, has_ancestor_among, lies_within};
 use crate::run::broker::invalid_input;
 
 /// The set of paths the interpreters may name, and the resolver that admits one.
@@ -45,6 +46,9 @@ pub(super) struct Reach {
 
     /// The deny floor: roots no path may resolve into, whatever policy says.
     forbidden: Vec<PathBuf>,
+
+    /// The on-disk identities of the deny floor's roots that existed when the set was declared.
+    forbidden_identities: Vec<(u64, u64)>,
 
     /// The exact authority-source identities that this run loaded.
     forbidden_exactly: Vec<AuthoritySource>,
@@ -184,6 +188,10 @@ impl Reach {
             home: home_text,
             home_source,
             resolver,
+            forbidden_identities: forbidden
+                .iter()
+                .filter_map(|root| disk_identity(root))
+                .collect(),
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
             shared: shared
@@ -313,13 +321,15 @@ impl Reach {
             && self
                 .forbidden_exactly
                 .iter()
-                .any(|forbidden| forbidden.path().starts_with(approved))
+                .any(|forbidden| lies_within(forbidden.path(), approved))
         {
             return Err(Refused::new(reported_as, AUTHORITY_SOURCE));
         }
 
         // No exception for a home: `layout::refuse_home_in_box_state` refuses one here first.
-        if self.forbidden.iter().any(|root| approved.starts_with(root)) {
+        if self.forbidden.iter().any(|root| approved.starts_with(root))
+            || has_ancestor_among(approved, &self.forbidden_identities)
+        {
             return Err(Refused::new(reported_as, BENEATH_THE_FLOOR));
         }
         Ok(())
@@ -686,6 +696,33 @@ mod tests {
         }
     }
 
+    /// **A box directory in the macOS data-volume spelling is still beneath the floor** for a path
+    /// that names its private state in the ordinary spelling.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_volume_box_directory_is_still_beneath_the_floor() {
+        let operator = tempfile::tempdir().expect("an operator home");
+        let resolved = operator.path().canonicalize().expect("the home resolves");
+        let box_directory = resolved.join("boxes/codex");
+        std::fs::create_dir_all(box_directory.join("private")).expect("the box's private state");
+        let target = box_directory.join("private/record.json");
+        std::fs::write(&target, "{}").expect("a record");
+        let data_volume =
+            Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
+
+        let reach = crate::test_support::with_operator_home(&resolved, || {
+            Reach::over_box(&resolved, Some(&resolved), None, &data_volume, &[])
+                .expect("the reachable set is declarable")
+        });
+        let spelled = target.to_str().expect("UTF-8");
+        let refusal =
+            crate::test_support::with_operator_home(&resolved, || reach.approve(&target, spelled))
+                .err()
+                .unwrap_or_else(|| panic!("{spelled} must be beneath the floor"))
+                .to_string();
+        assert!(refusal.contains(BENEATH_THE_FLOOR), "{spelled}: {refusal}");
+    }
+
     /// A symlink into the box directory is refused — **by the resolver, not by the floor.**
     ///
     /// Measured 2026-08-18 by deleting the floor: this test still passed, because
@@ -766,6 +803,39 @@ mod tests {
         reach
             .approve(&enclosing, enclosing.to_str().expect("UTF-8"))
             .expect("the directory beside the policy stays reachable");
+        let refusal = reach
+            .approve_mutation(&enclosing, enclosing.to_str().expect("UTF-8"))
+            .expect_err("the directory holding a loaded source may not be changed")
+            .to_string();
+        assert!(refusal.contains(AUTHORITY_SOURCE), "{refusal}");
+    }
+
+    /// **A policy loaded in the macOS data-volume spelling still guards its directory** against a
+    /// change named in the ordinary spelling.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_volume_authority_source_still_guards_its_directory() {
+        let operator = tempfile::tempdir().expect("an operator home");
+        let resolved = operator.path().canonicalize().expect("the home resolves");
+        let enclosing = resolved.join("workspace");
+        std::fs::create_dir_all(&enclosing).expect("a workspace");
+        std::fs::write(enclosing.join("policy.dw"), "permit(...)").expect("a policy");
+        let policy = Path::new("/System/Volumes/Data")
+            .join(enclosing.join("policy.dw").strip_prefix("/").unwrap());
+        let (source, _text) =
+            AuthoritySource::read(&policy, "policy").expect("the authority loads");
+        std::fs::create_dir(resolved.join("box")).expect("a box directory");
+        let reach = crate::test_support::with_operator_home(&resolved, || {
+            Reach::over_box(
+                &resolved,
+                Some(&resolved),
+                None,
+                &resolved.join("box"),
+                &[source],
+            )
+            .expect("the reachable set is usable")
+        });
+
         let refusal = reach
             .approve_mutation(&enclosing, enclosing.to_str().expect("UTF-8"))
             .expect_err("the directory holding a loaded source may not be changed")

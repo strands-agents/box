@@ -841,6 +841,63 @@ fn path_relationship_refusals_create_no_box_state() {
     assert_eq!(std::fs::read_dir(&nested).expect("box reads").count(), 0);
 }
 
+/// **The macOS data-volume spelling places no box state against the workspace or an authority
+/// source**: each refusal fires as it does for the ordinary spelling.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_data_volume_spelling_is_refused_against_the_workspace_and_the_authority_sources() {
+    let data_volume =
+        |path: &Path| Path::new("/System/Volumes/Data").join(path.strip_prefix("/").unwrap());
+    let fixture = ContractFixture::new();
+    let nested = fixture.workspace.join("box");
+    std::fs::create_dir(&nested).expect("nested box directory");
+    make_private(&nested);
+    let document = |box_directory: &Path, policy: &str| {
+        format!(
+            "name = \"contract\"\nbox_dir = {:?}\n{policy}[agent]\ncommand = [{:?}]\nworkspace = {:?}\n",
+            box_directory.display().to_string(),
+            no_op_program(),
+            fixture.workspace_text()
+        )
+    };
+
+    std::fs::write(&fixture.config, document(&data_volume(&nested), "")).expect("configuration");
+    let output = fixture.run(&fixture.config, &[]);
+    assert!(
+        !output.status.success() && text(&output).contains("equal to or below"),
+        "{}",
+        text(&output)
+    );
+
+    let inside_config = fixture.box_directory.join("control.any");
+    std::fs::write(&inside_config, document(&fixture.box_directory, ""))
+        .expect("inside configuration");
+    let output = fixture.run(&data_volume(&inside_config), &[]);
+    assert!(
+        text(&output).contains("configuration source")
+            && text(&output).contains("inside `box_dir`"),
+        "{}",
+        text(&output)
+    );
+    std::fs::remove_file(&inside_config).expect("clear root");
+
+    let inside_policy = fixture.box_directory.join("rules.any");
+    std::fs::write(&inside_policy, "").expect("inside policy");
+    let policy = format!(
+        "policy = {:?}\n",
+        data_volume(&inside_policy).display().to_string()
+    );
+    std::fs::write(&fixture.config, document(&fixture.box_directory, &policy))
+        .expect("configuration");
+    let output = fixture.run(&fixture.config, &[]);
+    assert!(
+        text(&output).contains("policy source") && text(&output).contains("inside `box_dir`"),
+        "{}",
+        text(&output)
+    );
+    assert!(!fixture.box_directory.join("private").exists());
+}
+
 #[test]
 fn authority_sources_cannot_live_inside_the_box_directory() {
     let fixture = ContractFixture::new();

@@ -20,7 +20,7 @@ use crate::error::{BoxError, ConfigError, TrampolineError};
 use crate::record::config::filesystem::{self, DirectGrant, DirectReach, FilesystemContext};
 use crate::record::config::process::ProcessSpec;
 use crate::record::config::{AuthoritySource, Record};
-use crate::record::layout::BoxRoot;
+use crate::record::layout::{BoxRoot, disk_identity, lies_within, respelled_under};
 use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
 use crate::run::hosted::Attachment;
@@ -874,10 +874,18 @@ fn protect_authorities<'a>(
     }
     for (source, opened) in sources {
         config = config.require_file_identity(source, opened)?;
-        if writes.iter().any(|(path, scope)| {
-            source == path || *scope == Scope::Root && source.starts_with(path)
-        }) {
-            config = config.protect_write(source, opened)?;
+        let spellings: std::collections::BTreeSet<PathBuf> = writes
+            .iter()
+            .filter_map(|(path, scope)| match scope {
+                Scope::Root => respelled_under(source, path),
+                _ => (source == path
+                    || disk_identity(source)
+                        .is_some_and(|source| disk_identity(path) == Some(source)))
+                .then(|| path.clone()),
+            })
+            .collect();
+        for spelling in spellings {
+            config = config.protect_write(&spelling, opened)?;
         }
     }
     Ok(config)
@@ -889,8 +897,8 @@ pub(crate) fn require_private_state_absent(
     scope: Scope,
     private: &Path,
 ) -> Result<(), containment::ContainmentError> {
-    if path.starts_with(private)
-        || operation != Operation::Metadata && scope == Scope::Root && private.starts_with(path)
+    if lies_within(path, private)
+        || operation != Operation::Metadata && scope == Scope::Root && lies_within(private, path)
     {
         return Err(containment::ContainmentError::GrantTooBroad {
             path: path.to_path_buf(),
@@ -931,10 +939,10 @@ pub(crate) fn require_box_directory_absent(
     scope: Scope,
     box_directory: &Path,
 ) -> Result<(), containment::ContainmentError> {
-    if path.starts_with(box_directory)
+    if lies_within(path, box_directory)
         || operation != Operation::Metadata
             && scope == Scope::Root
-            && box_directory.starts_with(path)
+            && lies_within(box_directory, path)
     {
         return Err(containment::ContainmentError::GrantTooBroad {
             path: path.to_path_buf(),
@@ -3337,6 +3345,71 @@ mod tests {
             box_directory,
         )
         .expect_err("a read root above the box directory is refused");
+    }
+
+    /// **The macOS data-volume spelling of the box directory meets both guards**, as the ordinary
+    /// spelling does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_data_volume_spelling_of_the_box_directory_is_still_guarded() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let lab = scratch.path().canonicalize().expect("the scratch resolves");
+        assert!(lab.starts_with("/private"), "{}", lab.display());
+        let box_directory = lab.join("state");
+        std::fs::create_dir_all(box_directory.join("private")).expect("the box directory");
+        let data_volume =
+            Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
+        assert_eq!(
+            data_volume
+                .canonicalize()
+                .expect("the data-volume spelling resolves"),
+            data_volume,
+            "realpath keeps the data-volume spelling"
+        );
+
+        let private = data_volume.join("private");
+        require_private_state_absent(&lab, Operation::Write, Scope::Root, &private)
+            .expect_err("the grant would expose private Box state");
+        require_box_directory_absent(&lab, Operation::Write, Scope::Root, &data_volume)
+            .expect_err("the grant would expose the Box's own directory");
+    }
+
+    /// **A write grant over a policy loaded in the macOS data-volume spelling still protects it.**
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_write_grant_over_a_data_volume_authority_still_protects_it() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let project = scratch.path().canonicalize().expect("the scratch resolves");
+        std::fs::write(project.join("policy.dw"), "permit(...)").expect("a policy");
+        let policy = Path::new("/System/Volumes/Data")
+            .join(project.join("policy.dw").strip_prefix("/").unwrap());
+        let opened = std::fs::File::open(&policy).expect("the policy opens");
+        let state = tempfile::tempdir().expect("a box directory");
+        let private = state
+            .path()
+            .canonicalize()
+            .expect("resolves")
+            .join("private");
+        std::fs::create_dir(&private).expect("private state");
+
+        let config = ContainmentConfig::new()
+            .allow(&project, Operation::Write, Scope::Root)
+            .expect("a write grant over the project");
+        let config = protect_authorities(config, &private, [(policy.as_path(), &opened)])
+            .expect("the authority is protected");
+
+        let snapshot = serde_json::to_value(&config).expect("the config serializes");
+        let protected: Vec<&str> = snapshot["write_protections"]
+            .as_array()
+            .expect("write protections")
+            .iter()
+            .filter_map(|protection| protection["path"].as_str())
+            .collect();
+        assert_eq!(
+            protected,
+            [project.join("policy.dw").to_str().expect("UTF-8")],
+            "the protection takes the spelling the write grant names: {snapshot}"
+        );
     }
 
     /// **A policy path spelled through a parent component still resolves to the file it names**,
