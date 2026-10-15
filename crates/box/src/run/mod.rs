@@ -20,6 +20,8 @@ pub(crate) mod credential;
 pub(crate) mod hardening;
 pub(crate) mod hosted;
 pub(crate) mod lock;
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+pub(crate) mod macos_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
 pub(crate) mod telemetry;

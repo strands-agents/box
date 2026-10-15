@@ -206,7 +206,7 @@ while [ "$n" -le "$RUNS" ]; do
   STOPPED=exit
   # Portable hard stop: macOS ships no `timeout`. Run the box in the background,
   # poll, and kill the process group if the case overruns its budget.
-  strands-box run --config "$CFG/box.toml" -- "${EXTRA[@]}" >"$TURNS_N" 2>>"$ERR_N" &
+  "${WL_BOX_BINARY:-strands-box}" run --config "$CFG/box.toml" -- "${EXTRA[@]}" >"$TURNS_N" 2>>"$ERR_N" &
   BOX_PID=$!
   ELAPSED=0
   while kill -0 "$BOX_PID" 2>/dev/null; do

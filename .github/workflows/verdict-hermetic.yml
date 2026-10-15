@@ -64,6 +64,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Native workload verdict and configuration
+        run: python3 test-workload/workload-native-filesystem/checks_test.py
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

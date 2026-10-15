@@ -37,7 +37,7 @@ invent one.
 | **relay** | — | The part that carries bytes across the box's network boundary. **It decides nothing.** Calling it a gateway implies authority it must never hold. |
 | **box directory** | box home, home, private home | The private per-box directory. It holds `bin`, `run`, `trust`, and `private`. The workload cannot reach it, and no child of it is a home. |
 | **runtime minimum** | pack, bundle, base grants | The paths an interpreter must have to start. Core adds them to each process, and `run` discloses them at startup. The operator authors none of them. |
-| **process specification** | session config, agent config, tool config | The four keys that `[agent]` and each `[tool.<name>]` hold: `command`, `workspace`, `env`, and `filesystem`. |
+| **process specification** | session config, agent config, tool config | The fields in `[agent]` and each `[tool.<name>]`: `command`, `workspace`, `env`, and `filesystem`, plus the optional experimental `native-filesystem-policy` selection. |
 | **absent** | denied, blocked, refused | A path the box can name and cannot reach. The call fails as "no such file". **Absent and refused are different outcomes**, and only Linux makes an ungranted path absent. |
 
 ## Three terms that look like synonyms and are not

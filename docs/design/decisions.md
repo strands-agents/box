@@ -68,6 +68,30 @@ constrains what the program does.
 
 ## The box
 
+<a id="native-filesystem-policy-requires-explicit-selection"></a>
+### Native filesystem policy requires explicit selection
+
+The `native-filesystem-policy` Cargo feature includes the adapter but does not activate it.
+`[experimental-features] native-filesystem-policy = true` enables the mechanism and supplies the default for each workload.
+An optional `native-filesystem-policy` boolean in `[agent]`, `[tool.<name>]`, or a local `[mcp.<name>]` overrides that default.
+Each table inherits the global default independently. Remote MCP entries refuse the setting.
+An explicit process enablement requires the global gate. Standard release builds exclude the adapter.
+
+The trusted launcher holds each workload before execution and registers its selection against the kernel-observed process identity.
+Children inherit the selection across forks and executable changes. Only trusted launches apply table overrides.
+Disabling mediation retains sandbox restrictions and descendant shutdown tracking, but omits those native operations from Dogwood history.
+The adapter checks kernel event sequences even for bypassed operations. Bypassed operations avoid the Dogwood work queue.
+A single box-wide selection cannot exempt a build tool while retaining checks for the agent, so it is insufficient.
+
+The adapter uses the existing durable policy engine. It adds no memory-history setting or asynchronous persistence.
+The directory-entry resolver uses `PathResolver::approve_host_entry` to check rename and unlink without following the final symlink.
+
+Without process overrides, disabled configurations use record version 21 and enabled configurations use version 22.
+Explicit overrides require version 23. Older binaries refuse unsupported records.
+Changing the selection does not erase existing history. See [operator instructions](../user/native-filesystem-policy.md).
+
+Signed native tests live in `test-native-filesystem`, separately from ordinary workspace tests that require no signing identity.
+
 <a id="the-boundary-is-the-surrounding-os-not-a-virtual-machine"></a>
 ### The boundary is the surrounding OS's own sandboxing, and not a virtual machine
 

@@ -192,6 +192,8 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
     executable: PathBuf,
 
@@ -652,6 +654,9 @@ impl Boundary {
             command_listed,
             broad_exec,
             native_egress: launch.egress == EgressMode::Native,
+            native_filesystem_policy: spec
+                .native_filesystem_policy
+                .unwrap_or(stored.experimental_features.native_filesystem_policy),
         });
 
         // The digest covers the exact bytes written, so the trampoline verifies what this process
@@ -680,6 +685,10 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            native_filesystem_policy: spec
+                .native_filesystem_policy
+                .unwrap_or(site.stored.experimental_features.native_filesystem_policy),
             working_directory,
             executable: executable_path,
             program_identity,
@@ -693,6 +702,11 @@ impl Boundary {
             #[cfg(target_os = "linux")]
             served_ports: served_ports.clone(),
         })
+    }
+
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn native_filesystem_policy(&self) -> bool {
+        self.native_filesystem_policy
     }
 
     pub(crate) fn executable(&self) -> &Path {
@@ -771,14 +785,20 @@ struct DisclosureInputs<'a> {
     command_listed: bool,
     broad_exec: bool,
     native_egress: bool,
+    native_filesystem_policy: bool,
 }
 
-/// The text a box prints for one spec: every grant no policy decision covers, Core's own additions,
+/// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
 /// and the effective `HOME` and `PATH`.
 fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
     let table = inputs.table;
+    let coverage = if inputs.native_filesystem_policy {
+        "with experimental native policy checks for open, create, unlink, rename, and truncate over these paths"
+    } else {
+        "with no policy decision over these paths"
+    };
     let mut lines = vec![format!(
-        "strands-box: {table} runs {} with no policy decision over these paths:",
+        "strands-box: {table} runs {} {coverage}:",
         inputs.program.display()
     )];
     if inputs.grants.is_empty() {
@@ -1336,6 +1356,7 @@ mod tests {
             }
             let record = Record {
                 version: RECORD_VERSION,
+                experimental_features: Default::default(),
                 box_id: root.name().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: "codex".to_string(),
@@ -1395,6 +1416,7 @@ mod tests {
         /// variables, and one entry in every list Linux lowers.
         fn spec(&self) -> ProcessSpec {
             ProcessSpec {
+                native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string()],
                 workspace: Some(self.path("project")),
                 env: BTreeMap::from([

@@ -102,6 +102,7 @@ impl Snapshot {
 
 /// The test hook run between the accept loop's stop check and its `accept`, given the stop flag.
 type BeforeAccept = Arc<dyn Fn(&AtomicBool) + Send + Sync>;
+type BeforeObserve = Arc<dyn Fn() + Send + Sync>;
 
 struct Shared {
     observations: Mutex<Vec<Observation>>,
@@ -122,6 +123,7 @@ struct Shared {
     /// flag: the one place a stream can still be accepted once `stop` has asked. `None` in every
     /// case.
     before_accept: Option<BeforeAccept>,
+    before_observe: Option<BeforeObserve>,
 }
 
 /// A loopback listener on the host recording every connection it accepts.
@@ -145,13 +147,14 @@ impl HostRecorder {
     }
 
     fn start_with(deadline: Duration, after_sweep: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
-        Self::start_with_hooks(deadline, after_sweep, None)
+        Self::start_with_hooks(deadline, after_sweep, None, None)
     }
 
     fn start_with_hooks(
         deadline: Duration,
         after_sweep: Option<Arc<dyn Fn() + Send + Sync>>,
         before_accept: Option<BeforeAccept>,
+        before_observe: Option<BeforeObserve>,
     ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .expect("DET_ERROR: bind a loopback recorder on the host");
@@ -172,6 +175,7 @@ impl HostRecorder {
             deadline,
             after_sweep,
             before_accept,
+            before_observe,
         });
         let handlers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let (s, h) = (shared.clone(), handlers.clone());
@@ -210,6 +214,9 @@ impl HostRecorder {
                             }
                             let s = s.clone();
                             let handle = std::thread::spawn(move || {
+                                if let Some(hook) = &s.before_observe {
+                                    hook();
+                                }
                                 let observation = observe(tcp, s.deadline);
                                 s.observations.lock().unwrap().push(observation);
                                 s.active.lock().unwrap().retain(|(i, _)| *i != id);
@@ -2042,20 +2049,26 @@ mod tests {
         }
     }
 
-    /// A stream accepted while `stop` is under way is still shut down: the accept loop is joined
-    /// before the shutdown set is taken. The `before_accept` hook parks the loop between its stop
-    /// check and its `accept`; the peer connects while it is parked, `stop` sets its flag, and only
-    /// then does the loop accept and register the stream. The stream is therefore in the active set
-    /// when `stop` takes it, and its handler is live, so nothing but the shutdown can end it inside
-    /// the bounds: the handler's own deadline is 5 s, the stop bound 1.5 s, the peer's read 500 ms.
+    /// Stop closes a stream accepted after its stop flag, even before the handler starts reading.
     #[test]
     fn a_stream_accepted_during_stop_is_shut_down_and_stop_stays_bounded() {
         let gate = Arc::new(AcceptGate::default());
         let hook_gate = gate.clone();
+        let pending_peer = Arc::new(Mutex::new(None::<TcpStream>));
+        let handler_peer = pending_peer.clone();
         let mut recorder = HostRecorder::start_with_hooks(
             DEFAULT_CONNECTION_DEADLINE,
             None,
             Some(Arc::new(move |stop: &AtomicBool| hook_gate.park(stop))),
+            Some(Arc::new(move || {
+                if let Some(mut peer) = handler_peer.lock().unwrap().take() {
+                    assert_eq!(
+                        peer_closure(&mut peer),
+                        Ok(()),
+                        "shutdown must close the peer before the handler starts reading"
+                    );
+                }
+            })),
         );
         // Positive control: with the gate closed the recorder accepts and answers as usual.
         recorder.self_test();
@@ -2074,6 +2087,7 @@ mod tests {
         peer.set_read_timeout(Some(PEER_OBSERVATION))
             .expect("arm the peer's bounded read before stop");
         peer.write_all(b"G").unwrap();
+        *pending_peer.lock().unwrap() = Some(peer.try_clone().unwrap());
         assert!(
             !gate.released.load(Ordering::SeqCst),
             "the loop is still parked: the peer is queued, not accepted"
@@ -2093,11 +2107,13 @@ mod tests {
             "the hook released on the stop flag, not on its bound: {gate:?}"
         );
         assert!(gate.released.load(Ordering::SeqCst));
-        // The stream was accepted, registered and read by a live handler: its observation exists,
-        // carries the one byte the peer sent, and ended short without a request line.
+        // Shutdown may discard queued bytes or refuse a timeout before the handler reads.
         let observations = recorder.shared.observations.lock().unwrap().clone();
         assert_eq!(observations.len(), 1, "{observations:?}");
-        assert_eq!(observations[0].raw, "G", "{observations:?}");
+        assert!(
+            observations[0].raw.is_empty() || observations[0].raw == "G",
+            "{observations:?}"
+        );
         assert!(!observations[0].complete);
         assert!(observations[0].request_line.is_none());
         assert!(

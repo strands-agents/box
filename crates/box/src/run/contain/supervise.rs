@@ -15,6 +15,50 @@ use crate::run::contain::trampoline::{self, Trampoline};
 /// How long a signalled group may take to leave before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(1);
 
+/// Register a held trampoline before releasing it to execute the workload.
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+async fn spawn_registered(
+    command: Command,
+    trampoline: &mut Trampoline,
+    registration: Option<crate::run::macos_enforcement::Registration>,
+    mediated: bool,
+) -> Result<ProcessGroup, BoxError> {
+    let gate = trampoline.take_launch_gate();
+    if registration.is_some() != gate.is_some() {
+        return Err(SuperviseError::Control {
+            reason: "native launch gate and registration disagree".into(),
+        }
+        .into());
+    }
+    if let Some(registration) = &registration {
+        registration
+            .prepare_bootstrap(
+                trampoline
+                    .bootstrap()
+                    .map_err(|source| SuperviseError::Spawn { source })?,
+            )
+            .map_err(|source| SuperviseError::Spawn { source })?;
+    }
+    let mut group = ProcessGroup::spawn(command).await?;
+    if let (Some(gate), Some(registration)) = (gate, registration) {
+        let pid = group.leader_pid()?;
+        let result = tokio::task::spawn_blocking(move || {
+            gate.release(|| registration.set_mode(pid, mediated))
+        })
+        .await;
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(reason) = error {
+            let _ = group.stop().await;
+            return Err(SuperviseError::Control { reason }.into());
+        }
+    }
+    Ok(group)
+}
+
 /// The workload's child handle and the process group it leads, owned and ended as one.
 pub(crate) struct ProcessGroup {
     child: tokio::process::Child,
@@ -329,7 +373,13 @@ impl Contained {
         let (relay_box_side, relay_child_side) =
             crate::run::netns_relay::NetnsRelay::control_pair()?;
 
-        let (mut command, trampoline) = trampoline::command(trampoline::Launch {
+        #[cfg_attr(
+            not(all(target_os = "macos", feature = "native-filesystem-policy")),
+            allow(unused_mut)
+        )]
+        let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: hosted.native_registration().is_some(),
             config_path: boundary.containment_config(),
             config_file: boundary.containment_config_file(),
             config_sha256: boundary.containment_digest(),
@@ -356,6 +406,15 @@ impl Contained {
             .stdout(stdio())
             .stderr(Stdio::inherit());
         let signals = Signals::listen()?;
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        let mut group = spawn_registered(
+            command,
+            &mut trampoline,
+            hosted.native_registration(),
+            boundary.native_filesystem_policy(),
+        )
+        .await?;
+        #[cfg(not(all(target_os = "macos", feature = "native-filesystem-policy")))]
         let mut group = ProcessGroup::spawn(command).await?;
         let terminal = if claim_terminal {
             match group.leader_pid().and_then(ForegroundTerminal::claim) {
@@ -427,6 +486,7 @@ impl Contained {
             let _ = self.group.stop().await;
         }
         let termination_result = self.group.release().await;
+        let native_result = self.hosted.stop_native();
         // A piped run never claimed the terminal, so there is nothing to give back.
         let terminal_result = match self.terminal.as_mut() {
             Some(terminal) => terminal.restore(),
@@ -443,6 +503,7 @@ impl Contained {
             Completion::Hosted(failure) => return Err(failure),
         };
         termination_result?;
+        native_result?;
         terminal_result?;
         // A setup failure outranks the status: `exit 3` from a refused apply is
         // the trampoline's, not the workload's.
@@ -496,6 +557,9 @@ impl LeafBox {
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<LaunchedLeaf, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned, because the
         // trampoline sends its listening descriptor over it during containment setup.
@@ -506,6 +570,8 @@ impl LeafBox {
         // `trampoline` is used mutably only in the Linux relay-failure branch below.
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: registration.is_some(),
             config_path: boundary.containment_config(),
             config_file: boundary.containment_config_file(),
             config_sha256: boundary.containment_digest(),
@@ -526,7 +592,16 @@ impl LeafBox {
         command.stdin(stdin).stdout(stdout).stderr(stderr);
         // `group` is stopped only in the Linux relay-failure branch below.
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        #[cfg(not(all(target_os = "macos", feature = "native-filesystem-policy")))]
         let mut group = ProcessGroup::spawn(command).await?;
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        let group = spawn_registered(
+            command,
+            &mut trampoline,
+            registration,
+            boundary.native_filesystem_policy(),
+        )
+        .await?;
 
         // Start the relay only after the child is spawned: `start_each` blocks until the descriptor
         // arrives, and the descriptor comes from the trampoline. Held until the child exits.
@@ -573,6 +648,9 @@ impl LeafBox {
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
         // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
@@ -587,6 +665,8 @@ impl LeafBox {
             Stdio::null(),
             Stdio::piped(),
             Stdio::piped(),
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            registration,
         )
         .await?;
 
@@ -624,6 +704,9 @@ impl LeafBox {
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<StreamingLeaf, BoxError> {
         // stderr is piped, not nulled: a containment setup failure must carry the trampoline's own
         // message as `detail`, the same reason the buffered `run` path reports. On success the
@@ -641,6 +724,8 @@ impl LeafBox {
             Stdio::piped(),
             Stdio::piped(),
             Stdio::piped(),
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            registration,
         )
         .await?;
 

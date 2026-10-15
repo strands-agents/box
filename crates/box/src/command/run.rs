@@ -224,6 +224,10 @@ fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
         source,
     })?;
     let contract = RunContract::read(config, &invocation)?;
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    if contract.experimental_features().native_filesystem_policy {
+        crate::run::macos_enforcement::preflight()?;
+    }
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;
     contract.validate_directory(root.root())?;
@@ -317,6 +321,7 @@ mod tests {
     fn record_with(agent: Option<ProcessSpec>, tools: BTreeMap<String, ProcessSpec>) -> Record {
         Record {
             version: RECORD_VERSION,
+            experimental_features: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -333,6 +338,7 @@ mod tests {
 
     fn spec(command: &str, read: &[&str], write: &[&str]) -> ProcessSpec {
         ProcessSpec {
+            native_filesystem_policy: None,
             command: vec![command.to_string()],
             workspace: None,
             env: BTreeMap::new(),

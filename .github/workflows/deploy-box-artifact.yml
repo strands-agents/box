@@ -240,7 +240,7 @@ jobs:
         # resolves the trampoline from beside its own executable and refuses
         # to start without it.
         run: |
-          cargo build --release --locked --all-features \
+          cargo build --release --locked \
             --target ${{ matrix.target.triple }} \
             -p strands-box \
             -p strands-box-containment

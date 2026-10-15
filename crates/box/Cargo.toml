@@ -83,10 +83,8 @@ tokio = { version = "1", features = [
     "time",
 ] }
 
-# `box-egress-probe` is the test-only workload the credential end-to-end tests run
-# inside the box. Gated on a non-default feature so a normal build never produces it,
-# matching `containment`'s `containment-test-probe`.
 [features]
+native-filesystem-policy = []
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).

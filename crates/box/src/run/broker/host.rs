@@ -121,9 +121,34 @@ pub(crate) struct BrokerHost {
 }
 
 impl BrokerHost {
-    /// Bind the broker's socket on a dedicated thread and serve it until dropped.
+    /// Bind through the trusted helper without accepting or processing any request.
+    pub(crate) fn bind(layout: &BoxRoot) -> Result<std::os::unix::net::UnixListener, BoxError> {
+        let displayed_socket = layout.broker_socket();
+        if layout.path_exists(&displayed_socket)? {
+            return Err(ShellError::Serve {
+                source: io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "broker socket already exists: {}",
+                        displayed_socket.display()
+                    ),
+                ),
+            }
+            .into());
+        }
+        let listener = layout
+            .bind_broker_listener()
+            .map_err(|source| ShellError::Bind { source })?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|source| ShellError::Bind { source })?;
+        Ok(listener)
+    }
+
+    /// Serve a prepared socket after the caller establishes enforcement.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
+        listener: std::os::unix::net::UnixListener,
         layout: &BoxRoot,
         record: &Record,
         workspace: &Path,
@@ -136,7 +161,6 @@ impl BrokerHost {
         mcp_leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
-        let displayed_socket = layout.broker_socket();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(
@@ -156,27 +180,6 @@ impl BrokerHost {
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
-
-        // Refuse rather than adopt: the liveness lock proves no daemon holds this path,
-        // so anything at it is a corpse — but binding over a *live* one would serve
-        if layout.path_exists(&displayed_socket)? {
-            return Err(ShellError::Serve {
-                source: io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "broker socket already exists: {}",
-                        displayed_socket.display()
-                    ),
-                ),
-            }
-            .into());
-        }
-        let listener = layout
-            .bind_broker_listener()
-            .map_err(|source| ShellError::Bind { source })?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|source| ShellError::Bind { source })?;
 
         let (ready_sender, ready_receiver) = std::sync::mpsc::channel::<io::Result<()>>();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
@@ -216,8 +219,7 @@ impl BrokerHost {
             })
             .map_err(|source| ShellError::Serve { source })?;
 
-        // Block until the thread has bound, or failed to. `recv` also errors if the
-        // thread died before reporting, so a panic during setup surfaces here rather than
+        // Wait until the server thread is ready; the caller already bound its socket.
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 shutdown: Some(shutdown_sender),

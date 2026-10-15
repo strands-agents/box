@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries eight keys. `name` and `box_dir` are required.
+The file carries nine keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -80,8 +80,9 @@ The file carries eight keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
+| `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
 
-The example uses five of the eight: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -106,9 +107,22 @@ and remove the directory after `run` has exited to delete one. Do not remove the
 its `run` is alive: on macOS, the kernel kills a shell or Python call of that box whose program file
 loses a name during its security assessment.
 
+## `[experimental-features]`
+
+Native filesystem policy checks require both a custom build and explicit selection:
+
+```toml
+[experimental-features]
+native-filesystem-policy = true
+```
+
+The default is `false`. Unknown feature names are errors.
+The standard release excludes this experiment. An unsupported build refuses `true` before the workload starts.
+See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
+
 ## `[agent]` and `[tool.<name>]`
 
-Both tables hold one process, in one shape. Four fields:
+Both tables hold one process, in one shape:
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -116,6 +130,7 @@ Both tables hold one process, in one shape. Four fields:
 | `workspace` | string | The process's initial working directory. The box enters it; a `filesystem` list grants reach to it. |
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
+| `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
@@ -350,10 +365,13 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
+| `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 
-No `fs:*` decision covers a `stdio` server's filesystem grants. The startup report lists the agent's
+Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
+The experiment checks selected operations while retaining the server's filesystem grants.
+The startup report lists the agent's
 and each tool's grants, and a `stdio` server's grants are in its table alone, so read the table
 before you let the server start. See [the security page](./security.md) for what `box.toml` grants
 directly.

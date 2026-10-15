@@ -4,7 +4,7 @@
 //! ```text
 //! strands-box-contain-trampoline --config <containment-config.json> [--config-fd <fd>] \
 //!   --config-sha256 <digest> --target-env-json <json> [--argv0 <spelling>] \
-//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] -- <interp> [args...]
+//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] -- <interp> [args...]
 //! ```
 
 use std::process::ExitCode;
@@ -26,7 +26,7 @@ static EXECUTABLE_IDENTITY_MARKER: [u8; 72] =
 const USAGE: &str = "usage: strands-box-contain-trampoline --config <containment-config.json> \
      [--config-fd <fd>] \
      --config-sha256 <64-lowercase-hex> --target-env-json <json-object> \
-     [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
+     [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] \
      -- <command> [args...]\n\
      \n\
      Verifies and applies <containment-config.json>, then installs only the target\n\
@@ -76,15 +76,29 @@ fn run(args: &Args) -> ExitCode {
     };
     // Both the status pipe and the relay control socket must survive: the first reports a setup
     // failure, and the second is how the workload's egress listener gets back to the box.
-    let preserved: Vec<libc::c_int> = [args.setup_status_fd, args.relay_control_fd, args.config_fd]
-        .into_iter()
-        .flatten()
-        .collect();
+    let preserved: Vec<libc::c_int> = [
+        args.setup_status_fd,
+        args.relay_control_fd,
+        args.config_fd,
+        args.launch_gate_fd,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if let Err(error) = close_inherited_descriptors(&preserved) {
         return setup_status.fail(
             SetupStage::ConfigRead,
             2,
             format_args!("cannot close inherited descriptors: {error}"),
+        );
+    }
+    if let Some(descriptor) = args.launch_gate_fd
+        && let Err(error) = wait_for_launch(descriptor)
+    {
+        return setup_status.fail(
+            SetupStage::ConfigRead,
+            2,
+            format_args!("launch gate refused: {error}"),
         );
     }
     // Phase 1: contain THIS process while single-threaded, before any `exec`.
@@ -94,6 +108,25 @@ fn run(args: &Args) -> ExitCode {
     // Phase 2: hand off — `exec` replaces this (now-contained) image with the
     // command, which is therefore born contained. On success this never returns.
     exec_command(args, &setup_status)
+}
+
+/// The parent must acknowledge setup before any workload code can execute.
+#[cfg(unix)]
+fn wait_for_launch(descriptor: i32) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::net::UnixStream;
+    // SAFETY: the trusted launcher supplies one owned descriptor, above the standard streams.
+    let mut gate = unsafe { UnixStream::from_raw_fd(descriptor) };
+    gate.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    gate.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+    gate.write_all(b"R")?;
+    let mut reply = [0];
+    gate.read_exact(&mut reply)?;
+    if reply != *b"G" {
+        return Err(std::io::Error::other("parent refused launch"));
+    }
+    Ok(())
 }
 
 /// Close every inherited descriptor except the standard streams and `preserve`.
@@ -483,6 +516,45 @@ mod descriptor_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn launch_gate_requires_parent_acknowledgment_and_refuses_eof() {
+        use std::io::{Read, Write};
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        for acknowledgment in [Some(b'G'), Some(b'X'), None] {
+            let (mut parent, child) = UnixStream::pair().unwrap();
+            parent
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let descriptor = child.into_raw_fd();
+            let (finished, observed) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                finished
+                    .send(super::wait_for_launch(descriptor).is_ok())
+                    .unwrap()
+            });
+            let mut ready = [0];
+            parent.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            assert!(
+                observed.try_recv().is_err(),
+                "workload released before acknowledgment"
+            );
+            if let Some(byte) = acknowledgment {
+                parent.write_all(&[byte]).unwrap();
+            }
+            drop(parent);
+            assert_eq!(
+                observed
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap(),
+                acknowledgment == Some(b'G')
+            );
+            worker.join().unwrap();
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::os::fd::IntoRawFd as _;
 
@@ -538,6 +610,7 @@ mod tests {
         let expected = b"\x00exact config bytes\xff";
         std::fs::write(&path, expected).expect("write config");
         let args = Args {
+            launch_gate_fd: None,
             config: path.clone(),
             config_fd: None,
             config_sha256: [0; 32],
@@ -563,6 +636,7 @@ mod tests {
         std::fs::remove_file(&path).expect("remove opened name");
         std::fs::write(&path, b"replacement").expect("replacement config");
         let args = Args {
+            launch_gate_fd: None,
             config: path.clone(),
             config_fd: Some(descriptor),
             config_sha256: [0; 32],

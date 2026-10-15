@@ -1,0 +1,39 @@
+name: Native Filesystem
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+
+jobs:
+  compile-and-test:
+    name: macOS build and unit tests
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build experimental code and signed test package
+        run: |
+          cargo build --locked -p strands-box -p strands-box-containment --all-features
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked --no-run
+      - name: Test native adapter and configuration
+        run: |
+          cargo test --locked -p strands-box --all-features --bin strands-box macos_enforcement
+          cargo test --locked -p strands-box --all-features --bin strands-box native_
+          cargo test --locked -p strands-box --all-features --bin strands-box record::config::
+      - name: Check signed test receipt freshness
+        run: |
+          python3 -m unittest discover -s test-native-filesystem -p '*_test.py'
+          python3 test-native-filesystem/receipt.py

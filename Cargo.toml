@@ -31,6 +31,7 @@ exclude = [
     # `cargo build --workspace --all-targets` (the unit-test CI leg).
     "test-common",
     "test-integ",
+    "test-native-filesystem",
     "test-workload/verdict",
     # A small perf benchmark. It is test code, not part of the shipped artifact
     "crates/box-bench",

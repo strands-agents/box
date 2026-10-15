@@ -234,9 +234,14 @@ fn tool_spawner(
     workspace: PathBuf,
     protected_sources: Vec<AuthoritySource>,
     recorder: Arc<telemetry::DecisionRecorder>,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+        super::macos_enforcement::Registration,
+    >,
 ) -> strands_shell::os::HostSpawner {
     Arc::new(move |spawn: strands_shell::os::HostSpawn| {
         let recorder = Arc::clone(&recorder);
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        let registration = registration.clone();
         let attachment = attachment.clone();
         let layout = layout.clone();
         let record = record.clone();
@@ -288,9 +293,14 @@ fn tool_spawner(
                     "native-egress",
                 ));
             }
-            let captured = crate::run::contain::supervise::LeafBox::run(boundary, &layout)
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let captured = crate::run::contain::supervise::LeafBox::run(
+                boundary,
+                &layout,
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                registration,
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             Ok(strands_shell::os::HostSpawnOutcome {
                 status: captured.status,
                 stdout: captured.stdout,
@@ -309,6 +319,8 @@ fn tool_spawner(
 /// crossing the thread boundary. A contained MCP leaf reuses the parent's gateway and policy exactly
 /// as a tool leaf does; it owns no second [`HostedBox`].
 pub(crate) struct McpLeafLauncher {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    registration: Option<super::macos_enforcement::Registration>,
     attachment: Attachment,
     layout: BoxRoot,
     record: Record,
@@ -326,8 +338,13 @@ impl McpLeafLauncher {
         record: Record,
         protected_sources: Vec<AuthoritySource>,
         workspace: PathBuf,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            super::macos_enforcement::Registration,
+        >,
     ) -> Self {
         Self {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            registration,
             attachment,
             layout,
             record,
@@ -404,7 +421,13 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
-        crate::run::contain::supervise::LeafBox::spawn_streaming(boundary, &self.layout).await
+        crate::run::contain::supervise::LeafBox::spawn_streaming(
+            boundary,
+            &self.layout,
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            self.registration.clone(),
+        )
+        .await
     }
 }
 
@@ -456,6 +479,9 @@ pub(crate) struct HostedBox {
     /// The broker serving this box's aliases.
     broker: Option<BrokerHost>,
 
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    _file_monitor: Option<super::macos_enforcement::FileMonitor>,
+
     /// A fatal cross-door completion verdict from the discovery coordinator,
     /// raced against the broker and the registry in [`stopped`](Self::stopped).
     coordinator_fatal: tokio::sync::mpsc::UnboundedReceiver<BoxError>,
@@ -482,6 +508,13 @@ pub(crate) struct HostedBox {
 }
 
 impl HostedBox {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn native_registration(&self) -> Option<super::macos_enforcement::Registration> {
+        self._file_monitor
+            .as_ref()
+            .map(|monitor| monitor.registration())
+    }
+
     pub(crate) fn prepare_policy(
         root: &BoxRoot,
         operator: &policy::Operator,
@@ -546,7 +579,7 @@ impl HostedBox {
         let coordinator = DiscoveryCoordinator::new(
             doors,
             Arc::clone(&policy),
-            coordinator_fatal_sender,
+            coordinator_fatal_sender.clone(),
             Some(Arc::clone(&collector)),
         );
 
@@ -639,6 +672,19 @@ impl HostedBox {
         };
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
+        let broker_listener = BrokerHost::bind(root)?;
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        let file_monitor = if record.experimental_features.native_filesystem_policy {
+            Some(super::macos_enforcement::FileMonitor::start(
+                Arc::clone(&policy),
+                Arc::clone(&recorder),
+                root.name(),
+                &crate::record::layout::operator_home_directory()?,
+                coordinator_fatal_sender.clone(),
+            )?)
+        } else {
+            None
+        };
         // The host-binary seam: a command the Shell does not implement runs in the
         // boundary of the tool the invocation selects, not as an uncontained child.
         let host_spawner = Some(tool_spawner(
@@ -649,6 +695,8 @@ impl HostedBox {
             workspace.to_path_buf(),
             protected_sources.to_vec(),
             Arc::clone(&recorder),
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
         // Every stdio MCP server is started contained, as a streaming leaf, through the same inputs.
         // Built only when the box declares at least one stdio server, so a box with none carries no
@@ -660,9 +708,12 @@ impl HostedBox {
                 record.clone(),
                 protected_sources.to_vec(),
                 workspace.to_path_buf(),
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
         });
         let broker = BrokerHost::start(
+            broker_listener,
             root,
             record,
             workspace,
@@ -670,7 +721,7 @@ impl HostedBox {
             Arc::clone(&policy),
             discovery.registry(),
             egress,
-            recorder,
+            Arc::clone(&recorder),
             host_spawner,
             mcp_leaf_launcher,
             protected_sources,
@@ -680,6 +731,8 @@ impl HostedBox {
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            _file_monitor: file_monitor,
             coordinator_fatal,
             _proxy: proxy,
             _collector: collector,
@@ -711,6 +764,21 @@ impl HostedBox {
     /// The filesystem reach this run judged for every process table.
     pub(crate) fn approved(&self) -> &ApprovedReach {
         &self.approved
+    }
+
+    pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        if self._file_monitor.is_some() {
+            if let Some(discovery) = &self.discovery {
+                discovery.close();
+            }
+            drop(self.broker.take());
+            drop(self.discovery.take());
+            if let Some(mut monitor) = self._file_monitor.take() {
+                monitor.stop()?;
+            }
+        }
+        Ok(())
     }
 
     /// Wait until this box's broker stops, and answer why.
@@ -790,11 +858,13 @@ mod tests {
     fn record_with_mcp(root: &BoxRoot, mcp: Vec<crate::record::config::mcp::McpServer>) -> Record {
         Record {
             version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
             name: "codex".to_string(),
             policy: None,
             agent: Some(ProcessSpec {
+                native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string()],
                 workspace: None,
                 env: Default::default(),
@@ -891,6 +961,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
         let vendor = home.join("vendor");
         std::fs::create_dir(&vendor).expect("a readable tree");
         let tool = |read: PathBuf| ProcessSpec {
+            native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
             env: Default::default(),
@@ -1707,6 +1778,7 @@ while :; do :; done"#
 
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
+            native_filesystem_policy: None,
             command: command.iter().map(|part| (*part).to_string()).collect(),
             workspace: None,
             env: Default::default(),
@@ -1716,6 +1788,7 @@ while :; do :; done"#
         let agent = spec(&["/bin/sh"]);
         Record {
             version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -1848,9 +1921,11 @@ while :; do :; done"#
             .expect("a built binary");
         let demo = demo.canonicalize().expect("canonical");
         let mut record = selection_record(&[("sh", &["/bin/sh"])]);
+        record.experimental_features.native_filesystem_policy = true;
         let agent = record.agent.as_mut().expect("an agent");
         agent.filesystem.exec = vec![root.path().join("target")];
         agent.filesystem.write = vec![root.path().to_path_buf()];
+        agent.native_filesystem_policy = Some(false);
         let expected = agent.filesystem.clone();
 
         let selected = select_tool(
@@ -1865,6 +1940,7 @@ while :; do :; done"#
         assert_eq!(selected.spec.command, vec![demo.display().to_string()]);
         assert_eq!(selected.trailing, ["--flag"]);
         assert_eq!(selected.spec.filesystem, expected);
+        assert_eq!(selected.spec.native_filesystem_policy, Some(false));
         assert_eq!(selected.spec.network, None);
     }
 
@@ -2081,6 +2157,7 @@ while :; do :; done"#
         }
         let workspace = root_path.join("workspace");
         let mut tool = ProcessSpec {
+            native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
             env: Default::default(),

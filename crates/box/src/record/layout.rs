@@ -3789,6 +3789,7 @@ mod tests {
             .expect("first use completes");
         let mut updated = initial;
         updated.agent = Some(crate::record::config::process::ProcessSpec {
+            native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
             env: std::collections::BTreeMap::from([("REFRESHED".to_string(), "yes".to_string())]),

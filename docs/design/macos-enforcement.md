@@ -2,6 +2,9 @@
 
 Box uses Seatbelt, macOS's process sandbox, to restrict the files, programs, and network connections an agent can access. Box sets those restrictions before the agent starts. This page explains how they work, why external tools receive different restrictions, and where the protection ends.
 
+The default behavior below excludes [experimental native filesystem policy](../user/native-filesystem-policy.md).
+That feature adds Dogwood checks for selected operations when the operator explicitly enables it.
+
 ## See a sandbox restriction in action
 
 Consider a project with two existing files: `allowed.txt` and `blocked.txt`. The first contains `Hello from the allowed file.` The operator (the person configuring Box) grants read access only to `allowed.txt` through `[agent.filesystem].read_file` in `box.toml`. A filesystem grant names a path and its permitted access. No other grant covers either file.

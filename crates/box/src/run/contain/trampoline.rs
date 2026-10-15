@@ -27,15 +27,63 @@ use crate::error::{BoxError, SetupStage, TrampolineError};
 const EXECUTABLE_MARKER: &[u8] =
     b"STRANDS_BOX_CONTAIN_EXECUTABLE_IDENTITY_8E313B0F21A04D3BA52C4E87D493E6C2";
 
+/// A private handshake that holds the trusted trampoline before workload execution.
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+pub(crate) struct LaunchGate {
+    parent: std::os::unix::net::UnixStream,
+    child: std::os::unix::net::UnixStream,
+}
+
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+impl LaunchGate {
+    pub(crate) fn attach(command: &mut Command) -> std::io::Result<Self> {
+        let (parent, child) = std::os::unix::net::UnixStream::pair()?;
+        parent.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        parent.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        attach_descriptor(command, &child, "--launch-gate-fd").map_err(std::io::Error::other)?;
+        Ok(Self { parent, child })
+    }
+
+    pub(crate) fn release(
+        mut self,
+        register: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        drop(self.child);
+        let mut ready = [0];
+        self.parent.read_exact(&mut ready)?;
+        if ready != *b"R" {
+            return Err(std::io::Error::other("invalid launch handshake"));
+        }
+        register()?;
+        self.parent.write_all(b"G")
+    }
+}
+
 /// The trampoline's filename, which must sit beside the box executable.
 const HELPER_NAME: &str = "strands-box-contain-trampoline";
 
 /// What the box must hold until the child is reaped.
 pub(crate) struct Trampoline {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    bootstrap: Option<File>,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    launch_gate: Option<LaunchGate>,
     setup_status: SetupStatusPipe,
 }
 
 impl Trampoline {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn bootstrap(&self) -> std::io::Result<&File> {
+        self.bootstrap
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing bootstrap image"))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn take_launch_gate(&mut self) -> Option<LaunchGate> {
+        self.launch_gate.take()
+    }
+
     /// Build a trampoline whose setup status is already complete.
     #[cfg(all(test, unix))]
     pub(crate) fn testing_complete() -> Result<Self, BoxError> {
@@ -43,6 +91,10 @@ impl Trampoline {
             close_on_exec_pipe().map_err(|source| TrampolineError::StatusPipe { source })?;
         drop(writer);
         Ok(Self {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            bootstrap: None,
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            launch_gate: None,
             setup_status: SetupStatusPipe {
                 reader,
                 writer: None,
@@ -94,6 +146,8 @@ pub(crate) type ImageName<'a> = &'a dyn Fn(&str) -> Result<ImageCache, BoxError>
 
 /// Everything the trampoline needs to launch one workload.
 pub(crate) struct Launch<'a> {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) hold_for_registration: bool,
     /// The serialized containment config, and the digest of the exact bytes written.
     pub(crate) config_path: &'a Path,
     pub(crate) config_file: &'a File,
@@ -121,18 +175,37 @@ pub(crate) struct Launch<'a> {
 /// Build the command that runs the workload under containment.
 pub(crate) fn command(launch: Launch<'_>) -> Result<(Command, Trampoline), BoxError> {
     let helper = locate()?;
-    let mut command = identity_bound_command(&helper, launch.image_name)?;
+    let prepared = identity_bound_command(&helper, launch.image_name)?;
+    let mut command = prepared.command;
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
     #[cfg(target_os = "linux")]
     if let Some(control) = launch.relay_control {
         attach_relay_control(&mut command, control)?;
     }
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    let launch_gate = if launch.hold_for_registration {
+        Some(
+            LaunchGate::attach(&mut command)
+                .map_err(|source| TrampolineError::StatusPipe { source })?,
+        )
+    } else {
+        None
+    };
     command
         .args(workload_argv(&launch))
         .env_clear()
         .current_dir(launch.working_directory);
-    Ok((command, Trampoline { setup_status }))
+    Ok((
+        command,
+        Trampoline {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            bootstrap: Some(prepared.bootstrap),
+            setup_status,
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            launch_gate,
+        },
+    ))
 }
 
 /// The trampoline's own arguments, in order, after the descriptors are attached.
@@ -235,8 +308,17 @@ fn validate_installed(candidate: &Path) -> Result<(), TrampolineError> {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Identity-bound exec: validate what is open, run what was validated.
 
+struct PreparedCommand {
+    command: Command,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    bootstrap: File,
+}
+
 #[cfg(target_os = "linux")]
-fn identity_bound_command(path: &Path, _image_name: ImageName<'_>) -> Result<Command, BoxError> {
+fn identity_bound_command(
+    path: &Path,
+    _image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
     let (executable, mut identity_reader) = open_without_following(path)?;
     validate_opened(path, &executable, &mut identity_reader)?;
     // A fresh descriptor for the same open file, above stdio so `Command`'s own
@@ -251,7 +333,7 @@ fn identity_bound_command(path: &Path, _image_name: ImageName<'_>) -> Result<Com
             Ok(())
         });
     }
-    Ok(command)
+    Ok(PreparedCommand { command })
 }
 
 #[cfg(target_os = "linux")]
@@ -278,7 +360,10 @@ fn duplicate_above_stdio(path: &Path, executable: &File) -> Result<File, BoxErro
 /// macOS cannot exec `/dev/fd/<n>` (`ENOTSUP`), so the validated bytes are copied
 /// into a private image and only that image is executed.
 #[cfg(target_os = "macos")]
-fn identity_bound_command(path: &Path, image_name: ImageName<'_>) -> Result<Command, BoxError> {
+fn identity_bound_command(
+    path: &Path,
+    image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
     let (executable, mut identity_reader) = open_without_following(path)?;
     validate_opened(path, &executable, &mut identity_reader)?;
     let materialize = |reason: String| TrampolineError::Materialize {
@@ -315,7 +400,19 @@ fn identity_bound_command(path: &Path, image_name: ImageName<'_>) -> Result<Comm
         )?;
     }
 
-    Ok(command_in_directory(image.directory, &image_name))
+    #[cfg(feature = "native-filesystem-policy")]
+    let bootstrap = open_at(
+        &image.directory,
+        &image_name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|error| materialize(error.to_string()))?;
+    Ok(PreparedCommand {
+        command: command_in_directory(image.directory, &image_name),
+        #[cfg(feature = "native-filesystem-policy")]
+        bootstrap,
+    })
 }
 
 /// Write the validated bytes to `image_path`, atomically and executable.
@@ -508,7 +605,10 @@ fn rename_at(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn identity_bound_command(_path: &Path, _image_name: ImageName<'_>) -> Result<Command, BoxError> {
+fn identity_bound_command(
+    _path: &Path,
+    _image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
     Err(TrampolineError::UnsupportedPlatform {
         os: std::env::consts::OS,
     }
@@ -776,6 +876,8 @@ mod tests {
         image_name: ImageName<'a>,
     ) -> Launch<'a> {
         Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: false,
             config_path: config,
             config_file: file,
             config_sha256: "0".repeat(64).leak(),

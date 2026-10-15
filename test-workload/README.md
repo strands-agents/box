@@ -12,14 +12,14 @@ gated" below.
 
 ## What a cell is
 
-A **cell** is one dimension and one agent. The suite holds fourteen dimensions and runs three agents.
+A **cell** is one dimension and one agent. The default suite holds fourteen dimensions and runs three agents.
 Nine dimensions run for every agent and five are two-run dimensions, of which four name one agent,
 so one platform gives 34 cells, and Linux and macOS together give 68.
 
 | Agent | What runs in the box |
 |---|---|
 | `claude` | Claude Code, from its standalone install. |
-| `codex` | Codex CLI, through its Node shim. |
+| `codex` | Codex CLI, through its Node shim, or an explicit `WL_CODEX_BINARY`. |
 | `strands` | An agent built on the Strands Agents SDK, `common/workload-strands-agent.py`. |
 
 | Dimension | What the agent must do |
@@ -38,6 +38,12 @@ so one platform gives 34 cells, and Linux and macOS together give 68.
 | `workload-resume-codex` | Two runs. Codex only. Resume the thread with `exec … resume <thread-id>` in the same box and recall a token from run one. |
 | `workload-kill-claude` | `workload-resume-claude`, with run one ended by SIGKILL. |
 | `workload-kill-codex` | `workload-resume-codex`, with run one ended by SIGKILL. |
+| `workload-native-filesystem` | Explicit selection only: Claude Code and Codex edit files through native tools, meet a policy denial, and continue. Requires a signed macOS 27 build. |
+
+The native case adds two macOS cells outside the default matrix.
+See [the signed workload instructions](../docs/user/native-filesystem-policy.md#run-real-agent-workloads).
+Its host checks require exact file contents, native denial evidence, matching policy records, and a later continuation permit.
+Transcript tool events confirm tool selection; an agent's closing report cannot satisfy those checks.
 
 Each dimension directory holds five files, and a two-run dimension a sixth, `goal.2.md`:
 

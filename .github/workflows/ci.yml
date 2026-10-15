@@ -23,6 +23,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       containment: ${{ steps.filter.outputs.containment }}
       verdict: ${{ steps.filter.outputs.verdict }}
+      native: ${{ steps.filter.outputs.native }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
@@ -32,6 +33,13 @@ jobs:
           # extglob, not a `!**/*.md` negation (paths-filter OR-s patterns, so a
           # bare negation fires on everything).
           filters: |
+            native:
+              - 'crates/**/!(*.md)'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'test-native-filesystem/**/!(*.md)'
+              - '.github/workflows/**'
             rust:
               - 'crates/**/!(*.md)'
               - 'Cargo.toml'
@@ -51,6 +59,8 @@ jobs:
             verdict:
               - 'test-common/**/!(*.md)'
               - 'test-workload/verdict/**/!(*.md)'
+              - 'test-workload/common/**/!(*.md)'
+              - 'test-workload/workload-native-filesystem/**'
               - '.github/workflows/verdict-hermetic.yml'
               - '.github/workflows/ci.yml'
 
@@ -89,14 +99,24 @@ jobs:
     with:
       ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+  native:
+    name: Native Filesystem
+    needs: detect-changes
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.native == 'true' }}
+    uses: ./.github/workflows/native-filesystem.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [detect-changes, rust, containment, verdict]
+    needs: [detect-changes, rust, containment, verdict, native]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
         with:
-          allowed-skips: rust, containment, verdict
+          allowed-skips: rust, containment, verdict, native
           jobs: ${{ toJSON(needs) }}

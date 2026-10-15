@@ -20,6 +20,14 @@ use super::env::{reserved_workload_environment, valid_environment_name};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProcessSpec {
+    /// Override the box-wide native filesystem policy selection for this process tree.
+    #[serde(
+        default,
+        rename = "native-filesystem-policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) native_filesystem_policy: Option<bool>,
+
     /// The executable and its fixed leading arguments.
     pub(crate) command: Vec<String>,
 
@@ -178,6 +186,20 @@ pub(crate) struct ContainedMcp {
 }
 
 impl ProcessSpec {
+    pub(crate) fn validate_native_policy(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if self.native_filesystem_policy == Some(true) && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "native-filesystem-policy requires the global experimental feature".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Whether `[tool.<name>.network] contain_egress = false` gives this process direct egress.
     pub(crate) fn native_egress(&self) -> bool {
         self.network
