@@ -333,7 +333,7 @@ impl Contained {
             config_path: boundary.containment_config(),
             config_file: boundary.containment_config_file(),
             config_sha256: boundary.containment_digest(),
-            target_environment: boundary.target_environment(),
+            target_environment_file: boundary.target_environment_file(),
             executable: boundary.executable(),
             arguments: boundary.arguments(),
             argument_zero: boundary.argument_zero(),
@@ -447,9 +447,11 @@ impl Contained {
         // A setup failure outranks the status: `exit 3` from a refused apply is
         // the trampoline's, not the workload's.
         if let Some(stage) = setup_result? {
+            // The agent's stderr is the operator's terminal, so the trampoline's message already reached
+            // it and there is no detail to carry; the masked-`/proc` hint still applies.
             return Err(TrampolineError::SetupFailed {
                 stage,
-                detail: None,
+                detail: super::masked_proc::hint(stage, None, self._boundary.shares_proc()),
             }
             .into());
         }
@@ -509,7 +511,7 @@ impl LeafBox {
             config_path: boundary.containment_config(),
             config_file: boundary.containment_config_file(),
             config_sha256: boundary.containment_digest(),
-            target_environment: boundary.target_environment(),
+            target_environment_file: boundary.target_environment_file(),
             executable: boundary.executable(),
             arguments: boundary.arguments(),
             argument_zero: boundary.argument_zero(),
@@ -547,7 +549,11 @@ impl LeafBox {
                         let stderr = output.map(|output| output.stderr).unwrap_or_default();
                         return Err(TrampolineError::SetupFailed {
                             stage,
-                            detail: trampoline_message(&stderr),
+                            detail: super::masked_proc::hint(
+                                stage,
+                                trampoline_message(&stderr),
+                                boundary.shares_proc(),
+                            ),
                         }
                         .into());
                     }
@@ -603,7 +609,11 @@ impl LeafBox {
         if let Some(stage) = setup_result? {
             return Err(TrampolineError::SetupFailed {
                 stage,
-                detail: trampoline_message(&output.stderr),
+                detail: super::masked_proc::hint(
+                    stage,
+                    trampoline_message(&output.stderr),
+                    boundary.shares_proc(),
+                ),
             }
             .into());
         }
@@ -676,6 +686,7 @@ impl LeafBox {
                 }
                 None => None,
             };
+            let detail = super::masked_proc::hint(stage, detail, boundary.shares_proc());
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 

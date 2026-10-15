@@ -34,11 +34,16 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds eight keys, and the four inputs still stand
+//! # The configuration holds nine keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
-//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
-//! additional inputs: none decides which requests are governed.
+//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[containment]`
+//! are keys and not additional inputs: none decides which requests are governed.
+//!
+//! `[containment] private_proc = false` shows every contained process the container's process list.
+//! It grants no authority and widens no reach the policy judges: every `fs:*`, `shell:*`, and egress
+//! decision is unchanged. The processes it shows cannot be signalled, traced, or have their memory,
+//! environment, or descriptors read; a same-uid one can have its OOM score raised.
 //!
 //! `[agent] env` names variables the box adds to the composed environment. It cannot name a
 //! reserved variable, so it cannot reach proxy routing, CA trust, or the fixed identity, and it
@@ -191,6 +196,7 @@ fn the_config_record_carries_only_the_four_inputs() {
         [
             "agent",
             "box_dir",
+            "containment",
             "egress",
             "mcp",
             "name",
@@ -198,7 +204,7 @@ fn the_config_record_carries_only_the_four_inputs() {
             "telemetry",
             "tool"
         ],
-        "the config record must carry exactly these eight keys. `policy` and `egress` are \
+        "the config record must carry exactly these nine keys. `policy` and `egress` are \
          authority, `name` and `box_dir` are state, `agent` is the workload, `tool` is every \
          host binary the Shell may start, and `mcp` and `telemetry` grant no reach. A process's \
          `filesystem` lists ARE reach the policy does not judge — that is the whole of what they \
@@ -207,8 +213,11 @@ fn the_config_record_carries_only_the_four_inputs() {
          *input*, because they grant no authority over which requests are governed: every access \
          the Strands Shell and Monty make is still an `fs:*` decision on the one Policy, the \
          deny-only floors still sit beneath them, and absent lists grant nothing. What they cost \
-         is stated in the startup disclosure the box prints for every grant they name. A NINTH \
-         field changes the input contract and must update this guard."
+         is stated in the startup disclosure the box prints for every grant they name. \
+         `containment` is not a fifth input either: it grants no authority and widens no reach \
+         the policy judges. `private_proc = false` shows the workload the container's process \
+         list and lets it raise a same-uid process's OOM score; every `fs:*`, `shell:*`, and egress decision is unchanged. A \
+         TENTH field changes the input contract and must update this guard."
     );
 }
 

@@ -24,6 +24,7 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod isolation;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -454,6 +455,7 @@ impl RunContract {
                 mcp: mcp_servers,
                 contained_mcp,
                 telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                containment: self.file.containment,
             },
             policy,
             sources,
@@ -538,9 +540,18 @@ pub(crate) struct Record {
     /// The telemetry targets this box declares, verbatim.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// The `[containment]` table, verbatim. Absent when it is the default, so a box that never
+    /// wrote it stores what it stored before.
+    #[serde(
+        default,
+        skip_serializing_if = "isolation::ContainmentSpec::is_default"
+    )]
+    pub(crate) containment: isolation::ContainmentSpec,
 }
 
-/// The record format this build writes and accepts: version 21 adds `network` to each
+/// The record format this build writes and accepts: version 22 adds the `[containment]` table, whose
+/// `private_proc = false` shares the container's `/proc` with every leaf. Version 21 adds `network` to each
 /// `[tool.<name>]`, and stores a stdio MCP server's network in its spec's `network`, where version
 /// 20 kept a separate `native_egress` flag on `ContainedMcp`. Version 20 names a secret's injection mode
 /// `secret.inject`, taking `phantom` or `always`, where version 19 took `secret.phantom` with
@@ -550,7 +561,7 @@ pub(crate) struct Record {
 /// stdio server is now contained), so a v16 record that predates it is refused with a version
 /// mismatch rather than silently losing containment. Version 16 dropped the credsd `secret.type`
 /// key.
-pub(crate) const RECORD_VERSION: u32 = 21;
+pub(crate) const RECORD_VERSION: u32 = 22;
 
 /// A key an earlier build read, and what replaced it.
 struct RemovedKey {
@@ -999,6 +1010,10 @@ struct ConfigFile {
     /// Where this box's decision records and its agent's own spans go.
     #[serde(default)]
     telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// How the box's contained processes see the host: `[containment] private_proc`.
+    #[serde(default)]
+    containment: isolation::ContainmentSpec,
 }
 
 impl ConfigFile {
@@ -1052,6 +1067,13 @@ impl ConfigFile {
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+        }
+        if cfg!(target_os = "macos") && !self.containment.private_proc {
+            return Err(ConfigError::Contract {
+                reason: "[containment] private_proc = false is Linux-only: Seatbelt cannot show \
+                         the workload other processes"
+                    .to_string(),
+            });
         }
         validate_egress(&self.egress)
     }
@@ -1154,6 +1176,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+            containment: Default::default(),
         }
     }
 
@@ -1215,15 +1238,16 @@ mod tests {
         }
     }
 
-    /// **The file carries eight keys**, and a ninth is a load error rather than an ignored key.
+    /// **The file carries nine keys**, and a tenth is a load error rather than an ignored key.
     #[test]
-    fn the_config_accepts_the_eight_keys_and_refuses_a_ninth() {
+    fn the_config_accepts_the_nine_keys_and_refuses_a_tenth() {
         // `name` and `box_dir` are the two required keys, so every accepted spelling carries both.
         let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
         for known in [
             format!("{required}[agent]\ncommand = [\"codex\"]"),
             format!("{required}policy = \"policy.dw\""),
             format!("{required}[tool.git]\ncommand = [\"git\"]"),
+            format!("{required}[containment]\nprivate_proc = false"),
         ] {
             assert!(
                 toml::from_str::<ConfigFile>(&known).is_ok(),
@@ -1243,6 +1267,51 @@ mod tests {
                 "a config carrying {unknown:?} must fail loudly, not be ignored"
             );
         }
+    }
+
+    /// **A record written by the previous build is refused**, not loaded without `containment`.
+    #[test]
+    fn a_v21_record_is_refused_with_a_version_mismatch() {
+        let text = toml::to_string(&record(None, BTreeMap::new()))
+            .unwrap()
+            .replace(&format!("version = {RECORD_VERSION}"), "version = 21");
+        let error = Record::parse(&text, Path::new("/box/record.toml")).expect_err("v21 is stale");
+        assert!(
+            matches!(error, ConfigError::RecordVersion { found: 21, .. }),
+            "{error}"
+        );
+        assert_eq!(RECORD_VERSION, 22, "the [containment] table is version 22");
+    }
+
+    #[test]
+    fn a_record_round_trips_with_and_without_the_containment_table() {
+        for private_proc in [true, false] {
+            let mut stored = record(None, BTreeMap::new());
+            stored.containment = isolation::ContainmentSpec { private_proc };
+            let text = toml::to_string(&stored).unwrap();
+            assert_eq!(
+                text.contains("[containment]"),
+                !private_proc,
+                "the default is skipped: {text}"
+            );
+            assert_eq!(
+                Record::parse(&text, Path::new("/box/record.toml")).unwrap(),
+                stored
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shared_proc_is_refused_on_macos() {
+        let error = load("[containment]\nprivate_proc = false").expect_err("Linux-only");
+        assert!(
+            error.to_string().contains(
+                "[containment] private_proc = false is Linux-only: Seatbelt cannot show the \
+                 workload other processes"
+            ),
+            "{error}"
+        );
     }
 
     #[test]

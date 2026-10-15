@@ -253,7 +253,7 @@ trampoline image:
 
 ```text
 strands-box-contain-trampoline --config <file> --config-sha256 <64-lowercase-hex> \
-  --target-env-json <json-object> [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
+  [--target-env-fd <fd>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
   -- <command> [args...]
 ```
 

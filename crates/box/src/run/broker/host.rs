@@ -337,10 +337,19 @@ async fn start_mcp_server(
             boundary.working_directory(),
             &credential_reads,
         )?;
+        let shares_proc = boundary.shares_proc();
         let leaf = launcher
             .spawn(boundary)
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
+        // A server that shares the container's `/proc` can list the container's processes; record
+        // it after `spawn` succeeds, like `egress:native` below, so a failed launch leaves none.
+        if shares_proc {
+            spec.recorder
+                .record(crate::run::telemetry::EffectiveDecision::shared_proc(
+                    server.name.clone(),
+                ));
+        }
         // A native-egress server bypasses the gateway, so its outbound traffic is never mediated,
         // credential-injected, or journaled. Record that downgrade at the enforcement point, naming
         // the server, so an operator can reconstruct that this server's egress is untracked — the
@@ -1450,6 +1459,24 @@ mod tests {
             record > launch,
             "the egress:native record must be emitted after spawn() returns Ok, so a failed \
              launch leaves no false downgrade record"
+        );
+    }
+
+    /// **A shared-`/proc` MCP server is recorded only after `spawn` succeeds**, for the same reason
+    /// as `egress:native`: a server that never started never listed the container's processes.
+    #[test]
+    fn the_shared_proc_record_is_emitted_after_launch_succeeds() {
+        let src = include_str!("host.rs");
+        let launch = src
+            .find(".spawn(boundary)")
+            .expect("start_mcp_server calls launcher.spawn(boundary)");
+        // Split, so this test's own text is not what `find` matches.
+        let record = src
+            .find(concat!("EffectiveDecision::", "shared_proc("))
+            .expect("start_mcp_server records a shared /proc");
+        assert!(
+            record > launch,
+            "the proc:shared record must be emitted after spawn() returns Ok"
         );
     }
 

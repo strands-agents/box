@@ -55,8 +55,8 @@ an external party observe this."** `feature-critic` treats both classes as BLOCK
 (`run` and `policy generate-schema` — `stop`, `ls`, `rm`, and `reset` are deleted with the
 `~/.strands-box/b/` namespace they enumerated, because a caller supplies `box_dir` and Box cannot
 locate a box it was not handed);
-the eight `box.toml` top-level keys (`name`, `box_dir`, `policy`, `agent`, `tool`,
-`egress`, `mcp`, `telemetry`), of which `name` and `box_dir` are required; the four fields that `[agent]` and each `[tool.<name>]` hold
+the nine `box.toml` top-level keys (`name`, `box_dir`, `policy`, `agent`, `tool`,
+`egress`, `mcp`, `telemetry`, `containment`), of which `name` and `box_dir` are required; the four fields that `[agent]` and each `[tool.<name>]` hold
 (`command`, `workspace`, `env`, `filesystem`); the filesystem lists — `[agent.filesystem]`
 holds eight, and a `[tool.<name>.filesystem]` holds six, because `metadata` and `exec` are refused on a tool
 (a leaf discovers metadata across the operator home, and runs its toolchain through broad exec on
