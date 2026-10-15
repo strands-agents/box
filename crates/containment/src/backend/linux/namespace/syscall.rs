@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-    SeccompRule, TargetArch,
+    SeccompRule, TargetArch, sock_filter,
 };
 
 use crate::error::ContainmentError;
@@ -753,11 +753,73 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     },
 ];
 
-/// The two filters for one containment request.
+/// The two filters for one containment request, and the one program that observes both.
 #[derive(Debug)]
 pub(crate) struct SyscallFilters {
     pub(crate) permit: BpfProgram,
     pub(crate) restrictions: BpfProgram,
+    /// `permit` then `restrictions` as one program, every `EPERM` a notification. One program,
+    /// because a task's filter chain takes one listener and an `ERRNO` from any filter hides a
+    /// notification from another.
+    pub(crate) observed: BpfProgram,
+}
+
+/// `BPF_RET | BPF_K` and `BPF_JMP | BPF_JA`, the two instructions the splice reads and writes.
+const RETURN_CONSTANT: u16 = 0x06;
+const JUMP_ALWAYS: u16 = 0x05;
+
+/// The kernel's per-filter instruction bound.
+const BPF_MAXINSNS: usize = 4096;
+
+/// One program that answers what `permit` and `restrictions` answer stacked, except that a
+/// refusal asks the listener instead of returning `EPERM`.
+///
+/// Every `ret ALLOW` of `permit` becomes a jump to the first instruction of `restrictions`, which
+/// reloads `seccomp_data` itself, so nothing carries across the seam. Both programs return only
+/// `ALLOW` or `ERRNO(EPERM)` for an own-arch call, so stacked they compose as "permit, then
+/// restrictions", and any other return (the foreign-arch kill) is kept as it is.
+pub(crate) fn observed_program(
+    permit: &[sock_filter],
+    restrictions: &[sock_filter],
+) -> Result<BpfProgram, ContainmentError> {
+    let length = permit.len() + restrictions.len();
+    if length > BPF_MAXINSNS {
+        return Err(ContainmentError::ApplyFailed {
+            backend: MECHANISM.to_string(),
+            reason: format!(
+                "the observed filter would be {length} instructions, over the kernel's {BPF_MAXINSNS}"
+            ),
+        });
+    }
+    let refusal = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let copy = |i: &sock_filter| sock_filter {
+        code: i.code,
+        jt: i.jt,
+        jf: i.jf,
+        k: i.k,
+    };
+    let mut program = Vec::with_capacity(length);
+    for (at, i) in permit.iter().enumerate() {
+        program.push(
+            if i.code == RETURN_CONSTANT && i.k == libc::SECCOMP_RET_ALLOW {
+                sock_filter {
+                    code: JUMP_ALWAYS,
+                    jt: 0,
+                    jf: 0,
+                    k: (permit.len() - at - 1) as u32,
+                }
+            } else {
+                copy(i)
+            },
+        );
+    }
+    program.extend(restrictions.iter().map(copy));
+    for i in &mut program {
+        if i.code == RETURN_CONSTANT && i.k == refusal {
+            i.k = libc::SECCOMP_RET_USER_NOTIF;
+        }
+    }
+    Ok(program)
 }
 
 /// The static system-call policy for one containment request.
@@ -797,9 +859,11 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let observed = observed_program(&permit, &restrictions)?;
         Ok(SyscallFilters {
             permit,
             restrictions,
+            observed,
         })
     }
 
@@ -1046,6 +1110,264 @@ fn filter_error(e: impl std::fmt::Display) -> ContainmentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal classic-BPF interpreter over `seccomp_data`, for the opcodes seccompiler emits.
+    mod cbpf {
+        use seccompiler::sock_filter;
+
+        pub(super) struct Data {
+            pub(super) nr: i32,
+            pub(super) arch: u32,
+            pub(super) args: [u64; 6],
+        }
+
+        fn word(data: &Data, offset: u32) -> u32 {
+            match offset {
+                0 => data.nr as u32,
+                4 => data.arch,
+                8 | 12 => 0,
+                o if (16..64).contains(&o) => {
+                    let arg = data.args[((o - 16) / 8) as usize];
+                    if (o - 16) % 8 == 0 {
+                        arg as u32
+                    } else {
+                        (arg >> 32) as u32
+                    }
+                }
+                o => panic!("seccomp_data has no word at offset {o}"),
+            }
+        }
+
+        pub(super) fn run(program: &[sock_filter], data: &Data) -> u32 {
+            let (mut a, mut x, mut mem, mut pc) = (0u32, 0u32, [0u32; 16], 0usize);
+            loop {
+                let i = &program[pc];
+                pc += 1;
+                let jump = |taken: bool| if taken { i.jt as usize } else { i.jf as usize };
+                match i.code {
+                    0x20 => a = word(data, i.k),      // LD W ABS
+                    0x00 => a = i.k,                  // LD IMM
+                    0x01 => x = i.k,                  // LDX IMM
+                    0x60 => a = mem[i.k as usize],    // LD MEM
+                    0x61 => x = mem[i.k as usize],    // LDX MEM
+                    0x02 => mem[i.k as usize] = a,    // ST
+                    0x03 => mem[i.k as usize] = x,    // STX
+                    0x54 => a &= i.k,                 // ALU AND K
+                    0x87 => a = x,                    // TXA
+                    0x07 => x = a,                    // TAX
+                    0x05 => pc += i.k as usize,       // JA
+                    0x15 => pc += jump(a == i.k),     // JEQ K
+                    0x25 => pc += jump(a > i.k),      // JGT K
+                    0x35 => pc += jump(a >= i.k),     // JGE K
+                    0x45 => pc += jump(a & i.k != 0), // JSET K
+                    0x06 => return i.k,               // RET K
+                    code => panic!("opcode {code:#x} at {} is not modelled; add it", pc - 1),
+                }
+            }
+        }
+
+        /// Kernel precedence between two stacked filters' answers (higher wins).
+        pub(super) fn rank(action: u32) -> u8 {
+            match action & libc::SECCOMP_RET_ACTION_FULL {
+                libc::SECCOMP_RET_KILL_PROCESS => 7,
+                libc::SECCOMP_RET_KILL_THREAD => 6,
+                libc::SECCOMP_RET_TRAP => 5,
+                libc::SECCOMP_RET_ERRNO => 4,
+                libc::SECCOMP_RET_USER_NOTIF => 3,
+                libc::SECCOMP_RET_TRACE => 2,
+                libc::SECCOMP_RET_LOG => 1,
+                _ => 0,
+            }
+        }
+    }
+
+    fn edge_cases() -> Vec<cbpf::Data> {
+        let own = match std::env::consts::ARCH {
+            "aarch64" => 0xc000_00b7u32,
+            _ => 0xc000_003e,
+        };
+        let foreign = if own == 0xc000_00b7 {
+            0xc000_003e
+        } else {
+            0xc000_00b7
+        };
+        let small: Vec<u64> = vec![
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            10,
+            16,
+            17,
+            38,
+            40,
+            44,
+            1000,
+            libc::AT_EMPTY_PATH as u64,
+            (libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW) as u64,
+            u32::MAX as u64,
+            u64::MAX,
+            0xffff_ffff_0000_0000,
+        ];
+        let mut cases = Vec::new();
+        for nr in (-1..=500).chain([0x4000_0000]) {
+            for arch in [own, foreign] {
+                cases.push(cbpf::Data {
+                    nr,
+                    arch,
+                    args: [0; 6],
+                });
+            }
+        }
+        let scoped = [
+            libc::SYS_socket,
+            libc::SYS_socketpair,
+            libc::SYS_execveat,
+            libc::SYS_mmap,
+            libc::SYS_mprotect,
+            libc::SYS_pkey_mprotect,
+            libc::SYS_setpgid,
+            libc::SYS_setresuid,
+            libc::SYS_setresgid,
+        ];
+        for nr in scoped {
+            for slot in 0..6 {
+                for value in &small {
+                    let mut args = [0u64; 6];
+                    args[slot] = *value;
+                    cases.push(cbpf::Data {
+                        nr: nr as i32,
+                        arch: own,
+                        args,
+                    });
+                }
+            }
+            for a in [0u64, 1000, u32::MAX as u64] {
+                for b in [0u64, 1000, u32::MAX as u64] {
+                    for c in [0u64, 1000, u32::MAX as u64] {
+                        cases.push(cbpf::Data {
+                            nr: nr as i32,
+                            arch: own,
+                            args: [a, b, c, 0, 0, 0],
+                        });
+                    }
+                }
+            }
+            for prot in 0..8u64 {
+                cases.push(cbpf::Data {
+                    nr: nr as i32,
+                    arch: own,
+                    args: [0, 4096, prot, 0, 0, 0],
+                });
+            }
+        }
+        cases
+    }
+
+    /// **P3: the observed program refuses exactly what the pair refuses**, as a notification.
+    #[test]
+    fn the_observed_program_notifies_exactly_where_the_pair_answers_eperm() {
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("compiles");
+        let refusal = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        for data in edge_cases() {
+            let first = cbpf::run(&filters.permit, &data);
+            let second = cbpf::run(&filters.restrictions, &data);
+            let pair = if cbpf::rank(second) > cbpf::rank(first) {
+                second
+            } else {
+                first
+            };
+            let expected = if pair == refusal {
+                libc::SECCOMP_RET_USER_NOTIF
+            } else {
+                pair
+            };
+            assert_eq!(
+                cbpf::run(&filters.observed, &data),
+                expected,
+                "nr {} arch {:#x} args {:?}: pair {pair:#x}",
+                data.nr,
+                data.arch,
+                data.args
+            );
+        }
+    }
+
+    /// The spliced program keeps no EPERM return, fits the kernel's bound, and jumps nowhere outside.
+    #[test]
+    fn the_observed_program_is_well_formed() {
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("compiles");
+        let observed = &filters.observed;
+        assert!(observed.len() <= 4096, "{} instructions", observed.len());
+        assert_eq!(
+            observed.len(),
+            filters.permit.len() + filters.restrictions.len()
+        );
+        let refusal = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        for (at, i) in observed.iter().enumerate() {
+            assert!(
+                !(i.code == 0x06 && i.k == refusal),
+                "an EPERM return survives at {at}"
+            );
+            let targets: Vec<usize> = match i.code & 0x07 {
+                0x05 if i.code == 0x05 => vec![at + 1 + i.k as usize],
+                0x05 => vec![at + 1 + i.jt as usize, at + 1 + i.jf as usize],
+                _ => vec![],
+            };
+            for target in targets {
+                assert!(target < observed.len(), "jump at {at} lands at {target}");
+            }
+        }
+    }
+
+    /// **P4: the fallback programs are byte-identical to the base commit's.** The digests are
+    /// arm64's; the program differs per arch, and x86_64's lists are still being settled.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn the_fallback_filters_are_unchanged() {
+        use sha2::Digest as _;
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("compiles");
+        for (name, program, length, digest) in [
+            (
+                "permit",
+                &filters.permit,
+                587usize,
+                "3ee4e669c3383577e9cadd15504000fdb08c67bbc22fbe892dc986b62b145906",
+            ),
+            (
+                "restrictions",
+                &filters.restrictions,
+                205usize,
+                "7892ac781cf350a59a73338fbbcd34b1b514a8611a0746c97d55c5841348b48c",
+            ),
+        ] {
+            let mut hash = sha2::Sha256::new();
+            for i in program.iter() {
+                hash.update(i.code.to_le_bytes());
+                hash.update([i.jt, i.jf]);
+                hash.update(i.k.to_le_bytes());
+            }
+            assert_eq!(program.len(), length, "{name} length");
+            assert_eq!(
+                hash.finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+                digest,
+                "{name} bytes"
+            );
+        }
+    }
 
     fn localhost() -> Network {
         Network::Localhost {

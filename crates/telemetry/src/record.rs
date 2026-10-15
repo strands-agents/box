@@ -24,6 +24,8 @@ pub enum Signal {
     AgentMetrics,
     /// One change to the authority this box holds, rather than one decision under it.
     ControlPlane,
+    /// One call the kernel refused beneath policy, observed rather than decided.
+    KernelRefused,
 }
 
 impl Signal {
@@ -37,6 +39,7 @@ impl Signal {
             Self::AgentLogs => "agent_logs",
             Self::AgentMetrics => "agent_metrics",
             Self::ControlPlane => "control_plane",
+            Self::KernelRefused => "kernel_refused",
         }
     }
 
@@ -89,6 +92,7 @@ impl Signal {
             Self::AgentLogs => opentelemetry::logs::Severity::Trace2,
             Self::AgentMetrics => opentelemetry::logs::Severity::Trace3,
             Self::ControlPlane => opentelemetry::logs::Severity::Info2,
+            Self::KernelRefused => opentelemetry::logs::Severity::Warn2,
         }
     }
 
@@ -111,19 +115,21 @@ impl Signal {
             Self::AgentLogs => 3,
             Self::AgentMetrics => 4,
             Self::ControlPlane => 5,
+            Self::KernelRefused => 6,
         }
     }
 
     /// How many slots such a set needs.
-    pub(crate) const SLOTS: usize = 6;
+    pub(crate) const SLOTS: usize = 7;
 
-    const EVERY: [Self; 6] = [
+    const EVERY: [Self; 7] = [
         Self::PolicyDenied,
         Self::PolicyPermitted,
         Self::AgentTrace,
         Self::AgentLogs,
         Self::AgentMetrics,
         Self::ControlPlane,
+        Self::KernelRefused,
     ];
 }
 
@@ -605,6 +611,9 @@ pub enum ControlOperation {
     BoxStarted,
     /// This run is giving the box up.
     BoxStopped,
+    /// A launch's seccomp refusals are not observed: the install fell back, or the box's rate cap
+    /// filled.
+    RefusalsUnobserved,
 }
 
 impl ControlOperation {
@@ -618,6 +627,7 @@ impl ControlOperation {
             Self::DiscoveryComplete => "discovery_complete",
             Self::BoxStarted => "box_started",
             Self::BoxStopped => "box_stopped",
+            Self::RefusalsUnobserved => "refusals_unobserved",
         }
     }
 }
@@ -780,9 +790,171 @@ impl ControlRecord {
     }
 }
 
+/// The name identifying one kernel-refusal event.
+pub(crate) const REFUSAL_EVENT_NAME: &str = "strands.box.containment.refusal";
+
+/// One call the kernel refused beneath policy, as a target receives it.
+///
+/// Not a [`DecisionRecord`]: containment evaluates no policy, so nothing here is a verdict.
+#[derive(Debug, Clone)]
+pub struct RefusalRecord {
+    mechanism: &'static str,
+    syscall: String,
+    arguments: Option<String>,
+    errno: &'static str,
+    suppressed: u64,
+    pid: u32,
+    process: Subject,
+    unix_nanos: u128,
+}
+
+impl RefusalRecord {
+    /// A call the Linux syscall filter refused with `EPERM`. `process` is built with no literal
+    /// arguments, so every non-flag argument is redacted.
+    #[must_use]
+    pub fn seccomp(syscall: &str, arguments: Option<&str>, pid: u32, process: Subject) -> Self {
+        Self {
+            mechanism: "seccomp",
+            syscall: bounded(syscall),
+            arguments: arguments.map(bounded),
+            errno: "EPERM",
+            suppressed: 0,
+            pid,
+            process,
+            unix_nanos: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        }
+    }
+
+    /// How many earlier refusals under the same key this record also stands for.
+    #[must_use]
+    pub fn suppressed(mut self, count: u64) -> Self {
+        self.suppressed = count;
+        self
+    }
+
+    pub(crate) fn signal(&self) -> Signal {
+        Signal::KernelRefused
+    }
+
+    pub(crate) fn unix_nanos(&self) -> u128 {
+        self.unix_nanos
+    }
+
+    /// The attributes a consumer reads, in the order the box states them.
+    pub(crate) fn attributes(&self) -> Vec<(&'static str, AnyValue)> {
+        let mut pairs: Vec<(&'static str, AnyValue)> = vec![
+            (
+                "strands.box.containment.mechanism",
+                self.mechanism.to_string().into(),
+            ),
+            (
+                "strands.box.containment.syscall",
+                self.syscall.clone().into(),
+            ),
+        ];
+        if let Some(arguments) = &self.arguments {
+            pairs.push((
+                "strands.box.containment.arguments",
+                arguments.clone().into(),
+            ));
+        }
+        pairs.push((
+            "strands.box.containment.errno",
+            self.errno.to_string().into(),
+        ));
+        pairs.push((
+            "strands.box.containment.suppressed",
+            i64::try_from(self.suppressed).unwrap_or(i64::MAX).into(),
+        ));
+        pairs.push(("process.pid", i64::from(self.pid).into()));
+        pairs.extend(self.process.attributes());
+        pairs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A kernel refusal is its own record, never a decision.** It names the mechanism, the call,
+    /// and its arguments, and carries no policy key.
+    #[test]
+    fn a_refusal_record_names_the_call_and_never_a_verdict() {
+        let record = RefusalRecord::seccomp(
+            "socket",
+            Some("family=AF_PACKET type=SOCK_RAW"),
+            4242,
+            Subject::process(
+                "/usr/bin/python3",
+                &["-c".to_string(), "secret".to_string()],
+                &[],
+                "",
+            ),
+        )
+        .suppressed(7);
+        assert_eq!(record.signal(), Signal::KernelRefused);
+        let attributes: Vec<(&str, String)> = record
+            .attributes()
+            .into_iter()
+            .map(|(key, value)| (key, format!("{value:?}")))
+            .collect();
+        let keys: Vec<&str> = attributes.iter().map(|(key, _)| *key).collect();
+        assert_eq!(
+            keys,
+            [
+                "strands.box.containment.mechanism",
+                "strands.box.containment.syscall",
+                "strands.box.containment.arguments",
+                "strands.box.containment.errno",
+                "strands.box.containment.suppressed",
+                "process.pid",
+                "process.command",
+                "process.command_args",
+            ]
+        );
+        assert!(
+            attributes
+                .iter()
+                .all(|(key, _)| !key.starts_with("strands.box.policy."))
+        );
+        let args = &attributes
+            .iter()
+            .find(|(key, _)| *key == "process.command_args")
+            .unwrap()
+            .1;
+        assert!(
+            !args.contains("secret"),
+            "a raw argument is redacted: {args}"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_refusal_carries_no_arguments_key() {
+        let record =
+            RefusalRecord::seccomp("bpf", None, 1, Subject::process("/bin/x", &[], &[], ""));
+        assert!(
+            record
+                .attributes()
+                .iter()
+                .all(|(key, _)| *key != "strands.box.containment.arguments")
+        );
+    }
+
+    #[test]
+    fn the_seventh_signal_has_its_own_spelling_slot_and_severity() {
+        assert!(Signal::every().contains(&"kernel_refused"));
+        assert_eq!(Signal::KernelRefused.slot(), 6);
+        assert_eq!(
+            Signal::of_severity(Some(Signal::KernelRefused.severity())),
+            Some(Signal::KernelRefused)
+        );
+        assert_eq!(
+            ControlOperation::RefusalsUnobserved.as_str(),
+            "refusals_unobserved"
+        );
+    }
 
     /// A verdict arrives on the signal its outcome names, and on no other.
     #[test]

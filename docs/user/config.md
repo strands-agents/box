@@ -368,7 +368,7 @@ started reads with `jq`.
 |---|---|---|
 | `kind` | string | `file` or `otlp`. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
-| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans **and** the box's own records together. **Absent means every one of them**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
+| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `kernel`, `logs`, or `metrics`. `kernel` names the calls the kernel refused beneath policy (Linux). `trace` names the agent's own spans **and** the box's own records together. **Absent means every one of them**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
 | `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
 | `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
 
@@ -376,7 +376,7 @@ A file destination inside the box directory and outside `private/` is refused: `
 the box directory <path> but outside its private tree, where a process could truncate it; name a
 destination under `private/`, or outside the box, or declare no target and take the default`. An
 empty `include` is refused with `the target names no signal, so nothing would reach it; write one or
-more of: deny, permit, trace, logs, metrics`, and a repeated word with `the target names deny twice`.
+more of: deny, permit, trace, logs, metrics, kernel`, and a repeated word with `the target names deny twice`.
 
 ### `logs` and `metrics` are unconditional
 
@@ -384,8 +384,8 @@ more of: deny, permit, trace, logs, metrics`, and a repeated word with `the targ
 log records and metrics. `include = ["deny"]` delivers the refusals, the log records, and the
 metrics.
 
-`include` narrows `deny`, `permit`, and `trace`, where `trace` covers the agent's spans and the
-box's own records.
+`include` narrows `deny`, `permit`, `trace`, and `kernel`, where `trace` covers the agent's spans and the
+box's own records, and `kernel` covers the calls the Linux syscall filter refused.
 
 ### Agent spans, logs, and metrics need the agent's exporter
 

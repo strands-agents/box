@@ -13,6 +13,9 @@ pub const POLICY_SCOPE: &str = "strands-box.policy";
 /// The scope every control-plane operation carries.
 pub const CONTROL_SCOPE: &str = "strands-box.control";
 
+/// The scope every kernel-refusal record carries.
+pub const CONTAINMENT_SCOPE: &str = "strands-box.containment";
+
 /// The resource attribute naming the box a record belongs to.
 pub const BOX_NAME_KEY: &str = "strands.box.name";
 
@@ -555,11 +558,14 @@ impl Journal {
         let found = self.scopes();
         let unexpected: Vec<&String> = found
             .iter()
-            .filter(|name| name.as_str() != POLICY_SCOPE && name.as_str() != CONTROL_SCOPE)
+            .filter(|name| {
+                ![POLICY_SCOPE, CONTROL_SCOPE, CONTAINMENT_SCOPE].contains(&name.as_str())
+            })
             .collect();
         assert!(
             unexpected.is_empty(),
-            "{} names {unexpected:?}; a box writes {POLICY_SCOPE} and {CONTROL_SCOPE} alone",
+            "{} names {unexpected:?}; a box writes {POLICY_SCOPE}, {CONTROL_SCOPE}, and \
+             {CONTAINMENT_SCOPE} alone",
             self.path.display()
         );
         assert!(
@@ -584,7 +590,8 @@ fn number_of(value: &serde_json::Value) -> u64 {
     }
 }
 
-/// Every string attribute of an OTLP attribute array.
+/// Every string attribute of an OTLP attribute array, and every integer one in its decimal spelling
+/// (OTLP-JSON writes a 64-bit integer as a string).
 fn strings_of(attributes: &serde_json::Value) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     for attribute in attributes.as_array().into_iter().flatten() {
@@ -593,6 +600,11 @@ fn strings_of(attributes: &serde_json::Value) -> BTreeMap<String, String> {
         };
         if let Some(value) = attribute["value"]["stringValue"].as_str() {
             found.insert(key.to_string(), value.to_string());
+        } else if !attribute["value"]["intValue"].is_null() {
+            found.insert(
+                key.to_string(),
+                number_of(&attribute["value"]["intValue"]).to_string(),
+            );
         }
     }
     found

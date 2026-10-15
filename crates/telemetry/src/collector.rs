@@ -18,13 +18,16 @@ use crate::config::TelemetryConfig;
 use crate::error::Result;
 use crate::export::{BOX_ATTRIBUTE, SOURCE_ATTRIBUTE, SOURCE_BOX, TargetExporter};
 use crate::receive::Receiver;
-use crate::record::{ControlRecord, DecisionRecord, Signal};
+use crate::record::{ControlRecord, DecisionRecord, RefusalRecord, Signal};
 
 /// The scope every decision record carries.
 pub(crate) const SCOPE: &str = "strands-box.policy";
 
 /// The scope every control-plane record carries, so a reader filters one plane from the other.
 pub(crate) const CONTROL_SCOPE: &str = "strands-box.control";
+
+/// The scope every kernel-refusal record carries: containment's, not policy's.
+pub(crate) const CONTAINMENT_SCOPE: &str = "strands-box.containment";
 
 /// The service every record names.
 const SERVICE: &str = "strands-box";
@@ -130,6 +133,8 @@ pub struct Collector {
     logger: SdkLogger,
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
+    /// The containment scope's own logger, for kernel refusals.
+    containment_logger: SdkLogger,
     dropped: Arc<AtomicU64>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
@@ -220,6 +225,7 @@ impl Collector {
         let logs = logs.build();
         let logger = logs.logger(SCOPE);
         let control_logger = logs.logger(CONTROL_SCOPE);
+        let containment_logger = logs.logger(CONTAINMENT_SCOPE);
 
         // An agent's span arrives already encoded, so it relays rather than going through the SDK.
         let receiving = tokio::spawn(inbound.serve_forever(
@@ -234,6 +240,7 @@ impl Collector {
             logs,
             logger,
             control_logger,
+            containment_logger,
             dropped,
             accepts,
             port,
@@ -339,6 +346,36 @@ impl Collector {
             emitted.add_attribute(key, value);
         }
         self.control_logger.emit(emitted);
+    }
+
+    /// Queue one kernel refusal.
+    ///
+    /// Never blocks, never awaits, and never fails, on the same terms as [`Self::record`]. The
+    /// caller has already rate-limited it: a workload chooses how often it is refused.
+    pub fn refusal(&self, record: RefusalRecord) {
+        let signal = record.signal();
+        if !self.accepts[signal.slot()] {
+            return;
+        }
+        let mut emitted = self.containment_logger.create_log_record();
+        emitted.set_event_name(crate::record::REFUSAL_EVENT_NAME);
+        let ids = RandomIdGenerator::default();
+        emitted.set_trace_context(
+            ids.new_trace_id(),
+            ids.new_span_id(),
+            Some(TraceFlags::new(0x3)),
+        );
+        // The refusal's own time, not the emit time, because a full queue delays the emit.
+        emitted.set_timestamp(
+            std::time::UNIX_EPOCH
+                + Duration::from_nanos(u64::try_from(record.unix_nanos()).unwrap_or(u64::MAX)),
+        );
+        emitted.set_severity_number(signal.severity());
+        emitted.set_severity_text("refused");
+        for (key, value) in record.attributes() {
+            emitted.add_attribute(key, value);
+        }
+        self.containment_logger.emit(emitted);
     }
 
     /// Flush every lane and shut it down, inside [`DRAIN_DEADLINE`]. Call it before teardown.
@@ -816,6 +853,76 @@ mod tests {
                 .contains("rule-1"),
             "the drain still exported what was queued"
         );
+    }
+
+    fn logs_of(path: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+        let mut logs = Vec::new();
+        for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+            let batch: serde_json::Value = serde_json::from_str(line).unwrap();
+            for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
+                for scope in resource["scopeLogs"].as_array().unwrap() {
+                    let name = scope["scope"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    for log in scope["logRecords"].as_array().unwrap() {
+                        logs.push((name.clone(), log.clone()));
+                    }
+                }
+            }
+        }
+        logs
+    }
+
+    fn a_raw_socket_refusal() -> crate::record::RefusalRecord {
+        crate::record::RefusalRecord::seccomp(
+            "socket",
+            Some("family=AF_PACKET type=SOCK_RAW"),
+            7,
+            crate::record::Subject::process("/bin/probe", &[], &[], ""),
+        )
+    }
+
+    /// A kernel refusal reaches a file target as its own event under the containment scope, and
+    /// derives no span: it is not a decision and not a control-plane operation.
+    #[tokio::test]
+    async fn a_refusal_reaches_a_file_target_under_the_containment_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("refusal.jsonl");
+        let collector = Collector::start(file_config(&path)).unwrap();
+        collector.refusal(a_raw_socket_refusal());
+        collector.drained().await;
+
+        let logs = logs_of(&path);
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        let (scope, log) = &logs[0];
+        assert_eq!(scope, "strands-box.containment");
+        assert_eq!(log["eventName"], "strands.box.containment.refusal");
+        assert_eq!(log["severityText"], "refused");
+        let syscall = log["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pair| pair["key"] == "strands.box.containment.syscall")
+            .map(|pair| pair["value"]["stringValue"].clone());
+        assert_eq!(syscall, Some(serde_json::json!("socket")));
+        let (spans, _) = spans_and_logs(&path);
+        assert!(spans.is_empty(), "a refusal derives no span: {spans:?}");
+    }
+
+    /// A target that names only denials receives no kernel refusal.
+    #[tokio::test]
+    async fn a_target_without_kernel_receives_no_refusal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deny-only.jsonl");
+        let config = TelemetryConfig::for_box("demo").with_target(
+            Target::new(TargetKind::File, path.to_string_lossy().to_string())
+                .receiving(vec![Signal::PolicyDenied]),
+        );
+        let collector = Collector::start(config).unwrap();
+        collector.refusal(a_raw_socket_refusal());
+        collector.drained().await;
+        assert!(logs_of(&path).is_empty());
     }
 
     fn file_config(path: &std::path::Path) -> TelemetryConfig {

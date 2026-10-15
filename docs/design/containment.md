@@ -349,6 +349,29 @@ methods pass without an MCP decision: `server/discover`, `ping`, and `subscripti
 after an allowed call is outside Box's reach, so decide whether to trust it with what that call
 exposes.
 
+## Refusals the box observes
+
+On Linux every call the syscall filter refuses is answered by the box rather than by the filter
+alone, and it answers `EPERM` exactly as the filter did. The workload installs one program, the
+permit allow-list and the restrictions spliced together, with each refusal a seccomp notification.
+Namespace PID 1 copies the listener out of the workload and sends it to the box after the netns
+listeners, on the same socket. Five properties hold, each pinned by a test:
+
+- The workload holds neither the listener nor that socket after `exec`
+  (`the_workload_holds_no_listener_and_no_relay_descriptor`).
+- The box answers every notification with `EPERM` and never continues a call
+  (`the_response_always_refuses_with_eperm`).
+- The spliced program refuses exactly what the two filters refuse
+  (`the_observed_program_notifies_exactly_where_the_pair_answers_eperm`).
+- The fallback installs the two filters unchanged (`the_fallback_filters_are_unchanged`), when the
+  kernel refuses the observed install (`a_refused_observed_install_falls_back_to_the_refusing_filters`)
+  or PID 1 cannot copy a descriptor out of the workload
+  (`a_refused_listener_copy_falls_back_before_the_observed_install`).
+- With the box gone, a refused call still fails, with `ENOSYS` (`a_closed_listener_answers_enosys`).
+
+[A kernel refusal is observed, not decided](decisions.md#a-kernel-refusal-is-observed-not-decided)
+records why.
+
 ## Residual risk
 
 A box narrows what a process can reach, and it leaves real risk behind: allowed writes change real
