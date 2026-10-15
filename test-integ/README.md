@@ -46,28 +46,18 @@ approval gate is required for safety.
 against and the only one that binds `file-graft`, so a regression here is a real
 defect and stops the merge. No case is quarantined on macOS.
 
-**`ubuntu-24.04-arm` — advisory, and it must be an arm64 runner.** Linux
-containment is **aarch64-only by construction**. `crates/containment/src/facade.rs`
-maps `Platform::Linux if architecture == "aarch64"` to the namespace mechanism and
-refuses every other architecture, so on x86_64 the trampoline exits with
-
-```
-strands-box-contain-trampoline: platform Linux unsupported:
-  Linux containment supports ARM64 (aarch64), not x86_64
-```
-
-and all 73 cases error at the harness's positive control rather than reporting
-vacuous passes. A first CI run on `ubuntu-latest` confirmed this — 57 errors, 0
-passes. The leg is advisory because no arm64 run has gone green yet, not because
-the platform is expected to fail. Make it blocking by deleting the expression
-above once it has a green baseline.
+**`ubuntu-24.04-arm` and `ubuntu-latest` — advisory.** Linux containment runs on
+aarch64 and x86_64 (`crates/containment/src/facade.rs`), and both legs run the
+same cases. They are advisory because no Linux run has a green baseline yet, not
+because either platform is expected to fail. Make a leg blocking by deleting the
+expression above once it has a green baseline.
 
 The AppArmor question is settled, and it was **not** the blocker. The workflow
 clears `kernel.apparmor_restrict_unprivileged_userns` and probes it with
-`unshare`, and that demonstrably works — the x86_64 run logged `before: 1` →
-`after: 0` and `unshare(CLONE_NEWUSER): OK` before failing on architecture. The
-step stays because Ubuntu 24.04 restricts unprivileged user namespaces on arm64
-too, and the cage needs that primitive on any Linux.
+`unshare`, and that demonstrably works — the run logged `before: 1` → `after: 0`
+and `unshare(CLONE_NEWUSER): OK`. The step stays because Ubuntu 24.04 restricts
+unprivileged user namespaces on both architectures, and the cage needs that
+primitive on any Linux.
 
 ### A red leg does not notify anyone
 

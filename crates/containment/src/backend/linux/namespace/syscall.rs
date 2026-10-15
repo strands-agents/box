@@ -42,6 +42,25 @@ pub(crate) struct PermittedSyscall {
     pub(crate) number: libc::c_long,
 }
 
+/// Why a syscall that only one architecture numbers is permitted.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(all(test, target_arch = "x86_64")), allow(dead_code))]
+pub(crate) enum ArchBasis {
+    /// A legacy spelling of this shared permit, which reaches nothing the shared permit does not.
+    Twin(&'static str),
+    /// No shared permit has the same effect, so the entry states why it is safe.
+    Exception(&'static str),
+}
+
+/// One syscall permitted on one architecture only.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ArchPermittedSyscall {
+    pub(crate) name: &'static str,
+    pub(crate) number: libc::c_long,
+    #[cfg_attr(not(all(test, target_arch = "x86_64")), allow(dead_code))]
+    pub(crate) basis: ArchBasis,
+}
+
 /// `fchmodat2`, which `libc` numbers on x86-64 and not on ARM64.
 const FCHMODAT2: libc::c_long = 452;
 
@@ -506,6 +525,166 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     },
 ];
 
+/// The permits only this architecture needs.
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) const ARCH_PERMITTED: &[ArchPermittedSyscall] = &[];
+
+/// The permits only this architecture needs, for the reason that
+/// `docs/design/decisions.md#the-linux-boundary-is-namespaces-not-landlock` states.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const ARCH_PERMITTED: &[ArchPermittedSyscall] = &[
+    ArchPermittedSyscall {
+        name: "open",
+        number: libc::SYS_open,
+        basis: ArchBasis::Twin("openat"),
+    },
+    ArchPermittedSyscall {
+        name: "creat",
+        number: libc::SYS_creat,
+        basis: ArchBasis::Twin("openat"),
+    },
+    ArchPermittedSyscall {
+        name: "stat",
+        number: libc::SYS_stat,
+        basis: ArchBasis::Twin("newfstatat"),
+    },
+    ArchPermittedSyscall {
+        name: "lstat",
+        number: libc::SYS_lstat,
+        basis: ArchBasis::Twin("newfstatat"),
+    },
+    ArchPermittedSyscall {
+        name: "access",
+        number: libc::SYS_access,
+        basis: ArchBasis::Twin("faccessat"),
+    },
+    ArchPermittedSyscall {
+        name: "readlink",
+        number: libc::SYS_readlink,
+        basis: ArchBasis::Twin("readlinkat"),
+    },
+    ArchPermittedSyscall {
+        name: "getdents",
+        number: libc::SYS_getdents,
+        basis: ArchBasis::Twin("getdents64"),
+    },
+    ArchPermittedSyscall {
+        name: "rename",
+        number: libc::SYS_rename,
+        basis: ArchBasis::Twin("renameat"),
+    },
+    ArchPermittedSyscall {
+        name: "unlink",
+        number: libc::SYS_unlink,
+        basis: ArchBasis::Twin("unlinkat"),
+    },
+    ArchPermittedSyscall {
+        name: "rmdir",
+        number: libc::SYS_rmdir,
+        basis: ArchBasis::Twin("unlinkat"),
+    },
+    ArchPermittedSyscall {
+        name: "mkdir",
+        number: libc::SYS_mkdir,
+        basis: ArchBasis::Twin("mkdirat"),
+    },
+    ArchPermittedSyscall {
+        name: "chmod",
+        number: libc::SYS_chmod,
+        basis: ArchBasis::Twin("fchmodat"),
+    },
+    ArchPermittedSyscall {
+        name: "symlink",
+        number: libc::SYS_symlink,
+        basis: ArchBasis::Twin("symlinkat"),
+    },
+    ArchPermittedSyscall {
+        name: "utime",
+        number: libc::SYS_utime,
+        basis: ArchBasis::Twin("utimensat"),
+    },
+    ArchPermittedSyscall {
+        name: "utimes",
+        number: libc::SYS_utimes,
+        basis: ArchBasis::Twin("utimensat"),
+    },
+    ArchPermittedSyscall {
+        name: "futimesat",
+        number: libc::SYS_futimesat,
+        basis: ArchBasis::Twin("utimensat"),
+    },
+    ArchPermittedSyscall {
+        name: "poll",
+        number: libc::SYS_poll,
+        basis: ArchBasis::Twin("ppoll"),
+    },
+    // `pause` waits for a signal, which `ppoll` with no descriptor and no timeout also does.
+    ArchPermittedSyscall {
+        name: "pause",
+        number: libc::SYS_pause,
+        basis: ArchBasis::Twin("ppoll"),
+    },
+    ArchPermittedSyscall {
+        name: "epoll_wait",
+        number: libc::SYS_epoll_wait,
+        basis: ArchBasis::Twin("epoll_pwait"),
+    },
+    ArchPermittedSyscall {
+        name: "epoll_create",
+        number: libc::SYS_epoll_create,
+        basis: ArchBasis::Twin("epoll_create1"),
+    },
+    ArchPermittedSyscall {
+        name: "eventfd",
+        number: libc::SYS_eventfd,
+        basis: ArchBasis::Twin("eventfd2"),
+    },
+    ArchPermittedSyscall {
+        name: "inotify_init",
+        number: libc::SYS_inotify_init,
+        basis: ArchBasis::Twin("inotify_init1"),
+    },
+    ArchPermittedSyscall {
+        name: "pipe",
+        number: libc::SYS_pipe,
+        basis: ArchBasis::Twin("pipe2"),
+    },
+    ArchPermittedSyscall {
+        name: "dup2",
+        number: libc::SYS_dup2,
+        basis: ArchBasis::Twin("dup3"),
+    },
+    ArchPermittedSyscall {
+        name: "fork",
+        number: libc::SYS_fork,
+        basis: ArchBasis::Twin("clone"),
+    },
+    ArchPermittedSyscall {
+        name: "vfork",
+        number: libc::SYS_vfork,
+        basis: ArchBasis::Twin("clone"),
+    },
+    ArchPermittedSyscall {
+        name: "time",
+        number: libc::SYS_time,
+        basis: ArchBasis::Twin("clock_gettime"),
+    },
+    ArchPermittedSyscall {
+        name: "getpgrp",
+        number: libc::SYS_getpgrp,
+        basis: ArchBasis::Twin("getpgid"),
+    },
+    ArchPermittedSyscall {
+        name: "arch_prctl",
+        number: libc::SYS_arch_prctl,
+        basis: ArchBasis::Exception(
+            "glibc sets thread-local storage and the shadow stack with it, and AMX code requests \
+             its register state with it; every subcommand changes only the calling process, and \
+             none reaches a path, a socket, another process, a filter, or a namespace",
+        ),
+    },
+];
+
 /// Every syscall the namespace launcher mediates.
 pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     // --- W^X: an executable image the mount view cannot govern --------------- The mount view's
@@ -772,7 +951,7 @@ impl SyscallPolicy {
 
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
-        let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, ARCH_PERMITTED, true)?;
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
@@ -877,14 +1056,16 @@ fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
 
 fn build_permit_rules(
     entries: &[PermittedSyscall],
+    arch: &[ArchPermittedSyscall],
     include_installer: bool,
 ) -> Result<BTreeMap<libc::c_long, Vec<SeccompRule>>, ContainmentError> {
     let mut rules = BTreeMap::new();
-    for entry in entries {
-        if rules.insert(entry.number, Vec::new()).is_some() {
+    let shared = entries.iter().map(|entry| (entry.name, entry.number));
+    let arch_only = arch.iter().map(|entry| (entry.name, entry.number));
+    for (name, number) in shared.chain(arch_only) {
+        if rules.insert(number, Vec::new()).is_some() {
             return Err(filter_error(format!(
-                "duplicate permitted syscall '{}' ({})",
-                entry.name, entry.number
+                "duplicate permitted syscall '{name}' ({number})"
             )));
         }
     }
@@ -1078,9 +1259,9 @@ mod tests {
     #[test]
     fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
         assert_eq!(WORKLOAD_PERMITTED.len(), 111);
-        let rules =
-            build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 114);
+        let rules = build_permit_rules(WORKLOAD_PERMITTED, ARCH_PERMITTED, true)
+            .expect("the permit table must be unique");
+        assert_eq!(rules.len(), 114 + ARCH_PERMITTED.len());
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
@@ -1123,7 +1304,108 @@ mod tests {
                 number: libc::SYS_read,
             },
         ];
-        build_permit_rules(&duplicate, false).expect_err("a duplicate must fail");
+        build_permit_rules(&duplicate, &[], false).expect_err("a duplicate must fail");
+    }
+
+    #[test]
+    fn an_arch_permit_that_repeats_a_shared_number_is_refused() {
+        let shared = [PermittedSyscall {
+            name: "read",
+            number: libc::SYS_read,
+        }];
+        let arch = [ArchPermittedSyscall {
+            name: "read-again",
+            number: libc::SYS_read,
+            basis: ArchBasis::Twin("read"),
+        }];
+        build_permit_rules(&shared, &arch, false).expect_err("a repeated number must fail");
+    }
+
+    #[test]
+    fn no_permit_key_carries_the_x32_bit() {
+        let rules = build_permit_rules(WORKLOAD_PERMITTED, ARCH_PERMITTED, true)
+            .expect("the permit table must be unique");
+        assert!(
+            rules.keys().all(|number| number & 0x4000_0000 == 0),
+            "a permit key with the x32 bit would open the x32 ABI, which shares AUDIT_ARCH_X86_64"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_x86_64_table_has_29_entries_and_the_permit_filter_143() {
+        assert_eq!(ARCH_PERMITTED.len(), 29);
+        let rules = build_permit_rules(WORKLOAD_PERMITTED, ARCH_PERMITTED, true)
+            .expect("the permit table must be unique");
+        assert_eq!(rules.len(), 143);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn every_x86_64_spelling_names_a_permitted_unmediated_twin() {
+        for entry in ARCH_PERMITTED {
+            let ArchBasis::Twin(twin) = entry.basis else {
+                continue;
+            };
+            assert!(
+                WORKLOAD_PERMITTED.iter().any(|shared| shared.name == twin),
+                "'{}' is permitted as the twin of '{twin}', which the shared table does not permit",
+                entry.name
+            );
+            assert!(
+                !MEDIATED.iter().any(|mediated| mediated.name == twin),
+                "'{}' is permitted as the twin of '{twin}', which is mediated",
+                entry.name
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn arch_prctl_is_the_only_x86_64_exception() {
+        let exceptions: Vec<(&str, &str)> = ARCH_PERMITTED
+            .iter()
+            .filter_map(|entry| match entry.basis {
+                ArchBasis::Exception(reason) => Some((entry.name, reason)),
+                ArchBasis::Twin(_) => None,
+            })
+            .collect();
+        assert_eq!(exceptions.len(), 1, "exceptions: {exceptions:?}");
+        assert_eq!(exceptions[0].0, "arch_prctl");
+        assert!(
+            exceptions[0].1.len() > 20,
+            "the exception has no substantive reason"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_x86_64_kernel_programming_calls_stay_closed() {
+        let rules = build_permit_rules(WORKLOAD_PERMITTED, ARCH_PERMITTED, true)
+            .expect("the permit table must be unique");
+        for (name, number) in [
+            ("modify_ldt", libc::SYS_modify_ldt),
+            ("iopl", libc::SYS_iopl),
+            ("ioperm", libc::SYS_ioperm),
+            ("uselib", libc::SYS_uselib),
+        ] {
+            assert!(!rules.contains_key(&number), "'{name}' must stay refused");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn no_x86_64_spelling_collides_with_a_mediated_number() {
+        for entry in ARCH_PERMITTED {
+            assert!(
+                !MEDIATED
+                    .iter()
+                    .any(|mediated| mediated.number == entry.number),
+                "'{}' ({}) shares a number with a mediated syscall",
+                entry.name,
+                entry.number
+            );
+        }
     }
 
     #[test]
