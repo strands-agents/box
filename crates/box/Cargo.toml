@@ -5,8 +5,6 @@ edition = "2024"
 publish = false
 description = "The standalone workload-only Strands zero-trust box CLI."
 
-# Box is a binary with no library target
-# (docs/design/decisions.md#box-is-a-process-and-reads-one-complete-configuration).
 [[bin]]
 name = "strands-box"
 path = "src/main.rs"

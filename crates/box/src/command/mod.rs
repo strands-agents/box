@@ -21,8 +21,10 @@ use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
 pub(crate) fn cli_main() -> ExitCode {
-    let cli = Cli::parse();
+    execute(Cli::parse())
+}
 
+pub(crate) fn execute(cli: Cli) -> ExitCode {
     // Harden before the runtime exists, so the call is single-threaded and precedes every secret
     // this process will hold (`run::hardening`).
     if matches!(cli.command, Command::Run { .. })

@@ -16,8 +16,9 @@ takes them down. For which risks belong to Box and which to the operator, read
 
 ### The box's trusted process
 
-The box's trusted process is `strands-box run` itself. The operator starts it, it starts everything
-else, and it never runs inside a sandbox. It holds the policy engine and the four enforcement points
+The box's trusted process is `strands-box run` or an application that calls the Box library.
+The operator starts it, it starts everything else, and it never runs inside a sandbox.
+It holds the policy engine and the four enforcement points
 that ask it: Strands Shell, Monty, the egress gateway, and the MCP broker. Beside them, the broker
 routes each request from the agent to the right enforcement point, and the collector records each
 decision. Two more parts sit at the boundary: the trampoline, which applies a sandbox and then

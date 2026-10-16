@@ -99,15 +99,14 @@ it believes it governs, so an operator who wants the prompts gone states the sam
 <a id="box-is-a-process-and-reads-one-complete-configuration"></a>
 ### Box is a process, and it reads one complete configuration
 
-Box ships as a binary with no library target, so every caller starts `strands-box run` and nothing
-links Box into another process. A box has four inputs: policy, credentials, a name, and a workload.
+Box ships a binary and a library so external applications can call the existing run code.
+A box has four inputs: policy, credentials, a name, and a workload.
 One `run --config FILE` supplies them: the file states a required `name`, a required absolute
 `box_dir`, and an `[agent]` table holding `command` and `workspace`. A trailing argv appends to
 `[agent] command`, a relative configuration path resolves from the process working directory, and a
-relative policy path resolves beside the configuration. The process boundary keeps the composition
+relative policy path resolves beside the configuration. Box keeps the composition
 types private, so no caller can obtain the boundary, the trampoline, or the attachment and assemble
-a weaker box. You cannot embed Box in your own process, and the workload owns stdin and stdout, so
-every Box diagnostic goes to stderr.
+a weaker box. The workload owns stdin and stdout, so every Box diagnostic goes to stderr.
 
 <a id="one-trusted-process-per-box"></a>
 ### Each box has its own trusted process, and that process is `run`

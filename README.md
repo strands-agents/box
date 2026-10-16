@@ -74,6 +74,19 @@ individual Dogwood decisions. To apply a policy to file operations, use the
 interpreters and keep those files out of the agent's direct grants. See
 [filesystem access](docs/user/security.md) and [policy](docs/user/policy.md).
 
+## Use Box as a Rust library
+
+Link the `strands-box` package in `crates/box`, then call:
+
+```rust,no_run
+let exit_code = strands_box::run("/absolute/box.toml".into());
+```
+
+This runs the existing Box command in the calling process and waits until it finishes.
+It uses the process's terminal and returns its exit
+code. Call it before starting application threads or loading secrets, and use one Box workload
+per host process. Ship the matching Box helper binaries beside the host application.
+
 ## Architecture
 
 Box runs the Dogwood Local Engine and its enforcement components in its own
