@@ -2891,7 +2891,7 @@ fn nested_authority_parents_are_protected_through_each_writable_spelling() {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>(),
                 )
-                .args(["--target-env-json", "{}", "--"])
+                .arg("--")
                 .arg(probe)
                 .arg("move-authority-parent")
                 .arg(&moved_parent)

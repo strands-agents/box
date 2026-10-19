@@ -123,8 +123,6 @@ impl Fixture {
             .arg(&config_path)
             .arg("--config-sha256")
             .arg(digest)
-            .arg("--target-env-json")
-            .arg("{}")
             .arg("--")
             .arg(&self.tools_probe)
             .arg("--exec-target")

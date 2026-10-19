@@ -52,8 +52,6 @@ fn launch(work_directory: &Path) -> Command {
         .arg(&config_path)
         .arg("--config-sha256")
         .arg(digest)
-        .arg("--target-env-json")
-        .arg("{}")
         .arg("--")
         .arg(&probe)
         .current_dir(work_directory);

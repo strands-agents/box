@@ -8,6 +8,9 @@ use std::process::{Command, Output};
 use containment::{ContainmentConfig, Network, Operation, Scope};
 use sha2::{Digest as _, Sha256};
 
+#[path = "support/target_env.rs"]
+mod target_env;
+
 fn run_contained(
     executable_grant: &Path,
     command: &Path,
@@ -52,13 +55,14 @@ fn run_contained(
     let config_path = canonical_directory.join("containment.json");
     std::fs::write(&config_path, config_json).expect("write config");
 
-    Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
+    let mut trampoline = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"));
+    trampoline
         .arg("--config")
         .arg(&config_path)
         .arg("--config-sha256")
-        .arg(digest)
-        .arg("--target-env-json")
-        .arg(serde_json::to_string(target_environment).expect("target environment"))
+        .arg(digest);
+    let _environment = target_env::attach(&mut trampoline, target_environment);
+    trampoline
         .arg("--")
         .arg(command)
         .env("CONTAIN_AMBIENT_CANARY", "must-not-survive")
@@ -282,8 +286,6 @@ fn private_executables_cross_the_boundary(read_installation: bool) {
             .arg(&config_path)
             .arg("--config-sha256")
             .arg(&digest)
-            .arg("--target-env-json")
-            .arg("{}")
             .arg("--")
             .arg(executable)
             .arg("--exec-target")

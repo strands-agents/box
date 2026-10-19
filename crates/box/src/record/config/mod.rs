@@ -24,6 +24,7 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod isolation;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -454,6 +455,7 @@ impl RunContract {
                         .iter()
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
+                    &self.file.containment,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 box_id: root.box_id().to_string(),
@@ -467,6 +469,7 @@ impl RunContract {
                 mcp: mcp_servers,
                 contained_mcp,
                 telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                containment: self.file.containment,
             },
             policy,
             sources,
@@ -559,6 +562,14 @@ pub(crate) struct Record {
     /// The telemetry targets this box declares, verbatim.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// The `[containment]` table, verbatim. Absent when it is the default, so a box that never
+    /// wrote it stores what it stored before.
+    #[serde(
+        default,
+        skip_serializing_if = "isolation::ContainmentSpec::is_default"
+    )]
+    pub(crate) containment: isolation::ContainmentSpec,
 }
 
 /// The ordinary record format; native enforcement uses version 22. Version 21 adds `network` to each
@@ -576,6 +587,9 @@ pub(crate) const RECORD_VERSION: u32 = 21;
 /// Version 22 prevents older builds from resuming a box without its selected enforcement.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
+/// Version 25 carries `[containment] private_proc = false`, so a build that predates the table
+/// refuses the box rather than resuming it with a private `/proc` it no longer asked for.
+const SHARED_PROC_RECORD_VERSION: u32 = 25;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,14 +630,20 @@ impl ExperimentalFeatures {
 fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
+    containment: &isolation::ContainmentSpec,
 ) -> u32 {
-    if specs
+    let version = if specs
         .into_iter()
         .any(|spec| spec.native_filesystem_policy.is_some())
     {
         PROCESS_POLICY_RECORD_VERSION
     } else {
         features.record_version()
+    };
+    if containment.is_default() {
+        version
+    } else {
+        version.max(SHARED_PROC_RECORD_VERSION)
     }
 }
 
@@ -853,6 +873,7 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROC_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -873,6 +894,7 @@ impl Record {
                 .iter()
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
+            &record.containment,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1109,6 +1131,10 @@ struct ConfigFile {
     /// Where this box's decision records and its agent's own spans go.
     #[serde(default)]
     telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// How the box's contained processes see the host: `[containment] private_proc`.
+    #[serde(default)]
+    containment: isolation::ContainmentSpec,
 }
 
 impl ConfigFile {
@@ -1175,6 +1201,13 @@ impl ConfigFile {
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
             )?;
+        }
+        if cfg!(target_os = "macos") && !self.containment.private_proc {
+            return Err(ConfigError::Contract {
+                reason: "[containment] private_proc = false is Linux-only: Seatbelt cannot show \
+                         the workload other processes"
+                    .to_string(),
+            });
         }
         validate_egress(&self.egress)
     }
@@ -1279,6 +1312,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+            containment: Default::default(),
         }
     }
 
@@ -1452,13 +1486,14 @@ native-filesystem-policy = false
 
     /// Unknown keys remain errors when experimental enforcement is available.
     #[test]
-    fn the_config_accepts_the_nine_keys_and_refuses_unknown_keys() {
+    fn the_config_accepts_the_ten_keys_and_refuses_unknown_keys() {
         // `name` and `box_dir` are the two required keys, so every accepted spelling carries both.
         let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
         for known in [
             format!("{required}[agent]\ncommand = [\"codex\"]"),
             format!("{required}policy = \"policy.dw\""),
             format!("{required}[tool.git]\ncommand = [\"git\"]"),
+            format!("{required}[containment]\nprivate_proc = false"),
         ] {
             assert!(
                 toml::from_str::<ConfigFile>(&known).is_ok(),
@@ -1478,6 +1513,62 @@ native-filesystem-policy = false
                 "a config carrying {unknown:?} must fail loudly, not be ignored"
             );
         }
+    }
+
+    /// **A box that shares `/proc` is stored at version 25 and cannot hide in an ordinary record**, so
+    /// a build before the `[containment]` table refuses it rather than resuming it with a private `/proc`.
+    #[test]
+    fn a_shared_proc_box_needs_its_own_record_version() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.containment = toml::from_str("private_proc = false").unwrap();
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(matches!(
+            Record::parse(&forged, Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: RECORD_VERSION,
+                expected: SHARED_PROC_RECORD_VERSION
+            })
+        ));
+        stored.version = SHARED_PROC_RECORD_VERSION;
+        let text = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn a_record_round_trips_with_and_without_the_containment_table() {
+        for private_proc in [true, false] {
+            let mut stored = record(None, BTreeMap::new());
+            stored.containment = isolation::ContainmentSpec { private_proc };
+            if !private_proc {
+                stored.version = SHARED_PROC_RECORD_VERSION;
+            }
+            let text = toml::to_string(&stored).unwrap();
+            assert_eq!(
+                text.contains("[containment]"),
+                !private_proc,
+                "the default is skipped: {text}"
+            );
+            assert_eq!(
+                Record::parse(&text, Path::new("/box/record.toml")).unwrap(),
+                stored
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_shared_proc_is_refused_on_macos() {
+        let error = load("[containment]\nprivate_proc = false").expect_err("Linux-only");
+        assert!(
+            error.to_string().contains(
+                "[containment] private_proc = false is Linux-only: Seatbelt cannot show the \
+                 workload other processes"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1894,7 +1985,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHARED_PROC_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
