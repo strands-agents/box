@@ -4,6 +4,7 @@ pub(crate) mod authority;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
+pub(crate) mod refusal;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
@@ -194,16 +195,22 @@ impl ContainmentBackend for NamespaceBackend {
         // The PID namespace must exist *before* the view is built, because mounting a fresh `/proc`
         // requires the caller to be inside the PID namespace that procfs will describe.
         let mut keep = vec![0, 1, 2];
-        {
+        let handoff = {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
-        }
-        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+            // PID 1 sends the seccomp listener over this socket after the workload installs its
+            // filter, so it survives PID 1's close; the original caller and the workload close
+            // their own copies.
+            let handoff = egress_handoff.map(|handoff| handoff.as_raw_fd());
+            keep.extend(handoff);
+            handoff
+        };
+        let sync = establish_pid_namespace_and_reaper(&view, &keep, handoff, confirm_fd)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
-        install_syscall_filters(&filters)?;
+        install_syscall_filters(&filters, sync)?;
 
         // Every listener belongs to a relay, and each relay lives in the box.
         drop(listeners);
@@ -266,7 +273,51 @@ fn is_device_mode(mode: libc::mode_t) -> bool {
     mode & libc::S_IFMT == libc::S_IFCHR || mode & libc::S_IFMT == libc::S_IFBLK
 }
 
-fn install_syscall_filters(filters: &syscall::SyscallFilters) -> Result<(), ContainmentError> {
+/// Install the observed filter and have PID 1 hand its listener to the box, or fall back to the
+/// refusing pair. Either way every refused call is refused; only whether the box sees it differs.
+fn install_syscall_filters(
+    filters: &syscall::SyscallFilters,
+    sync: Option<std::os::fd::OwnedFd>,
+) -> Result<(), ContainmentError> {
+    let Some(sync) = sync else {
+        return install_refusing_filters(filters);
+    };
+    match refusal::await_plan(&sync) {
+        refusal::Plan::Observe => {}
+        refusal::Plan::Refuse => return install_refusing_filters(filters),
+        refusal::Plan::Broken => {
+            return Err(apply_failure(
+                "the namespace reaper did not answer the seccomp listener check".to_string(),
+            ));
+        }
+    }
+    match attach_with_listener(&filters.observed) {
+        Ok(listener) => {
+            let forwarded = refusal::announce_listener(&sync, &listener);
+            // P1: the workload never keeps the listener; a workload that held it could answer its
+            // own refusals.
+            drop(listener);
+            if forwarded {
+                Ok(())
+            } else {
+                // The observed filter refuses `seccomp`, so nothing can be stacked over it, and with
+                // no listener its refusals would answer ENOSYS: refuse the apply rather than start a
+                // workload whose refusals differ from the boundary's.
+                Err(apply_failure(
+                    "the seccomp listener did not reach the box".to_string(),
+                ))
+            }
+        }
+        Err(errno) => {
+            install_refusing_filters(filters)?;
+            refusal::announce_unobserved(&sync, errno);
+            Ok(())
+        }
+    }
+}
+
+/// Today's two refusing filters, unchanged.
+fn install_refusing_filters(filters: &syscall::SyscallFilters) -> Result<(), ContainmentError> {
     seccompiler::apply_filter(&filters.permit).map_err(|source| {
         apply_failure(format!("installing the namespace permit filter: {source}"))
     })?;
@@ -275,6 +326,36 @@ fn install_syscall_filters(filters: &syscall::SyscallFilters) -> Result<(), Cont
             "installing the namespace restriction filter: {source}"
         ))
     })
+}
+
+/// Attach `program` with a listener, or the errno the kernel refused it with. No version probe:
+/// the result of the install this needs anyway selects the fallback.
+fn attach_with_listener(program: &[seccompiler::sock_filter]) -> Result<std::os::fd::OwnedFd, i32> {
+    use std::os::fd::FromRawFd as _;
+    let Ok(len) = u16::try_from(program.len()) else {
+        return Err(libc::EINVAL);
+    };
+    // seccompiler's `sock_filter` is `repr(C)` with libc's layout.
+    let fprog = libc::sock_fprog {
+        len,
+        filter: program.as_ptr().cast_mut().cast(),
+    };
+    // SAFETY: `fprog` points at `program`, which outlives the call. NO_NEW_PRIVS is already set.
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            &fprog,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EINVAL));
+    }
+    // SAFETY: the kernel returned a new descriptor this process owns.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor as i32) })
 }
 
 /// A refusal naming a request this backend cannot lower exactly.
@@ -361,11 +442,14 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
     }
 }
 
+/// Returns, in the workload only, the workload's end of the socket it tells PID 1 about its
+/// seccomp listener on — `None` when this launch has no box to hand the listener to.
 fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
+    handoff: Option<libc::c_int>,
     confirm_fd: Option<std::os::fd::RawFd>,
-) -> Result<(), ContainmentError> {
+) -> Result<Option<std::os::fd::OwnedFd>, ContainmentError> {
     // SAFETY: a single syscall with a constant argument. Affects children only.
     if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
         return Err(apply_failure(format!(
@@ -386,6 +470,10 @@ fn establish_pid_namespace_and_reaper(
 
     if reaper > 0 {
         // The original caller.
+        if let Some(descriptor) = handoff {
+            // SAFETY: this process only waits from here; the descriptor is PID 1's to send on.
+            unsafe { libc::close(descriptor) };
+        }
         let mut status: libc::c_int = 0;
         // SAFETY: waiting on this process's own child.
         unsafe { libc::waitpid(reaper, &mut status, 0) };
@@ -424,6 +512,22 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(127) };
     }
 
+    // The socket the workload names its seccomp listener on. PID 1 runs unfiltered and holds the
+    // box's end of the relay; the workload, under its own filter, may not `sendmsg`.
+    let sync = match handoff {
+        Some(_) => match refusal::sync_pair() {
+            Ok(pair) => Some(pair),
+            Err(error) => {
+                eprintln!(
+                    "strands-box: namespace reaper could not create the listener socket: {error}"
+                );
+                // SAFETY: as above.
+                unsafe { libc::_exit(127) };
+            }
+        },
+        None => None,
+    };
+
     // Fork the workload.
     let workload = unsafe { libc::fork() };
     if workload == -1 {
@@ -434,6 +538,11 @@ fn establish_pid_namespace_and_reaper(
 
     if workload > 0 {
         // Still PID 1.
+        let reaper_sync = sync.map(|(reaper_end, workload_end)| {
+            use std::os::fd::AsRawFd as _;
+            // The number stays valid in the workload, which holds its own copy.
+            (reaper_end, workload_end.as_raw_fd())
+        });
         let dropped = authority::drop_all_capabilities();
         let locked = authority::set_no_new_privileges();
         if dropped.is_err() || locked.is_err() {
@@ -447,6 +556,14 @@ fn establish_pid_namespace_and_reaper(
             unsafe { libc::_exit(127) };
         }
 
+        // Hand the workload's seccomp listener to the box, then let go of both sockets: PID 1
+        // never answers a notification.
+        if let (Some((reaper_end, workload_end)), Some(descriptor)) = (&reaper_sync, handoff) {
+            refusal::forward_listener(workload, reaper_end, *workload_end, descriptor);
+            // SAFETY: closing PID 1's copy of the relay, which nothing else here uses.
+            unsafe { libc::close(descriptor) };
+        }
+
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
         let code = reaper::supervise(workload);
@@ -454,8 +571,15 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(code) };
     }
 
-    // The workload process — the only one that returns `Ok`.
-    Ok(())
+    // The workload process — the only one that returns `Ok`. It holds no copy of the relay: P5.
+    if let Some(descriptor) = handoff {
+        // SAFETY: closing the workload's inherited copy, which it never uses.
+        unsafe { libc::close(descriptor) };
+    }
+    Ok(sync.map(|(reaper_end, workload_end)| {
+        drop(reaper_end);
+        workload_end
+    }))
 }
 
 /// An apply failure carrying this backend's mechanism name.
@@ -1156,7 +1280,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
 
         if child == 0 {
-            if install_syscall_filters(filters).is_err() {
+            if install_syscall_filters(filters, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
             }

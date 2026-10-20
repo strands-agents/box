@@ -24,4 +24,5 @@ pub(crate) mod lock;
 pub(crate) mod macos_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+pub(crate) mod refusal;
 pub(crate) mod telemetry;

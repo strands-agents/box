@@ -445,6 +445,7 @@ impl RunContract {
         if let Some(source) = policy_source {
             sources.push(source);
         }
+        let telemetry = telemetry::checked(&self.file.telemetry, root.root())?;
         Ok(ConfigureRequest {
             record: Record {
                 version: process_record_version(
@@ -454,6 +455,7 @@ impl RunContract {
                         .iter()
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
+                    &telemetry,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 box_id: root.box_id().to_string(),
@@ -466,7 +468,7 @@ impl RunContract {
                 remote_mcp,
                 mcp: mcp_servers,
                 contained_mcp,
-                telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                telemetry,
             },
             policy,
             sources,
@@ -576,6 +578,9 @@ pub(crate) const RECORD_VERSION: u32 = 21;
 /// Version 22 prevents older builds from resuming a box without its selected enforcement.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
+/// Version 24 carries the `kernel` telemetry `include` word, which version 23 refused, so an older
+/// build refuses the box rather than misreading a target.
+const KERNEL_TELEMETRY_RECORD_VERSION: u32 = 24;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,14 +621,23 @@ impl ExperimentalFeatures {
 fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
+    telemetry: &BTreeMap<String, telemetry::TelemetryEntry>,
 ) -> u32 {
-    if specs
+    let version = if specs
         .into_iter()
         .any(|spec| spec.native_filesystem_policy.is_some())
     {
         PROCESS_POLICY_RECORD_VERSION
     } else {
         features.record_version()
+    };
+    if telemetry
+        .values()
+        .any(telemetry::TelemetryEntry::includes_kernel)
+    {
+        version.max(KERNEL_TELEMETRY_RECORD_VERSION)
+    } else {
+        version
     }
 }
 
@@ -853,6 +867,7 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            KERNEL_TELEMETRY_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -873,6 +888,7 @@ impl Record {
                 .iter()
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
+            &record.telemetry,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1366,6 +1382,34 @@ native-filesystem-policy = false
                 Err(ConfigError::ExperimentalFeatureUnavailable { .. })
             ));
         }
+    }
+
+    /// **A `kernel` target is stored at version 24 and cannot hide in an ordinary record**, so a build
+    /// before the word refuses the box by version rather than as an unknown word.
+    #[test]
+    fn a_kernel_target_needs_its_own_record_version() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.telemetry.insert(
+            "audit".to_string(),
+            toml::from_str(
+                "kind = \"file\"\ndestination = \"/tmp/r.jsonl\"\ninclude = [\"kernel\"]",
+            )
+            .unwrap(),
+        );
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(matches!(
+            Record::parse(&forged, Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: RECORD_VERSION,
+                expected: KERNEL_TELEMETRY_RECORD_VERSION
+            })
+        ));
+        stored.version = KERNEL_TELEMETRY_RECORD_VERSION;
+        let text = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).unwrap(),
+            stored
+        );
     }
 
     #[test]
@@ -1894,7 +1938,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, KERNEL_TELEMETRY_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

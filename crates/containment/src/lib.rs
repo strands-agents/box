@@ -28,5 +28,13 @@ pub use model::{
 pub use os_paths::{os_minimum_cells, os_runtime_cells};
 pub use platform::Platform;
 
+/// The seccomp notification path the box listens on (Linux).
+#[cfg(target_os = "linux")]
+pub mod refusal {
+    pub use crate::backend::linux::namespace::refusal::{
+        Description, Handoff, Listener, Next, Notification, describe, receive_handoff,
+    };
+}
+
 /// Containment operation result.
 pub type Result<T> = std::result::Result<T, ContainmentError>;

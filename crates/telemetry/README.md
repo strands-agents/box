@@ -57,13 +57,14 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_logs` | one log record the agent's own instrumentation exported |
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
+| `kernel_refused` | one call the kernel refused beneath policy (Linux seccomp), queued with `Collector::refusal` |
 
-**A target naming none receives every one of the six.** An empty set is refused.
+**A target naming none receives every one of the seven.** An empty set is refused.
 
-These six are this crate's own vocabulary and the spelling a record carries. They are not what an
-operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`, and
-`metrics`, and the box expands each word into this set. `trace` names both `agent_trace` and
-`control_plane`.
+These seven are this crate's own vocabulary and the spelling a record carries. They are not what an
+operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `kernel`,
+`logs`, and `metrics`, and the box expands each word into this set. `trace` names both `agent_trace`
+and `control_plane`; `kernel` names `kernel_refused`.
 
 ## What a record carries
 

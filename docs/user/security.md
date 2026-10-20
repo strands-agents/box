@@ -31,6 +31,12 @@ workload reaches each of these directly. Policy is not asked, and the decision l
 You own what `box.toml` grants. Review each path in `[agent.filesystem]` and each `[tool.<name>]`
 table, because direct reach raises no decision.
 
+On Linux a call the syscall filter refuses (a raw socket, writable and executable memory, `ptrace`,
+`bpf`, and the like) still leaves a `kernel_refused` record in the box's telemetry, though no decision
+([a kernel refusal is observed, not decided](../design/decisions.md#a-kernel-refusal-is-observed-not-decided)).
+A path absent from the agent's view, a write to a read-only path, and an unroutable connection leave
+none.
+
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
 in Monty (the box's Python), each connection and HTTP request through the egress gateway, and each

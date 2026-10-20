@@ -261,7 +261,9 @@ The first three flags are required, and each may appear only once.
 `--setup-status-fd` and `--relay-control-fd` are optional. `--setup-status-fd`
 names an inherited descriptor for compact pre-exec failure reporting, and must
 not be `0`, `1`, or `2`. `--relay-control-fd` carries the workload's egress
-listener back to the box, and is Linux-only.
+listeners back to the box, then one last message: the seccomp listener (`O`, with the descriptor)
+or the errno that kept refusals unobserved (`U`). It is Linux-only. A caller keeps reading after the
+egress listeners; if the listener cannot be sent, the apply is refused.
 
 The digest and target-environment carrier are supervisor-owned internal launch
 metadata, not `ContainmentConfig` fields or user policy.

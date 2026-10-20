@@ -65,7 +65,17 @@ pub(crate) fn send_descriptor(
     socket: &std::os::unix::net::UnixStream,
     descriptor: &OwnedFd,
 ) -> Result<(), ContainmentError> {
-    let payload = *b"L";
+    send_tagged_descriptor(socket, descriptor, b'L')
+}
+
+/// Send one descriptor with a one-byte `tag` naming what it is, so the box can tell a netns
+/// listener (`L`) from the seccomp listener (`O`) on the same socket.
+pub(crate) fn send_tagged_descriptor(
+    socket: &std::os::unix::net::UnixStream,
+    descriptor: &OwnedFd,
+    tag: u8,
+) -> Result<(), ContainmentError> {
+    let payload = [tag];
     let mut io = libc::iovec {
         iov_base: payload.as_ptr().cast_mut().cast(),
         iov_len: payload.len(),
@@ -106,8 +116,13 @@ pub(crate) fn send_descriptor(
 
         let sent = libc::sendmsg(socket.as_raw_fd(), &message, 0);
         if sent < 0 {
+            let what = if tag == b'L' {
+                "the listening descriptor"
+            } else {
+                "a descriptor"
+            };
             return Err(failure(format!(
-                "passing the listening descriptor to the box: {}",
+                "passing {what} to the box: {}",
                 std::io::Error::last_os_error()
             )));
         }

@@ -27,7 +27,7 @@ impl NetnsRelay {
     }
 
     /// Receive one listening descriptor per port, in order, and relay each to its port.
-    pub(crate) fn start_each(control: UnixStream, ports: &[u16]) -> Result<Vec<Self>, BoxError> {
+    pub(crate) fn start_each(control: &UnixStream, ports: &[u16]) -> Result<Vec<Self>, BoxError> {
         // A receive timeout, because this blocking `recvmsg` runs on a runtime worker.
         control
             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
@@ -35,7 +35,7 @@ impl NetnsRelay {
 
         let mut relays = Vec::with_capacity(ports.len());
         for port in ports {
-            relays.push(Self::start_one(&control, *port)?);
+            relays.push(Self::start_one(control, *port)?);
         }
         Ok(relays)
     }
@@ -187,7 +187,7 @@ mod tests {
         send_descriptor(&child_side, &OwnedFd::from(workload_listener));
 
         // Through the public entry point, so this exercises what `supervise` calls.
-        let mut relays = NetnsRelay::start_each(box_side, &[proxy_port]).expect("start relay");
+        let mut relays = NetnsRelay::start_each(&box_side, &[proxy_port]).expect("start relay");
         let _relay = relays.pop().expect("one relay for one port");
 
         // The workload's request, on a blocking thread so the runtime's workers stay
@@ -223,7 +223,7 @@ mod tests {
         (&child_side).write_all(b"x").expect("write payload");
 
         let error =
-            NetnsRelay::start_each(box_side, &[1]).expect_err("a missing descriptor must refuse");
+            NetnsRelay::start_each(&box_side, &[1]).expect_err("a missing descriptor must refuse");
         assert!(
             error.to_string().contains("descriptor"),
             "the refusal must name what was missing: {error}"

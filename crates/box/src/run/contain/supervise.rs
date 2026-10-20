@@ -349,6 +349,11 @@ pub(crate) struct Contained {
     /// The assembled boundary, which keeps the containment config descriptor open through spawn.
     _boundary: Boundary,
 
+    /// The watcher answering this workload's seccomp refusals. Before `_relays`, so it stops while
+    /// the relays still exist. `None` for an uncontained test spawn.
+    #[cfg(target_os = "linux")]
+    _refusals: Option<crate::run::refusal::RefusalWatch>,
+
     /// The Linux relays, held for exactly the workload's lifetime: the gateway's, then the
     /// collector's.
     #[cfg(target_os = "linux")]
@@ -367,8 +372,9 @@ impl Contained {
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
+        refusals: &std::sync::Arc<crate::run::refusal::RefusalRecorder>,
     ) -> Result<Self, BoxError> {
-        Self::spawn_with(boundary, layout, hosted, Stdio::inherit, true).await
+        Self::spawn_with(boundary, layout, hosted, refusals, Stdio::inherit, true).await
     }
 
     /// Spawn an isolated workload without applying containment.
@@ -396,6 +402,8 @@ impl Contained {
             trampoline,
             _boundary: boundary,
             #[cfg(target_os = "linux")]
+            _refusals: None,
+            #[cfg(target_os = "linux")]
             _relays: Vec::new(),
             hosted,
         })
@@ -406,6 +414,9 @@ impl Contained {
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] refusals: &std::sync::Arc<
+            crate::run::refusal::RefusalRecorder,
+        >,
         stdio: fn() -> Stdio,
         claim_terminal: bool,
     ) -> Result<Self, BoxError> {
@@ -450,7 +461,7 @@ impl Contained {
             drop(relay_child_side);
             // **The same list the containment config was built from**, gateway first.
             match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+                &relay_box_side,
                 boundary.served_ports(),
             ) {
                 Ok(relays) => relays,
@@ -466,12 +477,19 @@ impl Contained {
             }
         };
 
+        // The relays took their descriptors; what follows on the socket is this workload's seccomp
+        // listener, which the watcher answers for the workload's life.
+        #[cfg(target_os = "linux")]
+        let watch = refusals.watch(relay_box_side, "agent".to_string());
+
         Ok(Self {
             group,
             signals,
             terminal,
             trampoline,
             _boundary: boundary,
+            #[cfg(target_os = "linux")]
+            _refusals: Some(watch),
             #[cfg(target_os = "linux")]
             _relays: relays,
             hosted,
@@ -558,6 +576,8 @@ struct LaunchedLeaf {
     group: ProcessGroup,
     trampoline: Trampoline,
     #[cfg(target_os = "linux")]
+    refusals: crate::run::refusal::RefusalWatch,
+    #[cfg(target_os = "linux")]
     relays: Vec<crate::run::netns_relay::NetnsRelay>,
 }
 
@@ -569,6 +589,10 @@ impl LeafBox {
     async fn launch_contained(
         boundary: &Boundary,
         layout: &BoxRoot,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] refusals: &std::sync::Arc<
+            crate::run::refusal::RefusalRecorder,
+        >,
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] launch: &str,
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
@@ -602,7 +626,7 @@ impl LeafBox {
         let relays = {
             drop(relay_child_side);
             match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+                &relay_box_side,
                 boundary.served_ports(),
             ) {
                 Ok(relays) => relays,
@@ -624,9 +648,15 @@ impl LeafBox {
             }
         };
 
+        // What follows the relays' descriptors is this leaf's seccomp listener.
+        #[cfg(target_os = "linux")]
+        let refusals = refusals.watch(relay_box_side, launch.to_string());
+
         Ok(LaunchedLeaf {
             group,
             trampoline,
+            #[cfg(target_os = "linux")]
+            refusals,
             #[cfg(target_os = "linux")]
             relays,
         })
@@ -644,6 +674,8 @@ impl LeafBox {
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
             crate::run::macos_enforcement::Registration,
         >,
+        refusals: &std::sync::Arc<crate::run::refusal::RefusalRecorder>,
+        launch: &str,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
         // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
@@ -651,10 +683,14 @@ impl LeafBox {
             mut group,
             mut trampoline,
             #[cfg(target_os = "linux")]
+                refusals: _refusals,
+            #[cfg(target_os = "linux")]
                 relays: _relays,
         } = Self::launch_contained(
             &boundary,
             layout,
+            refusals,
+            launch,
             Stdio::null(),
             Stdio::piped(),
             Stdio::piped(),
@@ -700,6 +736,8 @@ impl LeafBox {
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
             crate::run::macos_enforcement::Registration,
         >,
+        refusals: &std::sync::Arc<crate::run::refusal::RefusalRecorder>,
+        launch: &str,
     ) -> Result<StreamingLeaf, BoxError> {
         // stderr is piped, not nulled: a containment setup failure must carry the trampoline's own
         // message as `detail`, the same reason the buffered `run` path reports. On success the
@@ -710,10 +748,14 @@ impl LeafBox {
             mut group,
             trampoline,
             #[cfg(target_os = "linux")]
+            refusals,
+            #[cfg(target_os = "linux")]
             relays,
         } = Self::launch_contained(
             &boundary,
             layout,
+            refusals,
+            launch,
             Stdio::piped(),
             Stdio::piped(),
             Stdio::piped(),
@@ -772,6 +814,8 @@ impl LeafBox {
             group,
             _boundary: boundary,
             #[cfg(target_os = "linux")]
+            _refusals: refusals,
+            #[cfg(target_os = "linux")]
             _relays: relays,
         })
     }
@@ -787,6 +831,10 @@ pub(crate) struct StreamingLeaf {
     /// The assembled boundary, which keeps the containment config descriptor open for the child's
     /// lifetime.
     _boundary: Boundary,
+
+    /// The watcher answering the server's seccomp refusals, for exactly its lifetime.
+    #[cfg(target_os = "linux")]
+    _refusals: crate::run::refusal::RefusalWatch,
 
     /// The Linux relays to the parent gateway, held for exactly the server's lifetime.
     #[cfg(target_os = "linux")]
@@ -809,6 +857,8 @@ pub(crate) struct StreamingLeafParts {
 pub(crate) struct StreamingLeafRetention {
     _boundary: Boundary,
     #[cfg(target_os = "linux")]
+    _refusals: crate::run::refusal::RefusalWatch,
+    #[cfg(target_os = "linux")]
     _relays: Vec<crate::run::netns_relay::NetnsRelay>,
 }
 
@@ -827,6 +877,8 @@ impl StreamingLeaf {
             leader,
             retention: StreamingLeafRetention {
                 _boundary: self._boundary,
+                #[cfg(target_os = "linux")]
+                _refusals: self._refusals,
                 #[cfg(target_os = "linux")]
                 _relays: self._relays,
             },

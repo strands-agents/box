@@ -226,6 +226,7 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
 /// call selects the tool the invocation matches, translates that tool's `ProcessSpec` through the
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
+#[allow(clippy::too_many_arguments)]
 fn tool_spawner(
     attachment: Attachment,
     layout: BoxRoot,
@@ -237,9 +238,11 @@ fn tool_spawner(
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         super::macos_enforcement::Registration,
     >,
+    refusals: Arc<crate::run::refusal::RefusalRecorder>,
 ) -> strands_shell::os::HostSpawner {
     Arc::new(move |spawn: strands_shell::os::HostSpawn| {
         let recorder = Arc::clone(&recorder);
+        let refusals = Arc::clone(&refusals);
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let registration = registration.clone();
         let attachment = attachment.clone();
@@ -281,12 +284,12 @@ fn tool_spawner(
                 &site,
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let label = table
+                .strip_prefix("[tool.")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or(&table);
             // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
             if selected.spec.native_egress() {
-                let label = table
-                    .strip_prefix("[tool.")
-                    .and_then(|rest| rest.strip_suffix(']'))
-                    .unwrap_or(&table);
                 recorder.record(telemetry::EffectiveDecision::enforcement_permit(
                     "egress:native",
                     label.to_string(),
@@ -298,6 +301,8 @@ fn tool_spawner(
                 &layout,
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 registration,
+                &refusals,
+                &format!("tool:{label}"),
             )
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -325,6 +330,8 @@ pub(crate) struct McpLeafLauncher {
     layout: BoxRoot,
     record: Record,
     protected_sources: Vec<AuthoritySource>,
+    /// The box's refusal sink, which every server's watcher feeds.
+    refusals: Arc<crate::run::refusal::RefusalRecorder>,
     /// The agent's workspace — the contained MCP leaf's working directory. NOT the box's
     /// `private/mcp` (the non-unix/no-launcher fallback start's cwd): that is private Box state and
     /// a leaf grant on it is refused ("would expose private Box state").
@@ -341,6 +348,7 @@ impl McpLeafLauncher {
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
             super::macos_enforcement::Registration,
         >,
+        refusals: Arc<crate::run::refusal::RefusalRecorder>,
     ) -> Self {
         Self {
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -349,6 +357,7 @@ impl McpLeafLauncher {
             layout,
             record,
             protected_sources,
+            refusals,
             workspace,
         }
     }
@@ -416,16 +425,19 @@ impl McpLeafLauncher {
         )
     }
 
-    /// Spawn the contained streaming leaf `boundary` describes.
+    /// Spawn the contained streaming leaf `boundary` describes, for `server`.
     pub(crate) async fn spawn(
         &self,
         boundary: Boundary,
+        server: &str,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             self.registration.clone(),
+            &self.refusals,
+            &format!("mcp:{server}"),
         )
         .await
     }
@@ -489,6 +501,10 @@ pub(crate) struct HostedBox {
     /// The egress gateway. Dropped after the broker, which joins its accept thread.
     _proxy: MitmHandle,
 
+    /// This box's kernel-refusal sink. Before `_collector`, so the last refusal counts flush into
+    /// a collector that still exists.
+    refusals: Arc<crate::run::refusal::RefusalRecorder>,
+
     /// This box's collector. Dropped after the gateway, and the drain that precedes teardown is
     /// what exports; a verdict taken after it reaches no target.
     _collector: Arc<telemetry::Collector>,
@@ -513,6 +529,11 @@ impl HostedBox {
         self._file_monitor
             .as_ref()
             .map(|monitor| monitor.registration())
+    }
+
+    /// This box's kernel-refusal sink, for the agent's own launch.
+    pub(crate) fn refusals(&self) -> Arc<crate::run::refusal::RefusalRecorder> {
+        Arc::clone(&self.refusals)
     }
 
     pub(crate) fn prepare_policy(
@@ -559,6 +580,7 @@ impl HostedBox {
 
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
+        let refusals = crate::run::refusal::RefusalRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
         let mut capabilities = CapabilitySet::builder();
         for (destination, store) in projection.capabilities {
@@ -697,6 +719,7 @@ impl HostedBox {
             Arc::clone(&recorder),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
+            Arc::clone(&refusals),
         ));
         // Every stdio MCP server is started contained, as a streaming leaf, through the same inputs.
         // Built only when the box declares at least one stdio server, so a box with none carries no
@@ -710,6 +733,7 @@ impl HostedBox {
                 workspace.to_path_buf(),
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
+                Arc::clone(&refusals),
             ))
         });
         let broker = BrokerHost::start(
@@ -735,6 +759,7 @@ impl HostedBox {
             _file_monitor: file_monitor,
             coordinator_fatal,
             _proxy: proxy,
+            refusals,
             _collector: collector,
             attachment,
             approved,
