@@ -603,6 +603,13 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     // API returns `EPERM`. Add the entry when libc carries the constant.
     // Privilege and identity surfaces the namespaces do not close.
     MediatedSyscall {
+        name: "ioctl",
+        number: libc::SYS_ioctl,
+        disposition: Disposition::ArgumentScoped,
+        reason: "terminal input injection can feed commands to the operator's shell \
+                 through an inherited terminal",
+    },
+    MediatedSyscall {
         name: "setuid",
         number: libc::SYS_setuid,
         disposition: Disposition::Deny,
@@ -808,6 +815,9 @@ impl SyscallPolicy {
         &self,
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
+        if entry.number == libc::SYS_ioctl {
+            return terminal_input_injection_rules();
+        }
         if entry.number == libc::SYS_socket {
             return self.socket_rules();
         }
@@ -858,6 +868,23 @@ impl SyscallPolicy {
             .map_err(filter_error)?,
         ])
     }
+}
+
+fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    Ok(vec![
+        SeccompRule::new(vec![
+            // Linux interprets the ioctl request as an unsigned int. Match its low
+            // 32 bits so nonzero upper bits cannot bypass the refusal.
+            SeccompCondition::new(
+                1,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                u64::from(libc::TIOCSTI as u32),
+            )
+            .map_err(filter_error)?,
+        ])
+        .map_err(filter_error)?,
+    ])
 }
 
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
