@@ -48,6 +48,9 @@ httparse = "1"
 # JSON-RPC frame classification for both kinds of MCP server (identifiers only — no body is retained).
 serde_json = "1"
 
+# RFC 3986 parsing and normalization of request paths and MCP resource URIs before they are judged.
+fluent-uri = { version = "=0.4.1", default-features = false, features = ["alloc"] }
+
 # ------------------------------------------------------------------------------
 # tls-intercept-only deps (Part A / MITM adapter). Optional so `--no-default-features`
 # builds a tunnel-only MITM with none of the TLS stack compiled in.

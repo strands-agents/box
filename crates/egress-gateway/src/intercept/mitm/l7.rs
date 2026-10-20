@@ -17,12 +17,11 @@ use super::{SharedState, http1, tls};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent};
 use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
-use crate::capability::{CapabilityContext, CapabilitySet};
+use crate::capability::CapabilityContext;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
-    McpTarget, McpTargetIdentity, canonicalize_mcp_frame, decode_unreserved, mcp_denial_response,
-    remove_dot_segments,
+    McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
 
 /// Terminate the client's TLS, run the L7 legs, and forward to the pinned upstream.
@@ -158,7 +157,42 @@ where
     // spelling, forward another" gap where `/%61dmin` or `/x/../admin` dodges a path `forbid` yet the
     // origin routes to `/admin`. The query is left untouched — a `UrlPath` credential can live there,
     // and it is deliberately kept out of the judged path.
-    req.target.path = canonicalize_request_path(&req.target.path);
+    let method = req.method.clone().unwrap_or_else(|| "GET".to_string());
+    req.target.path = match canonicalize_request_path(&req.target.path) {
+        Ok(path) => path,
+        Err(reason) => {
+            refuse_request(
+                state,
+                connect,
+                client_writer,
+                RefusedRequest {
+                    method: &method,
+                    path: &req.target.path,
+                    reason: &reason,
+                    diagnostic: b"request path is not a valid address",
+                },
+                correlation,
+            );
+            return Ok(());
+        }
+    };
+
+    // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
+    if !intercepted && state.controls.matches_any(&req.target.as_destination()) {
+        refuse_request(
+            state,
+            connect,
+            client_writer,
+            RefusedRequest {
+                method: &method,
+                path: &req.target.path,
+                reason: "credential would attach on a plaintext request; refused — a secret must ride TLS",
+                diagnostic: b"credential not permitted on a plaintext request",
+            },
+            correlation,
+        );
+        return Ok(());
+    }
 
     let cx = CapabilityContext::new(
         correlation.clone(),
@@ -533,30 +567,9 @@ where
 ///
 /// A thin transport wrapper mirroring [`intercept_tls`] without any TLS: the request was already
 /// read (`parsed`) and `origin_target` is its origin-form target (`/path?query`) from the absolute
-/// URL. It builds the boundary request and hands the shared legs to [`run_l7_legs`]. Plain HTTP has
-/// no CONNECT authority to bind against, so the post-mutation re-check is a no-op.
-/// Build the canonical forward target for a plain-HTTP origin-form request, and decide whether a
-/// credential control would attach on it — the "secret must ride TLS" refusal
-/// (docs/design/decisions.md#a-secret-rides-only-tls).
-///
-/// The path is canonicalized BEFORE the `matches_any` check: the origin resolves the canonical path,
-/// so a raw spelling like `/%76%31/chat` must not dodge a `/v1/chat`-scoped control (which would
-/// attach the real secret to a cleartext request). Judge and forward the same identity, as the TLS
-/// path does in [`run_l7_legs`]. Returns the target to forward and whether to refuse.
-fn plain_target_and_credential_refusal(
-    host: &str,
-    port: u16,
-    origin_target: &str,
-    controls: &CapabilitySet,
-) -> (Target, bool) {
-    let (path, query) = split_target(origin_target);
-    let mut target = Target::new(host.to_string(), port);
-    target.path = canonicalize_request_path(&path);
-    target.query = query;
-    let refuse = controls.matches_any(&target.as_destination());
-    (target, refuse)
-}
-
+/// URL. It builds the boundary request and hands the shared legs to [`run_l7_legs`], which
+/// canonicalizes the path and refuses a credential on it. Plain HTTP has no CONNECT authority to bind
+/// against, so the post-mutation re-check is a no-op.
 pub(super) fn forward_plain(
     client_writer: &mut TcpStream,
     upstream: TcpStream,
@@ -569,50 +582,10 @@ pub(super) fn forward_plain(
     let mut upstream_buf =
         BufReader::new(Bounded::new(upstream, state.config.upstream_read_deadline));
 
-    // Build the canonical forward target and the "secret must ride TLS" refusal together, so the path
-    // is canonicalized BEFORE the credential-control match (see the helper). Judging the raw spelling
-    // would let `/%76%31/chat` dodge a `/v1/chat`-scoped control and attach the real secret to a
-    // cleartext request.
-    let (target, credential_would_attach) = plain_target_and_credential_refusal(
-        &connect.host,
-        connect.port,
-        &origin_target,
-        &state.controls,
-    );
-
-    // A secret must only ever ride TLS. If a credential control matches this plaintext destination,
-    // refuse. Fail closed here, before `run_l7_legs`, so the
-    // mutator never runs and the secret cannot reach the wire. A credential-free destination (e.g. a
-    // loopback MCP server) matches nothing and forwards normally.
-    if credential_would_attach {
-        let reason =
-            "credential would attach on a plaintext request; refused — a secret must ride TLS";
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason.to_string(),
-            correlation.clone(),
-        ));
-        emit_decision(
-            state,
-            DecisionSubject {
-                host: &connect.host,
-                port: connect.port,
-                method: &parsed.method,
-                path: &target.path,
-            },
-            AuditDecision::Deny,
-            reason,
-            correlation,
-        );
-        write_trusted_diagnostic(
-            client_writer,
-            &parsed.method,
-            403,
-            b"credential not permitted on a plaintext request",
-        );
-        return Ok(());
-    }
+    let mut target = Target::new(connect.host.clone(), connect.port);
+    let (path, query) = split_target(&origin_target);
+    target.path = path;
+    target.query = query;
 
     let mut req = InterceptedRequest {
         target,
@@ -862,20 +835,51 @@ fn emit_decision(
     });
 }
 
-/// Canonicalize an origin-form request path to the form the origin will actually resolve, so the
-/// gateway judges and forwards one identity (RFC 3986). Two steps: percent-decode **only** unreserved
-/// octets (`ALPHA / DIGIT / -._~`), leaving every reserved octet still-encoded — critically `%2F` is
-/// NOT decoded, because turning it into `/` would change segment structure and open a different gap;
-/// then remove dot-segments (§5.2.4). Decoding cannot introduce a new `/` (that octet is reserved),
-/// so decode-then-remove-dot-segments is order-safe. The query is handled separately by the caller.
-fn canonicalize_request_path(path: &str) -> String {
-    let decoded = decode_unreserved(path);
-    let collapsed = remove_dot_segments(&decoded);
-    if collapsed.is_empty() {
+/// The RFC 3986 normal form of an origin-form request path, `/` when it is empty, or why it is refused.
+fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> {
+    let normal = normalize_path(path)?;
+    Ok(if normal.is_empty() {
         "/".to_string()
     } else {
-        collapsed
-    }
+        normal
+    })
+}
+
+/// A request the gateway refuses before any request leg runs.
+struct RefusedRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    reason: &'a str,
+    diagnostic: &'a [u8],
+}
+
+/// Record a refused request and answer the client 403.
+fn refuse_request(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    client_writer: &mut impl Write,
+    refused: RefusedRequest<'_>,
+    correlation: RequestId,
+) {
+    state.audit.push(NetworkAuditEvent::deny(
+        &connect.host,
+        connect.port,
+        refused.reason.to_string(),
+        correlation.clone(),
+    ));
+    emit_decision(
+        state,
+        DecisionSubject {
+            host: &connect.host,
+            port: connect.port,
+            method: refused.method,
+            path: refused.path,
+        },
+        AuditDecision::Deny,
+        refused.reason,
+        correlation,
+    );
+    write_trusted_diagnostic(client_writer, refused.method, 403, refused.diagnostic);
 }
 
 /// The `params.cursor` a `tools/list` request names.
@@ -1038,6 +1042,33 @@ mod tests {
         assert_eq!(canonicalize_request_path("/%61%64min"), "/admin");
     }
 
+    /// The canonical path of a spelling the test expects to be valid.
+    fn canonicalize_request_path(path: &str) -> String {
+        super::canonicalize_request_path(path).unwrap()
+    }
+
+    #[test]
+    fn canonicalize_request_path_is_idempotent() {
+        for spelling in crate::mcp::generated_spellings() {
+            for path in [spelling.clone(), format!("/{spelling}")] {
+                if let Ok(once) = super::canonicalize_request_path(&path) {
+                    assert_eq!(
+                        super::canonicalize_request_path(&once),
+                        Ok(once.clone()),
+                        "{path:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_that_is_not_rfc_3986_is_refused() {
+        for path in ["/%", "/%4", "/%zz", "/a%%41", "/a#b", "/a b", "/\u{e9}"] {
+            assert!(super::canonicalize_request_path(path).is_err(), "{path:?}");
+        }
+    }
+
     /// FIX B: dot-segments are removed, so `/tmp/../etc/passwd` cannot dodge a `forbid` on `/etc/*`.
     #[test]
     fn canonicalize_removes_dot_segments() {
@@ -1072,59 +1103,6 @@ mod tests {
             reconstruct_target(&target),
             "/x?%61=%62",
             "the forwarded target keeps the canonical path and the verbatim query"
-        );
-    }
-
-    /// FIX B on the plain-HTTP leg: `forward_plain` refuses to attach a secret to a cleartext request
-    /// when a credential control matches the destination — and it must canonicalize the path
-    /// BEFORE that match. This drives the refusal decision (`plain_target_and_credential_refusal`,
-    /// which `forward_plain` calls) with a RAW `/%76%31/chat` origin target against a `/v1/chat`-scoped
-    /// control: the canonical form matches, so the request is refused. If the canonicalize-before-match
-    /// line were removed, the raw path would not match, the refusal would not fire, and the secret
-    /// would slip onto the wire — so this test would fail, guarding that ordering.
-    #[test]
-    fn forward_plain_refuses_a_raw_encoded_path_a_canonical_control_matches() {
-        use crate::capability::{CapabilityOutcome, EgressCapability};
-        use credentials::DestinationPattern;
-
-        // A credential control scoped to the CANONICAL path. `matches_any` consults only `pattern()`;
-        // `on_request` never runs on this path (the refusal fires first), so it is a no-op abstain.
-        struct PathScopedCredential;
-        impl EgressCapability for PathScopedCredential {
-            fn pattern(&self) -> &DestinationPattern {
-                static PAT: std::sync::OnceLock<DestinationPattern> = std::sync::OnceLock::new();
-                PAT.get_or_init(|| DestinationPattern::parse("api.example.com/v1/chat").unwrap())
-            }
-            fn on_request(
-                &self,
-                _req: &mut InterceptedRequest,
-                _cx: &CapabilityContext,
-            ) -> CapabilityOutcome {
-                CapabilityOutcome::applied(vec![])
-            }
-        }
-        let controls = CapabilitySet::from_parts(vec![Box::new(PathScopedCredential)]);
-
-        // Raw, percent-encoded spelling of `/v1/chat` — what the client can put on the wire.
-        let (target, refuse) =
-            plain_target_and_credential_refusal("api.example.com", 443, "/%76%31/chat", &controls);
-        assert_eq!(
-            target.path, "/v1/chat",
-            "the forward target must carry the canonical path the origin resolves"
-        );
-        assert!(
-            refuse,
-            "the canonical path matches the credential control, so the plaintext request must be \
-             refused — a raw-path match would dodge the refusal and leak the secret in cleartext"
-        );
-
-        // A destination no credential control covers forwards normally (no refusal): the refusal is
-        // scoped to the matching path, not blanket.
-        let (_other, refuse_other) =
-            plain_target_and_credential_refusal("api.example.com", 443, "/other", &controls);
-        assert!(
-            !refuse_other,
-            "a destination no credential control matches must forward, not refuse"
         );
     }
 

@@ -838,7 +838,37 @@ async fn handle_request(
     {
         return refuse_reused_id(exchange, Some(id)).await;
     }
-    let target = McpTarget::of_stdio_request(frame.as_bytes())?;
+    let target = match McpTarget::of_stdio_request(frame.as_bytes()) {
+        Ok(target) => target,
+        Err(refusal) if method == "resources/read" => {
+            let reason = refusal.to_string();
+            let uri = request
+                .get("params")
+                .and_then(|params| params.get("uri"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            exchange
+                .connection
+                .recorder
+                .record(EffectiveDecision::enforcement_deny(
+                    r#"Box::Action::"mcp:call""#,
+                    format!("{}/{uri}", exchange.running.server()),
+                    "mcp-uri",
+                    &reason,
+                ));
+            emit_request_error(
+                exchange.frames,
+                exchange.program,
+                request.get("id"),
+                -32602,
+                &reason,
+                None,
+            )
+            .await?;
+            return Ok(ProgramAction::Continue);
+        }
+        Err(error) => return Err(error),
+    };
     if method == "tools/call" {
         let tool = target
             .as_ref()
@@ -2099,6 +2129,63 @@ done"#
             reaped
                 .await
                 .expect("the failed exchange reports only after child reap");
+        }));
+    }
+
+    #[test]
+    fn a_resource_read_whose_uri_is_not_rfc_3986_is_refused_and_the_exchange_remains_usable() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let registry = registry();
+            let (program, mut output, recorder) = test_exchange_with_recorder(
+                responsive_server_script(None),
+                Arc::clone(&registry),
+                Arc::new(policy("")),
+            )
+            .await;
+            initialize_exchange(&program, &mut output).await;
+
+            program
+                .input(
+                    br#"{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///a%zz"}}
+"#
+                    .to_vec(),
+                )
+                .await
+                .expect("send the resource read");
+            let (refusal, release) = next_exchange_output(&mut output).await;
+            assert_eq!(refusal["id"], 2);
+            assert_eq!(refusal["error"]["code"], -32602);
+            assert!(release.is_none());
+            let denied = recorder.recorded();
+            let (action, resource, rule, verdict, _) = denied
+                .last()
+                .expect("the refusal is recorded")
+                .parts();
+            assert_eq!(action, r#"Box::Action::"mcp:call""#);
+            assert_eq!(resource, "issues-mcp/file:///a%zz");
+            assert_eq!(
+                rule,
+                &crate::run::telemetry::EffectiveRule::Enforcement("mcp-uri")
+            );
+            assert_eq!(verdict, crate::run::telemetry::EffectiveVerdict::Deny);
+
+            program
+                .input(
+                    br#"{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}
+"#
+                    .to_vec(),
+                )
+                .await
+                .expect("send ping after refusal");
+            let (ping, release) = next_exchange_output(&mut output).await;
+            assert_eq!(ping["id"], 3);
+            assert!(ping.get("result").is_some());
+            assert!(release.is_none());
         }));
     }
 

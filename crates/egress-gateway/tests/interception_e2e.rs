@@ -120,9 +120,14 @@ fn env_locator(secret: &str) -> Locator {
 
 /// Build a store with one opaque header route for `host:port`; returns the store + the minted phantom.
 fn opaque_store(host: &str, port: u16, secret: &'static str) -> (Arc<Vault>, String) {
+    opaque_store_for(pat(host, port), secret)
+}
+
+/// Build a store with one opaque header route for `pattern`; returns the store + the minted phantom.
+fn opaque_store_for(pattern: DestinationPattern, secret: &'static str) -> (Arc<Vault>, String) {
     let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
         RouteSpec::opaque(
-            pat(host, port),
+            pattern,
             env_locator(secret),
             InjectMode::header("Bearer {}".to_string(), None).expect("a valid header placement"),
         ),
@@ -902,4 +907,159 @@ print(connection.getresponse().status)
         python.display(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+// ============================================================================================
+// NEGATIVE: a stray `%` cannot assemble an escape the gateway never judged
+// ============================================================================================
+
+/// A path-scoped credential reaches the origin only on a path the origin resolves inside the scope.
+#[test]
+fn a_path_scoped_secret_is_not_attached_to_a_path_the_origin_resolves_outside_the_scope() {
+    let host = "api.scope.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let pattern = DestinationPattern::parse(&format!("{host}:{port}/v1/")).unwrap();
+    let (store, phantom) = opaque_store_for(pattern, "sk_live_REALSECRET");
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            DestinationPattern::parse(&format!("{host}:{port}/v1/")).unwrap(),
+            store,
+        ))
+        .build();
+    let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
+    let bearer = format!("Bearer {phantom}");
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request("GET", "/v1/ok", &[("Authorization", &bearer)], b"");
+    assert_eq!(client.read_status(), 200);
+    assert_eq!(
+        upstream.last_request().header("authorization").as_deref(),
+        Some("Bearer sk_live_REALSECRET"),
+        "control: the binding attaches inside its scope"
+    );
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request(
+        "GET",
+        "/v1/%%32%65%%32%65/admin/export",
+        &[("Authorization", &bearer)],
+        b"",
+    );
+    let response = client.read_response();
+    assert!(
+        response.starts_with("HTTP/1.1 403"),
+        "a path that is not RFC 3986 is refused: {response:?}"
+    );
+    assert_eq!(
+        upstream.request_count(),
+        1,
+        "the refused request was not forwarded"
+    );
+}
+
+/// A plaintext origin that records each request it reads and answers `200`.
+struct PlainOrigin {
+    port: u16,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl PlainOrigin {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                if head.is_empty() {
+                    continue;
+                }
+                record.lock().unwrap().push(head);
+                let _ = reader.get_mut().write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        Self { port, seen }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// A plain-HTTP exchange through the proxy; returns the whole reply.
+fn plain_exchange(proxy: u16, request: &str) -> String {
+    use std::io::{Read, Write};
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    tcp.write_all(request.as_bytes()).unwrap();
+    let mut reply = Vec::new();
+    let _ = tcp.read_to_end(&mut reply);
+    String::from_utf8_lossy(&reply).into_owned()
+}
+
+/// A secret bound to a path never rides a plaintext request, whatever spelling names that path.
+#[test]
+fn a_path_scoped_secret_never_rides_plain_http() {
+    let host = "api.plain.test";
+    let origin = PlainOrigin::start();
+    let port = origin.port;
+    let (store, phantom) = opaque_store_for(
+        DestinationPattern::parse(&format!("{host}:{port}/v1/chat")).unwrap(),
+        "sk_live_REALSECRET",
+    );
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            DestinationPattern::parse(&format!("{host}:{port}/v1/chat")).unwrap(),
+            store,
+        ))
+        .build();
+    let config = MitmConfig {
+        dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
+        ..MitmConfig::default()
+    };
+    let handle = MitmInterceptor::start(config, controls, FixedPolicy::allowing(&[host])).unwrap();
+
+    for path in ["/v1/chat", "/%76%31/chat", "/%%3761/chat"] {
+        let reply = plain_exchange(
+            proxy_port(&handle),
+            &format!(
+                "GET http://{host}:{port}{path} HTTP/1.1\r\nHost: {host}:{port}\r\n\
+                 Authorization: Bearer {phantom}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        let leaked = origin
+            .requests()
+            .iter()
+            .any(|request| request.contains("sk_live_REALSECRET"));
+        assert!(
+            !leaked,
+            "{path}: the real secret reached a plaintext origin; reply {reply:?}"
+        );
+        assert!(
+            reply.starts_with("HTTP/1.1 403"),
+            "{path} is refused: {reply:?}"
+        );
+    }
+    assert_eq!(
+        origin.requests(),
+        Vec::<String>::new(),
+        "no request reached the origin"
+    );
+    let audit = format!("{:?}", handle.drain_audit_events());
+    assert!(audit.contains("a secret must ride TLS"), "{audit}");
+    assert!(audit.contains("not RFC 3986"), "{audit}");
 }

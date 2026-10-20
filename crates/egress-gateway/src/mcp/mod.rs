@@ -12,8 +12,10 @@ use std::io;
 
 use serde_json::Value;
 
+#[cfg(all(test, feature = "tls-intercept"))]
+pub(crate) use uri::generated_spellings;
 #[cfg(feature = "tls-intercept")]
-pub(crate) use uri::{decode_unreserved, remove_dot_segments};
+pub(crate) use uri::normalize_path;
 
 /// The methods a stdio server receives undecided, because its connection cannot start without them.
 const STDIO_UNDECIDED_METHODS: [&str; 4] = [
@@ -118,9 +120,9 @@ impl McpTarget {
         let identity = match method {
             "tools/call" => McpTargetIdentity::Tool(named("name")?),
             "prompts/get" => McpTargetIdentity::Prompt(named("name")?),
-            "resources/read" => {
-                McpTargetIdentity::Resource(uri::canonicalize_resource_uri(&named("uri")?))
-            }
+            "resources/read" => McpTargetIdentity::Resource(
+                uri::canonicalize_resource_uri(&named("uri")?).map_err(refuse)?,
+            ),
             other => McpTargetIdentity::Method(other.to_string()),
         };
         Ok(Some(Self {
