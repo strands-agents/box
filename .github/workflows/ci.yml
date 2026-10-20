@@ -75,7 +75,7 @@ jobs:
     permissions:
       contents: read
     with:
-      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      ref: ${{ github.sha }}
 
   containment:
     name: Containment
@@ -87,7 +87,7 @@ jobs:
     permissions:
       contents: read
     with:
-      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      ref: ${{ github.sha }}
 
   verdict:
     name: Verdict
@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: read
     with:
-      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      ref: ${{ github.sha }}
 
   native:
     name: Native Filesystem
