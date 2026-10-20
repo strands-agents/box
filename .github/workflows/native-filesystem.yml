@@ -2,10 +2,6 @@ name: Native Filesystem
 
 on:
   workflow_call:
-    inputs:
-      ref:
-        required: true
-        type: string
 
 jobs:
   compile-and-test:
@@ -19,7 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -43,4 +38,13 @@ jobs:
       - name: Test signed receipt checker
         run: |
           python3 -m unittest discover -s test-native-filesystem -p '*_test.py'
-          echo "Native enforcement: not run. Signed receipt freshness is not required." >> "$GITHUB_STEP_SUMMARY"
+      - name: Check signed receipt freshness (informational)
+        id: signed-receipt
+        continue-on-error: true
+        run: python3 test-native-filesystem/receipt.py
+      - name: Summarize native validation
+        env:
+          RECEIPT_OUTCOME: ${{ steps.signed-receipt.outcome }}
+        run: |
+          echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"

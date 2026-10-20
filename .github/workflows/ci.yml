@@ -107,8 +107,6 @@ jobs:
     uses: ./.github/workflows/native-filesystem.yml
     permissions:
       contents: read
-    with:
-      ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
   ci-gate:
     name: CI Gate
