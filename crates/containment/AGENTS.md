@@ -136,6 +136,10 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `a_grant_through_a_linked_ancestor_renders_the_node_the_kernel_checks` is the pin. Box does not
     hit it, because `executable.rs`'s `canonical_route` normalizes the head first — but
     `ContainmentConfig::allow` is public and nothing in this crate required that.
+  - **The Linux view consumes the set too.** Each node that is a host link with a canonical parent
+    becomes a `MountKind::Symlink` with the host's text, unless a directory bind brings it in, and
+    that spelling gets no bind of its own. `view.rs::a_two_link_chain_plans_each_unenclosed_hop_as_a_link`
+    is the pin.
   - **The set is a stored field, resolved once when the grant is built.** That is what makes the
     floor and the renderer read one answer. `traversal_paths` was briefly a live walk, and it then
     ran three times per grant inside one `render_profile` — once for `require_bounded_grant` and
