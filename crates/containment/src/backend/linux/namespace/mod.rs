@@ -1226,8 +1226,8 @@ mod tests {
         let size = libc::winsize {
             ws_row: 37,
             ws_col: 101,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            ws_xpixel: 808,
+            ws_ypixel: 592,
         };
         // SAFETY: all output pointers are valid. This creates a private terminal
         // pair without making it the caller's controlling terminal.
@@ -1260,7 +1260,13 @@ mod tests {
             }
             // SAFETY: the successful ioctl initialized the output.
             let observed = unsafe { observed.assume_init() };
-            if observed.ws_row != size.ws_row || observed.ws_col != size.ws_col {
+            if (
+                observed.ws_row,
+                observed.ws_col,
+                observed.ws_xpixel,
+                observed.ws_ypixel,
+            ) != (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
+            {
                 return 11;
             }
             let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
