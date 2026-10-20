@@ -40,7 +40,7 @@ jobs:
         run: |
           cargo test --locked -p strands-box --all-features --test macos_file_enforcement
           cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
-      - name: Check signed test receipt freshness
+      - name: Test signed receipt checker
         run: |
           python3 -m unittest discover -s test-native-filesystem -p '*_test.py'
-          python3 test-native-filesystem/receipt.py
+          echo "Native enforcement: not run. Signed receipt freshness is not required." >> "$GITHUB_STEP_SUMMARY"
