@@ -660,11 +660,32 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
-  frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
-  the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
-  deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
-  as `the call exceeded its deadline`. Two things worth not repeating:
+- **The alias forwards its stdin, and ends it with `StdinEof` while the connection stands.** For a
+  Shell Call, `forward` sends `Open` and `Call`, then the alias's stdin as `Input` frames, then
+  **`StdinEof`**. A harness hook reads its payload on stdin, so a hook rewritten to `zsh -c` needs
+  that input. The `Input` writes carry no timeout, because a cancelled write leaves part of a frame
+  on the socket and no `StdinEof` can follow it. A Python Call still gets `Open`, `Call`,
+  `StdinEof`. The broker refuses `Input` and `StdinEof` for Python, and the trailing EOF is harmless
+  only because a Python Call runs inline and writes `Exit` first. The EOF is not optional. Without it the Program's stdin channel stays open, and any command that
+  pre-reads stdin blocks to its deadline — the `lua` builtin does exactly that, so **every** `lua`
+  call took 34–36s and came back as `the call exceeded its deadline`. That is also why
+  `STDIN_GRACE` exists: a harness can hold the alias's stdin open and write nothing, so a stdin
+  that yields no byte and no EOF within 200 ms is treated as empty. The cost is that a writer
+  silent for longer before its first byte loses its input.
+  `box_shell.rs::a_silent_open_stdin_does_not_hold_a_command_that_pre_reads_it` pins the grace,
+  and `box_cardinality.rs::e5a_stdin_reaches_a_shell_command` pins the forwarding.
+
+  **The broker holds at most `MAX_BUFFERED_INPUT_BYTES` (1 MiB) of unread stdin per Program,
+  counted in bytes.** There is no flow-control frame, so the alias sends as fast as it reads, and
+  `feed_stdin` refuses past the budget with `Denied { FlowControl }`, which the alias treats as
+  terminal. Each queued chunk is a `Bytes::from_owner(BufferedInput)` whose `Drop` releases its
+  bytes when the reader takes it. The vendored `FdReader` copies a partly read chunk into its own
+  remainder, so the real hold is the budget plus one chunk. A count of chunks would not bound
+  memory, because a raw client sends `Input` frames up to `MAX_FRAME_BYTES`; the 256-slot channel
+  binds first only for chunks under 4 KiB, which a slow writer of short lines can produce.
+  `host.rs::unread_stdin_is_held_up_to_the_byte_budget` pins the budget, and
+  `box_shell.rs::read_stdin_releases_its_bytes_from_the_broker_budget` pins the release.
+  Two things worth not repeating:
   - **`close_stdin` must drop the sender, not send an empty frame.** The vendored `ChannelReader`
     reaches end-of-stream only on `Poll::Ready(None)` — every sender gone. A zero-length recv is a
     successful 0-byte read, so `read_to_string_limited` loops on it forever. `ProgramControl` holds

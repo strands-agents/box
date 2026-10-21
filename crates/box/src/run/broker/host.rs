@@ -3782,6 +3782,71 @@ done"#;
         }));
     }
 
+    /// A Program that reads no stdin holds up to its byte budget, and the next chunk is refused.
+    #[test]
+    fn unread_stdin_is_held_up_to_the_byte_budget() {
+        use crate::run::broker::program::MAX_BUFFERED_INPUT_BYTES;
+        use crate::run::broker::protocol::MAX_CHUNK_BYTES;
+
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(short_connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "sleep 60".to_string(),
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let chunk = encode_payload(&vec![b'x'; MAX_CHUNK_BYTES]);
+            let within = MAX_BUFFERED_INPUT_BYTES / MAX_CHUNK_BYTES;
+            for _ in 0..within {
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: chunk.clone(),
+                    },
+                )
+                .await;
+            }
+            let early = tokio::time::timeout(
+                Duration::from_millis(500),
+                read_frame::<Frame, _>(&mut reader),
+            )
+            .await;
+            assert!(
+                early.is_err(),
+                "{within} chunks fit the budget, so nothing may be refused: {early:?}"
+            );
+
+            put(&mut writer, 1, Body::Input { data: chunk }).await;
+            let frame = read_frame::<Frame, _>(&mut reader)
+                .await
+                .expect("read")
+                .expect("a frame");
+            match frame.body {
+                Body::Denied { kind, .. } => assert_eq!(kind, DeniedKind::FlowControl),
+                other => panic!("expected a flow-control refusal, got {other:?}"),
+            }
+        }));
+    }
+
     /// Closing a Program mid-Call is final: a later `Open` at the same id is not clobbered.
     #[test]
     fn closing_a_running_program_does_not_resurrect_it() {

@@ -3136,3 +3136,42 @@ fn a_loaded_authority_source_is_immutable_and_unreadable() {
         "the config bytes were changed: {output:?}"
     );
 }
+
+/// A stdin pipe that stays open and silent does not hold a command that pre-reads stdin.
+///
+/// The left side holds the pipe open for eight seconds with bash builtins alone, because the
+/// workload's `PATH` has no `sleep`.
+#[test]
+fn a_silent_open_stdin_does_not_hold_a_command_that_pre_reads_it() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_under(PERMISSIVE_POLICY, "shell-stdin-silent");
+
+    let output = box_.bash(
+        r#"( end=$((SECONDS + 8)); while [ "$SECONDS" -lt "$end" ]; do :; done ) | { start=$SECONDS; zsh -c 'lua -e "print(1+1)"'; printf "|status=%s|took=%s" "$?" "$((SECONDS - start))"; }"#,
+    );
+
+    let text = stdout(&output);
+    let took: u64 = text
+        .rsplit_once("|took=")
+        .and_then(|(_, seconds)| seconds.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no timing in the output: {output:?}"));
+    assert!(text.contains("2\n|status=0"), "{output:?}");
+    assert!(took < 4, "the command waited {took}s for stdin: {output:?}");
+}
+
+/// Stdin past the broker's byte budget reaches a command that reads it.
+#[test]
+fn read_stdin_releases_its_bytes_from_the_broker_budget() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_under(PERMISSIVE_POLICY, "shell-stdin-large");
+
+    let output = box_.bash(r#"printf '%0*d' 2097152 0 | zsh -c 'wc -c'; printf "|status=%s" "$?""#);
+
+    let text = stdout(&output);
+    assert!(text.contains("2097152"), "{output:?}");
+    assert!(text.contains("|status=0"), "{output:?}");
+}

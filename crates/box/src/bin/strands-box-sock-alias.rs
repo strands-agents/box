@@ -37,6 +37,10 @@ const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bound on waiting for the daemon's Shell to answer.
 const SERVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// How long a stdin that yields neither a byte nor end-of-file is waited for before the alias
+/// closes the command's stdin.
+const STDIN_GRACE: Duration = Duration::from_millis(200);
+
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
 struct Mode {
@@ -367,16 +371,18 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
         return stream_mcp(stream, interpreter).await;
     }
 
-    // `InputEof` immediately after the Call, because this alias forwards no input: a harness
-    // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
-    for body in [
+    let reads_stdin = forwards_stdin(&interpreter);
+    let mut bodies = vec![
         Body::Open { mode: interpreter },
         Body::Call {
             source,
             correlation: Box::new(call_correlation()),
         },
-        Body::InputEof,
-    ] {
+    ];
+    if !reads_stdin {
+        bodies.push(Body::InputEof);
+    }
+    for body in bodies {
         tokio::time::timeout(
             SERVE_IO_TIMEOUT,
             write_frame(
@@ -394,14 +400,94 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
 
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
     // while it runs.
+    // Each branch holds its write half, because dropping it shuts the socket's write side, which
+    // the broker reads as a disconnect.
+    if !reads_stdin {
+        let (mut readable, _writable) = stream.into_split();
+        return relay(&mut readable).await;
+    }
+    let (mut readable, mut writable) = stream.into_split();
+    let relaying = relay(&mut readable);
+    let feeding = forward_stdin(&mut writable);
+    tokio::pin!(relaying, feeding);
+    let mut fed = false;
     loop {
-        let frame =
-            tokio::time::timeout(SERVE_RESPONSE_TIMEOUT, read_frame::<Frame, _>(&mut stream))
-                .await
-                .map_err(|_| timed_out("read a transport frame"))??
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed")
-                })?;
+        tokio::select! {
+            result = &mut relaying => return result,
+            () = &mut feeding, if !fed => fed = true,
+        }
+    }
+}
+
+/// Whether a Call on `interpreter` gets this alias's stdin. A Python program reads no input.
+fn forwards_stdin(interpreter: &Interpreter) -> bool {
+    matches!(interpreter, Interpreter::Shell)
+}
+
+/// Send this alias's stdin to the Program as `Input` frames, then `InputEof`.
+///
+/// A terminal sends none, and a stdin that is silent for [`STDIN_GRACE`] is treated as empty.
+async fn forward_stdin(writable: &mut tokio::net::unix::OwnedWriteHalf) {
+    use std::io::{IsTerminal as _, Read as _};
+
+    let (chunks, mut received) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    if !std::io::stdin().is_terminal() {
+        // A detached thread, so a stdin that never closes cannot hold the process open at exit.
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if chunks.blocking_send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        drop(chunks);
+    }
+    let mut next = tokio::time::timeout(STDIN_GRACE, received.recv())
+        .await
+        .unwrap_or(None);
+    while let Some(chunk) = next {
+        let frame = Frame {
+            version: PROTOCOL_VERSION,
+            program: ALIAS_PROGRAM,
+            body: Body::Input {
+                data: encode_payload(&chunk),
+            },
+        };
+        // No timeout here: a cancelled write would leave part of a frame on the socket.
+        if write_frame(&mut *writable, &frame).await.is_err() {
+            return;
+        }
+        next = received.recv().await;
+    }
+    let _ = write_frame(
+        &mut *writable,
+        &Frame {
+            version: PROTOCOL_VERSION,
+            program: ALIAS_PROGRAM,
+            body: Body::InputEof,
+        },
+    )
+    .await;
+}
+
+/// Relay the Program's output to this process until it exits.
+async fn relay(readable: &mut tokio::net::unix::OwnedReadHalf) -> io::Result<i32> {
+    loop {
+        let frame = tokio::time::timeout(
+            SERVE_RESPONSE_TIMEOUT,
+            read_frame::<Frame, _>(&mut *readable),
+        )
+        .await
+        .map_err(|_| timed_out("read a transport frame"))??
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
         match frame.body {
             Body::Output {
                 stream: which,
@@ -495,6 +581,14 @@ mod tests {
                 "the alias must read the standard header {header}"
             );
         }
+    }
+
+    /// A Shell Call gets the alias's stdin, and a Python Call does not, because the broker refuses
+    /// `Input` for a Python program.
+    #[test]
+    fn only_a_shell_call_forwards_stdin() {
+        assert!(forwards_stdin(&Interpreter::Shell));
+        assert!(!forwards_stdin(&Interpreter::Python));
     }
 
     /// The alias derives its socket from its own path, under both login and
