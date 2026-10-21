@@ -157,7 +157,6 @@ where
     // spelling, forward another" gap where `/%61dmin` or `/x/../admin` dodges a path `forbid` yet the
     // origin routes to `/admin`. The query is left untouched — a `UrlPath` credential can live there,
     // and it is deliberately kept out of the judged path.
-    let method = req.method.clone().unwrap_or_else(|| "GET".to_string());
     req.target.path = match canonicalize_request_path(&req.target.path) {
         Ok(path) => path,
         Err(reason) => {
@@ -166,7 +165,7 @@ where
                 connect,
                 client_writer,
                 RefusedRequest {
-                    method: &method,
+                    method: req.method.as_deref(),
                     path: &req.target.path,
                     reason: &reason,
                     diagnostic: b"request path is not a valid address",
@@ -184,7 +183,7 @@ where
             connect,
             client_writer,
             RefusedRequest {
-                method: &method,
+                method: req.method.as_deref(),
                 path: &req.target.path,
                 reason: "credential would attach on a plaintext request; refused — a secret must ride TLS",
                 diagnostic: b"credential not permitted on a plaintext request",
@@ -847,7 +846,7 @@ fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> 
 
 /// A request the gateway refuses before any request leg runs.
 struct RefusedRequest<'a> {
-    method: &'a str,
+    method: Option<&'a str>,
     path: &'a str,
     reason: &'a str,
     diagnostic: &'a [u8],
@@ -872,14 +871,19 @@ fn refuse_request(
         DecisionSubject {
             host: &connect.host,
             port: connect.port,
-            method: refused.method,
+            method: refused.method.unwrap_or_default(),
             path: refused.path,
         },
         AuditDecision::Deny,
         refused.reason,
         correlation,
     );
-    write_trusted_diagnostic(client_writer, refused.method, 403, refused.diagnostic);
+    write_trusted_diagnostic(
+        client_writer,
+        refused.method.unwrap_or("GET"),
+        403,
+        refused.diagnostic,
+    );
 }
 
 /// The `params.cursor` a `tools/list` request names.
