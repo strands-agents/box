@@ -94,3 +94,77 @@ fn cancelling_a_pipeline_drops_every_host_spawn_future() {
 fn the_command_deadline_stops_every_host_pipeline_stage() {
     cleanup(true, 2);
 }
+
+fn background_cleanup(wait_for_jobs: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = Directory(std::env::temp_dir().join(format!(
+        "shell-background-cleanup-{}-{wait_for_jobs}",
+        std::process::id()
+    )));
+    std::fs::create_dir(&directory.0).unwrap();
+    let program = directory.0.join("cleanup-probe");
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let observed = Arc::clone(&stopped);
+    let hook: strands_shell::os::HostSpawner = Arc::new(move |_| {
+        let stopped = Arc::clone(&observed);
+        let started = started.clone();
+        Box::pin(async move {
+            let _pending = Pending(stopped);
+            started.send(()).unwrap();
+            std::future::pending().await
+        })
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async {
+        let mut shell = Some(strands_shell::Shell::builder().host_spawner(hook)
+            .timeout(Duration::from_secs(25)).build().unwrap());
+        let jobs = if wait_for_jobs { 2 } else { 1 };
+        if wait_for_jobs {
+            let command = format!("{0} & {0} & wait", program.display());
+            let mut call = Box::pin(shell.as_mut().unwrap().run(&command));
+            for _ in 0..jobs {
+                tokio::select! {
+                    output = &mut call => panic!("wait returned before cancellation: {} {}", output.status, output.stderr),
+                    result = starts.recv() => assert!(result.is_some()),
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("background command did not start"),
+                }
+            }
+            drop(call);
+        } else {
+            let output = shell.as_mut().unwrap().run(&format!("{} &", program.display())).await;
+            assert_eq!(output.status, 0, "{}", output.stderr);
+            tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
+            let next = shell.as_mut().unwrap().run("printf ready").await;
+            assert_eq!(next.stdout, "ready");
+            assert_eq!(stopped.load(Ordering::SeqCst), 0, "an open shell still owns its background job");
+            drop(shell.take());
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stopped.load(Ordering::SeqCst) != jobs {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("background host commands must stop while the runtime stays alive");
+        if let Some(shell) = shell.as_mut() {
+            let next = shell.run("printf ready").await;
+            assert_eq!(next.status, 0);
+            assert_eq!(next.stdout, "ready");
+        }
+    });
+}
+
+#[test]
+fn dropping_a_shell_stops_its_background_host_command() {
+    background_cleanup(false);
+}
+
+#[test]
+fn cancelling_wait_stops_every_background_host_command() {
+    background_cleanup(true);
+}

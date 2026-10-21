@@ -23,6 +23,8 @@ Pipeline tasks now stop when the caller drops the pending pipeline.
 The pipeline also applies its existing command deadline while it waits for host commands.
 Previously, those tasks could outlive cancellation or wait indefinitely for a host command.
 The actual Box process cleanup tests cover configured tools and their descendants.
+Background jobs stop when their owning process is dropped or a pending `wait` is cancelled.
+An open shell retains background jobs across completed foreground calls.
 
 ### Local addition: an effect says which words the script stated (2026-09-25)
 

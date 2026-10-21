@@ -15,17 +15,6 @@ use crate::mediate::{CommandPermit, Mediated};
 use crate::os::{self, FdReader, OpenFlags, Process, STDERR, STDIN, STDOUT};
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
-/// End pipeline tasks when the caller drops the pending pipeline.
-struct PipelineTasks(Vec<tokio::task::AbortHandle>);
-
-impl Drop for PipelineTasks {
-    fn drop(&mut self) {
-        for task in &self.0 {
-            task.abort();
-        }
-    }
-}
-
 /// Signals for break/continue/exit control flow.
 #[derive(Debug)]
 enum ControlFlow {
@@ -2447,7 +2436,7 @@ async fn execute_command_line_inner(
                     let stderr = std::mem::take(&mut sub.captured_stderr);
                     (code, stdout, stderr)
                 });
-                proc.bg_jobs.push(handle);
+                proc.add_background_job(handle);
                 last_exit = 0;
                 proc.last_exit = 0;
                 continue;
@@ -3890,7 +3879,7 @@ async fn run_pipeline(
         }
     }
 
-    let mut tasks = PipelineTasks(
+    let mut tasks = os::Tasks(
         handles
             .iter()
             .map(|(_, task)| task.abort_handle())

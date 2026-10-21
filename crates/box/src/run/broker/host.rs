@@ -931,6 +931,7 @@ async fn serve_transport(
                     }
                     // The control handle stays reachable, so `Input`, `InputEof`, and `Signal` still
                     // find this Program while its Call runs. Moving the slot into the task is what
+                    slot.program.prepare_call();
                     let sequence = calls_accepted;
                     calls_accepted += 1;
                     running.insert(
@@ -1263,6 +1264,9 @@ async fn run_call(
 ) -> io::Result<i32> {
     let deadline = tokio::time::Instant::now() + request_timeout;
     let control = slot.control.clone();
+    if control.is_cancelled() {
+        return Ok(BOUNDARY_FAILURE_STATUS);
+    }
 
     // Split the borrows: the Call takes `&mut program`, the chunker takes `&mut output`. Separate
     // fields, so both are live at once — which is why `Program` and `ProgramOutput` are different
@@ -4149,6 +4153,53 @@ done"#;
             let (text, status) = collect(&mut reader, 0).await;
             assert_eq!(status, 0);
             assert!(text.contains("still_here"), "got {text:?}");
+        }));
+    }
+
+    #[test]
+    fn disconnect_before_first_call_poll_cancels_the_queued_call() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let spec = connection_spec(marker.path());
+            let (mut client, server) = UnixStream::pair().expect("transport pair");
+            write_frame(
+                &mut client,
+                &Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 1,
+                    body: Body::Call {
+                        correlation: Default::default(),
+                        source: "printf started > queued-started; sleep 25".to_string(),
+                    },
+                },
+            )
+            .await
+            .expect("buffer the Call before the server runs");
+            tokio::io::AsyncWriteExt::shutdown(&mut client)
+                .await
+                .expect("buffer EOF after the Call");
+            let first = serde_json::to_value(Frame {
+                version: PROTOCOL_VERSION,
+                program: 1,
+                body: Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            })
+            .expect("Open frame");
+            let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                serve_transport(server, spec, first, None, shutdown),
+            )
+            .await
+            .expect("disconnect must cancel a Call before its first poll")
+            .expect("connection cleanup succeeds");
+            assert!(
+                !marker.path().join("queued-started").exists(),
+                "a cancelled queued call must not start"
+            );
+            drop(client);
         }));
     }
 

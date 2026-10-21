@@ -18,6 +18,17 @@ use tokio::sync::mpsc;
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
+#[derive(Default)]
+pub(crate) struct Tasks(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Metadata about a directory entry.
 pub struct DirEntry {
     pub name: String,
@@ -212,6 +223,7 @@ pub struct Process {
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
     pub bg_jobs: Vec<tokio::task::JoinHandle<(i32, String, String)>>,
+    background_tasks: Tasks,
     /// Stack of local variable scopes (for shell functions).
     /// Each entry maps variable names to their previous value (None = was unset).
     local_scopes: Vec<HashMap<String, Option<String>>>,
@@ -298,6 +310,15 @@ impl Default for ProcessLimits {
 }
 
 impl Process {
+    pub(crate) fn add_background_job(
+        &mut self,
+        job: tokio::task::JoinHandle<(i32, String, String)>,
+    ) {
+        self.background_tasks.0.retain(|task| !task.is_finished());
+        self.background_tasks.0.push(job.abort_handle());
+        self.bg_jobs.push(job);
+    }
+
     /// Extract the configured resource limits from this process.
     pub fn limits(&self) -> ProcessLimits {
         ProcessLimits {
@@ -356,6 +377,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,
@@ -398,6 +420,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,
@@ -450,6 +473,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,

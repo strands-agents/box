@@ -16,6 +16,7 @@ pub fn builtin_wait<'a>(
     Box::pin(async move {
         let mut last = 0;
         let jobs = std::mem::take(&mut proc.bg_jobs);
+        let _tasks = crate::os::Tasks(jobs.iter().map(|job| job.abort_handle()).collect());
         for handle in jobs {
             let (code, stdout, stderr) = handle.await.unwrap_or((1, String::new(), String::new()));
             last = code;
