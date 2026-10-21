@@ -45,7 +45,7 @@
     "crates/box/src/run/broker/python/effects.rs": "f7b4d229a3cff42af4ab1e3ee176fdba3233a06de748b8d7be1646bd020403af",
     "crates/box/src/run/broker/python/fetch.rs": "8b7b78a5d6b237a526f9304681fc552693e0a703796cbb361a212a8e9cb6e0fa",
     "crates/box/src/run/broker/python/mod.rs": "e3ff830eebd4af984ce613746f2f0d8fd317d50c85395cb69850f22ed9a47ff0",
-    "crates/box/src/run/broker/reach.rs": "ba2166e10b7b37459b236b52b1515cf886a02c8d4dcf3bc87ebd81fbf5bc55be",
+    "crates/box/src/run/broker/reach.rs": "651b1e6e97b45b881d6e06743b6bfb45fe9385ccb3ab148a100b60f5c4a195f1",
     "crates/box/src/run/broker/shell.rs": "f4a1ffd04bcd4a6a374d855156c28abc98917bed354913dc4903e5b69d8f7f15",
     "crates/box/src/run/configure.rs": "57de4209229fb0b2cb10979515d7fa8374656892d0d71ceb1c683855bf33ca6e",
     "crates/box/src/run/contain/boundary.rs": "cc960bea7f783f6be54ca3752d8625fa75bb6563f05bb593a2d5ee9bde63372b",
@@ -315,6 +315,6 @@
   ],
   "signature_verified": true,
   "macos": "27.0.1",
-  "binary_sha256": "8b6f0e18895acbec4afd305785455cc1b29e72f9e52841a0fb3c954a6972f1d9",
-  "test_log_sha256": "15a95b8b8dc76f680d01691fdeff9ea7fc31cb5e6a830e21da659faa29d73fc3"
+  "binary_sha256": "5a729724f21da8e48bca8e08b9cf75ccc43cdb3b4cf4417fe2ab9f42b8d17ad9",
+  "test_log_sha256": "40f163a21d7938980e600c38043b9d49606891af004968aa258926ab5e77500b"
 }
