@@ -52,8 +52,11 @@ fn launch(root: &Path, config: &ContainmentConfig, args: &[&str]) -> Output {
 }
 
 fn supported() -> bool {
-    if cfg!(all(target_os = "linux", not(target_arch = "aarch64"))) {
-        eprintln!("skipping: Linux containment requires ARM64");
+    if cfg!(all(
+        target_os = "linux",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    )) {
+        eprintln!("skipping: Linux containment requires ARM64 or x86_64");
         return false;
     }
     #[cfg(target_os = "linux")]
