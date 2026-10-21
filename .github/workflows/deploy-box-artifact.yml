@@ -3,7 +3,7 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS tarball and its SHA256SUMS.txt to a GitHub Release.
+# the macOS and ARM64 Linux tarballs and SHA256SUMS.txt to a GitHub Release.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -11,9 +11,8 @@ name: Release Box
 #   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
 #
 # Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
-# aarch64. Only the macOS tarball is released. The Linux tarballs build so the
-# Linux backend can be brought up, and stay run artifacts that are never
-# published. musl and native distro packages (deb/rpm) are not built here.
+# aarch64. The x86_64 Linux tarball stays a run artifact. ARM64 Linux builds
+# against Amazon Linux 2023. musl and native distro packages are not built here.
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
 # release): scan -> test-lint / build -> inspect -> approve ->
@@ -195,12 +194,11 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # Ubuntu 22.04 for a lower baseline glibc. The Linux targets build
-          # for bring-up and are not released; inspect publishes macOS only.
+          # x86_64 Linux remains a build artifact until its separate qualification.
           - triple: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
           - triple: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
             runner: macos-latest
     steps:
@@ -210,13 +208,15 @@ jobs:
           ref: ${{ needs.scan.outputs.release_sha }}
           persist-credentials: false
 
-      - name: Install aarch64 cross linker (linux)
+      - name: Prepare the Amazon Linux 2023 builder
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          set -euo pipefail
+          rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$rust_version"
+          docker build --file scripts/linux-release.Dockerfile \
+            --build-arg "RUST_VERSION=$rust_version" \
+            --tag box-linux-release .
 
       - name: Add rust target
         run: rustup target add ${{ matrix.target.triple }}
@@ -240,11 +240,25 @@ jobs:
         # box, sock-alias, and contain-trampoline must ship together; the box
         # resolves the trampoline from beside its own executable and refuses
         # to start without it.
+        if: matrix.target.triple != 'aarch64-unknown-linux-gnu'
         run: |
           cargo build --release --locked \
             --target ${{ matrix.target.triple }} \
             -p strands-box \
             -p strands-box-containment
+
+      - name: Build ARM64 Linux against glibc 2.34
+        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            --mount "type=bind,source=$PWD/target,target=/target" \
+            --env CARGO_TARGET_DIR=/target \
+            box-linux-release \
+            cargo build --release --locked --target aarch64-unknown-linux-gnu \
+              -p strands-box -p strands-box-containment
 
       - name: Package tarball
         # Stage the exact ./box-core layout, then tar its contents. Add a file
@@ -266,8 +280,7 @@ jobs:
 
       - name: Assert the packaged binary reports the stamped version
         # Each leg stamps its own crates, so the released leg checks its own binary.
-        # TODO: when Linux is released, also check x86_64-unknown-linux-gnu.
-        if: matrix.target.triple == 'aarch64-apple-darwin'
+        if: matrix.target.triple != 'x86_64-unknown-linux-gnu'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -278,6 +291,24 @@ jobs:
             echo "::error::box --version ('$out') does not report $VERSION"
             exit 1
           fi
+
+      - name: Check and run the ARM64 Linux package
+        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/check-linux-package.py stage/box-core
+          # The outer test container permits namespace setup. Box still runs as UID 1000.
+          docker run --rm --privileged --user 1000:1000 \
+            --env HOME=/home/box-test \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/smoke-linux-package.py \
+              "dist/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
@@ -303,8 +334,7 @@ jobs:
           path: assets
 
       - name: Collect tarballs and compute SHA256SUMS.txt
-        # Every target lands in built/. Only the macOS tarball is copied into
-        # release/, which is the bundle the release job publishes.
+        # Every target lands in built/. Only qualified architectures enter release/.
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
         run: |
@@ -316,7 +346,12 @@ jobs:
             echo "::error::missing the macOS tarball $darwin"
             exit 1
           fi
-          cp "$darwin" release/
+          linux="built/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          if [ ! -f "$linux" ]; then
+            echo "::error::missing the ARM64 Linux tarball $linux"
+            exit 1
+          fi
+          cp "$darwin" "$linux" release/
           (cd release && sha256sum *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
@@ -354,10 +389,12 @@ jobs:
             echo "::error::expected ${#expected[@]} built tarballs, found $count"
             exit 1
           fi
-          # The release bundle holds the macOS tarball and nothing else.
-          released=$(cd release && ls -- *.tar.gz)
-          if [ "$released" != "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" ]; then
-            echo "::error::release bundle must hold only the macOS tarball (got: $released)"
+          released=$(cd release && printf '%s\n' *.tar.gz | sort)
+          expected_release=$(printf '%s\n' \
+            "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz" | sort)
+          if [ "$released" != "$expected_release" ]; then
+            echo "::error::release bundle has an unexpected asset set: $released"
             exit 1
           fi
 
@@ -441,7 +478,7 @@ jobs:
           cat > body.md <<EOF
           ## Download
 
-          Box Core is an engine, not something you install. Download the binaries into a local directory on macOS (Apple Silicon):
+          Download Box Core into a local directory on macOS (Apple silicon) or Linux ARM64:
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
@@ -457,7 +494,7 @@ jobs:
 
           ## Assets
 
-          \`box-${NEW_TAG}-aarch64-apple-darwin.tar.gz\` unpacks to the \`./box-core\` layout: \`box\` beside its helper binaries. \`SHA256SUMS.txt\` is the aggregate checksum file the downloader verifies against.
+          Both ARM64 tarballs unpack to the \`./box-core\` layout: \`box\` beside its helper binaries. The Linux build requires glibc 2.34 or newer and a host that permits Box's containment setup. \`SHA256SUMS.txt\` contains the checksum for each published archive.
           EOF
 
       - name: Tag the pinned SHA
@@ -523,6 +560,7 @@ jobs:
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
             "SHA256SUMS.txt"
           )
           for i in $(seq 1 30); do
