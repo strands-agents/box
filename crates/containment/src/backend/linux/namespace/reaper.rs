@@ -3,6 +3,42 @@
 /// The exit status a caller should use when the workload was signalled.
 const SIGNAL_EXIT_BASE: i32 = 128;
 
+/// Arm termination with the launcher before acknowledging readiness.
+pub(super) fn arm_parent_death(control: &std::os::unix::net::UnixStream) -> bool {
+    // SAFETY: prctl takes scalar arguments for the parent-death signal.
+    let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == 0 };
+    armed && transfer_byte(control, true) && transfer_byte(control, false)
+}
+
+/// Confirm that the reaper armed termination while this launcher is alive.
+pub(super) fn confirm_parent_death(control: &std::os::unix::net::UnixStream) -> bool {
+    transfer_byte(control, false) && transfer_byte(control, true)
+}
+
+fn transfer_byte(control: &std::os::unix::net::UnixStream, sending: bool) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut byte = 1_u8;
+    loop {
+        // SAFETY: the socket and one-byte buffer remain valid for each syscall.
+        let result = unsafe {
+            if sending {
+                libc::send(
+                    control.as_raw_fd(),
+                    (&byte as *const u8).cast(),
+                    1,
+                    libc::MSG_NOSIGNAL,
+                )
+            } else {
+                libc::read(control.as_raw_fd(), (&mut byte as *mut u8).cast(), 1)
+            }
+        };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return result == 1 && byte == 1;
+    }
+}
+
 /// Run as the namespace's PID 1: forward signals, reap orphans, and return the
 /// workload's exit status.
 pub(crate) fn supervise(workload: libc::pid_t) -> i32 {
@@ -76,6 +112,36 @@ fn install_forwarding_handlers() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_lifetime_channel_refuses_confirmation() {
+        let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
+        drop(child);
+        assert!(!confirm_parent_death(&parent));
+    }
+
+    #[test]
+    fn a_reaper_cannot_start_after_its_lifetime_channel_closes() {
+        let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
+        drop(parent);
+        // SAFETY: the child uses syscalls and exits without returning into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert_ne!(pid, -1, "fork");
+        if pid == 0 {
+            let accepted = arm_parent_death(&child);
+            // SAFETY: exit without running the parent's destructors.
+            unsafe { libc::_exit(i32::from(accepted)) };
+        }
+        let mut status = 0;
+        // SAFETY: wait for this test's child and store its status.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "the closed channel must refuse"
+        );
+    }
 
     /// Runs `supervise` in a real PID namespace and returns its exit status.
     fn in_pid_namespace(body: impl FnOnce() -> i32) -> Option<i32> {

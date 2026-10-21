@@ -366,6 +366,8 @@ fn establish_pid_namespace_and_reaper(
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
 ) -> Result<(), ContainmentError> {
+    let (parent_control, reaper_control) = std::os::unix::net::UnixStream::pair()
+        .map_err(|source| apply_failure(format!("creating reaper lifetime channel: {source}")))?;
     // SAFETY: a single syscall with a constant argument. Affects children only.
     if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
         return Err(apply_failure(format!(
@@ -385,10 +387,24 @@ fn establish_pid_namespace_and_reaper(
     }
 
     if reaper > 0 {
+        drop(reaper_control);
+        if !reaper::confirm_parent_death(&parent_control) {
+            // SAFETY: the identifier names this process's unreaped child.
+            unsafe { libc::kill(reaper, libc::SIGKILL) };
+        }
+        drop(parent_control);
         // The original caller.
         let mut status: libc::c_int = 0;
-        // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(reaper, &mut status, 0) };
+        loop {
+            // SAFETY: waiting on this process's own child.
+            if unsafe { libc::waitpid(reaper, &mut status, 0) } != -1 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                // SAFETY: an unsuccessful wait cannot report the workload's status.
+                unsafe { libc::_exit(125) };
+            }
+        }
         let code = if libc::WIFEXITED(status) {
             libc::WEXITSTATUS(status)
         } else {
@@ -399,6 +415,12 @@ fn establish_pid_namespace_and_reaper(
     }
 
     // Namespace PID 1.
+    drop(parent_control);
+    if !reaper::arm_parent_death(&reaper_control) {
+        // SAFETY: no workload can start without a live launcher.
+        unsafe { libc::_exit(127) };
+    }
+    drop(reaper_control);
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.

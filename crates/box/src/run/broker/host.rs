@@ -1060,6 +1060,10 @@ async fn serve_transport(
     }
     .await;
 
+    for current in running.values() {
+        current.control.signal();
+        current.control.close_stdin();
+    }
     let cleanup = finish_mcp_servers(&mut mcp).await;
     drop(frames);
     let writer = finish_writer(&mut pump).await;
@@ -4145,6 +4149,55 @@ done"#;
             let (text, status) = collect(&mut reader, 0).await;
             assert_eq!(status, 0);
             assert!(text.contains("still_here"), "got {text:?}");
+        }));
+    }
+
+    /// Dropping the connection reaps every Program on it.
+    #[test]
+    fn broker_shutdown_cancels_active_shell_calls_before_joining() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let spec = connection_spec(marker.path());
+            let socket = marker.path().join("shutdown.sock");
+            let listener = UnixListener::bind(&socket).expect("bind broker");
+            let (stop, stopped) = oneshot::channel();
+            let serving = tokio::task::spawn_local(async move {
+                serve(listener, spec, async {
+                    let _ = stopped.await;
+                })
+                .await
+            });
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "printf RUNNING; sleep 25".to_string(),
+                },
+            )
+            .await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                await_output(&mut reader, 1, "RUNNING"),
+            )
+            .await
+            .expect("the call must start");
+            stop.send(()).expect("request shutdown");
+            tokio::time::timeout(Duration::from_secs(2), serving)
+                .await
+                .expect("shutdown must cancel the active call before joining")
+                .expect("serving task joins")
+                .expect("shutdown succeeds");
         }));
     }
 

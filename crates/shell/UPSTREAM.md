@@ -17,6 +17,13 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Pipeline lifetime and host-command deadlines
+
+Pipeline tasks now stop when the caller drops the pending pipeline.
+The pipeline also applies its existing command deadline while it waits for host commands.
+Previously, those tasks could outlive cancellation or wait indefinitely for a host command.
+The actual Box process cleanup tests cover configured tools and their descendants.
+
 ### Local addition: an effect says which words the script stated (2026-09-25)
 
 At the pinned revision `expand_words` returns `Vec<String>` and discards which `Word` each string came

@@ -329,6 +329,11 @@ impl Reach {
         // No exception for a home: `layout::refuse_home_in_box_state` refuses one here first.
         if self.forbidden.iter().any(|root| approved.starts_with(root))
             || has_ancestor_among(approved, &self.forbidden_identities)
+            || (mutates
+                && self
+                    .forbidden
+                    .iter()
+                    .any(|root| lies_within(root, approved)))
         {
             return Err(Refused::new(reported_as, BENEATH_THE_FLOOR));
         }
@@ -901,5 +906,85 @@ mod tests {
             .is_ok(),
             "the floor must refuse only trusted Box state and the sources this run loaded"
         );
+    }
+}
+
+#[cfg(test)]
+mod private_tree_mutation_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Reach, PathBuf) {
+        let temporary = tempfile::tempdir().expect("fixture directory");
+        let home = temporary.path().canonicalize().expect("canonical fixture");
+        let box_root = home.join("grandparent/parent/dummy-box");
+        std::fs::create_dir_all(box_root.join("private/child")).expect("dummy directories");
+        std::fs::create_dir_all(home.join("sibling")).expect("sibling directory");
+        let reach = Reach::over_box(&home, None, None, &box_root, &[]).expect("reachable fixture");
+        (temporary, reach, box_root)
+    }
+
+    fn refused_by_floor(reach: &Reach, named: &Path) {
+        let direct = reach.refuse_forbidden(named, "dummy", true);
+        let resolved = reach.approve_mutation(named, "dummy");
+        assert!(
+            direct.is_err(),
+            "direct mutation validation accepted {named:?}"
+        );
+        assert!(
+            resolved.is_err(),
+            "resolved mutation validation accepted {named:?}"
+        );
+        assert_eq!(
+            direct.unwrap_err().to_string(),
+            format!("dummy: {BENEATH_THE_FLOOR}")
+        );
+        assert_eq!(
+            resolved.unwrap_err().to_string(),
+            format!("dummy: {BENEATH_THE_FLOOR}")
+        );
+    }
+
+    #[test]
+    fn parent_mutation_is_refused() {
+        let (_temporary, reach, box_root) = fixture();
+        refused_by_floor(&reach, box_root.parent().unwrap());
+    }
+
+    #[test]
+    fn grandparent_mutation_is_refused() {
+        let (_temporary, reach, box_root) = fixture();
+        refused_by_floor(&reach, box_root.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn protected_root_mutation_is_refused() {
+        let (_temporary, reach, box_root) = fixture();
+        refused_by_floor(&reach, &box_root);
+    }
+
+    #[test]
+    fn protected_descendant_mutation_is_refused() {
+        let (_temporary, reach, box_root) = fixture();
+        refused_by_floor(&reach, &box_root.join("private/child"));
+    }
+
+    #[test]
+    fn ancestor_non_mutating_access_is_accepted() {
+        let (_temporary, reach, box_root) = fixture();
+        for ancestor in [
+            box_root.parent().unwrap(),
+            box_root.parent().unwrap().parent().unwrap(),
+        ] {
+            assert!(reach.refuse_forbidden(ancestor, "dummy", false).is_ok());
+            assert_eq!(reach.approve(ancestor, "dummy").unwrap(), ancestor);
+        }
+    }
+
+    #[test]
+    fn unaffected_sibling_mutation_is_accepted() {
+        let (temporary, reach, _box_root) = fixture();
+        let sibling = temporary.path().canonicalize().unwrap().join("sibling");
+        assert!(reach.refuse_forbidden(&sibling, "dummy", true).is_ok());
+        assert_eq!(reach.approve_mutation(&sibling, "dummy").unwrap(), sibling);
     }
 }

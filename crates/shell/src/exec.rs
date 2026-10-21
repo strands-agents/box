@@ -15,6 +15,17 @@ use crate::mediate::{CommandPermit, Mediated};
 use crate::os::{self, FdReader, OpenFlags, Process, STDERR, STDIN, STDOUT};
 use crate::parser::{self, Connector, Item, Redirect, Word, WordPart};
 
+/// End pipeline tasks when the caller drops the pending pipeline.
+struct PipelineTasks(Vec<tokio::task::AbortHandle>);
+
+impl Drop for PipelineTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Signals for break/continue/exit control flow.
 #[derive(Debug)]
 enum ControlFlow {
@@ -3879,6 +3890,13 @@ async fn run_pipeline(
         }
     }
 
+    let mut tasks = PipelineTasks(
+        handles
+            .iter()
+            .map(|(_, task)| task.abort_handle())
+            .collect(),
+    );
+
     // Drain last stage stdout
     let max_output = shell_proc.max_output;
     let stdout_drain = if capture {
@@ -3935,6 +3953,12 @@ async fn run_pipeline(
         });
         Some(handle)
     };
+    tasks
+        .0
+        .extend(stdout_drain.iter().map(|task| task.abort_handle()));
+    tasks
+        .0
+        .extend(stderr_drain.iter().map(|task| task.abort_handle()));
 
     // Wait for all command tasks, reporting each stage against its own permit.
     //
@@ -3942,8 +3966,30 @@ async fn run_pipeline(
     // zip against `permits` would misalign every later stage — reporting one command's
     // status against another command's permit.
     let mut last_exit = 0;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut expired = false;
     for (index, handle) in handles {
-        let exit = match handle.await {
+        #[cfg(not(target_arch = "wasm32"))]
+        let joined = {
+            let mut handle = handle;
+            if let Some(deadline) = shell_proc.deadline {
+                match tokio::time::timeout_at(deadline, &mut handle).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        expired = true;
+                        for task in &tasks.0 {
+                            task.abort();
+                        }
+                        handle.await
+                    }
+                }
+            } else {
+                handle.await
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let joined = handle.await;
+        let exit = match joined {
             Ok(exit) => exit,
             // A task that did not join has ended with no status. Leave the permit to
             // submit `Indeterminate` from its `Drop`: a rule counting attempts must still
@@ -3952,6 +3998,11 @@ async fn run_pipeline(
         };
         let permit = permits.get_mut(index).and_then(Option::take);
         last_exit = report_stage(permit, shell_proc, exit).await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if expired {
+        shell_proc.err_msg("strands-shell: execution timeout exceeded");
+        last_exit = 1;
     }
 
     let stdout_str = if let Some(h) = stdout_drain {

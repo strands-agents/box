@@ -194,14 +194,14 @@ impl ProcessGroup {
 
     /// Wait for the leader and collect its piped stdout and stderr.
     async fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
-        Self::output_of(&mut self.child).await
-    }
-
-    async fn output_of(child: &mut tokio::process::Child) -> std::io::Result<std::process::Output> {
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (status, stdout, stderr) =
-            tokio::try_join!(child.wait(), drain(stdout), drain(stderr))?;
+        let stdout = self.child.stdout.take();
+        let stderr = self.child.stderr.take();
+        let stopped = async {
+            let status = self.child.wait().await?;
+            self.release().await.map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(status)
+        };
+        let (status, stdout, stderr) = tokio::try_join!(stopped, drain(stdout), drain(stderr))?;
         Ok(std::process::Output {
             status,
             stdout,
@@ -328,6 +328,23 @@ impl Drop for ProcessGroup {
 #[cfg(unix)]
 pub(crate) fn isolate(command: &mut Command) {
     command.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getpid reads this process's identifier.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: the callback uses only process-control syscalls before exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -1177,5 +1194,59 @@ mod tests {
             processes_exit(&pids).await,
             "leader and descendant must be gone: {pids:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn captured_exit_stops_descendants_that_hold_the_output_open() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let path = directory.path().join("pids");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#"trap '' TERM; sleep 3600 & printf '%s %s' "$$" "$!" > "$1"; printf 'done'; exit 7"#,
+                "group",
+            ])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut group = ProcessGroup::spawn(command).await.expect("spawn");
+        let pids = wait_for_pids(&path, 2).await.expect("both pids");
+        let result = tokio::time::timeout(Duration::from_secs(4), group.wait_with_output()).await;
+        drop(group);
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
+        let output = result
+            .expect("capture finishes after the leader exits")
+            .expect("output");
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"done");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_captured_wait_ends_every_member() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            started.send(()).expect("waiting receiver");
+            group.wait_with_output().await
+        });
+        waiting.await.expect("capture starts");
+        task.abort();
+        assert!(task.await.expect_err("cancelled task").is_cancelled());
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
+    }
+
+    #[tokio::test]
+    async fn a_captured_wait_timeout_ends_every_member() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
+        let result = tokio::time::timeout(Duration::from_millis(20), async move {
+            group.wait_with_output().await
+        })
+        .await;
+        assert!(result.is_err(), "the workload outlives the timeout");
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
     }
 }
