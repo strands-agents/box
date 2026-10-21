@@ -37,12 +37,7 @@ fn with_cargo(text: String, hello_tool: bool) -> String {
 }
 
 // TEMPORARY QUARANTINE (linux): this fixture authors `[tool.cargo.filesystem]` and
-// `[tool.hello.filesystem] exec`, which a box refuses at load
-// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds). Broad exec
-// ships on macOS only; broad exec for a Linux tool leaf is a currently-missing feature. The case
-// runs only on linux, so it records an authorized SKIP there (see test-integ/src/quarantine.rs
-// and QUARANTINE.md) until that Linux broad-exec feature lands. The body and its assertions are
-// unchanged.
+// `[tool.hello.filesystem] exec`, which a box refuses at load; its grants need conversion (see QUARANTINE.md).
 det_case! {
     name: cn_w_06,
     id:   "CN-W-06",

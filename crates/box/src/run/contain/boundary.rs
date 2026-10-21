@@ -558,12 +558,7 @@ impl Boundary {
                 .deny_discovery(guard.box_directory);
         }
 
-        // Leaf broad exec: a tool runs its whole toolchain via `process-exec*`
-        // and loads what it compiles in its writable workspace, without the box enumerating every
-        // helper. Leaf-only and macOS-only — the agent box keeps enumerated exec and full W^X, so
-        // its profile is byte-identical; on Linux a read-only bind confers exec already, so the flag
-        // is a no-op there. The top-level program was already admitted by `shell:spawn`.
-        #[cfg(target_os = "macos")]
+        // docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds
         if launch.runtime_reach == RuntimeReach::Leaf {
             containment = containment.allow_broad_exec();
         }
@@ -637,10 +632,7 @@ impl Boundary {
             .collect();
         // Mirrors the broad-exec wiring above, so the disclosure names the carve-out exactly when the
         // leaf renders it.
-        #[cfg(target_os = "macos")]
         let broad_exec = launch.runtime_reach == RuntimeReach::Leaf;
-        #[cfg(not(target_os = "macos"))]
-        let broad_exec = false;
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
@@ -2260,6 +2252,19 @@ mod tests {
                 !profile.contains(&rule(operation, "subpath", &root.join("bin"))),
                 "the alias directory stays unread: {profile}"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_leaf_enables_and_discloses_execution_from_writable_grants() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        for (reach, expected) in [(RuntimeReach::Leaf, true), (RuntimeReach::Agent, false)] {
+            let boundary = fixture.translate_with_reach(&spec, "[tool.build]", reach);
+            let config: serde_json::Value =
+                serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+            assert_eq!(config["broad_exec"], expected);
+            assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
         }
     }
 

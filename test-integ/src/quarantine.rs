@@ -3,9 +3,7 @@
 //!
 //! Why this exists: CN-W-05 and CN-W-06 author a `[tool.<name>.filesystem] exec` list, which a box
 //! refuses at load (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds).
-//! Broad exec ships on macOS only, and broad exec for a Linux tool leaf is a currently-missing
-//! feature. Both cases run only on linux, so the maintainers approved a temporary SKIP there until
-//! that Linux broad-exec feature lands and the fixtures are aligned to it.
+//! Linux broad exec is implemented; these fixtures still need supported grants and verified toolchain paths.
 //!
 //! What this is NOT: it is not a platform declaration, not a retry, and not suppression of a failure
 //! anywhere else; any other case that fails stays FAIL/ERROR and turns the suite RED. A GREEN produced while this
@@ -44,13 +42,11 @@ pub struct Quarantine {
 pub const QUARANTINE_NOTE_PREFIX: &str = "TEMPORARY QUARANTINE: ";
 
 const TOOL_EXEC_ISSUE: &str = "the fixture authors [tool.<name>.filesystem] exec, which a box \
-refuses at load: a tool leaf runs its toolchain through broad exec, and broad exec ships on macOS \
-only. Broad exec for a Linux tool leaf is a currently-missing feature; until it lands, a Linux tool leaf cannot run a \
-multi-binary toolchain the way this case needs";
+refuses at load; Linux broad exec is implemented, but the fixture needs supported read grants \
+and verified toolchain paths";
 
-const TOOL_EXEC_RESTORE_WHEN: &str = "broad exec for a Linux tool leaf is built (the currently-missing feature), the \
-fixtures are aligned to it, these entries are deleted, and the full Linux deterministic suite passes with both cases \
-enabled";
+const TOOL_EXEC_RESTORE_WHEN: &str = "fixtures use supported grants with broad exec for a Linux tool leaf, \
+these entries are deleted, and the full Linux deterministic suite passes with both cases enabled";
 
 /// The exact, authorized list. Edit ONLY with the authorization recorded in test-integ/QUARANTINE.md;
 /// the unit test `the_quarantine_is_exactly_the_authorized_set` pins its contents so any change is a
@@ -60,7 +56,7 @@ pub const TEMPORARY_QUARANTINE: &[Quarantine] = &[
         id: "CN-W-05",
         platform: "linux",
         reason: "authors [tool.git.filesystem] exec, refused at load; the case runs only on linux, \
-so it records a SKIP there pending broad exec for a Linux tool leaf",
+so it records a SKIP there pending fixture conversion to supported grants",
         issue: TOOL_EXEC_ISSUE,
         owner: "box-maintainers",
         restore_when: TOOL_EXEC_RESTORE_WHEN,
@@ -69,7 +65,7 @@ so it records a SKIP there pending broad exec for a Linux tool leaf",
         id: "CN-W-06",
         platform: "linux",
         reason: "authors [tool.cargo.filesystem] and [tool.hello.filesystem] exec, refused at load; \
-the case runs only on linux, so it records a SKIP there pending broad exec for a Linux tool leaf",
+the case runs only on linux, so it records a SKIP there pending fixture conversion to supported grants",
         issue: TOOL_EXEC_ISSUE,
         owner: "box-maintainers",
         restore_when: TOOL_EXEC_RESTORE_WHEN,

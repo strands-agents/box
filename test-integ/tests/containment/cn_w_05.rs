@@ -17,12 +17,7 @@ fn with_git(text: String) -> String {
 }
 
 // TEMPORARY QUARANTINE (linux): this fixture authors `[tool.git.filesystem] exec`, which a box
-// refuses at load
-// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds). Broad exec
-// ships on macOS only; broad exec for a Linux tool leaf is a currently-missing feature. The case
-// runs only on linux, so it records an authorized SKIP there (see test-integ/src/quarantine.rs
-// and QUARANTINE.md) until that Linux broad-exec feature lands. The body and its assertions are
-// unchanged.
+// refuses at load; the fixture still needs supported helper grants (see QUARANTINE.md).
 det_case! {
     name: cn_w_05,
     id:   "CN-W-05",

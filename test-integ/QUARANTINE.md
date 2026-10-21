@@ -4,14 +4,14 @@
 
 | case | platform | body | why | owner | evidence |
 |---|---|---|---|---|---|
-| CN-W-05 | linux | unchanged, runs only on linux | authors `[tool.git.filesystem] exec`, which a box refuses at load under [the leaf toolchain decision](../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); broad exec ships on macOS only, and broad exec for a Linux tool leaf is a currently-missing feature | box-maintainers | recorded on a Linux run |
-| CN-W-06 | linux | unchanged, runs only on linux | authors `[tool.cargo.filesystem]` and `[tool.hello.filesystem] exec`, which a box refuses at load under [the leaf toolchain decision](../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); broad exec ships on macOS only, and broad exec for a Linux tool leaf is a currently-missing feature | box-maintainers | recorded on a Linux run |
+| CN-W-05 | linux | unchanged, runs only on linux | authors `[tool.git.filesystem] exec`, which a box refuses at load under [the leaf toolchain decision](../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); Linux broad exec exists, but the fixture still needs supported helper grants | box-maintainers | recorded on a Linux run |
+| CN-W-06 | linux | unchanged, runs only on linux | authors `[tool.cargo.filesystem]` and `[tool.hello.filesystem] exec`, which a box refuses at load under [the leaf toolchain decision](../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); Linux broad exec exists, but the fixture still needs supported helper grants | box-maintainers | recorded on a Linux run |
 
 The maintainers approved this exception for the CN-W-05 and CN-W-06 linux cells. Both cases
 author a tool `exec` list that a box refuses at load under [the leaf toolchain decision](../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds), and both
-run only on linux. Broad exec ships on macOS only; broad exec for a Linux tool leaf is a currently-missing feature
-the team plans to build. This supersedes the no-exclusion rule ONLY for those two linux cells, until that Linux
-broad-exec feature lands and the fixtures are aligned to it.
+run only on linux. Linux broad exec now supports execution from readable and writable grants.
+These fixtures still need supported grants and verified toolchain paths.
+The exception remains limited to those two cells until their converted fixtures pass.
 
 ## The mechanism (smallest transparent one the harness supports)
 
@@ -42,7 +42,7 @@ Example (linux, reduced gate):
   "coverage_gate": "reduced: 2 quarantined cell(s) on this platform",
   "quarantine": [
     { "id": "CN-W-05", "platform": "linux", "reason": "authors [tool.git.filesystem] exec, …", "issue": "…",
-      "owner": "box-maintainers", "restore_when": "broad exec for a Linux tool leaf is built, …", "applied": true },
+      "owner": "box-maintainers", "restore_when": "fixtures use supported grants with broad exec for a Linux tool leaf, …", "applied": true },
     { "id": "CN-W-06", "platform": "linux", "reason": "…", "issue": "…", "owner": "box-maintainers", "restore_when": "…", "applied": true }
   ],
   "results": [ …, { "id": "CN-W-05", "result": "SKIP", "note": "TEMPORARY QUARANTINE: CN-W-05 on linux: …" }, … ]
@@ -53,7 +53,7 @@ Example (linux, reduced gate):
 
 - **macOS GREEN = the full merge gate:** no cell is quarantined on macOS, and `coverage_gate` reads `full`.
 - **Linux GREEN = the explicitly reduced merge gate:** every applicable cell passed except CN-W-05 and CN-W-06,
-  which recorded authorized SKIPs pending broad exec for a Linux tool leaf (a currently-missing feature). It is
+  which recorded authorized SKIPs pending fixture conversion to supported grants. It is
   **not** full qualification.
 - Global qualification still requires PASS for every applicable cell on both platforms; the exception is only for
   the merge gate.
@@ -67,8 +67,8 @@ deleted) only once `TEMPORARY_QUARANTINE` is empty.
 
 ### Linux tool-exec cells (CN-W-05, CN-W-06)
 
-1. Land broad exec for a Linux tool leaf (the currently-missing feature) and align the two fixtures
-   to it, so neither authors a `[tool.<name>.filesystem] exec` list a box refuses.
+1. Convert both fixtures to supported helper grants and verify their toolchain paths.
+   Neither fixture can use a `[tool.<name>.filesystem] exec` list.
 2. Delete the `CN-W-05` and `CN-W-06` entries; update the pinned test; remove the comment blocks
    above those two cases.
 3. Run the full deterministic suite on Linux. Both cells must execute and PASS; the linux

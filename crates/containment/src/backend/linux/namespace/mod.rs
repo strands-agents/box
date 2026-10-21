@@ -2158,7 +2158,7 @@ mod tests {
         );
     }
 
-    /// The four macOS-only leaf fields validate on Linux and change neither the view nor the filters.
+    /// The macOS discovery and runtime-service fields leave Linux mounts and filters unchanged.
     #[test]
     fn linux_validate_states_its_handling_of_macos_only_leaf_fields() {
         let home = tempfile::tempdir().expect("home");
@@ -2173,7 +2173,6 @@ mod tests {
             .clone()
             .allow_discovery(home.path())
             .deny_discovery(&state)
-            .allow_broad_exec()
             .allow_runtime_services();
 
         NamespaceBackend::with_probe_result(true)
@@ -2193,7 +2192,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.writable && entry.origin == view::MountOrigin::Grant)
                 .all(|entry| !entry.executable),
-            "broad exec made a writable grant executable on Linux"
+            "discovery or runtime-service fields made a writable grant executable"
         );
         syscall::SyscallPolicy::for_config(leaf.network())
             .compile()

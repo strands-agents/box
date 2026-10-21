@@ -213,6 +213,9 @@ impl MountView {
             // A read root on a loader directory is exec-capable, because the loader maps code from
             // it and a mount cannot separate `mmap(PROT_EXEC)` from `execve`.
             let executable = granted.operation == Operation::Exec
+                || config.broad_exec()
+                    && matches!(granted.operation, Operation::Read | Operation::Write)
+                    && (resolved.is_file() || resolved.is_dir())
                 || granted.operation == Operation::Read
                     && granted.scope == Scope::Root
                     && is_loader_directory(&resolved);
@@ -1541,6 +1544,64 @@ mod tests {
             .expect("plan must succeed")
             .entries()
             .to_vec()
+    }
+
+    #[test]
+    fn broad_exec_keeps_scaffolds_refusals_and_protected_files_non_executable() {
+        let root = tempfile::tempdir().expect("fixture");
+        let work = root.path().join("work");
+        let denied = work.join("denied");
+        let protected = work.join("protected");
+        let readable = root.path().join("helper");
+        let metadata = root.path().join("metadata");
+        let writable_file = root.path().join("output");
+        std::fs::create_dir_all(&denied).expect("denied subtree");
+        std::fs::create_dir(&metadata).expect("metadata directory");
+        for path in [&protected, &readable, &writable_file] {
+            std::fs::write(path, "fixture").expect("fixture file");
+        }
+        let opened = std::fs::File::open(&protected).expect("protected identity");
+        let config = ContainmentConfig::new()
+            .allow(&work, Operation::Read, Scope::Root)
+            .unwrap()
+            .allow(&work, Operation::Write, Scope::Root)
+            .unwrap()
+            .allow(&readable, Operation::Read, Scope::File)
+            .unwrap()
+            .allow(&metadata, Operation::Metadata, Scope::Dir)
+            .unwrap()
+            .allow(&writable_file, Operation::Read, Scope::File)
+            .unwrap()
+            .allow(&writable_file, Operation::Write, Scope::File)
+            .unwrap()
+            .allow("/dev/null", Operation::Write, Scope::File)
+            .unwrap()
+            .refuse(&denied, Scope::Root)
+            .unwrap()
+            .protect_write(&protected, &opened)
+            .unwrap();
+        let agent = planned(&config);
+        assert!(agent.iter().all(|entry| !entry.executable));
+        let leaf = planned(&config.allow_broad_exec());
+        for entry in &leaf {
+            let expected =
+                entry.target == work || entry.target == readable || entry.target == writable_file;
+            assert_eq!(entry.executable, expected, "{entry:?}");
+            if entry.target == work || entry.target == writable_file {
+                assert!(entry.writable);
+            }
+            if entry.target == readable {
+                assert!(!entry.writable);
+            }
+        }
+        assert!(
+            leaf.iter()
+                .any(|entry| entry.origin == MountOrigin::Refusal)
+        );
+        assert!(
+            leaf.iter()
+                .any(|entry| matches!(entry.origin, MountOrigin::Protection { .. }))
+        );
     }
 
     /// Every path a planned view leaves `execve`-able, as `(origin, target)`.

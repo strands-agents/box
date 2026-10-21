@@ -1212,17 +1212,15 @@ disclosure: a tool or MCP server learns which paths exist across the operator ho
 <a id="a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds"></a>
 #### A tool or MCP server runs its whole toolchain, and loads what it builds
 
-A permitted host binary re-execs helpers nobody can enumerate up front (a version control tool ships
-roughly 150 of them), and a build must load and run what it compiles. So on macOS the sandbox for a tool or
-MCP server renders broad exec, and over that sandbox's own writable grants one executable-mapping
-allow, so a build loads its own output. This applies only to that sandbox, and only after policy
-already admitted the one top-level program,
-which `a_leaf_carries_broad_exec_and_the_main_box_does_not` pins. Write-xor-execute still holds
-everywhere except that sandbox's own writable grants: the carve-out never covers the operator home,
-the system directories, or box state, and the agent's sandbox keeps the invariant whole. So a tool's
-or MCP server's sandbox is a bounded filesystem-and-network envelope inside which arbitrary native
-code can run. On Linux a
-read-only bind already confers execute, and the mount view bounds the exec set instead.
+A tool or MCP server must run helpers and load programs or libraries that it builds.
+After policy admits the top-level program, its sandbox permits execution from its readable and writable grants.
+macOS uses process-execution rules and executable mappings.
+Linux makes the corresponding file and directory mounts executable.
+Enumerating every helper or build output would prevent toolchains from selecting their own programs.
+
+The cost is that a tool can execute code it changes within its writable grants, while the agent retains its existing execution restrictions.
+Linux keeps automatic temporary mounts, refused paths, and protected files non-executable.
+`cn_x_04` tests execution and library loading from tool output, with agent denials on both platforms.
 
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade
@@ -1507,10 +1505,10 @@ sandboxing a host binary does not depend on remembering to wire the hook: absenc
 
 A tool makes raw filesystem syscalls, so its reach is a set of containment cells and not a set of
 policy decisions. Box grants no blanket project read and write. A tool's `filesystem` table holds six
-lists, `read`, `write`, `read_file`, `write_file`, `list`, and `deny`. A tool states no `metadata`
-list, because a tool's sandbox discovers existence and metadata across the operator home, and no `exec` list,
-because on macOS a tool's sandbox runs its whole toolchain through broad exec; Box refuses both names on a tool.
-On Linux a tool reaches a runnable binary through a `read` entry, which confers exec. A cell raises no
+lists, `read`, `write`, `read_file`, `write_file`, `list`, and `deny`.
+Box refuses `metadata` and `exec` lists on a tool.
+macOS supplies metadata discovery, and both platforms permit execution through the tool's readable and writable grants.
+A cell raises no
 `fs:*` decision and enters no temporal history, so inside a granted tree a tool can touch a file that
 the operator's per-path policy denies to the agent; Box discloses each cell at startup, and an operator
 must read that disclosure. No tool grant can name the box directory, which

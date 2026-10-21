@@ -44,8 +44,7 @@ pub struct ContainmentConfig {
     /// beneath one (the CA trust bundle) still applies. Empty for the agent box.
     #[serde(default, deserialize_with = "deserialize_canonical_paths")]
     discovery_denies: Vec<PathBuf>,
-    /// Whether the leaf renders `(allow process-exec*)` in addition to its exec literals, and a
-    /// `file-map-executable` allow over its writable grants. False for the agent box.
+    /// Whether a leaf executes code from its readable and writable grants.
     #[serde(default)]
     broad_exec: bool,
     /// Whether the process may reach the host services a bundled JS/Node runtime touches at startup:
@@ -132,9 +131,7 @@ impl ContainmentConfig {
         self
     }
 
-    /// Let a leaf `exec` any reachable binary (`process-exec*`, in addition to its exec literals) and
-    /// load what it compiles in its writable grants. Leaf-only and macOS-only; the agent box never
-    /// calls this.
+    /// Let a leaf execute reachable binaries and load code from its readable and writable grants.
     #[must_use]
     pub fn allow_broad_exec(mut self) -> Self {
         self.broad_exec = true;
