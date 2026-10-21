@@ -1606,8 +1606,11 @@ def image():
     except Exception:
         pass
     return sys.executable
-roots = [sys.base_prefix, sysconfig.get_paths().get("stdlib", "")]
-hints = [sys.prefix, sysconfig.get_config_var("LIBDIR") or ""]
+roots = [sysconfig.get_paths().get("stdlib", "")]
+hints = [sysconfig.get_config_var("LIBDIR") or ""]
+if sys.platform != "linux":
+    roots.append(sys.base_prefix)
+    hints.append(sys.prefix)
 print(json.dumps({"implementation": sys.implementation.name, "image": image(),
                   "roots": [d for d in roots if d], "hints": [d for d in hints if d]}))
 "#;
@@ -1640,10 +1643,27 @@ where
     I: IntoIterator<Item = PathBuf>,
     Q: Fn(&Path) -> Result<PyIdentity, String>,
 {
+    let host = if cfg!(target_os = "macos") {
+        Platform::Macos
+    } else {
+        Platform::Linux
+    };
+    select_native_python_on(host, candidates, query)
+}
+
+fn select_native_python_on<I, Q>(
+    platform: Platform,
+    candidates: I,
+    query: Q,
+) -> Result<NativePython, String>
+where
+    I: IntoIterator<Item = PathBuf>,
+    Q: Fn(&Path) -> Result<PyIdentity, String>,
+{
     let mut rejected = Vec::new();
     for candidate in candidates {
         let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
-        if is_apple_shim(&candidate) || is_apple_shim(&canonical) {
+        if platform == Platform::Macos && (is_apple_shim(&candidate) || is_apple_shim(&canonical)) {
             rejected.push(format!(
                 "{}: Apple launcher shim under /usr/bin",
                 candidate.display()
@@ -1685,7 +1705,7 @@ where
                 continue;
             }
         };
-        if is_apple_shim(&image) {
+        if platform == Platform::Macos && is_apple_shim(&image) {
             rejected.push(format!(
                 "{}: executes as a /usr/bin image",
                 candidate.display()
@@ -2933,7 +2953,7 @@ mod tests {
     fn the_apple_launcher_shim_is_never_selected_even_when_first() {
         let (_tmp, version_root, image, stdlib) = real_framework_runtime();
         let candidates = vec![PathBuf::from("/usr/bin/python3"), image.clone()];
-        let chosen = select_native_python_from(candidates, |path| {
+        let chosen = select_native_python_on(Platform::Macos, candidates, |path| {
             assert_ne!(
                 path,
                 Path::new("/usr/bin/python3"),
@@ -2951,6 +2971,34 @@ mod tests {
         // Nested runtime directories collapse to the framework version root: one grant, nothing above it.
         assert_eq!(chosen.runtime_reads, vec![version_root]);
         assert!(chosen.rejected_hints.is_empty());
+    }
+
+    #[test]
+    fn linux_selects_a_usr_bin_image_after_verifying_its_identity() {
+        let (_tmp, version_root, _image, _stdlib) = real_framework_runtime();
+        let image = PathBuf::from("/usr/bin/env").canonicalize().unwrap();
+        let chosen = select_native_python_on(Platform::Linux, vec![image.clone()], |path| {
+            assert_eq!(path, image);
+            Ok(identity(
+                "cpython",
+                &image,
+                std::slice::from_ref(&version_root),
+                &[],
+            ))
+        })
+        .expect("Linux system images are not Apple launchers");
+        assert_eq!(chosen.executable, image);
+        assert_eq!(chosen.runtime_reads, vec![version_root]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_python_discovery_grants_runtime_libraries_without_the_usr_prefix() {
+        let chosen = select_native_python_from(native_python_candidates(), query_python_identity)
+            .expect("the Linux test host needs CPython");
+        assert!(!chosen.runtime_reads.is_empty());
+        assert!(!chosen.runtime_reads.contains(&PathBuf::from("/usr")));
+        assert!(!chosen.runtime_reads.contains(&PathBuf::from("/")));
     }
 
     #[test]
@@ -3088,7 +3136,8 @@ mod tests {
     #[test]
     fn a_candidate_that_executes_as_a_usr_bin_image_or_is_not_cpython_is_rejected() {
         let (_tmp, version_root, image, _stdlib) = real_framework_runtime();
-        let err = select_native_python_from(
+        let err = select_native_python_on(
+            Platform::Macos,
             vec![
                 PathBuf::from("/opt/a/python3"),
                 PathBuf::from("/opt/b/python3"),
@@ -3377,7 +3426,12 @@ mod tests {
         let id = query_python_identity(&py).expect("this host's python answers the identity query");
         assert_eq!(id.implementation, "cpython");
         assert!(id.image.exists(), "{:?}", id.image);
-        assert_eq!(id.roots.len(), 2, "base_prefix and stdlib: {:?}", id.roots);
+        assert_eq!(
+            id.roots.len(),
+            if cfg!(target_os = "linux") { 1 } else { 2 },
+            "the host's runtime roots: {:?}",
+            id.roots
+        );
         assert!(
             id.roots.iter().all(|r| r.is_dir()),
             "a running interpreter's roots exist: {:?}",

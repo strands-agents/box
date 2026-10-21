@@ -1,6 +1,6 @@
 // Do not directly execute writable files.
 //
-// macOS only. The LIBRARY-LOAD half of write-xor-exec. `process-exec` and a file-backed
+// The LIBRARY-LOAD half of write-xor-exec. `process-exec` and a file-backed
 // executable mapping are two separate authorities, and a profile can leave one open while it
 // closes the other: the 2026-08-31 invariant measurements found exactly that — a contained
 // workload wrote a dynamic library into its own home and loaded it, because write-xor-exec held
@@ -35,12 +35,12 @@
 //     fail and the change must be re-decided — never widen the needle.
 //   * Every `/usr/lib` system dylib is in the dyld shared cache and absent from disk, so none can
 //     serve as the source. A Python extension module is the available on-disk library.
-use strands_det_harness::det_case;
+use strands_det_harness::{Platform, det_case};
 
 det_case! {
     name: cn_x_03,
     id:   "CN-X-03",
-    platforms: [Macos],
+    platforms: [Macos, Linux],
     desc: "Write-xor-exec: a loadable library copied into the write root cannot be mapped executable, although the same bytes load from a read root",
     run: |b| {
         b.reset_policy();
@@ -98,6 +98,9 @@ os.unlink(DST)
         // The copy cannot be mapped executable, and the message names the SANDBOX. A
         // code-signing refusal is not an acceptable pass here — see the header.
         r.assert_absent("load_written_copy OK");
-        r.assert_contains("file system sandbox blocked mmap()");
+        match Platform::current() {
+            Platform::Macos => r.assert_contains("file system sandbox blocked mmap()"),
+            Platform::Linux => r.assert_contains("failed to map segment from shared object"),
+        }
     }
 }
