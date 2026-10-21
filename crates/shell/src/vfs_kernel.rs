@@ -14,6 +14,8 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+#[cfg(unix)]
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -288,7 +290,38 @@ impl VfsKernel {
                 _ => {}
             }
         }
-        // The HostDir ancestor, when there is one, is the longest prefix that resolves.
+        if let Some((_, host_base, ro, rest)) = Self::host_dir_ancestor(vfs, abs_path) {
+            let mut host = PathBuf::from(&host_base);
+            for c in &rest {
+                host.push(c);
+            }
+            // Canonicalize and verify the path stays within the bind mount
+            let canon_base =
+                std::fs::canonicalize(&host_base).unwrap_or_else(|_| PathBuf::from(&host_base));
+            if let Ok(canon_host) = std::fs::canonicalize(&host) {
+                if !canon_host.starts_with(&canon_base) {
+                    return None; // symlink escape — block access
+                }
+                return Some((canon_host, ro, canon_base));
+            }
+            // canonicalize failed — check if path is a dangling symlink
+            if host.symlink_metadata().is_ok() {
+                return None; // dangling symlink pointing outside mount
+            }
+            // Path truly doesn't exist — verify parent is safe
+            if let Some(parent) = host.parent()
+                && let Ok(canon_parent) = std::fs::canonicalize(parent)
+                && !canon_parent.starts_with(&canon_base)
+            {
+                return None;
+            }
+            return Some((host, ro, canon_base));
+        }
+        None
+    }
+
+    /// The longest `HostDir` ancestor of `abs_path`: its path, its host source, its read-only flag, and the components below it.
+    fn host_dir_ancestor(vfs: &Vfs, abs_path: &str) -> Option<(String, String, bool, Vec<String>)> {
         let normalized = vfs::normalize(abs_path);
         let components: Vec<&str> = normalized.split('/').filter(|c| !c.is_empty()).collect();
         let resolves = |length: usize| {
@@ -304,39 +337,51 @@ impl VfsKernel {
                 high = middle - 1;
             }
         }
-        if low > 0
-            && let Some(ino) = resolves(low)
-            && let Ok(inode) = vfs.get(ino)
-            && let InodeData::HostDir(host_base, ro) = &inode.data
-        {
-            let rest = &components[low..];
-            let mut host = PathBuf::from(host_base);
-            for c in rest {
-                host.push(c);
-            }
-            // Canonicalize and verify the path stays within the bind mount
-            let canon_base =
-                std::fs::canonicalize(host_base).unwrap_or_else(|_| PathBuf::from(host_base));
-            if let Ok(canon_host) = std::fs::canonicalize(&host) {
-                if !canon_host.starts_with(&canon_base) {
-                    return None; // symlink escape — block access
-                }
-                return Some((canon_host, *ro, canon_base));
-            }
-            // canonicalize failed — check if path is a dangling symlink
-            if host.symlink_metadata().is_ok() {
-                return None; // dangling symlink pointing outside mount
-            }
-            // Path truly doesn't exist — verify parent is safe
-            if let Some(parent) = host.parent()
-                && let Ok(canon_parent) = std::fs::canonicalize(parent)
-                && !canon_parent.starts_with(&canon_base)
-            {
-                return None;
-            }
-            return Some((host, *ro, canon_base));
+        if low == 0 {
+            return None;
         }
-        None
+        let inode = vfs.get(resolves(low)?).ok()?;
+        let InodeData::HostDir(host_base, ro) = &inode.data else {
+            return None;
+        };
+        let bind = format!("/{}", components[..low].join("/"));
+        let rest = components[low..].iter().map(|c| (*c).to_string()).collect();
+        Some((bind, host_base.clone(), *ro, rest))
+    }
+
+    /// The host path that `abs_path` spells under its `HostDir` bind, with no host symlink followed.
+    fn spelled_host(vfs: &Vfs, abs_path: &str) -> Option<PathBuf> {
+        let (_, host_base, _, rest) = Self::host_dir_ancestor(vfs, abs_path)?;
+        let mut spelled =
+            std::fs::canonicalize(&host_base).unwrap_or_else(|_| PathBuf::from(&host_base));
+        spelled.extend(rest);
+        Some(spelled)
+    }
+
+    /// The spelling of `abs_path` with each host symlink below its `HostDir` bind followed, per `follow`.
+    ///
+    /// Returns `None`, and the caller keeps its spelling, for a bind point, a missing parent, or a
+    /// host identity outside the bind.
+    fn host_canonical_spelling(vfs: &Vfs, abs_path: &str, follow: Follow) -> Option<String> {
+        if Self::is_bind_point(vfs, abs_path) {
+            return None;
+        }
+        let (bind, host_base, _, rest) = Self::host_dir_ancestor(vfs, abs_path)?;
+        let canon_base = std::fs::canonicalize(&host_base).ok()?;
+        let (leaf, parent_rest) = rest.split_last()?;
+        let mut host_parent = PathBuf::from(&host_base);
+        host_parent.extend(parent_rest);
+        let mut canonical = std::fs::canonicalize(&host_parent).ok()?.join(leaf);
+        if follow == Follow::Yes
+            && let Ok(target) = std::fs::canonicalize(&canonical)
+        {
+            canonical = target;
+        }
+        let tail = canonical.strip_prefix(&canon_base).ok()?.to_str()?;
+        if tail.is_empty() {
+            return Some(bind);
+        }
+        Some(format!("{}/{tail}", bind.trim_end_matches('/')))
     }
 
     fn resolve_host_for(
@@ -360,45 +405,139 @@ impl VfsKernel {
     }
 
     fn host_identity(vfs: &Vfs, abs_path: &str, follow: Follow) -> Option<HostIdentity> {
-        let (path, _, _) = Self::resolve_host_for(vfs, abs_path, follow)?;
+        let (path, _, base) = Self::resolve_host_for(vfs, abs_path, follow)?;
         let parent = path.parent()?.canonicalize().ok()?;
-        let parent_metadata = std::fs::metadata(&parent).ok()?;
+        let bind_point = Self::is_bind_point(vfs, abs_path);
+        if !bind_point
+            && let Some(spelled) = Self::spelled_host(vfs, abs_path)
+            && path.file_name().map(|leaf| parent.join(leaf)) != Some(spelled)
+        {
+            return Some(HostIdentity::Unavailable { path });
+        }
+        let root = if parent.starts_with(&base) {
+            base
+        } else if bind_point {
+            parent.clone()
+        } else {
+            return Some(HostIdentity::Unavailable { path });
+        };
+        Self::pinned_identity(path, parent, root, follow)
+    }
+
+    /// Pin `path` by the parent reached from `root` one component at a time, with no symlink followed.
+    #[cfg(unix)]
+    fn pinned_identity(
+        path: PathBuf,
+        parent: PathBuf,
+        root: PathBuf,
+        follow: Follow,
+    ) -> Option<HostIdentity> {
+        let directory = Self::open_beneath(&root, &parent).ok()?;
+        let parent_metadata = directory.metadata().ok()?;
+        let leaf = CString::new(path.file_name()?.as_bytes()).ok()?;
+        let flags = if follow == Follow::Yes {
+            0
+        } else {
+            libc::AT_SYMLINK_NOFOLLOW
+        };
+        let mut leaf_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: directory and leaf are owned, valid handles; leaf_stat is written before it is read.
+        let statted = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                leaf_stat.as_mut_ptr(),
+                flags,
+            )
+        };
+        if statted == 0 {
+            // SAFETY: fstatat returned 0, so leaf_stat is initialized.
+            let leaf_stat = unsafe { leaf_stat.assume_init() };
+            return Some(HostIdentity::Present {
+                path,
+                parent,
+                root,
+                device: stat_device(&leaf_stat),
+                inode: leaf_stat.st_ino,
+                parent_device: parent_metadata.dev(),
+                parent_inode: parent_metadata.ino(),
+            });
+        }
+        if io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            return Some(HostIdentity::Missing {
+                path,
+                parent,
+                root,
+                parent_device: parent_metadata.dev(),
+                parent_inode: parent_metadata.ino(),
+            });
+        }
+        Some(HostIdentity::Unavailable { path })
+    }
+
+    #[cfg(not(unix))]
+    fn pinned_identity(
+        path: PathBuf,
+        parent: PathBuf,
+        root: PathBuf,
+        follow: Follow,
+    ) -> Option<HostIdentity> {
+        std::fs::metadata(&parent).ok()?;
         let metadata = if follow == Follow::Yes {
             std::fs::metadata(&path)
         } else {
             std::fs::symlink_metadata(&path)
         };
         match metadata {
-            Ok(metadata) => Some(HostIdentity::Present {
-                path,
-                parent,
-                #[cfg(unix)]
-                device: metadata.dev(),
-                #[cfg(unix)]
-                inode: metadata.ino(),
-                #[cfg(unix)]
-                parent_device: parent_metadata.dev(),
-                #[cfg(unix)]
-                parent_inode: parent_metadata.ino(),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Some(HostIdentity::Missing {
-                path,
-                parent,
-                #[cfg(unix)]
-                parent_device: parent_metadata.dev(),
-                #[cfg(unix)]
-                parent_inode: parent_metadata.ino(),
-            }),
+            Ok(_) => Some(HostIdentity::Present { path, parent, root }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Some(HostIdentity::Missing { path, parent, root })
+            }
             Err(_) => Some(HostIdentity::Unavailable { path }),
         }
     }
 
+    /// Open `directory` from `root` one component at a time, refusing a symlink at every component.
+    #[cfg(unix)]
+    fn open_beneath(root: &Path, directory: &Path) -> io::Result<File> {
+        let relative = directory
+            .strip_prefix(root)
+            .map_err(|_| Self::stale_resolution())?;
+        let mut current = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(root)?;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(Self::stale_resolution());
+            };
+            let name = CString::new(name.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "host path contains a NUL byte")
+            })?;
+            // SAFETY: current and name are owned, valid handles. The returned descriptor is checked.
+            let descriptor = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                )
+            };
+            if descriptor < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: openat returned this owned descriptor and File closes it once.
+            current = unsafe { File::from_raw_fd(descriptor) };
+        }
+        Ok(current)
+    }
+
     #[cfg(unix)]
     fn opened_parent(host_path: &Path, expected: &HostIdentity) -> io::Result<(File, CString)> {
-        let (identity_path, parent, parent_device, parent_inode) = match expected {
+        let (identity_path, parent, root, parent_device, parent_inode) = match expected {
             HostIdentity::Present {
                 path,
                 parent,
+                root,
                 parent_device,
                 parent_inode,
                 ..
@@ -406,18 +545,16 @@ impl VfsKernel {
             | HostIdentity::Missing {
                 path,
                 parent,
+                root,
                 parent_device,
                 parent_inode,
-            } => (path, parent, *parent_device, *parent_inode),
+            } => (path, parent, root, *parent_device, *parent_inode),
             HostIdentity::Unavailable { .. } => return Err(Self::stale_resolution()),
         };
         if identity_path != host_path {
             return Err(Self::stale_resolution());
         }
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(parent)?;
+        let directory = Self::open_beneath(root, parent)?;
         let metadata = directory.metadata()?;
         if metadata.dev() != parent_device || metadata.ino() != parent_inode {
             return Err(Self::stale_resolution());
@@ -1846,10 +1983,10 @@ impl Kernel for VfsKernel {
                 }
             },
         };
-        let host_identity = {
-            let vfs = self.vfs.lock().await;
-            Self::host_identity(&vfs, &resolved, follow)
-        };
+        let vfs = self.vfs.lock().await;
+        let resolved = Self::host_canonical_spelling(&vfs, &resolved, follow).unwrap_or(resolved);
+        let host_identity = Self::host_identity(&vfs, &resolved, follow);
+        drop(vfs);
         Resolved::new(resolved, follow, *generation, host_identity)
     }
 
@@ -2525,11 +2662,20 @@ mod url_safety_tests {
     }
 }
 
+/// The device of a `stat`, whose field type differs by platform.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+fn stat_device(stat: &libc::stat) -> u64 {
+    stat.st_dev as u64
+}
+
 #[cfg(all(test, unix))]
 mod resolve_host_tests {
+    use std::os::unix::fs::MetadataExt as _;
     use std::path::{Path, PathBuf};
 
-    use super::VfsKernel;
+    use super::{HostIdentity, VfsKernel};
+    use crate::os::Follow;
     use crate::vfs::{InodeData, LASH_GID, LASH_UID, Vfs};
 
     struct Fixture {
@@ -2602,6 +2748,79 @@ mod resolve_host_tests {
             host(&fixture, "/mnt/deep/absent/../ws/real.txt"),
             under(canonical, "real.txt")
         );
+    }
+
+    #[test]
+    fn a_pin_whose_host_identity_is_not_the_spelling_is_unavailable() {
+        let fixture = fixture("pin-spelling");
+        std::fs::write(fixture.workspace.join("sub/f"), "IN_SUB").expect("file");
+        std::os::unix::fs::symlink("sub", fixture.workspace.join("hop")).expect("hop");
+        let identity = |path| VfsKernel::host_identity(&fixture.vfs, path, Follow::Yes);
+        assert!(matches!(
+            identity("/mnt/deep/ws/sub/f"),
+            Some(HostIdentity::Present { .. })
+        ));
+        assert!(matches!(
+            identity("/mnt/deep/ws/sub/new"),
+            Some(HostIdentity::Missing { .. })
+        ));
+        assert!(matches!(
+            identity("/mnt/deep/ws/hop/f"),
+            Some(HostIdentity::Unavailable { .. })
+        ));
+        assert!(matches!(
+            identity("/mnt/deep/ws/hop/new"),
+            Some(HostIdentity::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_symlinked_ancestor_is_neither_pinned_nor_opened() {
+        let fixture = fixture("pin-ancestor");
+        let outside = fixture.canonical.parent().expect("base").join("outside");
+        std::fs::create_dir_all(outside.join("b")).expect("outside dir");
+        std::fs::write(outside.join("b/f"), "OUTSIDE").expect("outside file");
+        std::os::unix::fs::symlink(&outside, fixture.workspace.join("a")).expect("ancestor link");
+        let root = fixture.canonical.clone();
+        let parent = root.join("a/b");
+
+        let pinned =
+            VfsKernel::pinned_identity(parent.join("f"), parent.clone(), root.clone(), Follow::Yes);
+        assert_eq!(pinned, None);
+
+        let target = std::fs::metadata(outside.join("b")).expect("outside metadata");
+        let forged = HostIdentity::Missing {
+            path: parent.join("g"),
+            parent: parent.clone(),
+            root,
+            parent_device: target.dev(),
+            parent_inode: target.ino(),
+        };
+        assert!(VfsKernel::opened_parent(&parent.join("g"), &forged).is_err());
+        assert!(!outside.join("b/g").exists());
+    }
+
+    #[test]
+    fn a_spelling_under_a_bind_is_translated_to_its_host_identity() {
+        let fixture = fixture("translate");
+        std::os::unix::fs::symlink("sub", fixture.workspace.join("hop")).expect("hop");
+        std::os::unix::fs::symlink("real.txt", fixture.workspace.join("flink")).expect("flink");
+        let spelling =
+            |path, follow| VfsKernel::host_canonical_spelling(&fixture.vfs, path, follow);
+        assert_eq!(
+            spelling("/mnt/deep/ws/hop/new", Follow::Yes).as_deref(),
+            Some("/mnt/deep/ws/sub/new")
+        );
+        assert_eq!(
+            spelling("/mnt/deep/ws/flink", Follow::Yes).as_deref(),
+            Some("/mnt/deep/ws/real.txt")
+        );
+        assert_eq!(
+            spelling("/mnt/deep/ws/flink", Follow::No).as_deref(),
+            Some("/mnt/deep/ws/flink")
+        );
+        assert_eq!(spelling("/mnt/deep/ws/escape/x", Follow::Yes), None);
+        assert_eq!(spelling("/mnt/deep/ws", Follow::Yes), None);
     }
 
     #[test]
