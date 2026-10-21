@@ -2880,6 +2880,8 @@ fn nested_authority_parents_are_protected_through_each_writable_spelling() {
             let config = ContainmentConfig::new()
                 .allow(probe, Operation::Exec, Scope::File)
                 .expect("probe grant")
+                .allow(&alias, Operation::Read, Scope::Root)
+                .expect("readable root through alias")
                 .allow(&alias, Operation::Write, Scope::Root)
                 .expect("writable root through alias")
                 .protect_write(&authority, &opened)
