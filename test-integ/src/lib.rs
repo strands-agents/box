@@ -1569,6 +1569,8 @@ pub struct NativePython {
     /// the probe's agent. Deduplicated to the outermost; nothing above them is granted, and a path
     /// that is not there is never granted (the box refuses a grant on a nonexistent path at load).
     pub runtime_reads: Vec<PathBuf>,
+    /// Verified Linux Python extension directories that must load native code.
+    pub runtime_execs: Vec<PathBuf>,
     /// Compile-time hints the interpreter reported that do not exist on this host, each with why
     /// it was dropped (e.g. `sysconfig`'s `LIBDIR` naming the build machine's Xcode). Reported, not
     /// granted, not fabricated.
@@ -1586,6 +1588,7 @@ pub struct PyIdentity {
     /// Build-configuration hints: `sys.prefix` and `sysconfig`'s `LIBDIR`. These can name the
     /// machine the interpreter was built on rather than this host; each is used only if it exists.
     pub hints: Vec<PathBuf>,
+    pub extensions: Vec<PathBuf>,
 }
 
 /// The query run on the host against a candidate: prints one JSON object with the implementation
@@ -1611,8 +1614,15 @@ hints = [sysconfig.get_config_var("LIBDIR") or ""]
 if sys.platform != "linux":
     roots.append(sys.base_prefix)
     hints.append(sys.prefix)
+extensions = []
+if sys.platform == "linux":
+    import _ctypes
+    extension = getattr(_ctypes, "__file__", None)
+    if extension:
+        extensions.append(os.path.dirname(os.path.realpath(extension)))
 print(json.dumps({"implementation": sys.implementation.name, "image": image(),
-                  "roots": [d for d in roots if d], "hints": [d for d in hints if d]}))
+                  "roots": [d for d in roots if d], "hints": [d for d in hints if d],
+                  "extensions": extensions}))
 "#;
 
 /// Whether `path` is Apple's launcher shim (or any `/usr/bin` interpreter, which on macOS is one):
@@ -1767,9 +1777,39 @@ where
             .cloned()
             .collect();
         outer.sort();
+        let runtime_execs = if platform == Platform::Linux {
+            match identity
+                .extensions
+                .iter()
+                .map(|path| existing_directory(path))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(paths) => paths,
+                Err(why) => {
+                    rejected.push(format!(
+                        "{}: extension directory {why}",
+                        candidate.display()
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if runtime_execs
+            .iter()
+            .any(|path| !outer.iter().any(|root| path.starts_with(root)))
+        {
+            rejected.push(format!(
+                "{}: extension directory is outside its runtime reads",
+                candidate.display()
+            ));
+            continue;
+        }
         return Ok(NativePython {
             executable: image,
             runtime_reads: outer,
+            runtime_execs,
             rejected_hints,
         });
     }
@@ -1832,6 +1872,7 @@ pub fn query_python_identity(candidate: &Path) -> Result<PyIdentity, String> {
         image: PathBuf::from(value["image"].as_str().unwrap_or_default()),
         roots: paths("roots"),
         hints: paths("hints"),
+        extensions: paths("extensions"),
     })
 }
 
@@ -1900,9 +1941,7 @@ pub fn macos_developer_tool(name: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// The probe's agent configuration: the interpreter's image as the command (implicitly executable),
-/// its runtime directories as `read` grants beside the workspace, HOME in the workspace, and the
-/// declared search path. Nothing else is widened.
+/// The probe grants the verified Python runtime, including native extension execution on Linux.
 pub fn native_probe_config(template: &str, workspace: &Path, python: &NativePython) -> String {
     let quoted = |p: &Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
     let command = serde_json::to_string(&[python.executable.to_string_lossy()]).unwrap();
@@ -1910,6 +1949,19 @@ pub fn native_probe_config(template: &str, workspace: &Path, python: &NativePyth
     let mut config = template.replacen("{command}", &command, 1);
     if !extra.is_empty() {
         config = config.replacen("read = [", &format!("read = [{}, ", extra.join(", ")), 1);
+    }
+    if !python.runtime_execs.is_empty() {
+        let entries = python
+            .runtime_execs
+            .iter()
+            .map(|path| quoted(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        config = config.replacen(
+            "[agent.filesystem]",
+            &format!("[agent.filesystem]\nexec = [{entries}]"),
+            1,
+        );
     }
     // The CLT interpreter needs an entropy source during hash initialization.
     // This is one read-only device in this probe's fixture, not a wider Core minimum.
@@ -2924,6 +2976,7 @@ mod tests {
             image: image.to_path_buf(),
             roots: roots.to_vec(),
             hints: hints.to_vec(),
+            extensions: Vec::new(),
         }
     }
 
@@ -2999,6 +3052,58 @@ mod tests {
         assert!(!chosen.runtime_reads.is_empty());
         assert!(!chosen.runtime_reads.contains(&PathBuf::from("/usr")));
         assert!(!chosen.runtime_reads.contains(&PathBuf::from("/")));
+        assert!(!chosen.runtime_execs.is_empty());
+        assert!(chosen.runtime_execs.iter().all(|path| {
+            path.is_dir()
+                && chosen
+                    .runtime_reads
+                    .iter()
+                    .any(|root| path.starts_with(root))
+        }));
+    }
+
+    #[test]
+    fn linux_extension_exec_is_verified_and_stays_inside_the_runtime_reads() {
+        let (_tmp, root, image, stdlib) = real_framework_runtime();
+        let extension = stdlib.join("lib-dynload");
+        std::fs::create_dir(&extension).unwrap();
+        let query = |path: PathBuf| {
+            let mut value = identity("cpython", &image, std::slice::from_ref(&root), &[]);
+            value.extensions = vec![path];
+            value
+        };
+        let selected = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(extension.clone()))
+        })
+        .unwrap();
+        assert_eq!(selected.runtime_reads, vec![root.clone()]);
+        assert_eq!(selected.runtime_execs, vec![extension.clone()]);
+        let config = native_probe_config(
+            "[agent]\ncommand = {command}\n[agent.filesystem]\nread = [\"/workspace\"]\nwrite = [\"/workspace\"]\n",
+            Path::new("/workspace"),
+            &selected,
+        );
+        let exec_line = config
+            .lines()
+            .find(|line| line.starts_with("exec = "))
+            .unwrap();
+        assert_eq!(
+            exec_line,
+            format!("exec = [{:?}]", extension.to_string_lossy())
+        );
+        let missing = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(stdlib.join("absent")))
+        })
+        .unwrap_err();
+        assert!(
+            missing.contains("extension directory") && missing.contains("not there"),
+            "{missing}"
+        );
+        let outside = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(root.parent().unwrap().to_path_buf()))
+        })
+        .unwrap_err();
+        assert!(outside.contains("outside its runtime reads"), "{outside}");
     }
 
     #[test]
@@ -3180,6 +3285,7 @@ mod tests {
                 "/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9",
             )],
             rejected_hints: vec![],
+            runtime_execs: Vec::new(),
         };
         let config = native_probe_config(template, Path::new("/b/ws"), &python);
         assert!(config.contains("command = [\"/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python\"]"), "{config}");

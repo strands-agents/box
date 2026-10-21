@@ -1,47 +1,10 @@
-// Do not directly execute writable files.
-//
-// The LIBRARY-LOAD half of write-xor-exec. `process-exec` and a file-backed
-// executable mapping are two separate authorities, and a profile can leave one open while it
-// closes the other: the 2026-08-31 invariant measurements found exactly that — a contained
-// workload wrote a dynamic library into its own home and loaded it, because write-xor-exec held
-// for `process-exec` and not for a library load. Each write cell renders
-// `(deny file-map-executable (subpath ...))` for that reason.
-//
-// CN-X-01 owns the `process-exec` half — a written script and a copy of the signed interpreter,
-// both refused `execv`. Neither of its arms reaches `file-map-executable`, so a regression that
-// dropped only the mapping deny would leave CN-X-01 green. This case is that arm.
-//
-// SCOPE. This measures the agent box with no `exec` grant, which is what `probe_py` declares.
-// `seatbelt.rs::executable_carve_outs` renders `(allow file-map-executable ...)` in the AGENT box
-// when an `exec` grant overlaps a `write` grant, and over the write grant's own subpath when a
-// write root sits inside a Root-scope `exec` grant. That configuration re-opens the mapping by
-// operator authorship and has no case here; do not read this one as covering it.
-//
-// Four things this case is written around:
-//   * The control must load bytes DYLD HAS NOT SEEN. Loading the library the probe already
-//     imported proves nothing: `dlopen` returns the cached handle for a path it has mapped, so
-//     the call never re-reads the file. Measured — `DYLD_PRINT_LIBRARIES=1` prints the mapping
-//     during the import and prints nothing for a later `CDLL` of the same path, and a library
-//     overwritten with garbage after its first load still "loads" by that path. So the control
-//     picks an extension this process has not imported.
-//   * Loading the original first does not poison the refusal arm. dyld caches by path, and the
-//     copy has a different path, so the copy is mapped fresh.
-//   * ONLY `file system sandbox blocked mmap()` is accepted. dyld's
-//     `SyscallDelegate::sandboxBlockedMmap` emits that text when `sandbox_check` reports the
-//     sandbox blocked the mapping, and `code signing blocked mmap()` when it reports the sandbox
-//     did NOT. Accepting the second string would let an AMFI or code-signing refusal satisfy this
-//     case with the mapping deny deleted, which is the one alternative explanation the case
-//     exists to exclude. If a future profile version changes which text appears, this case must
-//     fail and the change must be re-decided — never widen the needle.
-//   * Every `/usr/lib` system dylib is in the dyld shared cache and absent from disk, so none can
-//     serve as the source. A Python extension module is the available on-disk library.
 use strands_det_harness::{Platform, det_case};
 
 det_case! {
     name: cn_x_03,
     id:   "CN-X-03",
     platforms: [Macos, Linux],
-    desc: "Write-xor-exec: a loadable library copied into the write root cannot be mapped executable, although the same bytes load from a read root",
+    desc: "Write-xor-exec: a loadable library copied into the write root cannot be mapped executable, although the same bytes load from the approved runtime directory",
     run: |b| {
         b.reset_policy();
         let r = b.probe_py(
