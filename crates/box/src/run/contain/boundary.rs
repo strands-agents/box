@@ -569,6 +569,8 @@ impl Boundary {
         for refusal in &reach.refusals {
             containment = containment.refuse(&refusal.path, refusal.scope)?;
         }
+        // The box's private tree is refused beneath every grant.
+        containment = containment.refuse(guard.private, Scope::Root)?;
         for grant in &reach.grants {
             if grant.operation == Operation::Exec
                 && grant.scope == Scope::File
@@ -2297,6 +2299,61 @@ mod tests {
         );
     }
 
+    /// **Every profile refuses the box's private tree in both spellings, after every allow that
+    /// reaches it**: the agent box, a tool leaf, and an MCP leaf alike.
+    #[test]
+    fn every_profile_refuses_the_private_tree_after_every_allow_that_reaches_it() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let private = fixture
+            .root
+            .record()
+            .parent()
+            .expect("the record has a directory")
+            .canonicalize()
+            .expect("the private tree resolves");
+        let twin = Path::new("/System/Volumes/Data")
+            .join(private.strip_prefix("/").expect("an absolute private tree"));
+        for (table, reach, egress) in [
+            ("[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            ("[tool.git]", RuntimeReach::Leaf, EgressMode::Gateway),
+            ("[mcp.alpha]", RuntimeReach::Leaf, EgressMode::Native),
+        ] {
+            let boundary = fixture.translate_full(&spec, table, reach, egress);
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            let profile = containment::test_support::generate_seatbelt_profile(&config)
+                .expect("the profile renders");
+            // An allow reaches the private tree when it names a path inside it or a subpath above it.
+            let reaches_private = |line: &str| {
+                [&private, &twin].iter().any(|spelling| {
+                    spelling
+                        .ancestors()
+                        .any(|path| line.contains(&format!("(subpath \"{}\")", path.display())))
+                        || line.contains(&format!("\"{}", spelling.display()))
+                })
+            };
+            let last_reaching_allow = profile
+                .match_indices("(allow ")
+                .map(|(at, _)| at)
+                .filter(|at| reaches_private(profile[*at..].lines().next().unwrap_or_default()))
+                .max()
+                .unwrap_or(0);
+            for spelling in [&private, &twin] {
+                for operation in ["file-write*", "file-read*", "process-exec"] {
+                    let rule = format!("(deny {operation} (subpath \"{}\"))", spelling.display());
+                    let at = profile
+                        .find(&rule)
+                        .unwrap_or_else(|| panic!("{table} renders {rule}: {profile}"));
+                    assert!(
+                        at > last_reaching_allow,
+                        "{table} renders {rule} after every allow that reaches it: {profile}"
+                    );
+                }
+            }
+        }
+    }
+
     /// **The caller's spelling becomes `argv[0]` and the executable stays the identity**, so a venv
     /// link runs the canonical interpreter while the interpreter reads the link as its own path.
     #[test]
@@ -2574,11 +2631,22 @@ mod tests {
             translated.contains(&(command, Operation::Exec, Scope::File)),
             "the command's identity is granted exec at file scope: {translated:?}"
         );
+        let private = fixture
+            .root
+            .root()
+            .join("private")
+            .canonicalize()
+            .expect("the private tree resolves");
         assert!(
             !translated
                 .iter()
-                .any(|(path, _, _)| path.starts_with(fixture.root.root().join("private"))),
+                .any(|(path, operation, _)| path.starts_with(&private)
+                    && *operation != Operation::Deny),
             "no cell reaches private state: {translated:?}"
+        );
+        assert!(
+            translated.contains(&(private, Operation::Deny, Scope::Root)),
+            "private state is refused: {translated:?}"
         );
         for alias in fixture.root.shell_aliases() {
             assert!(

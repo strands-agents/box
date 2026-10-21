@@ -184,12 +184,17 @@ impl MountView {
             // entry's own metadata, so it holds the requirement rather than widening it.
             if granted.scope == Scope::Dir {
                 for target in granted.reachable_paths() {
-                    let has_granted_descendant = config.authorizations().iter().any(|candidate| {
-                        candidate
-                            .reachable_paths()
-                            .iter()
-                            .any(|path| path != &target && path.starts_with(&target))
-                    });
+                    // A refusal below needs a mountpoint, which a read-only filesystem cannot hold.
+                    let has_granted_descendant = config
+                        .authorizations()
+                        .into_iter()
+                        .chain(config.refusals())
+                        .any(|candidate| {
+                            candidate
+                                .reachable_paths()
+                                .iter()
+                                .any(|path| path != &target && path.starts_with(&target))
+                        });
                     if has_granted_descendant {
                         continue;
                     }
@@ -2207,6 +2212,31 @@ mod tests {
         let entry = entry_for(&entries, &descendant);
         assert_eq!(entry.kind, MountKind::Bind);
         assert_eq!(entry.source.as_deref(), Some(descendant.as_path()));
+        assert!(!entry.writable);
+    }
+
+    /// A refusal beneath a metadata-only directory keeps that directory out of the plan, so the
+    /// refusal's mountpoint can be created.
+    #[test]
+    fn a_refusal_replaces_its_metadata_only_ancestor() {
+        let ancestor = tempfile::tempdir().expect("ancestor");
+        let refused = ancestor.path().join("box/private");
+        std::fs::create_dir_all(&refused).expect("the refused tree");
+        let config = ContainmentConfig::new()
+            .allow(ancestor.path(), Operation::Metadata, Scope::Dir)
+            .expect("metadata ancestor")
+            .refuse(&refused, Scope::Root)
+            .expect("the refusal");
+
+        let entries = planned(&config);
+        assert!(
+            entries.iter().all(|entry| {
+                entry.target != ancestor.path() || entry.origin != MountOrigin::Grant
+            }),
+            "a read-only ancestor mount leaves no place for the refusal's mountpoint: {entries:?}"
+        );
+        let entry = entry_for(&entries, &refused);
+        assert_eq!(entry.origin, MountOrigin::Refusal);
         assert!(!entry.writable);
     }
 

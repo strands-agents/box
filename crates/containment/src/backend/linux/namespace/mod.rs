@@ -2180,6 +2180,62 @@ mod tests {
         );
     }
 
+    /// A refusal beneath a metadata-only directory establishes, and its contents stay out of reach.
+    #[test]
+    fn a_refusal_beneath_a_metadata_only_directory_establishes() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let project = directory
+            .path()
+            .canonicalize()
+            .expect("the project resolves");
+        let refused = project.join("box/private");
+        std::fs::create_dir_all(&refused).expect("the refused tree");
+        let secret = refused.join("record");
+        std::fs::write(&secret, b"record").expect("write the refused file");
+        let config = ContainmentConfig::new()
+            .allow(&project, Operation::Metadata, Scope::Dir)
+            .expect("metadata grant")
+            .refuse(&refused, Scope::Root)
+            .expect("the refusal");
+
+        // SAFETY: the child applies containment and exits; it never returns into
+        // test-harness code.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+        if child == 0 {
+            let backend = NamespaceBackend::with_probe_result(true);
+            if let Err(error) = backend.apply(&config, None, None) {
+                eprintln!("apply failed: {error}");
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(20) };
+            }
+            let code = if std::fs::read(&secret).is_ok() {
+                22
+            } else if std::fs::write(refused.join("planted"), b"planted").is_ok() {
+                23
+            } else {
+                0
+            };
+            // SAFETY: terminating the workload with the verdict.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(libc::WIFEXITED(status), "the child must exit normally");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "20=apply failed, 22=REFUSED FILE READABLE, 23=REFUSED TREE WRITABLE"
+        );
+        assert!(!refused.join("planted").exists());
+    }
+
     /// The macOS discovery and runtime-service fields leave Linux mounts and filters unchanged.
     #[test]
     fn linux_validate_states_its_handling_of_macos_only_leaf_fields() {
