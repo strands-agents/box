@@ -117,7 +117,7 @@ with `the types String and ipaddr are not compatible`.
 | `host` | String | The destination host. |
 | `port` | Long | The destination port. |
 | `method` | String | `GET`, `POST`, and so on. |
-| `path` | String | The URL path, without the query. |
+| `path` | String | The URL path in canonical form, without the query: escapes of unreserved characters decoded, `%2F` kept encoded, `.` and `..` segments removed, and repeated slashes kept. [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) shows rules for these paths. |
 | `body_bytes` | Long | The request body length. |
 | `intercepted` | Bool | `true` when the gateway decrypted a TLS exchange, `false` for plain HTTP. |
 
