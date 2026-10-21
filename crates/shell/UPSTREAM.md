@@ -1699,3 +1699,8 @@ check, and `a_symlinked_ancestor_is_neither_pinned_nor_opened` fails with a path
 are judged on the target. In `crates/policy`,
 `a_directory_symlink_on_a_direct_bind_is_defended_by_a_subtree_read_forbid` asserts that the forbid
 holds.
+
+Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and the `openat` walk,
+so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
+`is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
+each canonicalize the bind root again for one path.
