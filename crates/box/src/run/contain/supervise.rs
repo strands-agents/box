@@ -330,6 +330,7 @@ pub(crate) fn isolate(command: &mut Command) {
     command.process_group(0);
     #[cfg(target_os = "linux")]
     {
+        // Linux ties the signal to the spawning thread, which must outlive the supervised child.
         // SAFETY: getpid reads this process's identifier.
         let parent = unsafe { libc::getpid() };
         // SAFETY: the callback uses only process-control syscalls before exec.

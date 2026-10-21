@@ -3966,6 +3966,7 @@ async fn run_pipeline(
                     Ok(result) => result,
                     Err(_) => {
                         expired = true;
+                        // Discard incomplete capture so the deadline cannot wait on output drains.
                         for task in &tasks.0 {
                             task.abort();
                         }
