@@ -918,6 +918,59 @@ mod tests {
         );
     }
 
+    /// **A metadata read that the kernel answers "no" charges a `::response` budget**, and a
+    /// failed content read does not.
+    #[tokio::test]
+    async fn a_failed_metadata_read_records_a_response() {
+        let interceptor = interceptor(
+            r#"permit(principal, action == Box::Action::"fs:read", resource);
+               @id("after_a_metadata_answer")
+               forbid(principal, action == Box::Action::"fs:read", resource)
+               when { context.input.path == "/work/gated" }
+               when temporal {
+                   formerly within 60s
+                   Box::Action::"fs:read"::response{ input.path: "/work/absent" }
+               };"#,
+        );
+        let gated = EffectAttempt::Filesystem {
+            path: "/work/gated",
+            operation: KernelFsOperation::ReadContent,
+        };
+        let failed = EffectOutcome::Kernel(EffectResult::Failed(io::ErrorKind::NotFound));
+
+        interceptor
+            .intercept(&EffectAttempt::Filesystem {
+                path: "/work/absent",
+                operation: KernelFsOperation::ReadContent,
+            })
+            .await
+            .expect("the content read is admitted")
+            .record_outcome(failed)
+            .await
+            .expect("outcome reporting is best effort");
+        assert!(
+            interceptor.intercept(&gated).await.is_ok(),
+            "a failed content read records an error"
+        );
+
+        interceptor
+            .intercept(&EffectAttempt::Filesystem {
+                path: "/work/absent",
+                operation: KernelFsOperation::ReadMetadata {
+                    follow_symlinks: true,
+                },
+            })
+            .await
+            .expect("the metadata read is admitted")
+            .record_outcome(failed)
+            .await
+            .expect("outcome reporting is best effort");
+        assert!(
+            interceptor.intercept(&gated).await.is_err(),
+            "a metadata read answered no records a response"
+        );
+    }
+
     /// **A relative symlink target is judged on the path it resolves to from the link's
     /// directory**, lexically: `.` and `..` close, surplus `..` stops at the root, a nested link
     /// resolves from its own directory, and an empty target, an absolute target, or a rename source

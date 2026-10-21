@@ -224,7 +224,7 @@ What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A `read_metadata` probe that got an answer is a response even when the answer is "no", such as a `test -e` or an `os.stat()` of a missing path. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |

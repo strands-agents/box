@@ -124,6 +124,10 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
+A metadata read is an operation that happened once the workload has its answer, so a `stat` or a
+`test -e` of a missing path is a `::response`, not a `::error`. A budget on
+`fs:read::response{read_metadata}` therefore counts every probe the box answered.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and

@@ -599,6 +599,45 @@ fn an_open_reports_a_descriptor_not_a_transfer() {
     }
 }
 
+/// An answered metadata probe reports a completed effect, whether the answer is yes or no.
+#[test]
+fn an_answered_probe_reports_a_completed_effect() {
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut shell = shell_with(interceptor);
+
+    let out = run(async {
+        shell
+            .run(
+                "printf x > /home/lash/present; test -e /home/lash/present; echo $?; \
+                 test -e /home/lash/absent; echo $?; test -r /home/lash/absent; echo $?",
+            )
+            .await
+    });
+    assert_eq!(out.stdout, "0\n1\n1\n", "{}", out.stderr);
+
+    let recorded = outcomes.lock().unwrap().clone();
+    let probes: Vec<_> = recorded
+        .iter()
+        .filter(|(effect, _)| {
+            effect.starts_with("meta(")
+                && (effect.ends_with("/home/lash/present") || effect.ends_with("/home/lash/absent"))
+        })
+        .collect();
+    assert!(
+        probes.iter().any(|(effect, _)| effect.ends_with("absent")),
+        "the absent-path probes must report an outcome: {recorded:?}"
+    );
+    for (effect, result) in probes {
+        assert_eq!(*result, EffectResult::Completed, "{effect}");
+    }
+}
+
 /// A symlink cannot launder a denied read.
 ///
 /// `abs` normalizes a path string but does not follow symlinks. Admitting its output
