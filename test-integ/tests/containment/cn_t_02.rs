@@ -7,7 +7,7 @@ use strands_det_harness::{Platform, det_case, sh_quote};
 const PROBE: &str = include_str!("../probes/fs_probe.rs");
 include!("../probes/probe_lines.rs");
 
-/// On Linux the refused tree is not in the leaf's view; on macOS Seatbelt refuses it.
+/// On Linux the refused tree's files are not in the leaf's view; on macOS Seatbelt refuses them.
 fn denials() -> &'static [i32] {
     match Platform::current() {
         Platform::Linux => &[ENOENT],
@@ -18,7 +18,7 @@ fn denials() -> &'static [i32] {
 det_case! {
     name: cn_t_02,
     id:   "CN-T-02",
-    desc: "A tool with read=[<workspace>] cannot read the workspace's .strands-box/policy.dw or box.toml, or <box_dir>/private/*; a sibling file under the same grant reads; the host files are unchanged",
+    desc: "A tool with read=[<workspace>] cannot read the workspace's .strands-box/policy.dw or box.toml, or <box_dir>/private/*, and lists no entry of <box_dir>/private; a sibling file under the same grant reads; the host files are unchanged",
     run: |b| {
         let probe = b.compile_probe("fsprobe-t02", PROBE);
         let quoted = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
@@ -67,8 +67,13 @@ det_case! {
             refused_as(&r.out, "APPEND", &s, denials())
                 .unwrap_or_else(|why| panic!("the tool appended to {s}: {why}; out=[{}]", r.snippet()));
         }
-        refused_as(&r.out, "LIST", &subject(&private), denials())
-            .unwrap_or_else(|why| panic!("the tool listed the box's private tree: {why}; out=[{}]", r.snippet()));
+        // On Linux the private tree is overmounted empty, so a listing names nothing.
+        let hidden = Platform::current() == Platform::Linux
+            && probe_line(&r.out, "LIST_OK", &subject(&private)).is_some_and(|l| l.ends_with(" names="));
+        if !hidden {
+            refused_as(&r.out, "LIST", &subject(&private), denials())
+                .unwrap_or_else(|why| panic!("the tool listed the box's private tree: {why}; out=[{}]", r.snippet()));
+        }
         r.assert_absent("permit (principal, action == Box::Action::\"shell:exec\"");
         r.assert_absent("DET_PROTECTED_CONFIG_MARKER_7f3a9c");
 
