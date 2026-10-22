@@ -2329,10 +2329,17 @@ mod tests {
             .filter(|entry| entry.origin == MountOrigin::Socket)
             .collect();
         assert_eq!(sockets.len(), 1);
-        assert_eq!(sockets[0].target, path.canonicalize().unwrap());
-        assert_eq!(sockets[0].kind, MountKind::Bind);
-        assert!(sockets[0].writable);
-        assert!(!sockets[0].executable);
+        assert_eq!(
+            *sockets[0],
+            MountEntry {
+                source: Some(path.canonicalize().unwrap()),
+                target: path.canonicalize().unwrap(),
+                kind: MountKind::Bind,
+                writable: true,
+                executable: false,
+                origin: MountOrigin::Socket,
+            }
+        );
     }
 
     #[test]
@@ -2349,9 +2356,17 @@ mod tests {
             .filter(|entry| entry.origin == MountOrigin::Grant)
             .collect();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].kind, MountKind::Fresh { fstype: "tmpfs" });
-        assert!(!grants[0].writable);
-        assert!(!grants[0].executable);
+        assert_eq!(
+            *grants[0],
+            MountEntry {
+                source: None,
+                target: directory.path().canonicalize().unwrap(),
+                kind: MountKind::Fresh { fstype: "tmpfs" },
+                writable: false,
+                executable: false,
+                origin: MountOrigin::Grant,
+            }
+        );
     }
 
     #[test]

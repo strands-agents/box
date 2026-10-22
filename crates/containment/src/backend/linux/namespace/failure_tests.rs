@@ -19,6 +19,47 @@ pub(super) fn in_fresh_process_with_user_namespace(user_namespace: bool, body: i
     in_fresh_process_expecting_exit(user_namespace, None, None, body);
 }
 
+fn namespace_command() -> std::process::Command {
+    let mut command = std::process::Command::new("unshare");
+    command.env("LC_ALL", "C").args([
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--net",
+        "--ipc",
+        "--uts",
+        "--",
+    ]);
+    command
+}
+
+fn namespace_test_is_permitted() -> bool {
+    // Creating a user namespace alone does not prove that this host permits ID mapping.
+    // Probe the exact prerequisites without running any production code or test body.
+    let output = namespace_command().arg("/bin/true").output().unwrap();
+    if output.status.success() {
+        return true;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let denied = output.status.code() == Some(1)
+        && output.stdout.is_empty()
+        && matches!(
+            stderr.trim(),
+            "unshare: unshare failed: Operation not permitted"
+                | "unshare: write failed /proc/self/uid_map: Operation not permitted"
+                | "unshare: write failed /proc/self/gid_map: Operation not permitted"
+        );
+    assert!(
+        denied,
+        "unexpected namespace prerequisite failure: {output:?}"
+    );
+    eprintln!(
+        "skipping: namespace test prerequisite denied: {}",
+        stderr.trim()
+    );
+    false
+}
+
 fn in_fresh_process_expecting_exit(
     user_namespace: bool,
     expected_exit: Option<i32>,
@@ -35,24 +76,14 @@ fn in_fresh_process_expecting_exit(
         body();
         return;
     }
-    if user_namespace && !probe::user_namespace_is_permitted() {
-        println!("skipping: this host forbids user namespaces");
+    if user_namespace && !namespace_test_is_permitted() {
         return;
     }
     let executable = std::env::current_exe().unwrap();
     let temporary = tempfile::tempdir().unwrap();
     let mut command = if user_namespace {
         // util-linux enters the user namespace before the Rust harness creates threads.
-        let mut command = std::process::Command::new("unshare");
-        command.args([
-            "--user",
-            "--map-root-user",
-            "--mount",
-            "--net",
-            "--ipc",
-            "--uts",
-            "--",
-        ]);
+        let mut command = namespace_command();
         command.arg(&executable);
         command
     } else {

@@ -157,7 +157,7 @@ jobs:
           FILTER: ${{ inputs.filter }}
         run: |
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
-            -- \
+            -- --show-output \
             --skip 'backend::linux::namespace::authority' \
             --skip 'backend::linux::namespace::netns' \
             --skip 'backend::linux::namespace::reaper' \
