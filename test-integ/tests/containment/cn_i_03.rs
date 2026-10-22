@@ -77,6 +77,6 @@ fn linux_signals(b: &BoxFixture) {
     result.assert_contains("self_signal_count 1");
     result.assert_contains("signal_host ('rc', -1, 'errno', 3)");
     marker.advance();
-    assert_eq!(marker.count(), 1, "the contained signal reached the host marker");
+    assert_eq!(marker.count(), 1, "only the host control signal reached the marker");
     marker.signal_control(2);
 }

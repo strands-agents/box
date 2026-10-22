@@ -685,11 +685,12 @@ fn eight_concurrent_clients_all_make_progress() {
     }
     let box_ = Request::with_policy("prog-eight", PERMISSIVE).expect();
     let mut script = String::from("printf 'EIGHT_CLIENTS_STARTED\n'\npids=''\n");
+    let release = await_file("$BOX_HOME/release-clients");
     for i in 1..=8 {
         script.push_str(&format!(
             r#"(
                 : > "$BOX_HOME/ready-{i}"
-                while [ ! -e "$BOX_HOME/release-clients" ]; do :; done
+                {release}
                 zsh -c '
                     mkdir -p {{box_home}}/w{i}
                     cd {{box_home}}/w{i}
@@ -702,9 +703,8 @@ fn eight_concurrent_clients_all_make_progress() {
         ));
     }
     for i in 1..=8 {
-        script.push_str(&format!(
-            "while [ ! -e \"$BOX_HOME/ready-{i}\" ]; do :; done\n"
-        ));
+        script.push_str(&await_file(&format!("$BOX_HOME/ready-{i}")));
+        script.push('\n');
     }
     script.push_str(
         r#": > "$BOX_HOME/release-clients"

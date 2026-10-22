@@ -54,7 +54,7 @@ fn marker(args: &[String]) {
                 // The caller must still prove a successful host attach and detach.
                 assert_eq!(
                     error.raw_os_error(),
-                    Some(22),
+                    Some(22), // EINVAL: this tracing permission option is unavailable.
                     "DET_ERROR: allow tracing this synthetic marker: {error}"
                 );
                 eprintln!("TRACE_PERMISSION_OPTION_UNAVAILABLE");

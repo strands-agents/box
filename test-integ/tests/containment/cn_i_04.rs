@@ -53,12 +53,17 @@ fn linux_queries(b: &BoxFixture) {
     assert!(support::text(control).contains("HOST_QUERIES_SUCCEEDED"));
     let result = b.probe_py(&format!(
         "t('self_process_group', lambda: os.getpgid(0) == os.getpgrp())\n\
+         t('getsid_self', lambda: os.getsid(0))\n\
+         t('getpriority_self', lambda: os.getpriority(os.PRIO_PROCESS, 0))\n\
          t('getpgid_host', lambda: os.getpgid({pid}))\n\
          t('getsid_host', lambda: os.getsid({pid}))\n\
          t('getpriority_host', lambda: os.getpriority(os.PRIO_PROCESS, {pid}))"
     ));
     result.assert_ok("self_process_group", "True");
     result.assert_errno("getpgid_host", 3);
+    // The syscall filter refuses getsid and getpriority regardless of the target process.
+    result.assert_errno("getsid_self", 1);
+    result.assert_errno("getpriority_self", 1);
     result.assert_errno("getsid_host", 1);
     result.assert_errno("getpriority_host", 1);
     marker.advance();

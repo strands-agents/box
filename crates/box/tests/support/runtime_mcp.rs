@@ -26,6 +26,22 @@ const AGENT_HOME: &str = "agent-home";
 const UNRELATED_SENTINEL: &str = "STRANDS_BOX_DISCOVERY_SENTINEL";
 const POLL: Duration = Duration::from_millis(20);
 
+fn fixture_python() -> PathBuf {
+    if cfg!(target_os = "linux") {
+        Path::new("/usr/bin/python3")
+            .canonicalize()
+            .expect("resolve the fixture script interpreter")
+    } else {
+        PathBuf::from("/usr/bin/python3")
+    }
+}
+
+fn fixture_sleep() -> PathBuf {
+    Path::new("/bin/sleep")
+        .canonicalize()
+        .expect("resolve the fixture's descendant helper")
+}
+
 /// What the first exec of a fresh box's own alias image may add on macOS, where the system assesses
 /// the new file once and serializes that assessment across every box starting on the host.
 const FIRST_ALIAS_EXEC: Duration = if cfg!(target_os = "macos") {
@@ -195,16 +211,8 @@ impl RuntimeMcpBox {
         if server.behavior.uses_release_fifo() {
             make_fifo(&self.release_path(server.program));
         }
-        let python = if cfg!(target_os = "linux") {
-            Path::new("/usr/bin/python3")
-                .canonicalize()
-                .expect("resolve the fixture script interpreter")
-        } else {
-            PathBuf::from("/usr/bin/python3")
-        };
-        let sleep = Path::new("/bin/sleep")
-            .canonicalize()
-            .expect("resolve the fixture's descendant helper");
+        let python = fixture_python();
+        let sleep = fixture_sleep();
         let script = format!(
             r#"#!{python}
 import json
@@ -581,19 +589,11 @@ while True:
                     server.behavior,
                     DiscoveryBehavior::FailAfterRelease | DiscoveryBehavior::Hang
                 ) {
-                    files.push(
-                        Path::new("/bin/sleep")
-                            .canonicalize()
-                            .expect("resolve the fixture's descendant helper"),
-                    );
+                    files.push(fixture_sleep());
                 }
                 if server.executable != server.program {
                     // An env launcher does not discover its script's interpreter.
-                    files.push(
-                        Path::new("/usr/bin/python3")
-                            .canonicalize()
-                            .expect("resolve the fixture script interpreter"),
-                    );
+                    files.push(fixture_python());
                 }
                 if server.contain_egress == Some(false) {
                     files.extend(

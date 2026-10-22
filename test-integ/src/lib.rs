@@ -1616,10 +1616,13 @@ if sys.platform != "linux":
     hints.append(sys.prefix)
 extensions = []
 if sys.platform == "linux":
-    import _ctypes
-    extension = getattr(_ctypes, "__file__", None)
-    if extension:
-        extensions.append(os.path.dirname(os.path.realpath(extension)))
+    try:
+        import _ctypes
+        extension = getattr(_ctypes, "__file__", None)
+        if extension:
+            extensions.append(os.path.dirname(os.path.realpath(extension)))
+    except ImportError:
+        pass
 print(json.dumps({"implementation": sys.implementation.name, "image": image(),
                   "roots": [d for d in roots if d], "hints": [d for d in hints if d],
                   "extensions": extensions}))

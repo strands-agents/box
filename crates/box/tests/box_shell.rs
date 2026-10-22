@@ -421,7 +421,7 @@ fn the_alias_image_is_execute_only() {
 /// The existing alias test still checks writes on every supported backend.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "known namespace-backend gap: an executable alias remains readable; run explicitly to measure read protection"]
+#[ignore = "https://github.com/strands-agents/box/issues/48: an executable alias remains readable; run explicitly to measure read protection"]
 fn linux_alias_read_protection_requirement() {
     assert!(
         fixture::namespace_launcher_is_usable(),

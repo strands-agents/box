@@ -28,14 +28,17 @@ det_case! {
         permitted.assert_spawn_permitted_exactly(&git);
         permitted.assert_absent("no tool runs");
 
-        let (sibling, output) = if Platform::current() == Platform::Macos {
-            ("ssh -V", "OpenSSH")
+        let (sibling, resource, output) = if Platform::current() == Platform::Macos {
+            ("ssh -V".to_owned(), "ssh".to_owned(), "OpenSSH")
         } else {
-            ("/bin/ls --version", "GNU coreutils")
+            let program = std::path::Path::new("/bin/ls").canonicalize()
+                .expect("DET_ERROR: resolve the sibling program");
+            let resource = program.to_string_lossy().into_owned();
+            (format!("{} --version", sh_quote(&resource)), resource, "GNU coreutils")
         };
-        let denied = b.run_mediated_with_config(|text| with_git(b, text), sibling);
+        let denied = b.run_mediated_with_config(|text| with_git(b, text), &sibling);
         denied.assert_shell_denied();
-        denied.assert_spawn_denied(if Platform::current() == Platform::Macos { "ssh" } else { "ls" });
+        denied.assert_spawn_denied(&resource);
         denied.assert_absent(output);
 
         let other_git = if Platform::current() == Platform::Macos {

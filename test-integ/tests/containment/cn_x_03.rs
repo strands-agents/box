@@ -46,6 +46,9 @@ load("load_unseen_original", SRC)
 shutil.copyfile(SRC, DST)
 # Positive control: the write half worked and the copy is byte-complete.
 t("copy_same_size", lambda: os.path.getsize(DST) == os.path.getsize(SRC))
+with open(SRC, "rb") as original, open(DST, "rb") as copied:
+    same_bytes = original.read() == copied.read()
+t("copy_same_bytes", lambda: same_bytes)
 
 # The mapping the write cell refuses. A different path, so dyld maps it fresh.
 load("load_written_copy", DST)
@@ -58,10 +61,11 @@ os.unlink(DST)
         r.assert_ok("source_is_unloaded", "True");
         r.assert_ok("load_unseen_original", "loaded");
         r.assert_ok("copy_same_size", "True");
-        // The copy cannot be mapped executable, and the message names the SANDBOX. A
-        // code-signing refusal is not an acceptable pass here — see the header.
+        r.assert_ok("copy_same_bytes", "True");
+        // The copy is readable; require the mapping refusal rather than a generic load error.
         r.assert_absent("load_written_copy OK");
         match Platform::current() {
+            // A code-signing refusal cannot satisfy the sandbox mapping check.
             Platform::Macos => r.assert_contains("file system sandbox blocked mmap()"),
             Platform::Linux => r.assert_contains("failed to map segment from shared object"),
         }
