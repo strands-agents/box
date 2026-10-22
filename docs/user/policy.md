@@ -302,9 +302,10 @@ Every request under `/v1/` on `api.example.com` is permitted, except the endpoin
 `/v1/admin`.
 
 `context.input.path` is the exact path the gateway forwards. The gateway puts the path in canonical
-form first: it decodes the percent-escapes of unreserved characters, keeps `%2F` encoded, and
-removes `.` and `..` segments. `/v1/./admin`, `/v1/%61dmin`, and `/v1/users/../admin` all reach
-policy as `/v1/admin`.
+form first: it decodes the percent-escapes of unreserved characters, keeps `%2F` encoded with
+uppercase hex digits, and removes `.` and `..` segments. `/v1/./admin`, `/v1/%61dmin`, and
+`/v1/users/../admin` all reach policy as `/v1/admin`, and `/v1/admin%2fexport` reaches it as
+`/v1/admin%2Fexport`.
 
 The gateway keeps repeated slashes and `%2F`, and the server receives them. Servers disagree about
 such a path: some serve `/v1//admin` as `/v1/admin`, and others, such as S3, treat `a//b` and `a/b`
@@ -345,6 +346,8 @@ when {
 | `/v1/admin/export` | Refused | `no_admin` |
 | `/v1//admin`, `/v1///admin/export` | Refused | `no_ambiguous_slash` |
 | `/v1/users//42`, `/v1/admin%2Fexport`, `/v1/admin%2fexport` | Refused | `no_ambiguous_slash` |
+
+`context.input.path` holds no query, so the `//` in `?next=//login` is outside the path.
 
 ```text
 http:request gate: policy denied this operation on 'api.example.com:443/v1//admin' [policy: no_ambiguous_slash].
