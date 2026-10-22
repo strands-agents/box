@@ -120,6 +120,12 @@ required-features = ["test-support"]
 name = "box_library"
 harness = false
 
+# Owns its `main` for the same reason `box_library` does: the one-run guard is process-wide, so
+# each case runs in its own re-executed process rather than as a second run beside the first.
+[[test]]
+name = "box_library_reload"
+harness = false
+
 # Each end-to-end suite below spawns a test-only binary, so each carries the same gate: without it
 # a plain `cargo test` would build the suite while its probe is absent and fail on a missing binary.
 #

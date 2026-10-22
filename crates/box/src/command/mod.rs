@@ -18,7 +18,7 @@ use crate::command::cli::{Cli, Command, PolicyCommand};
 use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
-pub(crate) fn execute(cli: Cli) -> ExitCode {
+pub(crate) fn execute(cli: Cli, on_open: Option<run::OnOpen>) -> ExitCode {
     // Disable core dumps and restrict process-memory inspection before Box starts its runtime or loads credentials.
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
@@ -37,7 +37,7 @@ pub(crate) fn execute(cli: Cli) -> ExitCode {
 
     // A plain multi-threaded runtime. The Shell is `!Send` and needs a `LocalSet`, but it builds its
     // own runtime on its own thread, so a non-yielding Lua loop cannot pin the thread serving
-    match runtime.block_on(dispatch(cli)) {
+    match runtime.block_on(dispatch(cli, on_open)) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("strands-box: error: {error}");
@@ -47,9 +47,9 @@ pub(crate) fn execute(cli: Cli) -> ExitCode {
 }
 
 /// Route one invocation to the verb it named.
-async fn dispatch(cli: Cli) -> Result<ExitCode, BoxError> {
+async fn dispatch(cli: Cli, on_open: Option<run::OnOpen>) -> Result<ExitCode, BoxError> {
     match &cli.command {
-        Command::Run { config, workload } => run::execute(config, workload).await,
+        Command::Run { config, workload } => run::execute(config, workload, on_open).await,
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },
         } => policy::generate_schema(config, output_dir).await,

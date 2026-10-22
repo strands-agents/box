@@ -74,7 +74,11 @@ fn write_credential_stores(
 }
 
 /// Run one contained agent from one locked configuration snapshot.
-pub(crate) async fn execute(config: &Path, argv: &[OsString]) -> Result<ExitCode, BoxError> {
+pub(crate) async fn execute(
+    config: &Path,
+    argv: &[OsString],
+    on_open: Option<OnOpen>,
+) -> Result<ExitCode, BoxError> {
     let locked = prepare(config, argv)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
@@ -84,7 +88,7 @@ pub(crate) async fn execute(config: &Path, argv: &[OsString]) -> Result<ExitCode
         &name,
     ));
 
-    let outcome = hosted(locked, Arc::clone(&collector)).await;
+    let outcome = hosted(locked, Arc::clone(&collector), on_open).await;
 
     // The one teardown point, so every exit above records the stop and every queued record
     // reaches its target. `drained` is the only route out of the collector's queue, and the
@@ -104,10 +108,15 @@ pub(crate) async fn execute(config: &Path, argv: &[OsString]) -> Result<ExitCode
     outcome
 }
 
+/// What [`crate::run_with_handle`] hands a caller once the box is open. Boxed rather than
+/// generic, so the supervision path carries one concrete type.
+pub(crate) type OnOpen = Box<dyn FnOnce(crate::BoxHandle) + Send>;
+
 /// Open this box's authority, translate every declared process, and supervise the agent.
 async fn hosted(
     locked: LockedRun,
     collector: Arc<telemetry::Collector>,
+    on_open: Option<OnOpen>,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = policy_subject(&sources);
@@ -152,6 +161,9 @@ async fn hosted(
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
     eprintln!("strands-box: starting workload");
+    // Cloned before the engine moves into the box, so a caller reloads the authority this run
+    // decides against rather than a fresh copy of it.
+    let reloadable = Arc::clone(&policy);
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
@@ -162,6 +174,11 @@ async fn hosted(
         &locked.workspace,
         &home,
     )?;
+    // Only once the box is open, so a caller never holds a handle to a box that failed to start.
+    // Runs on this task, so the callback is expected to hand the handle on.
+    if let Some(on_open) = on_open {
+        on_open(crate::BoxHandle::new(reloadable));
+    }
     let site = Site {
         attachment: hosted.attachment(),
         layout: &locked.root,
