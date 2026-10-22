@@ -37,21 +37,6 @@ pub(crate) const TEST_QUARANTINE: &[Quarantine] = &[Quarantine {
     restore_when: "the synthetic exception is removed",
 }];
 
-/// The authorized entry for `(id, platform)`, if any. Exact string match on both.
-pub fn lookup(id: &str, platform: &str) -> Option<&'static Quarantine> {
-    TEMPORARY_QUARANTINE
-        .iter()
-        .find(|q| q.id == id && q.platform == platform)
-}
-
-/// Every entry that applies to `platform`, in list order.
-pub fn for_platform(platform: &str) -> Vec<&'static Quarantine> {
-    TEMPORARY_QUARANTINE
-        .iter()
-        .filter(|q| q.platform == platform)
-        .collect()
-}
-
 /// The ONE note text an authorized SKIP row carries for `q`. The runner writes exactly this; the
 /// reducer requires exactly this. It names the case, the platform, the reason, the issue, the owner
 /// and the restoration condition, so the row is self-describing in `verdict.json`.
@@ -82,12 +67,6 @@ mod tests {
     #[test]
     fn the_quarantine_is_empty() {
         assert!(TEMPORARY_QUARANTINE.is_empty());
-        assert!(for_platform("linux").is_empty());
-        assert!(for_platform("macos").is_empty());
-        for id in ["CN-W-05", "CN-W-06", "CN-Q-01"] {
-            assert!(lookup(id, "linux").is_none());
-            assert!(lookup(id, "macos").is_none());
-        }
     }
 
     #[test]
