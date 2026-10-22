@@ -1166,6 +1166,26 @@ impl RunningMcpClient {
         }
     }
 
+    /// Write `frames` copies of `value` on another thread, ignoring write errors, and wait for the
+    /// alias to exit while its stdin is still open.
+    pub fn flood_and_wait(mut self, value: &Value, frames: usize, timeout: Duration) -> ClientExit {
+        let mut stdin = self.stdin.take().expect("the MCP alias stdin is open");
+        let mut line = serde_json::to_vec(value).expect("encode one MCP frame");
+        line.push(b'\n');
+        let writer = std::thread::spawn(move || {
+            for _ in 0..frames {
+                if stdin.write_all(&line).is_err() {
+                    return;
+                }
+            }
+            // Hold stdin open until the alias has exited, so the exit is not caused by EOF.
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        let exit = self.wait_for_broker_exit(timeout);
+        drop(writer);
+        exit
+    }
+
     pub fn send(&mut self, value: &Value) {
         let stdin = self.stdin.as_mut().expect("the MCP alias stdin is open");
         serde_json::to_writer(&mut *stdin, value).expect("write one MCP frame");

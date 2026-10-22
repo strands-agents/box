@@ -3175,3 +3175,20 @@ fn read_stdin_releases_its_bytes_from_the_broker_budget() {
     assert!(text.contains("2097152"), "{output:?}");
     assert!(text.contains("|status=0"), "{output:?}");
 }
+
+/// A Python Call reads none of the alias's stdin, so the commands after it still get it.
+#[test]
+fn a_python_call_leaves_stdin_to_the_commands_after_it() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_under(PERMISSIVE_POLICY, "python-stdin-left");
+
+    let output = box_.bash(
+        r#"printf 'first\nsecond\n' | { python3 -c "print(6 * 7)"; read LINE; printf "rest=[%s]" "$LINE"; }"#,
+    );
+
+    let text = stdout(&output);
+    assert!(text.contains("42"), "{output:?}");
+    assert!(text.contains("rest=[first]"), "{output:?}");
+}

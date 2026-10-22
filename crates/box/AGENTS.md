@@ -660,13 +660,27 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias forwards its stdin, and ends it with `StdinEof` while the connection stands.** For a
-  Shell Call, `forward` sends `Open` and `Call`, then the alias's stdin as `Input` frames, then
-  **`StdinEof`**. A harness hook reads its payload on stdin, so a hook rewritten to `zsh -c` needs
-  that input. The `Input` writes carry no timeout, because a cancelled write leaves part of a frame
-  on the socket and no `StdinEof` can follow it. A Python Call still gets `Open`, `Call`,
-  `StdinEof`. The broker refuses `Input` and `StdinEof` for Python, and the trailing EOF is harmless
-  only because a Python Call runs inline and writes `Exit` first. The EOF is not optional. Without it the Program's stdin channel stays open, and any command that
+- **The alias forwards its stdin, and ends it with `StdinEof` while the connection stands.** Every
+  alias sends one frame sequence: `Open`, `Call` for a submission, the alias's stdin as `Input`
+  frames, then **`StdinEof`**. A harness hook reads its payload on stdin, so a hook rewritten to
+  `zsh -c` needs that input. One `pump_stdin` sends it, in one of three `StdinMode`s:
+  - **`Grace`, for a Shell Call** (see `STDIN_GRACE` below).
+  - **`Stream`, for an MCP server**, with no grace, because a quiet client between requests must
+    not get an EOF.
+  - **`Closed`, for a Python Call**, which is the zero-`Input` case of the same sequence. Monty has
+    no `input()` and no `sys.stdin`, and reading the alias's stdin would take bytes from the
+    commands after it, which breaks `while read f; do python3 …; done < list`.
+    `box_shell.rs::a_python_call_leaves_stdin_to_the_commands_after_it` pins it. The broker also
+    takes `Input` and `StdinEof` for a Python Program and drops them, so a client that sends them
+    gets no refusal; `host.rs::a_python_program_drops_input_and_refuses_signal_by_name` pins that.
+
+  **An MCP alias lives until its client closes stdin, or until a write after the session fails.**
+  A client expects its stdio server process to stay up, and
+  `runtime_mcp_policy_staging.rs::one_failure_reaps_all_live_leader_and_follower_groups_before_exchange_close`
+  asserts it. While it waits, the alias drains the socket, so the broker never blocks on a frame
+  nobody reads. A `Denied` frame ends the alias at once. The `Input` writes carry no timeout,
+  because a cancelled write leaves part of a frame on the socket and no `StdinEof` can follow it.
+  The EOF is not optional. Without it the Program's stdin channel stays open, and any command that
   pre-reads stdin blocks to its deadline — the `lua` builtin does exactly that, so **every** `lua`
   call took 34–36s and came back as `the call exceeded its deadline`. That is also why
   `STDIN_GRACE` exists: a harness can hold the alias's stdin open and write nothing, so a stdin
