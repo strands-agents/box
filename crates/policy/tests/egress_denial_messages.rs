@@ -379,3 +379,104 @@ fn remote_mcp_refusals_form_rpc_errors_only_for_valid_request_ids() {
         assert_eq!(upstream.request_count(), 0);
     }
 }
+
+const DUPLICATE_KEY_POLICY: &str = r#"
+permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource);
+@id("blocked-tool")
+forbid(principal, action == Box::Action::"mcp:call", resource)
+when { context.input has tool && context.input.tool == "blocked" };
+@id("denied-argument")
+forbid(principal, action == demo::Action::"add", resource)
+when { context.input.a == 1 };
+"#;
+
+/// Each frame repeats a key, and a first-wins server reads the call the policy forbids.
+const DUPLICATED: [(&str, &str); 3] = [
+    (
+        "method",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"blocked","arguments":{"a":7}},"method":"ping"}"#,
+    ),
+    (
+        "params.name",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blocked","name":"add","arguments":{"a":7}}}"#,
+    ),
+    (
+        "params.arguments.a",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":{"a":1,"a":2}}}"#,
+    ),
+];
+
+#[test]
+fn a_remote_mcp_frame_with_a_duplicate_key_is_refused_and_recorded() {
+    let failures: Vec<String> = DUPLICATED
+        .into_iter()
+        .filter_map(|(key, frame)| {
+            let (handle, upstream, emitter) = tls_gateway(DUPLICATE_KEY_POLICY, true);
+            let response = tls_response(&handle, &upstream, frame.as_bytes());
+            let forwarded = upstream.request_count();
+            let denied = emitter
+                .records()
+                .into_iter()
+                .find(|record| record.decision == AuditDecision::Deny);
+            let refused = response.starts_with("HTTP/1.1 403 ")
+                && response.ends_with("MCP frame refused")
+                && forwarded == 0
+                && denied.as_ref().is_some_and(|denied| {
+                    denied.path == "/mcp"
+                        && denied.reason.starts_with("MCP frame refused: ")
+                        && denied.reason.contains("duplicate")
+                });
+            (!refused).then(|| {
+                format!(
+                    "{key}: status {:?}, forwarded {forwarded}, deny {:?}",
+                    response.lines().next(),
+                    denied.map(|denied| denied.reason)
+                )
+            })
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn a_remote_mcp_frame_without_a_duplicate_key_forwards_byte_identical() {
+    for frame in [
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"add","arguments":{"a":7}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"add","arguments":{"a":7},"_meta":{"name":"x","list":[{"a":1},{"a":2}],"nested":{"a":{"a":[]}}}}}"#,
+        r#"{ "jsonrpc" : "2.0" , "id" : 6 , "method" : "ping" }"#,
+    ] {
+        let (handle, upstream, _) = tls_gateway(DUPLICATE_KEY_POLICY, true);
+        let response = tls_response(&handle, &upstream, frame.as_bytes());
+        assert!(response.starts_with("HTTP/1.1 200 "), "{frame}: {response}");
+        assert!(
+            upstream.last_request().raw.ends_with(frame),
+            "{frame} reaches the server unchanged"
+        );
+    }
+}
+
+#[test]
+fn the_remote_mcp_controls_still_decide_by_policy() {
+    for (frame, status) in [
+        (
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"blocked","arguments":{"a":7}}}"#,
+            "HTTP/1.1 403 ",
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"add","arguments":{"a":1}}}"#,
+            "HTTP/1.1 403 ",
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"add","arguments":{"a":2}}}"#,
+            "HTTP/1.1 200 ",
+        ),
+    ] {
+        let (handle, upstream, _) = tls_gateway(DUPLICATE_KEY_POLICY, true);
+        assert!(
+            tls_response(&handle, &upstream, frame.as_bytes()).starts_with(status),
+            "{frame}"
+        );
+    }
+}

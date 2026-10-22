@@ -5,7 +5,9 @@
 //! | [`McpTarget`] | the decided method and the item it names, or `None` for a frame that asks nothing |
 //! | [`mcp_denial_response`] | the JSON-RPC error a refused request receives |
 //! | [`canonicalize_mcp_frame`] | the `resources/read` frame the server receives, with its canonical URI |
+//! | [`refuse_duplicate_mcp_keys`] | the refusal of a frame that repeats a key inside one object |
 
+mod duplicate;
 mod uri;
 
 use std::io;
@@ -65,6 +67,7 @@ impl McpTarget {
         if frame.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);
         }
+        refuse_duplicate_mcp_keys(frame)?;
         let refuse = |reason: String| io::Error::new(io::ErrorKind::InvalidData, reason);
 
         let parsed: Value = serde_json::from_slice(frame).map_err(|error| {
@@ -194,6 +197,11 @@ pub fn mcp_denial_response(frame: &[u8], message: &str) -> Option<String> {
         })
         .to_string(),
     )
+}
+
+/// Refuse a frame in which one object repeats a key, at any depth.
+pub fn refuse_duplicate_mcp_keys(frame: &[u8]) -> io::Result<()> {
+    duplicate::refuse_duplicate_keys(frame)
 }
 
 /// The frame with its `resources/read` URI canonicalized, or `None` when nothing changes.
