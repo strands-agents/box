@@ -35,6 +35,7 @@ struct LockedRun {
     /// The program each grammar in `grammars` decides, including a left-out tool's.
     grammar_programs: std::collections::BTreeSet<String>,
     sources: Vec<AuthoritySource>,
+    upstream_ca_pems: Vec<String>,
     owned: Lock,
 }
 
@@ -402,6 +403,7 @@ async fn hosted(
         commands,
         collector,
         &locked.sources,
+        &locked.upstream_ca_pems,
         locked.owned,
         &locked.workspace,
         &home,
@@ -551,6 +553,7 @@ fn prepare_contract(
         grammars: request.grammars,
         grammar_programs,
         sources: request.sources,
+        upstream_ca_pems: request.upstream_ca_pem.into_iter().collect(),
         owned,
     })
 }
