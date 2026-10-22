@@ -302,8 +302,11 @@ jobs:
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
             python3 scripts/check-linux-package.py stage/box-core
-          # The outer test container permits namespace setup. Box still runs as UID 1000.
-          docker run --rm --privileged --user 1000:1000 \
+          # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
+          docker run --rm --cap-drop ALL --user 1000:1000 \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
             --env HOME=/home/box-test \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
@@ -478,7 +481,7 @@ jobs:
           cat > body.md <<EOF
           ## Download
 
-          Download Box Core into a local directory on macOS (Apple silicon) or Linux ARM64:
+          Download Box Core into a local directory on macOS (Apple silicon):
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
@@ -491,6 +494,16 @@ jobs:
           \`\`\`
 
           The downloader picks a tarball from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
+
+          For Linux ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
+
+          \`\`\`sh
+          awk '\$2 == "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"' SHA256SUMS.txt > box-linux.sha256 &&
+            test -s box-linux.sha256 &&
+            sha256sum --check box-linux.sha256 &&
+            mkdir -p box-core &&
+            tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz
+          \`\`\`
 
           ## Assets
 

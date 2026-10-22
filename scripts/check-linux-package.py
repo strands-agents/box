@@ -29,6 +29,8 @@ def inspect(binary):
     if not names:
         raise ValueError(f"{binary.name}: no glibc requirements found")
     for name in names:
+        if name == "GLIBC_PRIVATE":
+            raise ValueError(f"{binary.name}: private glibc interfaces are not supported")
         version = name.removeprefix("GLIBC_")
         if not re.fullmatch(r"\d+\.\d+(?:\.\d+)*", version):
             raise ValueError(f"{binary.name}: unknown glibc requirement {name}")
