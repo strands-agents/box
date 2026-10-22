@@ -1326,7 +1326,13 @@ write. An in-memory effect re-resolves the token path under the same lock as the
 check and flushes through that descriptor, so a directory swapped inside the admission window cannot
 divert it, which
 `in_mount_admission_window.rs::a_directory_swapped_inside_the_admission_window_cannot_divert_a_host_write`
-pins.
+pins. The token is taken on the path with every symbolic link followed, and Box refuses it when the
+identity it pins is not that path, which
+`a_pin_whose_host_identity_is_not_the_spelling_is_unavailable` pins. The pin and the effect both reach
+the parent directory from the bind root one component at a time, refusing a symbolic link at every
+component, which `a_symlinked_ancestor_is_neither_pinned_nor_opened` pins. The cost: listing,
+metadata, `cd`, `readlink`, and `glob` act on the path again after the check, so a swap there can show
+names and metadata, and a swap of two real directories is not refused.
 
 <a id="host-backed-effects-refuse-what-a-write-cannot-produce"></a>
 ### On a shared inode, a host-backed effect is stricter than a write
