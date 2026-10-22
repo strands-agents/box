@@ -14,6 +14,9 @@ use std::process::ExitCode;
 mod args;
 use args::Args;
 
+#[cfg(all(test, target_os = "linux"))]
+mod linux_failure_tests;
+
 #[cfg(any(unix, test))]
 type TargetEnvironment = std::collections::BTreeMap<String, String>;
 
@@ -559,6 +562,166 @@ mod tests {
     use std::os::fd::IntoRawFd as _;
 
     use super::{Args, decode_target_environment, disclose_warnings, read_config};
+
+    fn request_at(path: &std::path::Path) -> Args {
+        Args {
+            config: path.to_owned(),
+            config_fd: None,
+            config_sha256: [0; 32],
+            target_env_json: "{}".into(),
+            setup_status_fd: None,
+            relay_control_fd: None,
+            launch_gate_fd: None,
+            command: vec!["/containment-test-no-such-program".into()],
+            argv0: None,
+        }
+    }
+
+    #[test]
+    fn config_failures_report_the_stage_before_applying_containment() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        for (bytes, correct_digest, expected_stage) in [
+            (None, false, 1),
+            (Some(b"{}".as_slice()), false, 2),
+            (Some(b"\xff".as_slice()), true, 2),
+            (Some(b"{".as_slice()), true, 2),
+            (Some(b"{}".as_slice()), true, 2),
+        ] {
+            let mut args = request_at(&path);
+            if let Some(bytes) = bytes {
+                std::fs::write(&path, bytes).unwrap();
+                if correct_digest {
+                    args.config_sha256 = Sha256::digest(bytes).into();
+                }
+            }
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let status = super::SetupStatus::arm(Some(writer.as_raw_fd())).unwrap();
+            assert_eq!(
+                super::apply_containment(&args, &status),
+                Err(std::process::ExitCode::from(2))
+            );
+            let mut stage = [0];
+            reader.read_exact(&mut stage).unwrap();
+            assert_eq!(stage, [expected_stage]);
+            assert_eq!(
+                unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                libc::FD_CLOEXEC
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_only_config_descriptor_reports_a_read_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        let mut args = request_at(&path);
+        args.config_fd = Some(std::fs::File::create(&path).unwrap().into_raw_fd());
+        assert!(matches!(
+            read_config(&args),
+            Err(super::ConfigFileError::Read(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"");
+    }
+
+    #[test]
+    fn target_setup_failures_report_environment_or_exec_stage() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let bad_cwd = serde_json::json!({"PWD": missing}).to_string();
+        for (environment, argv0, stage) in [
+            ("{", None, 4),
+            (bad_cwd.as_str(), None, 5),
+            ("{}", None, 5),
+            ("{}", Some("chosen-name"), 5),
+        ] {
+            let mut args = request_at(&missing);
+            args.target_env_json = environment.into();
+            args.argv0 = argv0.map(str::to_owned);
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let status = super::SetupStatus::arm(Some(writer.as_raw_fd())).unwrap();
+            assert_eq!(
+                super::exec_command(&args, &status),
+                std::process::ExitCode::from(4)
+            );
+            let mut observed = [0];
+            reader.read_exact(&mut observed).unwrap();
+            assert_eq!(observed, [stage]);
+        }
+    }
+
+    #[test]
+    fn absent_and_unwritable_status_channels_do_not_mask_failure() {
+        let status = super::SetupStatus::arm(None).unwrap();
+        assert_eq!(
+            status.fail(super::SetupStage::Apply, 3, "test refusal"),
+            std::process::ExitCode::from(3)
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let reader = std::fs::File::open(directory.path()).unwrap();
+        use std::os::fd::AsRawFd as _;
+        let status = super::SetupStatus::arm(Some(reader.as_raw_fd())).unwrap();
+        assert_eq!(
+            status.fail(super::SetupStage::Apply, 3, "unwritable status"),
+            std::process::ExitCode::from(3)
+        );
+        assert!(super::SetupStatus::arm(Some(-1)).is_err());
+        let mut args = request_at(directory.path());
+        args.setup_status_fd = Some(-1);
+        assert_eq!(super::run(&args), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn launch_gate_refuses_a_non_socket_descriptor() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(super::wait_for_launch(file.into_raw_fd()).is_err());
+    }
+
+    #[test]
+    fn closing_an_already_closed_descriptor_succeeds() {
+        assert!(super::close_ignoring_ebadf(-1).is_ok());
+    }
+
+    #[test]
+    fn run_refuses_missing_configuration_in_a_fresh_process() {
+        const CHILD: &str = "BOX_UNIT_TRAMPOLINE_MISSING_CONFIG";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let args = request_at(std::path::Path::new(&path));
+            let result = super::run(&args);
+            std::process::exit(if result == std::process::ExitCode::from(2) {
+                0
+            } else {
+                99
+            });
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::run_refuses_missing_configuration_in_a_fresh_process",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path().join("absent-config"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read config file"));
+    }
 
     /// The one warning the floors carry reaches stderr before apply, and a disjoint pair says nothing.
     #[test]

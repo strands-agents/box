@@ -7,6 +7,9 @@ pub(crate) mod reaper;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
+#[cfg(test)]
+mod failure_tests;
+
 use crate::ContainmentConfig;
 use crate::backend::{ContainmentBackend, SupportInfo};
 use crate::error::ContainmentError;
@@ -289,26 +292,46 @@ fn unenforceable(capability: &str) -> ContainmentError {
 fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     // Read the credentials BEFORE the unshare.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    enter_namespaces_using(
+        join_host_network,
+        uid,
+        gid,
+        |flags| {
+            // SAFETY: one syscall with scalar flags. Irreversible for this process.
+            if unsafe { libc::unshare(flags) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        },
+        |path, value| std::fs::write(path, value),
+    )
+}
 
-    // SAFETY: a single syscall with a constant argument. Irreversible for this
-    // process, which is the intent.
-    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+/// Keep setup ordering and refusal reporting testable without changing the caller's namespaces.
+fn enter_namespaces_using(
+    join_host_network: bool,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    mut unshare: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    mut write: impl FnMut(&str, &str) -> std::io::Result<()>,
+) -> Result<(), ContainmentError> {
+    if let Err(error) = unshare(libc::CLONE_NEWUSER) {
         return Err(apply_failure(format!(
-            "creating a user namespace: {}; this backend reported support, so a \
-             failure here means the host's policy changed since the probe",
-            std::io::Error::last_os_error()
+            "creating a user namespace: {error}; this backend reported support, so a \
+             failure here means the host's policy changed since the probe"
         )));
     }
 
-    std::fs::write("/proc/self/setgroups", "deny").map_err(|source| {
+    write("/proc/self/setgroups", "deny").map_err(|source| {
         apply_failure(format!(
             "denying setgroups: {source}; supplementary-group expansion must be \
              refused before the GID map is written"
         ))
     })?;
-    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1"))
+    write("/proc/self/uid_map", &format!("0 {uid} 1"))
         .map_err(|source| apply_failure(format!("writing the UID map: {source}")))?;
-    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
+    write("/proc/self/gid_map", &format!("0 {gid} 1"))
         .map_err(|source| apply_failure(format!("writing the GID map: {source}")))?;
 
     // One `unshare` for the rest: the kernel applies them atomically, so a partial
@@ -320,16 +343,14 @@ fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     if !join_host_network {
         remaining |= libc::CLONE_NEWNET;
     }
-    // SAFETY: a single syscall with a constant argument.
-    if unsafe { libc::unshare(remaining) } != 0 {
+    if let Err(error) = unshare(remaining) {
         return Err(apply_failure(format!(
-            "creating the mount, IPC, UTS{} namespaces: {}",
+            "creating the mount, IPC, UTS{} namespaces: {error}",
             if join_host_network {
                 ""
             } else {
                 ", and network"
-            },
-            std::io::Error::last_os_error()
+            }
         )));
     }
 
@@ -358,6 +379,23 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
             continue;
         }
         return;
+    }
+}
+
+/// Retry interrupted waits and propagate only a normal reaper exit.
+fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()>) -> libc::c_int {
+    let mut status = 0;
+    loop {
+        match wait(&mut status) {
+            Ok(()) => break,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            Err(_) => return 125,
+        }
+    }
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        125
     }
 }
 
@@ -394,22 +432,14 @@ fn establish_pid_namespace_and_reaper(
         }
         drop(parent_control);
         // The original caller.
-        let mut status: libc::c_int = 0;
-        loop {
+        let code = reaper_exit_code(|status| {
             // SAFETY: waiting on this process's own child.
-            if unsafe { libc::waitpid(reaper, &mut status, 0) } != -1 {
-                break;
+            if unsafe { libc::waitpid(reaper, status, 0) } != -1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
             }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                // SAFETY: an unsuccessful wait cannot report the workload's status.
-                unsafe { libc::_exit(125) };
-            }
-        }
-        let code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else {
-            125
-        };
+        });
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
@@ -702,6 +732,27 @@ mod tests {
         backend
             .validate_config(&config)
             .expect("the fixed utility device must remain available");
+    }
+
+    #[test]
+    fn a_fixed_device_exception_does_not_extend_to_a_symlink_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("null-alias");
+        std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&alias, Operation::Read, Scope::File)
+            .unwrap();
+        let error = NamespaceBackend::with_probe_result(true)
+            .validate_config(&config)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContainmentError::UnsupportedCapability { .. }
+        ));
+        assert!(
+            error.to_string().contains("configured device grant"),
+            "{error}"
+        );
     }
 
     #[test]

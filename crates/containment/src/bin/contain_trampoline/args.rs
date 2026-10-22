@@ -536,4 +536,118 @@ mod tests {
                 if message.contains("--relay-control-fd specified more than once")
         ));
     }
+
+    #[test]
+    fn every_descriptor_flag_refuses_standard_streams_and_invalid_numbers() {
+        for flag in [
+            "--config-fd",
+            "--setup-status-fd",
+            "--launch-gate-fd",
+            "--relay-control-fd",
+        ] {
+            for value in ["-1", "0", "1", "2", "2147483648", "not-a-number"] {
+                let error = parse(&[
+                    "--config",
+                    "c.json",
+                    "--config-sha256",
+                    DIGEST,
+                    "--target-env-json",
+                    "{}",
+                    flag,
+                    value,
+                    "--",
+                    "program",
+                ])
+                .unwrap_err();
+                let expected = if flag == "--launch-gate-fd" {
+                    if ["-1", "0", "1", "2"].contains(&value) {
+                        "launch gate must not use standard streams".to_owned()
+                    } else {
+                        "invalid launch gate descriptor".to_owned()
+                    }
+                } else if ["-1", "0", "1", "2"].contains(&value) {
+                    format!("{flag} must not collide with stdin/stdout/stderr")
+                } else {
+                    format!("{flag} must be a decimal file descriptor")
+                };
+                assert_eq!(error, ParseError::Invalid(expected), "{flag} {value}");
+            }
+            assert!(
+                matches!(parse(&[flag]), Err(ParseError::Invalid(message)) if message.contains(flag)),
+                "{flag} needs a value"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_gate_is_retained_and_cannot_be_declared_twice() {
+        let mut argv = vec![
+            "--config",
+            "c.json",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-json",
+            "{}",
+            "--launch-gate-fd",
+            "3",
+        ];
+        let mut valid = argv.clone();
+        valid.extend(["--", "program"]);
+        assert_eq!(parse(&valid).unwrap().launch_gate_fd, Some(3));
+        argv.extend(["--launch-gate-fd", "4", "--", "program"]);
+        assert!(
+            matches!(parse(&argv), Err(ParseError::Invalid(message)) if message.contains("more than once"))
+        );
+    }
+
+    #[test]
+    fn every_value_flag_reports_a_missing_value() {
+        for flag in [
+            "--config",
+            "--config-sha256",
+            "--target-env-json",
+            "--argv0",
+        ] {
+            assert!(
+                matches!(parse(&[flag]), Err(ParseError::Invalid(message)) if message.contains(flag)),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_required_fields_name_the_missing_field() {
+        for (argv, expected) in [
+            (vec!["--", "program"], "--config"),
+            (
+                vec!["--config", "c.json", "--", "program"],
+                "--config-sha256",
+            ),
+            (
+                vec![
+                    "--config",
+                    "c.json",
+                    "--config-sha256",
+                    DIGEST,
+                    "--",
+                    "program",
+                ],
+                "--target-env-json",
+            ),
+        ] {
+            assert!(
+                matches!(parse(&argv), Err(ParseError::Invalid(message)) if message.contains(expected)),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn digest_rejects_uppercase_nonhex_and_multibyte_input() {
+        for value in ["A".repeat(64), "g".repeat(64), "é".repeat(32)] {
+            assert!(
+                matches!(parse_sha256(&value), Err(ParseError::Invalid(message)) if message.contains("lowercase hexadecimal"))
+            );
+        }
+    }
 }
