@@ -33,6 +33,10 @@ fn contained(config: &ContainmentConfig, directory: &Path, arguments: &[&str]) -
 
 #[test]
 fn a_contained_build_runs_its_library_and_a_new_launch_keeps_operator_bytes_private() {
+    if !cfg!(target_arch = "aarch64") {
+        println!("skipping: Linux containment supports ARM64 (aarch64), not this architecture");
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
     std::fs::create_dir(&project).unwrap();

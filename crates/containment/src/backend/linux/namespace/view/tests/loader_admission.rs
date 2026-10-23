@@ -4,6 +4,14 @@ fn forked(case: impl FnOnce() -> bool) -> bool {
     super::forked(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(case)).unwrap_or(false))
 }
 
+fn mount_namespace_is_available() -> bool {
+    let available = forked(enter_private_namespace);
+    if !available {
+        println!("skipping: this host refuses a private user/mount namespace with UID/GID mappings");
+    }
+    available
+}
+
 fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, ContainmentConfig) {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().canonicalize().unwrap();
@@ -220,6 +228,9 @@ fn metadata_and_directory_entries_do_not_authorize_dependency_bytes() {
 
 #[test]
 fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
+    if !mount_namespace_is_available() {
+        return;
+    }
     assert!(forked(|| {
         assert!(enter_private_namespace());
         mount_syscall(
@@ -245,6 +256,9 @@ fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
 
 #[test]
 fn stated_byte_grants_admit_dependency_bytes() {
+    if !mount_namespace_is_available() {
+        return;
+    }
     for operation in [Operation::Read, Operation::Write, Operation::Exec] {
         for scope in [Scope::File, Scope::Root] {
             let (_directory, program, note, config) = fixture();
@@ -277,6 +291,9 @@ fn stated_byte_grants_admit_dependency_bytes() {
 
 #[test]
 fn dependency_mounts_refuse_leaf_or_parent_replacement() {
+    if !mount_namespace_is_available() {
+        return;
+    }
     for interpreter in [false, true] {
         for parent in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -320,6 +337,9 @@ fn dependency_mounts_refuse_leaf_or_parent_replacement() {
 
 #[test]
 fn concurrent_dependency_replacement_never_changes_the_mounted_bytes() {
+    if !mount_namespace_is_available() {
+        return;
+    }
     race_dependency_replacement(false);
     race_dependency_replacement(true);
 }
