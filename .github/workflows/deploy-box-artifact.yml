@@ -35,7 +35,7 @@ on:
         required: true
         type: string
       sha:
-        description: 'Optional commit SHA to release (must be an ancestor of origin/main). Defaults to current origin/main.'
+        description: 'Optional source SHA. Releases require main history. Dry runs also accept the dispatched commit and default to it.'
         required: false
         default: ''
         type: string
@@ -81,6 +81,8 @@ jobs:
         env:
           NEW_VERSION: ${{ inputs.version }}
           SHA_INPUT: ${{ inputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -90,19 +92,22 @@ jobs:
             exit 1
           fi
 
-          # 2. Resolve the SHA. Default to origin/main; a typed sha is accepted
-          #    only if it is an ancestor of origin/main.
+          # 2. Dry runs can validate the dispatched commit before merge.
           if [ -n "$SHA_INPUT" ]; then
             RELEASE_SHA=$(git rev-parse --verify "$SHA_INPUT^{commit}" 2>/dev/null) || {
               echo "::error::sha '$SHA_INPUT' is not a valid commit."
               exit 1
             }
-            if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
-              echo "::error::sha $RELEASE_SHA is not an ancestor of origin/main -- release only from main history."
-              exit 1
-            fi
+          elif [ "$DRY_RUN" = "true" ]; then
+            RELEASE_SHA=$(git rev-parse --verify "$DISPATCH_SHA^{commit}")
           else
             RELEASE_SHA=$(git rev-parse origin/main)
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            if [ "$DRY_RUN" != "true" ] || [ "$RELEASE_SHA" != "$DISPATCH_SHA" ]; then
+              echo "::error::source must belong to main history, or match the dispatched commit for a dry run."
+              exit 1
+            fi
           fi
 
           # 3. Resolve the previous tag. A baseline is required.
