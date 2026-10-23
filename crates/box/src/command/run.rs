@@ -31,6 +31,7 @@ struct LockedRun {
     trailing: Vec<String>,
     policy: Option<Policy>,
     sources: Vec<AuthoritySource>,
+    upstream_ca_pems: Vec<String>,
     owned: Lock,
 }
 
@@ -165,6 +166,7 @@ async fn hosted(
         policy,
         collector,
         &locked.sources,
+        &locked.upstream_ca_pems,
         locked.owned,
         &locked.workspace,
         &home,
@@ -285,6 +287,7 @@ fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
         sources: request.sources,
+        upstream_ca_pems: request.upstream_ca_pem.into_iter().collect(),
         owned,
     })
 }
