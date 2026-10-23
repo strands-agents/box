@@ -133,7 +133,7 @@ det_case! {
             .into_iter().filter_map(|path| std::fs::canonicalize(path).ok()).collect();
         let read = roots(libraries.iter().cloned().chain([
             ws.to_path_buf(), toolchain.to_path_buf(), support.to_path_buf(),
-            helpers.clone(), read_only.clone(),
+            helpers.clone(), cargo_home.clone(), read_only.clone(),
         ]));
         let tool = format!(
             "\n[tool.cargo]\ncommand = [{cargo}]\nworkspace = {c}\n\
