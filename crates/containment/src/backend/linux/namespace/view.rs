@@ -1,7 +1,10 @@
 //! Lowering filesystem grants onto a constructed mount view.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::config::ContainmentConfig;
 use crate::error::ContainmentError;
@@ -63,6 +66,7 @@ pub(crate) struct MountEntry {
 pub(crate) struct MountView {
     entries: Vec<MountEntry>,
     protected_parents: BTreeSet<PathBuf>,
+    dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
 }
 
 impl MountView {
@@ -263,8 +267,9 @@ impl MountView {
             })
             .map(|entry| entry.target.clone())
             .collect();
+        let mut dependency_sources = BTreeMap::new();
         for executable in exec_files {
-            for dependency in elf_dependencies(&executable, config.operator_home())? {
+            for dependency in elf_dependencies(&executable, config)? {
                 if covering
                     .iter()
                     .any(|tree| dependency.path.starts_with(tree))
@@ -272,8 +277,9 @@ impl MountView {
                     continue;
                 }
                 if dedup.insert(dependency.path.clone()) {
+                    dependency_sources.insert(dependency.path.clone(), dependency.file);
                     entries.push(MountEntry {
-                        source: Some(dependency.path.clone()),
+                        source: Some(dependency.resolved),
                         target: dependency.path,
                         kind: MountKind::Bind,
                         // Never writable: read-plus-execute is the safe pairing precisely
@@ -435,6 +441,7 @@ impl MountView {
         Ok(Self {
             entries,
             protected_parents,
+            dependency_sources: RefCell::new(dependency_sources),
         })
     }
 
@@ -496,7 +503,9 @@ impl MountView {
         )
         .map_err(|e| refusal(format!("remounting the view root read-only: {e}")))?;
 
-        self.pivot_into(root)
+        self.pivot_into(root)?;
+        self.dependency_sources.borrow_mut().clear();
+        Ok(())
     }
 
     /// Pin each protected parent before the root becomes read-only.
@@ -652,6 +661,32 @@ impl MountView {
                         entry.target.display()
                     ))
                 })?;
+
+                let dependency_sources = self.dependency_sources.borrow();
+                let pinned_source = dependency_sources
+                    .get(&entry.target)
+                    .map(|admitted| {
+                        use std::os::unix::fs::MetadataExt as _;
+                        let file = open_dependency(source)?;
+                        let expected = admitted.metadata().map_err(|error| {
+                            refusal(format!("reading admitted dependency identity: {error}"))
+                        })?;
+                        let actual = file.metadata().map_err(|error| {
+                            refusal(format!("reading dependency mount identity: {error}"))
+                        })?;
+                        if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+                            return Err(refusal(format!(
+                                "dependency '{}' changed after admission",
+                                source.display()
+                            )));
+                        }
+                        let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+                        Ok((file, path))
+                    })
+                    .transpose()?;
+                let source = pinned_source
+                    .as_ref()
+                    .map_or(source, |(_, path)| path.as_path());
 
                 // The mountpoint must match the source's kind: a file binds onto a
                 // file, a directory onto a directory.
@@ -1086,6 +1121,8 @@ const DEVICE_NODES: &[&str] = &["/dev/null", "/dev/zero", "/dev/urandom", "/dev/
 /// One resolved dependency of an executable.
 struct Dependency {
     path: PathBuf,
+    resolved: PathBuf,
+    file: Rc<std::fs::File>,
     origin: MountOrigin,
 }
 
@@ -1107,23 +1144,94 @@ struct LibrarySearch {
 /// A ceiling on the images one closure walks.
 const MAXIMUM_IMAGES: usize = 512;
 
+/// Open a canonical dependency without following replacement links.
+fn open_dependency(path: &Path) -> Result<std::fs::File, ContainmentError> {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let open = || -> std::io::Result<std::fs::File> {
+        let expected = std::fs::metadata(path)?;
+        if !expected.is_file() {
+            return Err(std::io::Error::other("dependency is not a regular file"));
+        }
+        let mut parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open("/")?;
+        let mut components = path.components().peekable();
+        if components.next() != Some(std::path::Component::RootDir) {
+            return Err(std::io::Error::other("dependency path is not absolute"));
+        }
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(std::io::Error::other("dependency path is not canonical"));
+            };
+            let name = path_to_cstring(Path::new(name))?;
+            let flags = libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | if components.peek().is_some() {
+                    libc::O_PATH | libc::O_DIRECTORY
+                } else {
+                    libc::O_RDONLY | libc::O_NONBLOCK
+                };
+            // SAFETY: parent is open, and name is a live NUL-terminated component.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: openat returned a new descriptor owned by this file.
+            parent = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        let actual = parent.metadata()?;
+        if !actual.is_file() || actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+            return Err(std::io::Error::other(
+                "dependency identity changed before opening",
+            ));
+        }
+        Ok(parent)
+    };
+    open().map_err(|error| {
+        refusal(format!(
+            "dependency '{}' cannot be granted: {error}",
+            path.display()
+        ))
+    })
+}
+
 /// The ELF interpreter and every shared library `executable` loads, through each library's own
 /// needs, resolved as the loader resolves them with no environment and no cache.
 fn elf_dependencies(
     executable: &Path,
-    declared_home: Option<&Path>,
+    config: &ContainmentConfig,
 ) -> Result<Vec<Dependency>, ContainmentError> {
     let mut dependencies: Vec<Dependency> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut pending = std::collections::VecDeque::from([(executable.to_path_buf(), None)]);
-    while let Some((image, inherited_rpath)) = pending.pop_front() {
+    let mut walked = BTreeSet::new();
+    let restricted = workload_writable(config, executable)?;
+    let resolved = executable.canonicalize().map_err(|error| {
+        refusal(format!(
+            "dependency '{}' cannot be granted: {error}",
+            executable.display()
+        ))
+    })?;
+    let file = Rc::new(open_dependency(&resolved)?);
+    let mut pending =
+        std::collections::VecDeque::from([(executable.to_path_buf(), file, None, restricted)]);
+    while let Some((image, file, inherited_rpath, restricted)) = pending.pop_front() {
+        if !walked.insert((image.clone(), restricted)) {
+            continue;
+        }
         if dependencies.len() > MAXIMUM_IMAGES {
             return Err(refusal(format!(
                 "'{}' loads more than {MAXIMUM_IMAGES} images; refusing rather than walking on",
                 executable.display()
             )));
         }
-        let needs = image_needs(&image)?;
+        let needs = image_needs_from_file(
+            &mut file
+                .try_clone()
+                .map_err(|error| refusal(format!("cloning dependency handle: {error}")))?,
+        )?;
         let rpath = if needs.runpath.is_none() && !needs.rpath.is_empty() {
             Some(std::rc::Rc::new(LibrarySearch {
                 directories: search_directories(&image, &needs.rpath),
@@ -1140,16 +1248,16 @@ fn elf_dependencies(
         } else {
             rpath.clone()
         };
-        if let Some(interpreter) = needs.interpreter
-            && seen.insert(interpreter.clone())
-        {
-            // The workload authors the program header, so its interpreter is judged like any other
-            // image it names.
-            require_loadable(&image, &interpreter, declared_home)?;
-            dependencies.push(Dependency {
-                path: interpreter,
-                origin: MountOrigin::Interpreter,
-            });
+        if let Some(interpreter) = needs.interpreter {
+            let (resolved, file) = require_loadable(&image, &interpreter, config, restricted)?;
+            if seen.insert(interpreter.clone()) {
+                dependencies.push(Dependency {
+                    path: interpreter,
+                    resolved,
+                    file,
+                    origin: MountOrigin::Interpreter,
+                });
+            }
         }
         for name in &needs.needed {
             let Some(found) = resolve_needed(name, search.as_deref()) else {
@@ -1161,34 +1269,35 @@ fn elf_dependencies(
                     name
                 )));
             };
-            // Seen by identity, so one library requested under two spellings is planned once.
-            let identity = found.canonicalize().unwrap_or_else(|_| found.clone());
-            if !seen.insert(identity.clone()) {
-                continue;
+            let (identity, file) = require_loadable(&image, &found, config, restricted)?;
+            let next_restricted = restricted || workload_writable(config, &found)?;
+            pending.push_back((
+                identity.clone(),
+                file.clone(),
+                rpath.clone(),
+                next_restricted,
+            ));
+            if seen.insert(identity.clone()) {
+                dependencies.push(Dependency {
+                    path: found,
+                    resolved: identity,
+                    file,
+                    origin: MountOrigin::Library,
+                });
             }
-            // A non-system library must pass the same floor as a read grant.
-            if !LIBRARY_DIRECTORIES
-                .iter()
-                .any(|directory| found.starts_with(directory))
-            {
-                require_loadable(&image, &found, declared_home)?;
-            }
-            pending.push_back((identity, rpath.clone()));
-            dependencies.push(Dependency {
-                path: found,
-                origin: MountOrigin::Library,
-            });
         }
     }
     Ok(dependencies)
 }
 
-/// Refuse a library the deny-only floor would refuse as a read grant.
+/// Check a dependency against the floors and the originating image's filesystem grants.
 fn require_loadable(
     image: &Path,
     library: &Path,
-    declared_home: Option<&Path>,
-) -> Result<(), ContainmentError> {
+    config: &ContainmentConfig,
+    restricted: bool,
+) -> Result<(PathBuf, Rc<std::fs::File>), ContainmentError> {
+    let restricted = restricted || workload_writable(config, library)?;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1197,12 +1306,102 @@ fn require_loadable(
                 library.display()
             ))
         })?;
-    crate::floors::require_bounded_grant(&granted, declared_home, false).map_err(|error| {
-        refusal(format!(
-            "'{}' needs '{}', which the floor refuses: {error}",
+    crate::floors::require_bounded_grant(&granted, config.operator_home(), false).map_err(
+        |error| {
+            refusal(format!(
+                "'{}' needs '{}', which the floor refuses: {error}",
+                image.display(),
+                library.display()
+            ))
+        },
+    )?;
+    if restricted
+        && !inside_loader_directory(&granted.resolved)
+        && !stated_grant_reaches(config, &granted.resolved)
+    {
+        return Err(refusal(format!(
+            "'{}' needs '{}', which no filesystem grant reaches; \
+             a writable image cannot add dependency bytes outside the stated grants",
             image.display(),
             library.display()
-        ))
+        )));
+    }
+    let file = Rc::new(open_dependency(&granted.resolved)?);
+    Ok((granted.resolved, file))
+}
+
+fn inside_loader_directory(identity: &Path) -> bool {
+    LIBRARY_DIRECTORIES
+        .iter()
+        .any(|directory| identity.starts_with(directory))
+}
+
+fn workload_writable(config: &ContainmentConfig, image: &Path) -> Result<bool, ContainmentError> {
+    if !config
+        .authorizations()
+        .iter()
+        .any(|grant| grant.operation == Operation::Write)
+    {
+        return Ok(false);
+    }
+    let path = crate::model::PathGrant::new(image, Operation::Read, Scope::File)?;
+    let mut nodes = path.traversal_paths();
+    for grant in config
+        .authorizations()
+        .iter()
+        .filter(|grant| grant.operation == Operation::Exec && grant.resolved == path.resolved)
+    {
+        nodes.extend(grant.traversal_paths());
+    }
+    let mut visited = BTreeSet::new();
+    while let Some(node) = nodes.pop() {
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        if visited.len() > 256 {
+            return Err(refusal(format!(
+                "dependency '{}' has too many link paths to verify",
+                image.display()
+            )));
+        }
+        if config.authorizations().iter().any(|grant| {
+            grant.operation == Operation::Write
+                && match grant.scope {
+                    Scope::Root => {
+                        node.starts_with(&grant.resolved) || node.starts_with(&grant.original)
+                    }
+                    Scope::File => node == grant.resolved || node == grant.original,
+                    Scope::Dir => false,
+                }
+        }) {
+            return Ok(true);
+        }
+        for ancestor in node.ancestors() {
+            if let Ok(target) = std::fs::read_link(ancestor) {
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    ancestor.parent().unwrap_or(Path::new("/")).join(target)
+                };
+                let target = target.join(node.strip_prefix(ancestor).unwrap_or(Path::new("")));
+                nodes.push(folded(&target));
+                nodes.push(target);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn stated_grant_reaches(config: &ContainmentConfig, identity: &Path) -> bool {
+    config.authorizations().iter().any(|grant| {
+        matches!(
+            grant.operation,
+            Operation::Read | Operation::Write | Operation::Exec
+        ) && match grant.scope {
+            Scope::Root => identity.starts_with(&grant.resolved),
+            Scope::File => identity == grant.resolved,
+            Scope::Dir => false,
+        }
     })
 }
 
@@ -1259,7 +1458,18 @@ fn is_loader_directory(resolved: &Path) -> bool {
 }
 
 /// Read what one ELF image asks for: its interpreter, its `DT_NEEDED` names, and its search list.
+#[cfg(test)]
 fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
+    let mut file = std::fs::File::open(executable).map_err(|source| {
+        refusal(format!(
+            "opening '{}' to resolve its dynamic dependencies: {source}",
+            executable.display()
+        ))
+    })?;
+    image_needs_from_file(&mut file)
+}
+
+fn image_needs_from_file(file: &mut std::fs::File) -> Result<ImageNeeds, ContainmentError> {
     use std::io::{Read as _, Seek as _};
 
     /// A 64-bit ELF header, and the fixed part of one program header.
@@ -1302,12 +1512,8 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     }
 
     let mut needs = ImageNeeds::default();
-    let mut file = std::fs::File::open(executable).map_err(|source| {
-        refusal(format!(
-            "opening '{}' to resolve its dynamic dependencies: {source}",
-            executable.display()
-        ))
-    })?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| refusal(format!("seeking dependency header: {error}")))?;
 
     // A file shorter than an ELF header is not an ELF; that is not an error.
     let mut header = [0u8; ELF_HEADER_BYTES];
@@ -1343,12 +1549,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
         return Ok(needs);
     };
     // A malformed table offset or length plans NOTHING rather than erroring.
-    let Ok(table) = read_at(
-        &mut file,
-        program_headers,
-        table_bytes,
-        "the program headers",
-    ) else {
+    let Ok(table) = read_at(file, program_headers, table_bytes, "the program headers") else {
         return Ok(needs);
     };
 
@@ -1384,8 +1585,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
 
     if let Some((offset, size)) = interpreter_segment {
         let length = usize::try_from(size).unwrap_or(0);
-        let segment =
-            read_at(&mut file, offset, length, "the ELF interpreter path").unwrap_or_default();
+        let segment = read_at(file, offset, length, "the ELF interpreter path").unwrap_or_default();
         if let Some(text) = segment.split(|byte| *byte == 0).next()
             && let Ok(path) = String::from_utf8(text.to_vec())
             && !path.is_empty()
@@ -1399,7 +1599,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
         return Ok(needs);
     };
     let length = usize::try_from(size).unwrap_or(0);
-    let Ok(dynamic) = read_at(&mut file, offset, length, "the ELF dynamic segment") else {
+    let Ok(dynamic) = read_at(file, offset, length, "the ELF dynamic segment") else {
         return Ok(needs);
     };
 
@@ -1456,7 +1656,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     let span = usize::try_from(furthest).unwrap_or(0).saturating_add(4096);
     // A short read is expected here rather than exceptional: the span is an upper bound (largest
     // offset plus a name's maximum length), so it routinely runs past the end of the file.
-    let strings = read_at_most(&mut file, string_table_offset, span);
+    let strings = read_at_most(file, string_table_offset, span);
     if strings.is_empty() {
         return Ok(needs);
     }
@@ -1517,6 +1717,7 @@ fn refusal(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod loader_admission;
     use super::*;
 
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
@@ -2870,7 +3071,8 @@ mod tests {
         let script = directory.path().join("script.sh");
         std::fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
 
-        let dependencies = elf_dependencies(&script, None).expect("a script must plan cleanly");
+        let dependencies = elf_dependencies(&script, &ContainmentConfig::new())
+            .expect("a script must plan cleanly");
         assert!(
             dependencies.is_empty(),
             "a script has no ELF interpreter or DT_NEEDED table"
@@ -2898,7 +3100,7 @@ mod tests {
         ] {
             let path = directory.path().join(name);
             std::fs::write(&path, &bytes).expect("write fixture");
-            let dependencies = elf_dependencies(&path, None)
+            let dependencies = elf_dependencies(&path, &ContainmentConfig::new())
                 .unwrap_or_else(|error| panic!("{name} errored: {error}"));
             assert!(dependencies.is_empty(), "{name} must plan nothing");
         }
@@ -3293,6 +3495,7 @@ mod tests {
         let view = MountView {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
         };
         let mut entry = MountEntry {
             source: None,
@@ -3318,6 +3521,7 @@ mod tests {
         let view = MountView {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: Some(source),
@@ -3355,6 +3559,7 @@ mod tests {
         let view = MountView {
             entries: vec![parent],
             protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: None,
@@ -3548,6 +3753,7 @@ mod tests {
             let view = MountView {
                 entries: Vec::new(),
                 protected_parents: BTreeSet::new(),
+                dependency_sources: RefCell::new(BTreeMap::new()),
             };
             let error = view.pivot_into(&root).unwrap_err();
             assert!(
@@ -3620,6 +3826,7 @@ mod tests {
             let view = MountView {
                 entries: Vec::new(),
                 protected_parents: BTreeSet::new(),
+                dependency_sources: RefCell::new(BTreeMap::new()),
             };
             super::super::failure_tests::refuse_syscall(denied_call, None);
             let error = view.establish(&entry, root.path()).unwrap_err();
@@ -3725,6 +3932,7 @@ mod tests {
         let view = MountView {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
         };
         let error = view.establish(&entry, root.path()).unwrap_err();
         assert!(
@@ -3879,7 +4087,7 @@ mod tests {
             "second.so",
             &synthetic_elf(Some(interpreter), &["first.so"], Some("$ORIGIN")),
         );
-        let dependencies = elf_dependencies(&first, None).unwrap();
+        let dependencies = elf_dependencies(&first, &ContainmentConfig::new()).unwrap();
         assert_eq!(dependencies.len(), 3);
         assert_eq!(
             dependencies
@@ -3920,9 +4128,12 @@ mod tests {
                 &synthetic_elf(None, &needed, Some("$ORIGIN")),
             );
         }
-        let error = elf_dependencies(&directory.path().join("image-0.so"), None)
-            .err()
-            .expect("dependency limit must refuse the walk");
+        let error = elf_dependencies(
+            &directory.path().join("image-0.so"),
+            &ContainmentConfig::new(),
+        )
+        .err()
+        .expect("dependency limit must refuse the walk");
         assert!(
             error.to_string().contains("loads more than 512 images"),
             "{error}"
@@ -3964,13 +4175,18 @@ mod tests {
                 &synthetic_elf(None, &["fixture.so"], Some("$ORIGIN")),
             );
             planted_image(directory.path(), "fixture.so", b"library");
-            assert_eq!(elf_dependencies(&program, None).unwrap().len(), 1);
+            assert_eq!(
+                elf_dependencies(&program, &ContainmentConfig::new())
+                    .unwrap()
+                    .len(),
+                1
+            );
             #[cfg(target_arch = "x86_64")]
             let call = libc::SYS_readlink;
             #[cfg(not(target_arch = "x86_64"))]
             let call = libc::SYS_readlinkat;
             super::super::failure_tests::refuse_syscall(call, None);
-            let error = elf_dependencies(&program, None)
+            let error = elf_dependencies(&program, &ContainmentConfig::new())
                 .err()
                 .expect("an unverifiable library must be refused");
             assert!(error.to_string().contains("cannot be granted"), "{error}");
