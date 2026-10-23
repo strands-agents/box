@@ -37,6 +37,7 @@ on:
 jobs:
   full:
     name: Full suite
+    cache-mode: read
     permissions:
       contents: read
     uses: ./.github/workflows/rust-test-lint.yml

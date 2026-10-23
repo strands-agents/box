@@ -55,8 +55,8 @@ pub(crate) struct Launch<'a> {
     pub(crate) approved: Option<&'a DirectReach>,
 }
 
-/// The filesystem reach of `[agent]` and of every `[tool.<name>]`, judged once when the run starts
-/// and acted on at every spawn.
+/// The filesystem reach of `[agent]`, every `[tool.<name>]`, and every local `[mcp.<name>]`,
+/// judged once when the run starts and acted on at every spawn.
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
@@ -76,8 +76,13 @@ impl ApprovedReach {
             .tool
             .iter()
             .map(|(label, spec)| (format!("[tool.{label}]"), spec));
+        let servers = stored
+            .contained_mcp
+            .iter()
+            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec));
         let tables = agent
             .chain(tools)
+            .chain(servers)
             .map(|(table, spec)| {
                 judge_filesystem(spec, &table, stored, protected_sources)
                     .map(|reach| (table, reach))
@@ -86,7 +91,7 @@ impl ApprovedReach {
         Ok(Self { tables })
     }
 
-    /// The reach approved for one table, named as a refusal names it: `[agent]` or `[tool.<name>]`.
+    /// The reach approved for one process table, named as a refusal names it.
     pub(crate) fn table(&self, table: &str) -> Option<&DirectReach> {
         self.tables.get(table)
     }
@@ -569,6 +574,8 @@ impl Boundary {
         for refusal in &reach.refusals {
             containment = containment.refuse(&refusal.path, refusal.scope)?;
         }
+        // The box's private tree is refused beneath every grant.
+        containment = containment.refuse(guard.private, Scope::Root)?;
         for grant in &reach.grants {
             if grant.operation == Operation::Exec
                 && grant.scope == Scope::File
@@ -1419,7 +1426,7 @@ mod tests {
                     ("FOO".to_string(), "declared".to_string()),
                 ]),
                 filesystem: Filesystem {
-                    read: vec![self.path("vendor")],
+                    read: vec![self.path("vendor"), self.path("scratch")],
                     write: vec![self.path("scratch")],
                     read_file: vec![self.path("notes/api.md")],
                     write_file: vec![self.path("notes/api.md")],
@@ -1591,6 +1598,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.filesystem = Filesystem {
+            read: vec![fixture.path("scratch")],
             write: vec![fixture.path("scratch")],
             ..Filesystem::default()
         };
@@ -1652,6 +1660,7 @@ mod tests {
         std::fs::create_dir(&inner).expect("a granted directory");
         let mut spec = fixture.spec();
         spec.filesystem = Filesystem {
+            read: vec![inner.clone()],
             write: vec![inner.clone()],
             ..Filesystem::default()
         };
@@ -1740,6 +1749,7 @@ mod tests {
         let source = plant_authority(&authority);
         let mut spec = fixture.spec();
         spec.filesystem = Filesystem {
+            read: vec![fixture.path("scratch")],
             write: vec![fixture.path("scratch")],
             ..Filesystem::default()
         };
@@ -1813,6 +1823,7 @@ mod tests {
         }
         let mut spec = fixture.spec();
         spec.filesystem = Filesystem {
+            read: vec![fixture.path("scratch")],
             write: vec![fixture.path("scratch")],
             deny,
             ..Filesystem::default()
@@ -2297,6 +2308,61 @@ mod tests {
         );
     }
 
+    /// **Every profile refuses the box's private tree in both spellings, after every allow that
+    /// reaches it**: the agent box, a tool leaf, and an MCP leaf alike.
+    #[test]
+    fn every_profile_refuses_the_private_tree_after_every_allow_that_reaches_it() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let private = fixture
+            .root
+            .record()
+            .parent()
+            .expect("the record has a directory")
+            .canonicalize()
+            .expect("the private tree resolves");
+        let twin = Path::new("/System/Volumes/Data")
+            .join(private.strip_prefix("/").expect("an absolute private tree"));
+        for (table, reach, egress) in [
+            ("[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            ("[tool.git]", RuntimeReach::Leaf, EgressMode::Gateway),
+            ("[mcp.alpha]", RuntimeReach::Leaf, EgressMode::Native),
+        ] {
+            let boundary = fixture.translate_full(&spec, table, reach, egress);
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            let profile = containment::test_support::generate_seatbelt_profile(&config)
+                .expect("the profile renders");
+            // An allow reaches the private tree when it names a path inside it or a subpath above it.
+            let reaches_private = |line: &str| {
+                [&private, &twin].iter().any(|spelling| {
+                    spelling
+                        .ancestors()
+                        .any(|path| line.contains(&format!("(subpath \"{}\")", path.display())))
+                        || line.contains(&format!("\"{}", spelling.display()))
+                })
+            };
+            let last_reaching_allow = profile
+                .match_indices("(allow ")
+                .map(|(at, _)| at)
+                .filter(|at| reaches_private(profile[*at..].lines().next().unwrap_or_default()))
+                .max()
+                .unwrap_or(0);
+            for spelling in [&private, &twin] {
+                for operation in ["file-write*", "file-read*", "process-exec"] {
+                    let rule = format!("(deny {operation} (subpath \"{}\"))", spelling.display());
+                    let at = profile
+                        .find(&rule)
+                        .unwrap_or_else(|| panic!("{table} renders {rule}: {profile}"));
+                    assert!(
+                        at > last_reaching_allow,
+                        "{table} renders {rule} after every allow that reaches it: {profile}"
+                    );
+                }
+            }
+        }
+    }
+
     /// **The caller's spelling becomes `argv[0]` and the executable stays the identity**, so a venv
     /// link runs the canonical interpreter while the interpreter reads the link as its own path.
     #[test]
@@ -2574,11 +2640,22 @@ mod tests {
             translated.contains(&(command, Operation::Exec, Scope::File)),
             "the command's identity is granted exec at file scope: {translated:?}"
         );
+        let private = fixture
+            .root
+            .root()
+            .join("private")
+            .canonicalize()
+            .expect("the private tree resolves");
         assert!(
             !translated
                 .iter()
-                .any(|(path, _, _)| path.starts_with(fixture.root.root().join("private"))),
+                .any(|(path, operation, _)| path.starts_with(&private)
+                    && *operation != Operation::Deny),
             "no cell reaches private state: {translated:?}"
+        );
+        assert!(
+            translated.contains(&(private, Operation::Deny, Scope::Root)),
+            "private state is refused: {translated:?}"
         );
         for alias in fixture.root.shell_aliases() {
             assert!(
@@ -2859,6 +2936,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command = vec![fixture.path("tools/run").display().to_string()];
+        spec.filesystem.read.push(fixture.path("tools"));
         spec.filesystem.write.push(fixture.path("tools"));
         spec.filesystem.exec = vec![fixture.path("bin/run")];
 
@@ -3656,11 +3734,24 @@ write = ["/Users/example/box-demo/aws-tmp"]
         assert_eq!(environment["ANTHROPIC_API_KEY"], "phantom-anthropic");
 
         // [tool.record-edit]
-        let hook = fixture.translate(
-            &example.spec(CONTRACT_RECORD_EDIT),
-            "[tool.record-edit]",
-            &[],
-        );
+        let mut hook_spec = example.spec(CONTRACT_RECORD_EDIT);
+        if cfg!(target_os = "linux") {
+            let error = crate::test_support::with_operator_home(fixture.operator.path(), || {
+                judge_filesystem(&hook_spec, "[tool.record-edit]", &fixture.record, &[])
+            })
+            .expect_err("the example requests unsupported write-only access");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Linux cannot enforce write-only"),
+                "{error}"
+            );
+            hook_spec
+                .filesystem
+                .read_file
+                .push(at("/Users/example/box-demo/hook-output/events.log"));
+        }
+        let hook = fixture.translate(&hook_spec, "[tool.record-edit]", &[]);
         let translated = cells(&hook);
         let has = |path: PathBuf, operation: Operation, scope: Scope| {
             translated.contains(&(path, operation, scope))

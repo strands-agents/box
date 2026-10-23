@@ -417,6 +417,37 @@ fn the_alias_image_is_execute_only() {
     }
 }
 
+/// Run explicitly to measure the known Linux read-protection gap.
+/// The existing alias test still checks writes on every supported backend.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "https://github.com/strands-agents/box/issues/48: an executable alias remains readable; run explicitly to measure read protection"]
+fn linux_alias_read_protection_requirement() {
+    assert!(
+        fixture::namespace_launcher_is_usable(),
+        "the read-protection measurement requires a working Linux backend"
+    );
+    let box_ = box_under(PERMISSIVE_POLICY, "alias-read-requirement");
+    let output = box_.bash(&format!(
+        r#"{DERIVE_PATHS}
+           printf 'CONTROL\n' > "$BOX_HOME/control.txt"
+           IFS= read -r -N 1 control < "$BOX_HOME/control.txt" && echo "control=$control"
+           IFS= read -r -N 1 leaked < "$ALIAS" && echo "LEAKED=$leaked"
+           printf 'READ_CHECK_COMPLETE\n'"#
+    ));
+    let seen = stdout(&output);
+    assert!(
+        output.status.success()
+            && seen.contains("control=C\n")
+            && seen.contains("READ_CHECK_COMPLETE"),
+        "the workload and positive read control must complete: {output:?}"
+    );
+    assert!(
+        !seen.contains("LEAKED="),
+        "the alias contents must not be readable: {output:?}"
+    );
+}
+
 /// Every host shell *other than the workload itself* is denied by the kernel, so
 /// the alias is the only interpreter the workload can reach.
 ///
@@ -2614,6 +2645,16 @@ fn a_signalled_host_binary_records_128_plus_the_signal_in_history() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    use std::os::unix::process::ExitStatusExt as _;
+    let control = std::process::Command::new(env!("CARGO_BIN_EXE_box-exit-probe"))
+        .args(["signal", &libc::SIGKILL.to_string()])
+        .output()
+        .expect("run the signal probe outside containment");
+    assert_eq!(
+        control.status.signal(),
+        Some(libc::SIGKILL),
+        "the probe must actually die by signal, not return a matching exit code: {control:?}"
+    );
     let killed = 128 + libc::SIGKILL;
     let box_ = exit_probe_box(
         "spawn-signal-status",
@@ -2839,6 +2880,8 @@ fn nested_authority_parents_are_protected_through_each_writable_spelling() {
             let config = ContainmentConfig::new()
                 .allow(probe, Operation::Exec, Scope::File)
                 .expect("probe grant")
+                .allow(&alias, Operation::Read, Scope::Root)
+                .expect("readable root through alias")
                 .allow(&alias, Operation::Write, Scope::Root)
                 .expect("writable root through alias")
                 .protect_write(&authority, &opened)

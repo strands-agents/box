@@ -224,10 +224,9 @@ fn a_relative_symlink_target_from_a_nested_link_resolves_from_the_links_director
     assert!(judged, "the fs:write symlink request names /work/file");
 }
 
-/// LIVE GAP, pinned as it stands: on a direct bind the kernel reports a read through a host
-/// symlink by the alias spelling, so a link to a directory carries a subtree read forbid away.
+/// A read through a host symlink on a direct bind is judged on its target, so a subtree read forbid holds.
 #[test]
-fn a_directory_symlink_on_a_direct_bind_is_not_defended_by_a_subtree_read_forbid() {
+fn a_directory_symlink_on_a_direct_bind_is_defended_by_a_subtree_read_forbid() {
     let project = project();
     std::fs::create_dir(project.path().join("private")).expect("a private directory");
     std::fs::write(project.path().join("private/secret"), "hidden").expect("the private secret");
@@ -254,10 +253,13 @@ when {{
         rendered(&direct)
     );
     assert_eq!(linked.status, 0, "{}", rendered(&linked));
-    assert_eq!(
-        (aliased.status, aliased.stdout.as_str()),
-        (0, "hidden"),
-        "the alias read is judged on /work/sub/secret, not /work/private/secret: {}",
+    assert_ne!(aliased.status, 0, "{}", rendered(&aliased));
+    assert!(
+        aliased
+            .stderr
+            .contains("'/work/private/secret' [policy: no-private]"),
+        "the alias read is judged on /work/private/secret: {}",
         rendered(&aliased)
     );
+    assert!(!aliased.stdout.contains("hidden"), "{}", rendered(&aliased));
 }

@@ -151,6 +151,30 @@ fn a_granted_target_runs_contained() {
     assert_eq!(code, 0, "the target's own exit status must propagate");
 }
 
+#[test]
+fn write_only_is_refused_before_the_target_runs() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work_dir = tempfile::tempdir().expect("work directory");
+    let config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Read, Scope::File)
+        .expect("read the shell")
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .expect("execute the shell")
+        .allow(work_dir.path(), Operation::Write, Scope::Root)
+        .expect("a structurally valid write grant");
+    let (code, stdout, stderr) = run_contained(
+        &config,
+        work_dir.path(),
+        &["/bin/sh", "-c", "echo TARGET_RAN"],
+    );
+    assert_eq!(code, 3, "containment must refuse the request: {stderr}");
+    assert!(stderr.contains("cannot enforce write-only"), "{stderr}");
+    assert!(!stdout.contains("TARGET_RAN"), "{stdout}");
+}
+
 /// An UNGRANTED target is not reachable, and the failure is an exec failure rather
 /// than a workload run.
 ///

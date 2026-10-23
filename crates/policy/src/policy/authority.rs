@@ -180,6 +180,61 @@ impl Authority {
         &self.warnings
     }
 
+    /// Re-install an authored policy set over the live engine, keeping this box's decision
+    /// history and the MCP schemas this run already discovered.
+    ///
+    /// Validation runs before the live lock is taken, so text that does not validate costs no
+    /// decision latency and leaves the previous authority serving every request. The authored
+    /// set is replaced wholesale and refused wholesale: `open_staged` may install the
+    /// schema-independent subset and open `Discovering`, because at startup the typed schemas
+    /// have not arrived yet and a box that denied everything until they did would be useless.
+    /// A reload has no such excuse — the schemas are already here, so a set that cannot
+    /// validate is an operator error, and installing the part of it that happens to validate
+    /// would report success for a rule that is not live.
+    pub(super) fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
+        // Same order as `stage_mcp_schema`: proposal first, then live. A reload that took them
+        // the other way round would deadlock against a schema staging mid-discovery.
+        let mut proposal_guard = self
+            .proposal
+            .lock()
+            .map_err(|_| PolicyStagingError::Durable("policy staging lock poisoned".to_string()))?;
+        let Some(current) = proposal_guard.as_ref() else {
+            return Err(PolicyStagingError::Durable(
+                "the authority was not opened for runtime staging".to_string(),
+            ));
+        };
+        let mut proposed = current.clone();
+        // The operator and the discovered schemas carry over; only the authored rules change.
+        proposed.candidates = parse_policy_source(&authored(sources))?
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, expanded_source)| CandidatePolicy {
+                ordinal,
+                expanded_source,
+            })
+            .collect();
+        proposed.ready = BTreeSet::new();
+        proposed.pending = BTreeMap::new();
+
+        let schemas = proposed.schema_sources();
+        let complete = proposed.complete_policy_set();
+        let (effective_schema, _) =
+            validate_canonical_policy_set(&complete, &schemas, &proposed.operator)?;
+
+        let mut live = self.live.lock().map_err(|_| {
+            PolicyStagingError::Durable("policy authority lock poisoned".to_string())
+        })?;
+        live.engine
+            .commit_staged(&complete, effective_schema)
+            .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+        proposed.mark_all_ready();
+        live.readiness = Readiness::Ready;
+        live.pending_tools = BTreeSet::new();
+        drop(live);
+        *proposal_guard = Some(proposed);
+        Ok(())
+    }
+
     /// Validates one schema proposal and commits only a valid complete policy set.
     pub(super) fn stage_mcp_schema(
         &self,

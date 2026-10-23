@@ -114,6 +114,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn termination_signals_reach_the_workload_and_determine_its_status() {
+        super::super::failure_tests::in_fresh_process(|| {
+            for signal in [libc::SIGTERM, libc::SIGINT] {
+                let mut child = std::process::Command::new("/bin/sleep")
+                    .arg("3")
+                    .spawn()
+                    .unwrap();
+                let pid = child.id() as libc::pid_t;
+                WORKLOAD_PID.store(pid, std::sync::atomic::Ordering::Relaxed);
+                install_forwarding_handlers();
+                // SAFETY: raise invokes the installed handler in this isolated test process.
+                assert_eq!(unsafe { libc::raise(signal) }, 0);
+                assert_eq!(supervise(pid), SIGNAL_EXIT_BASE + signal);
+                assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
+            WORKLOAD_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            // With no workload, forwarding must not signal the process group.
+            forward(libc::SIGTERM);
+        });
+    }
+
+    #[test]
+    fn an_invalid_lifetime_acknowledgment_is_refused() {
+        use std::io::Write as _;
+        let (parent, mut child) = std::os::unix::net::UnixStream::pair().unwrap();
+        child.write_all(&[0]).unwrap();
+        assert!(!confirm_parent_death(&parent));
+    }
+
+    #[test]
     fn a_closed_lifetime_channel_refuses_confirmation() {
         let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
         drop(child);
@@ -260,6 +290,80 @@ mod tests {
             observed, 7,
             "the orphan's status (99) must not become the run's result; the reaper \
              reports the workload's status and reaps everything else"
+        );
+    }
+
+    #[test]
+    fn an_adopted_child_is_reaped_before_the_workload_exits() {
+        let Some(observed) = in_pid_namespace(|| {
+            // The workload cannot exit successfully until PID 1 reaps the adopted child.
+            // Everything after these forks uses scalar syscalls and _exit.
+            let workload = unsafe { libc::fork() };
+            if workload < 0 {
+                return 90;
+            }
+            if workload == 0 {
+                unsafe {
+                    let mut channel = [0; 2];
+                    if libc::pipe(channel.as_mut_ptr()) != 0 {
+                        libc::_exit(91);
+                    }
+                    let intermediate = libc::fork();
+                    if intermediate < 0 {
+                        libc::_exit(92);
+                    }
+                    if intermediate == 0 {
+                        let adopted = libc::fork();
+                        if adopted < 0 {
+                            libc::_exit(93);
+                        }
+                        if adopted == 0 {
+                            libc::_exit(99);
+                        }
+                        let sent = libc::write(
+                            channel[1],
+                            (&adopted as *const libc::pid_t).cast(),
+                            std::mem::size_of::<libc::pid_t>(),
+                        );
+                        libc::_exit(if sent == std::mem::size_of::<libc::pid_t>() as isize {
+                            0
+                        } else {
+                            94
+                        });
+                    }
+                    libc::close(channel[1]);
+                    let mut adopted: libc::pid_t = 0;
+                    let received = libc::read(
+                        channel[0],
+                        (&mut adopted as *mut libc::pid_t).cast(),
+                        std::mem::size_of::<libc::pid_t>(),
+                    );
+                    libc::close(channel[0]);
+                    if received != std::mem::size_of::<libc::pid_t>() as isize || adopted <= 0 {
+                        libc::_exit(95);
+                    }
+                    let mut status = 0;
+                    if libc::waitpid(intermediate, &mut status, 0) != intermediate {
+                        libc::_exit(96);
+                    }
+                    for _ in 0..300 {
+                        if libc::kill(adopted, 0) == -1 && *libc::__errno_location() == libc::ESRCH
+                        {
+                            libc::_exit(7);
+                        }
+                        libc::usleep(10_000);
+                    }
+                    libc::_exit(97);
+                }
+            }
+            supervise(workload)
+        }) else {
+            println!("skipping: this host forbids user namespaces");
+            return;
+        };
+        assert_eq!(
+            observed, 7,
+            "PID 1 must reap the adopted child while the workload remains alive"
         );
     }
 

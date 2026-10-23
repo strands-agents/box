@@ -218,6 +218,22 @@ impl PolicyEngine {
         self.authority.finish_mcp_discovery()
     }
 
+    /// Re-install an authored policy set over this live authority.
+    ///
+    /// The box's decision history is kept, so temporal budgets and rate counters accumulated
+    /// before the reload still apply after it. A rule whose canonical text is unchanged keeps
+    /// its token; a rule whose text changed is a new rule and starts a new budget.
+    ///
+    /// Takes `&self`, so a reload is reachable through the `Arc<PolicyEngine>` the box already
+    /// shares, and serialises against in-flight decisions on the authority's own lock.
+    ///
+    /// The caller owns the question of *who* may ask for this. Nothing here authenticates a
+    /// request: the contained agent must never reach a reload, and the only thing that keeps
+    /// it out is where the trigger lives.
+    pub fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
+        self.authority.reload(sources)
+    }
+
     /// Decide whether `principal` may perform `request`.
     ///
     /// An installed [`DecisionObserver`](crate::DecisionObserver) sees every verdict this
@@ -1146,5 +1162,86 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
                 "no box may map to another resource id"
             );
         }
+    }
+
+    /// The write target the two reload tests name. Virtual namespace, so no filesystem
+    /// is touched.
+    fn reload_target() -> ApprovedPath {
+        crate::path::PathResolver::over([PathBuf::from("/home")])
+            .expect("the root is absolute")
+            .approve_virtual(std::path::Path::new("/home/project/README.md"))
+            .unwrap_or_else(|refusal| panic!("a fixture path must resolve: {refusal}"))
+    }
+
+    fn write_allowed(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
+        matches!(
+            engine.decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Fs {
+                    path,
+                    operation: crate::request::FsOperation::WriteContent,
+                },
+            ),
+            Decision::Allow { .. }
+        )
+    }
+
+    /// A write denied under one authored policy is permitted after a reload, on one live
+    /// engine, with no restart.
+    #[test]
+    fn reload_installs_a_new_authored_policy_on_a_live_engine() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+
+        let read_only = source(r#"permit(principal, action == Box::Action::"fs:read", resource);"#);
+        let read_and_write = source(
+            r#"permit(principal, action == Box::Action::"fs:read", resource);
+               permit(principal, action == Box::Action::"fs:write", resource);"#,
+        );
+
+        let engine = PolicyEngine::open_staged(&Operator::unanchored(), read_only, &path)
+            .expect("the first policy opens");
+        let target = reload_target();
+
+        assert!(
+            !write_allowed(&engine, &target),
+            "the first policy names no fs:write rule, so the write is denied"
+        );
+
+        engine
+            .reload(&read_and_write)
+            .expect("the second policy reloads onto the live engine");
+
+        assert!(
+            write_allowed(&engine, &target),
+            "after the reload the same engine permits the same write"
+        );
+    }
+
+    /// A reload that does not validate is refused in full, and the policy already
+    /// installed keeps serving every request.
+    #[test]
+    fn a_reload_that_does_not_validate_leaves_the_previous_policy_in_force() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+
+        let working = source(r#"permit(principal, action == Box::Action::"fs:write", resource);"#);
+        let engine = PolicyEngine::open_staged(&Operator::unanchored(), working, &path)
+            .expect("the working policy opens");
+        let target = reload_target();
+        assert!(
+            write_allowed(&engine, &target),
+            "the working policy permits the write"
+        );
+
+        engine
+            .reload(&source("this is not a policy {{{"))
+            .expect_err("a policy that does not parse is refused");
+
+        assert!(
+            write_allowed(&engine, &target),
+            "the refused reload validated before the live lock, so the previous policy serves"
+        );
     }
 }

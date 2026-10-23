@@ -140,12 +140,6 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   and a plain path outside every root is `Unresolvable` when its parent is missing and `Unreachable`
   when it is not. This is the existence-oracle class on host binds. Give one reason for every
   refusal of a path the caller may not reach.
-- LIVE GAP: on a direct host bind the Shell reports a read through a host symlink by the alias
-  spelling, so a link to a directory carries a subtree read `forbid` away. A scoped `fs:write`
-  admits the link since a relative target is judged on the path it resolves to; a scoped `fs:move`
-  already did. Pinned by
-  `tests/symlink_target_scope_e2e.rs::a_directory_symlink_on_a_direct_bind_is_not_defended_by_a_subtree_read_forbid`.
-  To close it, judge the `Filesystem` arm on the in-bind canonical identity the kernel resolves.
 - LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
   the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
 - `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public so tests and

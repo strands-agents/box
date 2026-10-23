@@ -82,11 +82,33 @@ write = [{json.dumps(str(workspace))}]
 read_file = [{json.dumps(str(readonly))}]
 """
     (root / "box.toml").write_text(config)
+    environment = dict(os.environ)
+    environment.pop("EXPERIMENTAL_LINUX_SUPPORT", None)
     version = subprocess.run(
-        [str(bundle / "box"), "--version"], capture_output=True, text=True, timeout=10
+        [str(bundle / "box"), "--version"], capture_output=True, text=True, timeout=10,
+        env=environment,
     )
+    command = [str(bundle / "box"), "run", "--config", str(root / "box.toml")]
+    refusal_checks = {}
+    for label, value in (("default", None), ("invalid", "true")):
+        refused_environment = dict(environment)
+        if value is not None:
+            refused_environment["EXPERIMENTAL_LINUX_SUPPORT"] = value
+        refused = subprocess.run(
+            command, env=refused_environment, capture_output=True, text=True, timeout=10,
+        )
+        refusal_checks[f"{label}_opt_in_refused"] = (
+            refused.returncode != 0
+            and "EXPERIMENTAL_LINUX_SUPPORT=TRUE" in refused.stderr
+            and "PACKAGE_ENTERED" not in refused.stdout
+            and not (root / "state").exists()
+            and not (workspace / "result.txt").exists()
+        )
+        if not refusal_checks[f"{label}_opt_in_refused"]:
+            raise ValueError(f"{label} Linux opt-in refusal failed")
+    environment["EXPERIMENTAL_LINUX_SUPPORT"] = "TRUE"
     process = subprocess.Popen(
-        [str(bundle / "box"), "run", "--config", str(root / "box.toml")],
+        command, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
     )
     timed_out = False
@@ -102,6 +124,7 @@ read_file = [{json.dumps(str(readonly))}]
     )
     status = {key: value.strip() for key, value in status.items()}
     checks = {
+        **refusal_checks,
         "box_starts": version.returncode == 0,
         "workload_entered": "PACKAGE_ENTERED\n" in stdout,
         "read_and_write": (workspace / "result.txt").exists()

@@ -1,21 +1,4 @@
-//! quarantine.rs — the TEMPORARY, exact, compiled allowlist of (case, platform) cells that record an
-//! authorized `SKIP` instead of running, and the one note text that authorizes it.
-//!
-//! Why this exists: CN-W-05 and CN-W-06 author a `[tool.<name>.filesystem] exec` list, which a box
-//! refuses at load (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds).
-//! Linux broad exec is implemented; these fixtures still need supported grants and verified toolchain paths.
-//!
-//! What this is NOT: it is not a platform declaration, not a retry, and not suppression of a failure
-//! anywhere else; any other case that fails stays FAIL/ERROR and turns the suite RED. A GREEN produced while this
-//! list is non-empty is the explicitly REDUCED merge gate, not full qualification: `verdict.json`
-//! carries `coverage_gate` and the `quarantine` array so reviewers see the exact gap.
-//!
-//! Runner and reducer read this ONE list: `run_case_on` writes the SKIP row with exactly
-//! [`note`]'s text; `verdict::Summary::build` accepts a SKIP on an applicable platform only for a
-//! listed cell with exactly that note, and turns a PASS/FAIL/ERROR for a listed cell (runner and
-//! reducer disagreeing) into an integrity problem. Any SKIP on an unlisted cell, any note that
-//! differs, a missing or duplicate row, a malformed row, a nonzero cargo exit, or any other failure
-//! remains RED. See test-integ/QUARANTINE.md for how to remove the exception.
+//! Exact temporary exceptions shared by the runner and verdict reducer.
 
 use serde::Serialize;
 
@@ -41,51 +24,18 @@ pub struct Quarantine {
 /// can never be confused in a report.
 pub const QUARANTINE_NOTE_PREFIX: &str = "TEMPORARY QUARANTINE: ";
 
-const TOOL_EXEC_ISSUE: &str = "the fixture authors [tool.<name>.filesystem] exec, which a box \
-refuses at load; Linux broad exec is implemented, but the fixture needs supported read grants \
-and verified toolchain paths";
+/// No current case has an authorized quarantine exception.
+pub const TEMPORARY_QUARANTINE: &[Quarantine] = &[];
 
-const TOOL_EXEC_RESTORE_WHEN: &str = "fixtures use supported grants with broad exec for a Linux tool leaf, \
-these entries are deleted, and the full Linux deterministic suite passes with both cases enabled";
-
-/// The exact, authorized list. Edit ONLY with the authorization recorded in test-integ/QUARANTINE.md;
-/// the unit test `the_quarantine_is_exactly_the_authorized_set` pins its contents so any change is a
-/// visible diff. When it is empty, GREEN means full coverage again with no other change.
-pub const TEMPORARY_QUARANTINE: &[Quarantine] = &[
-    Quarantine {
-        id: "CN-W-05",
-        platform: "linux",
-        reason: "authors [tool.git.filesystem] exec, refused at load; the case runs only on linux, \
-so it records a SKIP there pending fixture conversion to supported grants",
-        issue: TOOL_EXEC_ISSUE,
-        owner: "box-maintainers",
-        restore_when: TOOL_EXEC_RESTORE_WHEN,
-    },
-    Quarantine {
-        id: "CN-W-06",
-        platform: "linux",
-        reason: "authors [tool.cargo.filesystem] and [tool.hello.filesystem] exec, refused at load; \
-the case runs only on linux, so it records a SKIP there pending fixture conversion to supported grants",
-        issue: TOOL_EXEC_ISSUE,
-        owner: "box-maintainers",
-        restore_when: TOOL_EXEC_RESTORE_WHEN,
-    },
-];
-
-/// The authorized entry for `(id, platform)`, if any. Exact string match on both.
-pub fn lookup(id: &str, platform: &str) -> Option<&'static Quarantine> {
-    TEMPORARY_QUARANTINE
-        .iter()
-        .find(|q| q.id == id && q.platform == platform)
-}
-
-/// Every entry that applies to `platform`, in list order.
-pub fn for_platform(platform: &str) -> Vec<&'static Quarantine> {
-    TEMPORARY_QUARANTINE
-        .iter()
-        .filter(|q| q.platform == platform)
-        .collect()
-}
+#[cfg(test)]
+pub(crate) const TEST_QUARANTINE: &[Quarantine] = &[Quarantine {
+    id: "CN-Q-01",
+    platform: "linux",
+    reason: "synthetic runner and reducer fixture",
+    issue: "test-only exception",
+    owner: "box-maintainers",
+    restore_when: "the synthetic exception is removed",
+}];
 
 /// The ONE note text an authorized SKIP row carries for `q`. The runner writes exactly this; the
 /// reducer requires exactly this. It names the case, the platform, the reason, the issue, the owner
@@ -115,72 +65,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_quarantine_is_exactly_the_authorized_set() {
-        // Pinned on purpose: adding, widening or re-platforming an entry must show up here.
-        let cells: Vec<(&str, &str)> = TEMPORARY_QUARANTINE
-            .iter()
-            .map(|q| (q.id, q.platform))
-            .collect();
-        assert_eq!(cells, vec![("CN-W-05", "linux"), ("CN-W-06", "linux")]);
-        // The Linux tool-exec entries.
-        for q in TEMPORARY_QUARANTINE
-            .iter()
-            .filter(|q| q.platform == "linux")
-        {
-            assert_eq!(q.owner, "box-maintainers");
-            assert!(
-                q.reason.contains("exec") && q.reason.contains("only on linux"),
-                "{}",
-                q.reason
-            );
-            assert!(
-                q.issue.contains("refuses at load") && q.issue.contains("broad exec"),
-                "{}",
-                q.issue
-            );
-            assert!(
-                q.restore_when.contains("broad exec for a Linux tool leaf")
-                    && q.restore_when.contains("deleted"),
-                "{}",
-                q.restore_when
-            );
-        }
-    }
-
-    #[test]
-    fn lookup_is_exact_on_case_and_platform() {
-        assert!(lookup("CN-W-05", "linux").is_some() && lookup("CN-W-06", "linux").is_some());
-        assert!(
-            lookup("CN-W-05", "macos").is_none() && lookup("CN-W-06", "macos").is_none(),
-            "the tool-exec cases are linux-only"
-        );
-        assert!(
-            lookup("CN-E-01", "macos").is_none(),
-            "an unlisted case cannot skip"
-        );
-        assert!(
-            lookup("cn-w-05", "linux").is_none() && lookup("CN-W-05", "Linux").is_none(),
-            "no case folding"
-        );
-        assert_eq!(for_platform("linux").len(), 2);
-        assert!(for_platform("macos").is_empty());
+    fn the_quarantine_is_empty() {
+        assert!(TEMPORARY_QUARANTINE.is_empty());
     }
 
     #[test]
     fn the_note_is_self_describing_and_prefixed() {
-        let text = note(lookup("CN-W-05", "linux").unwrap());
+        let text = note(&TEST_QUARANTINE[0]);
         assert!(text.starts_with(QUARANTINE_NOTE_PREFIX));
         for needle in [
-            "CN-W-05 on linux",
-            "broad exec",
+            "CN-Q-01 on linux",
+            "test-only exception",
             "owner: box-maintainers",
             "restore when:",
         ] {
             assert!(text.contains(needle), "{text}");
         }
-        assert!(
-            !text.starts_with(crate::verdict::SKIP_NOTE_PREFIX),
-            "never confusable with a platform SKIP"
-        );
+        assert!(!text.starts_with(crate::verdict::SKIP_NOTE_PREFIX));
     }
 }

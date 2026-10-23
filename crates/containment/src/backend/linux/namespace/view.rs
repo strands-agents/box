@@ -1,7 +1,10 @@
 //! Lowering filesystem grants onto a constructed mount view.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::config::ContainmentConfig;
 use crate::error::ContainmentError;
@@ -63,6 +66,7 @@ pub(crate) struct MountEntry {
 pub(crate) struct MountView {
     entries: Vec<MountEntry>,
     protected_parents: BTreeSet<PathBuf>,
+    dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
 }
 
 impl MountView {
@@ -184,12 +188,17 @@ impl MountView {
             // entry's own metadata, so it holds the requirement rather than widening it.
             if granted.scope == Scope::Dir {
                 for target in granted.reachable_paths() {
-                    let has_granted_descendant = config.authorizations().iter().any(|candidate| {
-                        candidate
-                            .reachable_paths()
-                            .iter()
-                            .any(|path| path != &target && path.starts_with(&target))
-                    });
+                    // A refusal below needs a mountpoint, which a read-only filesystem cannot hold.
+                    let has_granted_descendant = config
+                        .authorizations()
+                        .into_iter()
+                        .chain(config.refusals())
+                        .any(|candidate| {
+                            candidate
+                                .reachable_paths()
+                                .iter()
+                                .any(|path| path != &target && path.starts_with(&target))
+                        });
                     if has_granted_descendant {
                         continue;
                     }
@@ -258,8 +267,9 @@ impl MountView {
             })
             .map(|entry| entry.target.clone())
             .collect();
+        let mut dependency_sources = BTreeMap::new();
         for executable in exec_files {
-            for dependency in elf_dependencies(&executable, config.operator_home())? {
+            for dependency in elf_dependencies(&executable, config)? {
                 if covering
                     .iter()
                     .any(|tree| dependency.path.starts_with(tree))
@@ -267,8 +277,9 @@ impl MountView {
                     continue;
                 }
                 if dedup.insert(dependency.path.clone()) {
+                    dependency_sources.insert(dependency.path.clone(), dependency.file);
                     entries.push(MountEntry {
-                        source: Some(dependency.path.clone()),
+                        source: Some(dependency.resolved),
                         target: dependency.path,
                         kind: MountKind::Bind,
                         // Never writable: read-plus-execute is the safe pairing precisely
@@ -430,6 +441,7 @@ impl MountView {
         Ok(Self {
             entries,
             protected_parents,
+            dependency_sources: RefCell::new(dependency_sources),
         })
     }
 
@@ -468,6 +480,36 @@ impl MountView {
         for entry in &self.entries {
             self.establish(entry, root)?;
         }
+        self.protect_parents(root)?;
+
+        // The pivot's temporary old-root mountpoint has to exist *before* the root is sealed read-
+        // only.
+        let old_root = root.join(OLD_ROOT_NAME);
+        std::fs::create_dir_all(&old_root)
+            .map_err(|e| refusal(format!("creating the pivot target: {e}")))?;
+
+        // Remount the root read-only now that every bind is in place.
+        mount_syscall(
+            None,
+            root,
+            None,
+            libc::MS_REMOUNT
+                | libc::MS_BIND
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_NOEXEC,
+            None,
+        )
+        .map_err(|e| refusal(format!("remounting the view root read-only: {e}")))?;
+
+        self.pivot_into(root)?;
+        self.dependency_sources.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// Pin each protected parent before the root becomes read-only.
+    fn protect_parents(&self, root: &Path) -> Result<(), ContainmentError> {
         for parent in &self.protected_parents {
             let target = root.join(parent.strip_prefix("/").unwrap_or(parent));
             let metadata = std::fs::symlink_metadata(&target).map_err(|error| {
@@ -497,28 +539,7 @@ impl MountView {
             })?;
         }
 
-        // The pivot's temporary old-root mountpoint has to exist *before* the root is sealed read-
-        // only.
-        let old_root = root.join(OLD_ROOT_NAME);
-        std::fs::create_dir_all(&old_root)
-            .map_err(|e| refusal(format!("creating the pivot target: {e}")))?;
-
-        // Remount the root read-only now that every bind is in place.
-        mount_syscall(
-            None,
-            root,
-            None,
-            libc::MS_REMOUNT
-                | libc::MS_BIND
-                | libc::MS_RDONLY
-                | libc::MS_NOSUID
-                | libc::MS_NODEV
-                | libc::MS_NOEXEC,
-            None,
-        )
-        .map_err(|e| refusal(format!("remounting the view root read-only: {e}")))?;
-
-        self.pivot_into(root)
+        Ok(())
     }
 
     /// Establish one planned mount beneath `root`.
@@ -640,6 +661,15 @@ impl MountView {
                         entry.target.display()
                     ))
                 })?;
+
+                let dependency_sources = self.dependency_sources.borrow();
+                let pinned_source = dependency_sources
+                    .get(&entry.target)
+                    .map(|admitted| pin_admitted_source(admitted, source))
+                    .transpose()?;
+                let source = pinned_source
+                    .as_ref()
+                    .map_or(source, |(_, path)| path.as_path());
 
                 // The mountpoint must match the source's kind: a file binds onto a
                 // file, a directory onto a directory.
@@ -1074,6 +1104,8 @@ const DEVICE_NODES: &[&str] = &["/dev/null", "/dev/zero", "/dev/urandom", "/dev/
 /// One resolved dependency of an executable.
 struct Dependency {
     path: PathBuf,
+    resolved: PathBuf,
+    file: Rc<std::fs::File>,
     origin: MountOrigin,
 }
 
@@ -1082,46 +1114,160 @@ struct Dependency {
 struct ImageNeeds {
     interpreter: Option<PathBuf>,
     needed: Vec<String>,
-    /// `DT_RUNPATH`, or `DT_RPATH` when the image carries no `DT_RUNPATH`.
-    search: Vec<String>,
+    runpath: Option<Vec<String>>,
+    rpath: Vec<String>,
+}
+
+/// An image's search directories and its shared RPATH ancestry.
+struct LibrarySearch {
+    directories: Vec<PathBuf>,
+    parent: Option<std::rc::Rc<LibrarySearch>>,
 }
 
 /// A ceiling on the images one closure walks.
 const MAXIMUM_IMAGES: usize = 512;
 
+/// Retain a mount source that matches the admitted dependency's identity.
+fn pin_admitted_source(
+    admitted: &std::fs::File,
+    source: &Path,
+) -> Result<(std::fs::File, PathBuf), ContainmentError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let file = open_dependency(source)?;
+    let expected = admitted
+        .metadata()
+        .map_err(|error| refusal(format!("reading admitted dependency identity: {error}")))?;
+    let actual = file
+        .metadata()
+        .map_err(|error| refusal(format!("reading dependency mount identity: {error}")))?;
+    if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        return Err(refusal(format!(
+            "dependency '{}' changed after admission",
+            source.display()
+        )));
+    }
+    let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    Ok((file, path))
+}
+
+/// Open a canonical dependency without following replacement links.
+fn open_dependency(path: &Path) -> Result<std::fs::File, ContainmentError> {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let open = || -> std::io::Result<std::fs::File> {
+        let expected = std::fs::metadata(path)?;
+        if !expected.is_file() {
+            return Err(std::io::Error::other("dependency is not a regular file"));
+        }
+        let mut parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open("/")?;
+        let mut components = path.components().peekable();
+        if components.next() != Some(std::path::Component::RootDir) {
+            return Err(std::io::Error::other("dependency path is not absolute"));
+        }
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(std::io::Error::other("dependency path is not canonical"));
+            };
+            let name = path_to_cstring(Path::new(name))?;
+            let flags = libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | if components.peek().is_some() {
+                    libc::O_PATH | libc::O_DIRECTORY
+                } else {
+                    libc::O_RDONLY | libc::O_NONBLOCK
+                };
+            // SAFETY: parent is open, and name is a live NUL-terminated component.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: openat returned a new descriptor owned by this file.
+            parent = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        let actual = parent.metadata()?;
+        if !actual.is_file() || actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+            return Err(std::io::Error::other(
+                "dependency identity changed before opening",
+            ));
+        }
+        Ok(parent)
+    };
+    open().map_err(|error| {
+        refusal(format!(
+            "dependency '{}' cannot be granted: {error}",
+            path.display()
+        ))
+    })
+}
+
 /// The ELF interpreter and every shared library `executable` loads, through each library's own
 /// needs, resolved as the loader resolves them with no environment and no cache.
 fn elf_dependencies(
     executable: &Path,
-    declared_home: Option<&Path>,
+    config: &ContainmentConfig,
 ) -> Result<Vec<Dependency>, ContainmentError> {
     let mut dependencies: Vec<Dependency> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    let executable_search = image_needs(executable)?.search;
-    let mut pending: Vec<PathBuf> = vec![executable.to_path_buf()];
-    while let Some(image) = pending.pop() {
+    let mut walked = BTreeSet::new();
+    let restricted = workload_writable(config, executable)?;
+    let resolved = executable.canonicalize().map_err(|error| {
+        refusal(format!(
+            "dependency '{}' cannot be granted: {error}",
+            executable.display()
+        ))
+    })?;
+    let file = Rc::new(open_dependency(&resolved)?);
+    let mut pending =
+        std::collections::VecDeque::from([(executable.to_path_buf(), file, None, restricted)]);
+    while let Some((image, file, inherited_rpath, restricted)) = pending.pop_front() {
+        if !walked.insert((image.clone(), restricted)) {
+            continue;
+        }
         if dependencies.len() > MAXIMUM_IMAGES {
             return Err(refusal(format!(
                 "'{}' loads more than {MAXIMUM_IMAGES} images; refusing rather than walking on",
                 executable.display()
             )));
         }
-        let needs = image_needs(&image)?;
-        if let Some(interpreter) = needs.interpreter
-            && seen.insert(interpreter.clone())
-        {
-            // The workload authors the program header, so its interpreter is judged like any other
-            // image it names.
-            require_loadable(&image, &interpreter, declared_home)?;
-            dependencies.push(Dependency {
-                path: interpreter,
-                origin: MountOrigin::Interpreter,
-            });
+        let needs = image_needs_from_file(
+            &mut file
+                .try_clone()
+                .map_err(|error| refusal(format!("cloning dependency handle: {error}")))?,
+        )?;
+        let rpath = if needs.runpath.is_none() && !needs.rpath.is_empty() {
+            Some(std::rc::Rc::new(LibrarySearch {
+                directories: search_directories(&image, &needs.rpath),
+                parent: inherited_rpath,
+            }))
+        } else {
+            inherited_rpath
+        };
+        let search = if let Some(paths) = &needs.runpath {
+            Some(std::rc::Rc::new(LibrarySearch {
+                directories: search_directories(&image, paths),
+                parent: None,
+            }))
+        } else {
+            rpath.clone()
+        };
+        if let Some(interpreter) = needs.interpreter {
+            let (resolved, file, _) = require_loadable(&image, &interpreter, config, restricted)?;
+            if seen.insert(interpreter.clone()) {
+                dependencies.push(Dependency {
+                    path: interpreter,
+                    resolved,
+                    file,
+                    origin: MountOrigin::Interpreter,
+                });
+            }
         }
         for name in &needs.needed {
-            let Some(found) =
-                resolve_needed(&image, executable, name, &needs.search, &executable_search)
-            else {
+            let Some(found) = resolve_needed(name, search.as_deref()) else {
                 return Err(refusal(format!(
                     "'{}' needs the shared library '{}', which is not in its DT_RUNPATH, its \
                      DT_RPATH, or any standard system library directory; the view would be \
@@ -1130,35 +1276,35 @@ fn elf_dependencies(
                     name
                 )));
             };
-            // Seen by identity, so one library requested under two spellings is planned once.
-            let identity = found.canonicalize().unwrap_or_else(|_| found.clone());
-            if !seen.insert(identity.clone()) {
-                continue;
+            let (identity, file, next_restricted) =
+                require_loadable(&image, &found, config, restricted)?;
+            pending.push_back((
+                identity.clone(),
+                file.clone(),
+                rpath.clone(),
+                next_restricted,
+            ));
+            if seen.insert(identity.clone()) {
+                dependencies.push(Dependency {
+                    path: found,
+                    resolved: identity,
+                    file,
+                    origin: MountOrigin::Library,
+                });
             }
-            // A system library needs only system libraries. Anything else is judged like a grant
-            // and walked for its own needs, under its identity so `$ORIGIN` is a real directory.
-            if !LIBRARY_DIRECTORIES
-                .iter()
-                .any(|directory| found.starts_with(directory))
-            {
-                require_loadable(&image, &found, declared_home)?;
-                pending.push(identity);
-            }
-            dependencies.push(Dependency {
-                path: found,
-                origin: MountOrigin::Library,
-            });
         }
     }
     Ok(dependencies)
 }
 
-/// Refuse a library the deny-only floor would refuse as a read grant.
+/// Check a dependency against the floors and the originating image's filesystem grants.
 fn require_loadable(
     image: &Path,
     library: &Path,
-    declared_home: Option<&Path>,
-) -> Result<(), ContainmentError> {
+    config: &ContainmentConfig,
+    restricted: bool,
+) -> Result<(PathBuf, Rc<std::fs::File>, bool), ContainmentError> {
+    let restricted = restricted || workload_writable(config, library)?;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1167,50 +1313,129 @@ fn require_loadable(
                 library.display()
             ))
         })?;
-    crate::floors::require_bounded_grant(&granted, declared_home, false).map_err(|error| {
-        refusal(format!(
-            "'{}' needs '{}', which the floor refuses: {error}",
+    crate::floors::require_bounded_grant(&granted, config.operator_home(), false).map_err(
+        |error| {
+            refusal(format!(
+                "'{}' needs '{}', which the floor refuses: {error}",
+                image.display(),
+                library.display()
+            ))
+        },
+    )?;
+    if restricted
+        && !inside_loader_directory(&granted.resolved)
+        && !stated_grant_reaches(config, &granted.resolved)
+    {
+        return Err(refusal(format!(
+            "'{}' needs '{}', which no filesystem grant reaches; \
+             a writable image cannot add dependency bytes outside the stated grants",
             image.display(),
             library.display()
-        ))
+        )));
+    }
+    let file = Rc::new(open_dependency(&granted.resolved)?);
+    Ok((granted.resolved, file, restricted))
+}
+
+fn inside_loader_directory(identity: &Path) -> bool {
+    LIBRARY_DIRECTORIES
+        .iter()
+        .any(|directory| identity.starts_with(directory))
+}
+
+fn workload_writable(config: &ContainmentConfig, image: &Path) -> Result<bool, ContainmentError> {
+    if !config
+        .authorizations()
+        .iter()
+        .any(|grant| grant.operation == Operation::Write)
+    {
+        return Ok(false);
+    }
+    let path = crate::model::PathGrant::new(image, Operation::Read, Scope::File)?;
+    let mut nodes = path.traversal_paths();
+    for grant in config
+        .authorizations()
+        .iter()
+        .filter(|grant| grant.operation == Operation::Exec && grant.resolved == path.resolved)
+    {
+        nodes.extend(grant.traversal_paths());
+    }
+    let mut visited = BTreeSet::new();
+    while let Some(node) = nodes.pop() {
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        if visited.len() > 256 {
+            return Err(refusal(format!(
+                "dependency '{}' has too many link paths to verify",
+                image.display()
+            )));
+        }
+        if config.authorizations().iter().any(|grant| {
+            grant.operation == Operation::Write
+                && match grant.scope {
+                    Scope::Root => {
+                        node.starts_with(&grant.resolved) || node.starts_with(&grant.original)
+                    }
+                    Scope::File => node == grant.resolved || node == grant.original,
+                    Scope::Dir => false,
+                }
+        }) {
+            return Ok(true);
+        }
+        for ancestor in node.ancestors() {
+            if let Ok(target) = std::fs::read_link(ancestor) {
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    ancestor.parent().unwrap_or(Path::new("/")).join(target)
+                };
+                let target = target.join(node.strip_prefix(ancestor).unwrap_or(Path::new("")));
+                nodes.push(folded(&target));
+                nodes.push(target);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn stated_grant_reaches(config: &ContainmentConfig, identity: &Path) -> bool {
+    config.authorizations().iter().any(|grant| {
+        matches!(
+            grant.operation,
+            Operation::Read | Operation::Write | Operation::Exec
+        ) && match grant.scope {
+            Scope::Root => identity.starts_with(&grant.resolved),
+            Scope::File => identity == grant.resolved,
+            Scope::Dir => false,
+        }
     })
 }
 
-/// Where the loader finds `name` for `image`: a path as spelled, then the image's own search list,
-/// then the executable's, then the standard directories. `$ORIGIN` is the image's directory.
-fn resolve_needed(
-    image: &Path,
-    executable: &Path,
-    name: &str,
-    image_search: &[String],
-    executable_search: &[String],
-) -> Option<PathBuf> {
+/// Search directories with `$ORIGIN` expanded against the image that owns the entry.
+fn search_directories(image: &Path, paths: &[String]) -> Vec<PathBuf> {
+    let origin = image.parent().unwrap_or(Path::new("/"));
+    paths
+        .iter()
+        .filter_map(|entry| {
+            let directory = entry
+                .replace("${ORIGIN}", &origin.to_string_lossy())
+                .replace("$ORIGIN", &origin.to_string_lossy());
+            // `$LIB` and `$PLATFORM` depend on the host's ABI spelling, which this walk does not model.
+            (!directory.contains('$') && !directory.is_empty()).then(|| PathBuf::from(directory))
+        })
+        .collect()
+}
+
+/// Resolve a dependency through its applicable search directories, then the system directories.
+fn resolve_needed(name: &str, search: Option<&LibrarySearch>) -> Option<PathBuf> {
     if name.contains('/') {
         let spelled = PathBuf::from(name);
         return spelled.is_file().then_some(spelled);
     }
-    let directory_of = |path: &Path| path.parent().unwrap_or(Path::new("/")).to_path_buf();
-    // `$ORIGIN` names the directory of the image that carries the entry, so an executable's own
-    // entry expands against the executable however deep the walk is.
-    let expanded = |(entry, origin): (&String, &Path)| -> Option<PathBuf> {
-        let directory = entry
-            .replace("${ORIGIN}", &origin.to_string_lossy())
-            .replace("$ORIGIN", &origin.to_string_lossy());
-        // `$LIB` and `$PLATFORM` depend on the host's ABI spelling, which this walk does not model.
-        (!directory.contains('$') && !directory.is_empty()).then(|| PathBuf::from(directory))
-    };
-    let image_origin = directory_of(image);
-    let executable_origin = directory_of(executable);
-    image_search
-        .iter()
-        .map(|entry| (entry, image_origin.as_path()))
-        .chain(
-            executable_search
-                .iter()
-                .map(|entry| (entry, executable_origin.as_path())),
-        )
-        .filter_map(expanded)
-        .chain(LIBRARY_DIRECTORIES.iter().map(PathBuf::from))
+    std::iter::successors(search, |entry| entry.parent.as_deref())
+        .flat_map(|entry| entry.directories.iter().map(PathBuf::as_path))
+        .chain(LIBRARY_DIRECTORIES.iter().map(Path::new))
         .map(|directory| folded(&directory.join(name)))
         .find(|candidate| candidate.is_file())
 }
@@ -1240,7 +1465,18 @@ fn is_loader_directory(resolved: &Path) -> bool {
 }
 
 /// Read what one ELF image asks for: its interpreter, its `DT_NEEDED` names, and its search list.
+#[cfg(test)]
 fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
+    let mut file = std::fs::File::open(executable).map_err(|source| {
+        refusal(format!(
+            "opening '{}' to resolve its dynamic dependencies: {source}",
+            executable.display()
+        ))
+    })?;
+    image_needs_from_file(&mut file)
+}
+
+fn image_needs_from_file(file: &mut std::fs::File) -> Result<ImageNeeds, ContainmentError> {
     use std::io::{Read as _, Seek as _};
 
     /// A 64-bit ELF header, and the fixed part of one program header.
@@ -1283,12 +1519,8 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     }
 
     let mut needs = ImageNeeds::default();
-    let mut file = std::fs::File::open(executable).map_err(|source| {
-        refusal(format!(
-            "opening '{}' to resolve its dynamic dependencies: {source}",
-            executable.display()
-        ))
-    })?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| refusal(format!("seeking dependency header: {error}")))?;
 
     // A file shorter than an ELF header is not an ELF; that is not an error.
     let mut header = [0u8; ELF_HEADER_BYTES];
@@ -1324,12 +1556,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
         return Ok(needs);
     };
     // A malformed table offset or length plans NOTHING rather than erroring.
-    let Ok(table) = read_at(
-        &mut file,
-        program_headers,
-        table_bytes,
-        "the program headers",
-    ) else {
+    let Ok(table) = read_at(file, program_headers, table_bytes, "the program headers") else {
         return Ok(needs);
     };
 
@@ -1365,8 +1592,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
 
     if let Some((offset, size)) = interpreter_segment {
         let length = usize::try_from(size).unwrap_or(0);
-        let segment =
-            read_at(&mut file, offset, length, "the ELF interpreter path").unwrap_or_default();
+        let segment = read_at(file, offset, length, "the ELF interpreter path").unwrap_or_default();
         if let Some(text) = segment.split(|byte| *byte == 0).next()
             && let Ok(path) = String::from_utf8(text.to_vec())
             && !path.is_empty()
@@ -1380,7 +1606,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
         return Ok(needs);
     };
     let length = usize::try_from(size).unwrap_or(0);
-    let Ok(dynamic) = read_at(&mut file, offset, length, "the ELF dynamic segment") else {
+    let Ok(dynamic) = read_at(file, offset, length, "the ELF dynamic segment") else {
         return Ok(needs);
     };
 
@@ -1419,7 +1645,8 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     // whose virtual range contains it.
     let Some(string_table_offset) = loads.iter().find_map(|(offset, virtual_address, size)| {
         (address >= *virtual_address && address < virtual_address.checked_add(*size)?)
-            .then(|| address - virtual_address + offset)
+            .then(|| (address - virtual_address).checked_add(*offset))
+            .flatten()
     }) else {
         return Ok(needs);
     };
@@ -1436,7 +1663,7 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     let span = usize::try_from(furthest).unwrap_or(0).saturating_add(4096);
     // A short read is expected here rather than exceptional: the span is an upper bound (largest
     // offset plus a name's maximum length), so it routinely runs past the end of the file.
-    let strings = read_at_most(&mut file, string_table_offset, span);
+    let strings = read_at_most(file, string_table_offset, span);
     if strings.is_empty() {
         return Ok(needs);
     }
@@ -1448,17 +1675,17 @@ fn image_needs(executable: &Path) -> Result<ImageNeeds, ContainmentError> {
     };
 
     needs.needed = needed_offsets.into_iter().filter_map(string_at).collect();
-    // `DT_RUNPATH` replaces `DT_RPATH`, as it does for the loader.
-    let search = if runpath_offsets.is_empty() {
-        rpath_offsets
-    } else {
-        runpath_offsets
+    let paths_at = |offsets: Vec<u64>| -> Vec<String> {
+        offsets
+            .into_iter()
+            .filter_map(string_at)
+            .flat_map(|list| list.split(':').map(str::to_owned).collect::<Vec<String>>())
+            .collect()
     };
-    needs.search = search
-        .into_iter()
-        .filter_map(string_at)
-        .flat_map(|list| list.split(':').map(str::to_owned).collect::<Vec<String>>())
-        .collect();
+    if !runpath_offsets.is_empty() {
+        needs.runpath = Some(paths_at(runpath_offsets));
+    }
+    needs.rpath = paths_at(rpath_offsets);
 
     Ok(needs)
 }
@@ -1497,6 +1724,7 @@ fn refusal(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod loader_admission;
     use super::*;
 
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
@@ -2210,6 +2438,31 @@ mod tests {
         assert!(!entry.writable);
     }
 
+    /// A refusal beneath a metadata-only directory keeps that directory out of the plan, so the
+    /// refusal's mountpoint can be created.
+    #[test]
+    fn a_refusal_replaces_its_metadata_only_ancestor() {
+        let ancestor = tempfile::tempdir().expect("ancestor");
+        let refused = ancestor.path().join("box/private");
+        std::fs::create_dir_all(&refused).expect("the refused tree");
+        let config = ContainmentConfig::new()
+            .allow(ancestor.path(), Operation::Metadata, Scope::Dir)
+            .expect("metadata ancestor")
+            .refuse(&refused, Scope::Root)
+            .expect("the refusal");
+
+        let entries = planned(&config);
+        assert!(
+            entries.iter().all(|entry| {
+                entry.target != ancestor.path() || entry.origin != MountOrigin::Grant
+            }),
+            "a read-only ancestor mount leaves no place for the refusal's mountpoint: {entries:?}"
+        );
+        let entry = entry_for(&entries, &refused);
+        assert_eq!(entry.origin, MountOrigin::Refusal);
+        assert!(!entry.writable);
+    }
+
     /// A read-write grant is writable — the box's home depends on this.
     #[test]
     fn a_read_write_grant_plans_a_writable_bind() {
@@ -2266,6 +2519,194 @@ mod tests {
             entries[protected_index].source.as_deref(),
             Some(authority.as_path())
         );
+    }
+
+    #[test]
+    fn duplicate_socket_grants_plan_one_writable_non_executable_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&path, Operation::Connect, Scope::File)
+            .unwrap()
+            .allow(&path, Operation::Connect, Scope::File)
+            .unwrap();
+        let entries = planned(&config);
+        let sockets: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.origin == MountOrigin::Socket)
+            .collect();
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(
+            *sockets[0],
+            MountEntry {
+                source: Some(path.canonicalize().unwrap()),
+                target: path.canonicalize().unwrap(),
+                kind: MountKind::Bind,
+                writable: true,
+                executable: false,
+                origin: MountOrigin::Socket,
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_directory_grants_plan_one_empty_read_only_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = ContainmentConfig::new()
+            .allow(directory.path(), Operation::Read, Scope::Dir)
+            .unwrap()
+            .allow(directory.path(), Operation::Metadata, Scope::Dir)
+            .unwrap();
+        let entries = planned(&config);
+        let grants: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.origin == MountOrigin::Grant)
+            .collect();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            *grants[0],
+            MountEntry {
+                source: None,
+                target: directory.path().canonicalize().unwrap(),
+                kind: MountKind::Fresh { fstype: "tmpfs" },
+                writable: false,
+                executable: false,
+                origin: MountOrigin::Grant,
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_subtrees_remain_omitted_from_the_linux_view() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("private"), b"content").unwrap();
+        let config = ContainmentConfig::new()
+            .allow(directory.path(), Operation::Metadata, Scope::Root)
+            .unwrap();
+        let entries = planned(&config);
+        assert!(!entries.iter().any(|entry| entry.target == directory.path()));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.source.as_deref() == Some(directory.path()))
+        );
+    }
+
+    #[test]
+    fn protected_file_mounts_refuse_writes_and_parent_replacement() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let parent = root.join("nested");
+            std::fs::create_dir(&parent).unwrap();
+            let protected = parent.join("authority");
+            std::fs::write(&protected, b"unchanged").unwrap();
+            let opened = std::fs::File::open(&protected).unwrap();
+            let config = ContainmentConfig::new()
+                .allow(&root, Operation::Write, Scope::Root)
+                .unwrap()
+                .protect_write(&protected, &opened)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            assert!(view.protected_parents.contains(&parent));
+            view.materialize().unwrap();
+            assert!(std::fs::write(&protected, b"changed").is_err());
+            assert_eq!(std::fs::read(&protected).unwrap(), b"unchanged");
+            assert!(std::fs::rename(&parent, root.join("moved")).is_err());
+            std::fs::write(parent.join("ordinary"), b"allowed").unwrap();
+            assert_eq!(std::fs::read(parent.join("ordinary")).unwrap(), b"allowed");
+        });
+    }
+
+    fn planned_parent_fixture() -> (tempfile::TempDir, tempfile::TempDir, MountView, PathBuf) {
+        let source = tempfile::tempdir().unwrap();
+        let parent = source.path().join("nested");
+        std::fs::create_dir(&parent).unwrap();
+        let protected = parent.join("authority");
+        std::fs::write(&protected, b"protected").unwrap();
+        let opened = std::fs::File::open(&protected).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(source.path(), Operation::Write, Scope::Root)
+            .unwrap()
+            .protect_write(&protected, &opened)
+            .unwrap();
+        let view = MountView::plan(&config).unwrap();
+        assert!(view.protected_parents.contains(&parent));
+        let staging = tempfile::tempdir().unwrap();
+        let target = staging.path().join(parent.strip_prefix("/").unwrap());
+        (source, staging, view, target)
+    }
+
+    #[test]
+    fn a_missing_or_replaced_protected_parent_refuses_the_view() {
+        let (_source, staging, view, target) = planned_parent_fixture();
+        let error = view.protect_parents(staging.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("inspecting protected parent"),
+            "{error}"
+        );
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::rename(&target, target.with_extension("before")).unwrap();
+        std::fs::write(&target, b"replacement").unwrap();
+        let error = view.protect_parents(staging.path()).unwrap_err();
+        assert!(error.to_string().contains("is not a directory"), "{error}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn a_failed_protected_parent_bind_refuses_the_view() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let (_source, staging, view, target) = planned_parent_fixture();
+            std::fs::create_dir_all(&target).unwrap();
+            view.protect_parents(staging.path()).unwrap();
+            super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
+            let error = view.protect_parents(staging.path()).unwrap_err();
+            assert!(
+                error.to_string().contains("binding protected parent"),
+                "{error}"
+            );
+            assert!(target.is_dir());
+        });
+    }
+
+    #[test]
+    fn an_empty_directory_mount_is_read_only() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            std::fs::write(root.join("hidden"), b"host bytes").unwrap();
+            let config = ContainmentConfig::new()
+                .allow(&root, Operation::Read, Scope::Dir)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+            assert!(std::fs::write(root.join("new"), b"refused").is_err());
+        });
+    }
+
+    #[test]
+    fn a_refused_file_outside_a_tree_bind_is_empty_and_read_only() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("private");
+            std::fs::write(&path, b"host bytes").unwrap();
+            let config = ContainmentConfig::new().refuse(&path, Scope::File).unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"");
+            assert!(std::fs::write(&path, b"refused").is_err());
+        });
     }
 
     /// The grant's own resolved path is the path inside the view, so one policy
@@ -2637,7 +3078,8 @@ mod tests {
         let script = directory.path().join("script.sh");
         std::fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
 
-        let dependencies = elf_dependencies(&script, None).expect("a script must plan cleanly");
+        let dependencies = elf_dependencies(&script, &ContainmentConfig::new())
+            .expect("a script must plan cleanly");
         assert!(
             dependencies.is_empty(),
             "a script has no ELF interpreter or DT_NEEDED table"
@@ -2665,7 +3107,7 @@ mod tests {
         ] {
             let path = directory.path().join(name);
             std::fs::write(&path, &bytes).expect("write fixture");
-            let dependencies = elf_dependencies(&path, None)
+            let dependencies = elf_dependencies(&path, &ContainmentConfig::new())
                 .unwrap_or_else(|error| panic!("{name} errored: {error}"));
             assert!(dependencies.is_empty(), "{name} must plan nothing");
         }
@@ -2902,6 +3344,15 @@ mod tests {
     /// A minimal 64-bit little-endian ELF image carrying the entries the planner reads. It is not
     /// runnable; the parser reads the headers and two segments.
     fn synthetic_elf(interpreter: Option<&str>, needed: &[&str], runpath: Option<&str>) -> Vec<u8> {
+        synthetic_elf_paths(interpreter, needed, runpath, None)
+    }
+
+    fn synthetic_elf_paths(
+        interpreter: Option<&str>,
+        needed: &[&str],
+        runpath: Option<&str>,
+        rpath: Option<&str>,
+    ) -> Vec<u8> {
         let mut strtab: Vec<u8> = vec![0];
         let mut needed_offsets = Vec::new();
         for name in needed {
@@ -2910,6 +3361,12 @@ mod tests {
             strtab.push(0);
         }
         let runpath_offset = runpath.map(|list| {
+            let offset = strtab.len() as u64;
+            strtab.extend_from_slice(list.as_bytes());
+            strtab.push(0);
+            offset
+        });
+        let rpath_offset = rpath.map(|list| {
             let offset = strtab.len() as u64;
             strtab.extend_from_slice(list.as_bytes());
             strtab.push(0);
@@ -2936,6 +3393,9 @@ mod tests {
         }
         if let Some(offset) = runpath_offset {
             entry(29, offset);
+        }
+        if let Some(offset) = rpath_offset {
+            entry(15, offset);
         }
         entry(5, strtab_offset as u64);
         entry(0, 0);
@@ -2986,6 +3446,772 @@ mod tests {
         path
     }
 
+    #[test]
+    fn unsupported_elf_headers_and_invalid_program_tables_plan_no_dependencies() {
+        let base = synthetic_elf(None, &["libfixture.so"], None);
+        let mut cases = Vec::new();
+        for (label, offset, value) in [("magic", 0, 0), ("32-bit", 4, 1), ("big-endian", 5, 2)] {
+            let mut image = base.clone();
+            image[offset] = value;
+            cases.push((label, image));
+        }
+        let mut short_entry = base.clone();
+        short_entry[54..56].copy_from_slice(&55u16.to_le_bytes());
+        cases.push(("short program entry", short_entry));
+        let mut oversized_table = base.clone();
+        oversized_table[54..56].copy_from_slice(&u16::MAX.to_le_bytes());
+        oversized_table[56..58].copy_from_slice(&u16::MAX.to_le_bytes());
+        cases.push(("oversized table", oversized_table));
+        let mut bad_offset = base.clone();
+        bad_offset[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        cases.push(("invalid table offset", bad_offset));
+        cases.push(("truncated table", base[..70].to_vec()));
+        let directory = tempfile::tempdir().unwrap();
+        for (label, image) in cases {
+            let path = planted_image(directory.path(), label, &image);
+            let needs = image_needs(&path).unwrap();
+            assert!(needs.interpreter.is_none(), "{label}");
+            assert!(needs.needed.is_empty(), "{label}");
+            assert!(needs.runpath.is_none(), "{label}");
+            assert!(needs.rpath.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn mount_arguments_with_nul_are_refused_before_the_syscall() {
+        let invalid = Path::new("/tmp/before\0after");
+        for (source, target, fstype, data) in [
+            (Some(invalid), Path::new("/"), None, None),
+            (None, invalid, None, None),
+            (None, Path::new("/"), Some("tmpfs\0other"), None),
+            (None, Path::new("/"), None, Some("mode=755\0other")),
+        ] {
+            assert_eq!(
+                mount_syscall(source, target, fstype, 0, data)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        assert!(path_to_c(invalid).unwrap_err().to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn unsafe_internal_mount_entries_are_refused_before_mounting() {
+        let root = tempfile::tempdir().unwrap();
+        let view = MountView {
+            entries: Vec::new(),
+            protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
+        };
+        let mut entry = MountEntry {
+            source: None,
+            target: PathBuf::from("/entry"),
+            kind: MountKind::Bind,
+            writable: false,
+            executable: false,
+            origin: MountOrigin::Grant,
+        };
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(error.to_string().contains("has no source"));
+        entry.target = PathBuf::from("/../escape");
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(error.to_string().contains("contains a '..'"));
+        assert!(!root.path().join("entry").exists());
+    }
+
+    #[test]
+    fn a_protected_mountpoint_must_exist_as_a_regular_file() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"protected").unwrap();
+        let view = MountView {
+            entries: Vec::new(),
+            protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
+        };
+        let entry = MountEntry {
+            source: Some(source),
+            target: PathBuf::from("/entry"),
+            kind: MountKind::Bind,
+            writable: false,
+            executable: false,
+            origin: MountOrigin::Protection {
+                device: 0,
+                inode: 0,
+            },
+        };
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("opening write-protected mountpoint")
+        );
+        std::fs::create_dir(root.path().join("entry")).unwrap();
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(error.to_string().contains("is not a regular file"));
+    }
+
+    #[test]
+    fn a_refused_file_never_creates_a_mountpoint_through_a_host_bind() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = MountEntry {
+            source: Some(root.path().join("host")),
+            target: PathBuf::from("/bound"),
+            kind: MountKind::Bind,
+            writable: false,
+            executable: false,
+            origin: MountOrigin::Grant,
+        };
+        let view = MountView {
+            entries: vec![parent],
+            protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
+        };
+        let entry = MountEntry {
+            source: None,
+            target: PathBuf::from("/bound/refused"),
+            kind: MountKind::EmptyFile,
+            writable: false,
+            executable: false,
+            origin: MountOrigin::Refusal,
+        };
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("absent from the tree bound over it")
+        );
+        assert!(!root.path().join("bound/refused").exists());
+        std::fs::create_dir_all(root.path().join("bound/refused")).unwrap();
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(error.to_string().contains("is not a regular file"));
+    }
+
+    #[test]
+    fn mounted_protection_checks_device_inode_and_link_count() {
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("protected");
+        assert!(
+            require_mounted_identity(&path, 0, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("inspecting")
+        );
+        std::fs::write(&path, b"identity").unwrap();
+        let metadata = path.metadata().unwrap();
+        require_mounted_identity(&path, metadata.dev(), metadata.ino()).unwrap();
+        for (device, inode) in [
+            (metadata.dev() ^ 1, metadata.ino()),
+            (metadata.dev(), metadata.ino() ^ 1),
+        ] {
+            assert!(require_mounted_identity(&path, device, inode).is_err());
+        }
+        std::fs::hard_link(&path, directory.path().join("alias")).unwrap();
+        assert!(require_mounted_identity(&path, metadata.dev(), metadata.ino()).is_err());
+    }
+
+    #[test]
+    fn dependency_lookup_handles_explicit_paths_and_refuses_unmodeled_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let library = directory.path().join("libfixture-coverage.so");
+        std::fs::write(&library, b"library").unwrap();
+        let image = directory.path().join("program");
+        assert_eq!(
+            resolve_needed(library.to_str().unwrap(), None),
+            Some(library.clone())
+        );
+        assert!(resolve_needed("/absent/fixture.so", None).is_none());
+        let search = LibrarySearch {
+            directories: search_directories(
+                &image,
+                &["".into(), "$LIB".into(), "$PLATFORM".into()],
+            ),
+            parent: None,
+        };
+        assert!(search.directories.is_empty());
+        assert!(resolve_needed("libfixture-coverage.so", Some(&search)).is_none());
+        let search = LibrarySearch {
+            directories: search_directories(&image, &["${ORIGIN}/missing/..".into()]),
+            parent: None,
+        };
+        assert_eq!(
+            resolve_needed("libfixture-coverage.so", Some(&search)),
+            Some(library)
+        );
+        assert_eq!(folded(Path::new("./one/../two")), PathBuf::from("two"));
+    }
+
+    #[test]
+    fn malformed_mount_escapes_remain_literal() {
+        for spelling in [r"tail\", r"\12", r"\888", r"\08x"] {
+            assert_eq!(unescape_mount_field(spelling), spelling);
+        }
+    }
+
+    fn materialize_refuses(number: libc::c_long, argument: Option<(u8, u64)>, reason: &str) {
+        use super::super::failure_tests::{in_fresh_process_with_user_namespace, refuse_syscall};
+        in_fresh_process_with_user_namespace(true, || {
+            // A root-only view tests the build sequence without requiring a fresh PID namespace.
+            let mut view = MountView::plan(&ContainmentConfig::new()).unwrap();
+            view.entries.retain(|entry| entry.target == Path::new("/"));
+            refuse_syscall(number, argument);
+            let error = view.materialize().unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        });
+    }
+
+    #[test]
+    fn failed_mount_propagation_change_refuses_the_view() {
+        materialize_refuses(libc::SYS_mount, None, "making the mount tree private");
+    }
+
+    #[test]
+    fn unavailable_random_device_refuses_the_staging_root() {
+        materialize_refuses(libc::SYS_openat, None, "opening /dev/urandom");
+    }
+
+    #[test]
+    fn unreadable_random_device_refuses_the_staging_root() {
+        materialize_refuses(libc::SYS_read, None, "reading /dev/urandom");
+    }
+
+    #[test]
+    fn failed_staging_directory_creation_refuses_the_view() {
+        #[cfg(target_arch = "x86_64")]
+        let call = libc::SYS_mkdir;
+        #[cfg(not(target_arch = "x86_64"))]
+        let call = libc::SYS_mkdirat;
+        materialize_refuses(call, None, "creating the staging root");
+    }
+
+    #[test]
+    fn failed_fresh_filesystem_mount_refuses_the_view() {
+        materialize_refuses(
+            libc::SYS_mount,
+            Some((3, libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC)),
+            "mounting a fresh tmpfs",
+        );
+    }
+
+    #[test]
+    fn failed_root_read_only_remount_refuses_the_view() {
+        materialize_refuses(
+            libc::SYS_mount,
+            Some((
+                3,
+                libc::MS_REMOUNT
+                    | libc::MS_BIND
+                    | libc::MS_RDONLY
+                    | libc::MS_NOSUID
+                    | libc::MS_NODEV
+                    | libc::MS_NOEXEC,
+            )),
+            "remounting the view root read-only",
+        );
+    }
+
+    #[test]
+    fn failed_root_pivot_refuses_the_view() {
+        materialize_refuses(libc::SYS_pivot_root, None, "pivot_root into the view");
+    }
+
+    #[test]
+    fn failed_directory_change_after_pivot_refuses_the_view() {
+        materialize_refuses(libc::SYS_chdir, None, "entering the pivoted root");
+    }
+
+    #[test]
+    fn failed_old_root_detachment_refuses_the_view() {
+        materialize_refuses(libc::SYS_umount2, None, "detaching the old root");
+    }
+
+    #[test]
+    fn an_unreadable_detached_root_refuses_the_view() {
+        materialize_refuses(
+            libc::SYS_openat,
+            Some((
+                2,
+                (libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NONBLOCK) as u64,
+            )),
+            "inspecting the detached old root",
+        );
+    }
+
+    #[test]
+    fn a_nonempty_old_root_mountpoint_refuses_the_pivoted_view() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            mount_syscall(
+                None,
+                Path::new("/"),
+                None,
+                libc::MS_REC | libc::MS_PRIVATE,
+                None,
+            )
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("root");
+            std::fs::create_dir(&root).unwrap();
+            mount_syscall(None, &root, Some("tmpfs"), 0, Some("mode=755")).unwrap();
+            let old = root.join(OLD_ROOT_NAME);
+            std::fs::create_dir(&old).unwrap();
+            std::fs::write(old.join("unexpected"), b"marker").unwrap();
+            let view = MountView {
+                entries: Vec::new(),
+                protected_parents: BTreeSet::new(),
+                dependency_sources: RefCell::new(BTreeMap::new()),
+            };
+            let error = view.pivot_into(&root).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("detached old root still has 1 entries"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(Path::new("/").join(OLD_ROOT_NAME).join("unexpected")).unwrap(),
+                b"marker"
+            );
+        });
+    }
+
+    #[test]
+    fn unreadable_mount_tables_refuse_remounting_and_shadow_classification() {
+        super::super::failure_tests::in_fresh_process(|| {
+            super::super::failure_tests::refuse_syscall(libc::SYS_openat, None);
+            let target = Path::new("/fixture");
+            let error = remount_read_only(target).unwrap_err();
+            assert!(
+                error.to_string().contains("reading the mount table"),
+                "{error}"
+            );
+            let error = shadowing_mount(&target.join("child"), target).unwrap_err();
+            assert!(
+                error.to_string().contains("re-reading the mount table"),
+                "{error}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_unshadowed_remount_error_refuses_the_view() {
+        super::super::failure_tests::in_fresh_process(|| {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
+            let error = remount_read_only(directory.path()).unwrap_err();
+            assert!(error.to_string().contains("remounting"), "{error}");
+        });
+    }
+
+    fn establish_refuses(
+        kind: MountKind,
+        create_empty_source: bool,
+        target: &str,
+        denied_call: libc::c_long,
+        reason: &str,
+    ) {
+        super::super::failure_tests::in_fresh_process(|| {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            std::fs::write(&source, b"source").unwrap();
+            if create_empty_source {
+                std::fs::write(root.path().join(EMPTY_FILE_NAME), b"").unwrap();
+            }
+            let entry = MountEntry {
+                source: (kind == MountKind::Bind).then_some(source),
+                target: target.into(),
+                kind,
+                writable: false,
+                executable: false,
+                origin: if kind == MountKind::EmptyFile {
+                    MountOrigin::Refusal
+                } else {
+                    MountOrigin::Grant
+                },
+            };
+            let view = MountView {
+                entries: Vec::new(),
+                protected_parents: BTreeSet::new(),
+                dependency_sources: RefCell::new(BTreeMap::new()),
+            };
+            super::super::failure_tests::refuse_syscall(denied_call, None);
+            let error = view.establish(&entry, root.path()).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        });
+    }
+
+    #[test]
+    fn failed_empty_refusal_source_creation_refuses_the_view() {
+        establish_refuses(
+            MountKind::EmptyFile,
+            false,
+            "/entry",
+            libc::SYS_openat,
+            "creating the empty file",
+        );
+    }
+
+    #[test]
+    fn failed_empty_refusal_mountpoint_creation_refuses_the_view() {
+        establish_refuses(
+            MountKind::EmptyFile,
+            true,
+            "/entry",
+            libc::SYS_openat,
+            "creating the mountpoint",
+        );
+    }
+
+    #[test]
+    fn failed_empty_refusal_parent_creation_refuses_the_view() {
+        #[cfg(target_arch = "x86_64")]
+        let call = libc::SYS_mkdir;
+        #[cfg(not(target_arch = "x86_64"))]
+        let call = libc::SYS_mkdirat;
+        establish_refuses(
+            MountKind::EmptyFile,
+            true,
+            "/parent/entry",
+            call,
+            "creating '",
+        );
+    }
+
+    #[test]
+    fn failed_empty_file_binding_refuses_the_view() {
+        establish_refuses(
+            MountKind::EmptyFile,
+            true,
+            "/entry",
+            libc::SYS_mount,
+            "binding the empty file",
+        );
+    }
+
+    #[test]
+    fn failed_source_binding_refuses_the_view() {
+        establish_refuses(MountKind::Bind, false, "/entry", libc::SYS_mount, "binding");
+    }
+
+    #[test]
+    fn failed_file_bind_mountpoint_creation_refuses_the_view() {
+        establish_refuses(
+            MountKind::Bind,
+            false,
+            "/entry",
+            libc::SYS_openat,
+            "creating the mountpoint",
+        );
+    }
+
+    #[test]
+    fn failed_fresh_mount_directory_creation_refuses_the_view() {
+        #[cfg(target_arch = "x86_64")]
+        let call = libc::SYS_mkdir;
+        #[cfg(not(target_arch = "x86_64"))]
+        let call = libc::SYS_mkdirat;
+        establish_refuses(
+            MountKind::Fresh { fstype: "tmpfs" },
+            false,
+            "/parent/entry",
+            call,
+            "creating",
+        );
+    }
+
+    #[test]
+    fn a_file_bind_cannot_replace_a_directory_mountpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"source").unwrap();
+        let target = root.path().join("entry");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("sentinel"), b"unchanged").unwrap();
+        let entry = MountEntry {
+            source: Some(source),
+            target: "/entry".into(),
+            kind: MountKind::Bind,
+            writable: false,
+            executable: false,
+            origin: MountOrigin::Grant,
+        };
+        let view = MountView {
+            entries: Vec::new(),
+            protected_parents: BTreeSet::new(),
+            dependency_sources: RefCell::new(BTreeMap::new()),
+        };
+        let error = view.establish(&entry, root.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("is not a regular file"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("sentinel")).unwrap(),
+            b"unchanged"
+        );
+    }
+
+    #[test]
+    fn unrelated_mounts_and_ancestors_outside_the_grant_do_not_count_as_shadowing() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let root = tempfile::tempdir().unwrap();
+            let grant = root.path().join("grant");
+            let point = grant.join("point");
+            let sibling = root.path().join("sibling");
+            std::fs::create_dir_all(&point).unwrap();
+            std::fs::create_dir(&sibling).unwrap();
+            let mount = |path: &Path| {
+                mount_syscall(
+                    Some(Path::new("tmpfs")),
+                    path,
+                    Some("tmpfs"),
+                    libc::MS_NOSUID | libc::MS_NODEV,
+                    None,
+                )
+                .unwrap()
+            };
+            mount(&point);
+            mount(&sibling);
+            assert!(shadowing_mount(&point, &grant).unwrap().is_none());
+            mount(root.path());
+            assert!(shadowing_mount(&point, &grant).unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn a_missing_executable_names_the_failed_dependency_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("absent");
+        let error = image_needs(&missing)
+            .err()
+            .expect("missing image must fail");
+        assert!(error.to_string().contains("opening"));
+        assert!(error.to_string().contains("absent"));
+    }
+
+    #[test]
+    fn malformed_interpreter_segments_do_not_create_an_interpreter_grant() {
+        let base = synthetic_elf(Some("/ld-fixture"), &[], None);
+        let mut cases = Vec::new();
+        for (label, byte) in [("empty interpreter", 0), ("invalid UTF-8", 0xff)] {
+            let mut image = base.clone();
+            image[64 + 3 * 56] = byte;
+            cases.push((label, image));
+        }
+        let mut oversized = base.clone();
+        oversized[64 + 32..64 + 40].copy_from_slice(&(4_194_305u64).to_le_bytes());
+        cases.push(("oversized interpreter", oversized));
+        let mut absent = base.clone();
+        absent[64 + 8..64 + 16].copy_from_slice(&u64::MAX.to_le_bytes());
+        cases.push(("absent interpreter", absent));
+        let directory = tempfile::tempdir().unwrap();
+        for (label, image) in cases {
+            let path = planted_image(directory.path(), label, &image);
+            assert!(image_needs(&path).unwrap().interpreter.is_none(), "{label}");
+        }
+    }
+
+    #[test]
+    fn absent_or_malformed_dynamic_metadata_plans_no_libraries() {
+        let base = synthetic_elf(None, &["libfixture.so"], None);
+        let dynamic = u64::from_le_bytes(base[128..136].try_into().unwrap()) as usize;
+        let mut cases = Vec::new();
+        let mut no_dynamic = base.clone();
+        no_dynamic[120..124].copy_from_slice(&0u32.to_le_bytes());
+        cases.push(("static image", no_dynamic));
+        let mut oversized = base.clone();
+        oversized[152..160].copy_from_slice(&4_194_305u64.to_le_bytes());
+        cases.push(("oversized dynamic", oversized));
+        let mut no_strings = base.clone();
+        no_strings[dynamic + 16..dynamic + 24].copy_from_slice(&99u64.to_le_bytes());
+        cases.push(("no string table", no_strings));
+        let mut no_load = base.clone();
+        no_load[64..68].copy_from_slice(&99u32.to_le_bytes());
+        cases.push(("no load segment", no_load));
+        let mut overflowing_range = base.clone();
+        overflowing_range[80..88].copy_from_slice(&u64::MAX.to_le_bytes());
+        overflowing_range[dynamic + 24..dynamic + 32].copy_from_slice(&u64::MAX.to_le_bytes());
+        cases.push(("overflowing virtual range", overflowing_range));
+        let mut oversized_strings = base.clone();
+        oversized_strings[dynamic + 8..dynamic + 16].copy_from_slice(&4_194_305u64.to_le_bytes());
+        cases.push(("oversized strings", oversized_strings));
+        let mut absent_strings = base.clone();
+        absent_strings[72..80].copy_from_slice(&1_000_000u64.to_le_bytes());
+        cases.push(("strings past EOF", absent_strings));
+        let mut empty_name = base.clone();
+        empty_name[177] = 0;
+        cases.push(("empty library name", empty_name));
+        let mut invalid_name = base.clone();
+        invalid_name[177] = 0xff;
+        cases.push(("invalid library name", invalid_name));
+        let directory = tempfile::tempdir().unwrap();
+        for (label, image) in cases {
+            let path = planted_image(directory.path(), label, &image);
+            assert!(image_needs(&path).unwrap().needed.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_overflowing_string_table_file_offset_does_not_panic() {
+        let mut image = synthetic_elf(None, &["libfixture.so"], None);
+        image[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
+        let directory = tempfile::tempdir().unwrap();
+        let path = planted_image(directory.path(), "overflowing-offset", &image);
+        assert!(image_needs(&path).unwrap().needed.is_empty());
+    }
+
+    #[test]
+    fn legacy_rpath_is_used_when_runpath_is_absent() {
+        let mut image = synthetic_elf(None, &["libfixture.so"], Some("/one:/two"));
+        let dynamic = u64::from_le_bytes(image[128..136].try_into().unwrap()) as usize;
+        image[dynamic + 16..dynamic + 24].copy_from_slice(&15u64.to_le_bytes());
+        let directory = tempfile::tempdir().unwrap();
+        let path = planted_image(directory.path(), "legacy-rpath", &image);
+        let needs = image_needs(&path).unwrap();
+        assert_eq!(needs.needed, ["libfixture.so"]);
+        assert!(needs.runpath.is_none());
+        assert_eq!(needs.rpath, ["/one", "/two"]);
+    }
+
+    #[test]
+    fn dependency_cycles_and_repeated_interpreters_terminate_without_duplicate_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let interpreter = planted_image(root, "loader", b"loader");
+        let interpreter = interpreter.to_str().unwrap();
+        let first = planted_image(
+            root,
+            "first.so",
+            &synthetic_elf(
+                Some(interpreter),
+                &["second.so", "second.so"],
+                Some("$ORIGIN"),
+            ),
+        );
+        let second = planted_image(
+            root,
+            "second.so",
+            &synthetic_elf(Some(interpreter), &["first.so"], Some("$ORIGIN")),
+        );
+        let dependencies = elf_dependencies(&first, &ContainmentConfig::new()).unwrap();
+        assert_eq!(dependencies.len(), 3);
+        assert_eq!(
+            dependencies
+                .iter()
+                .filter(|entry| entry.origin == MountOrigin::Interpreter)
+                .count(),
+            1
+        );
+        assert_eq!(
+            dependencies
+                .iter()
+                .filter(|entry| entry.path == first)
+                .count(),
+            1
+        );
+        assert_eq!(
+            dependencies
+                .iter()
+                .filter(|entry| entry.path == second)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dependency_walk_refuses_more_than_its_image_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..=MAXIMUM_IMAGES + 2 {
+            let next = format!("image-{}.so", index + 1);
+            let needed = if index == MAXIMUM_IMAGES + 2 {
+                Vec::new()
+            } else {
+                vec![next.as_str()]
+            };
+            planted_image(
+                directory.path(),
+                &format!("image-{index}.so"),
+                &synthetic_elf(None, &needed, Some("$ORIGIN")),
+            );
+        }
+        let error = elf_dependencies(
+            &directory.path().join("image-0.so"),
+            &ContainmentConfig::new(),
+        )
+        .err()
+        .expect("dependency limit must refuse the walk");
+        assert!(
+            error.to_string().contains("loads more than 512 images"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unseekable_string_table_offset_plans_no_libraries() {
+        let mut image = synthetic_elf(None, &["fixture.so"], None);
+        image.extend_from_slice(b"\0fixture.so\0");
+        // The table address is 176. This translation fits u64 but cannot be a file offset.
+        image[72..80].copy_from_slice(&(u64::MAX - 176).to_le_bytes());
+        let directory = tempfile::tempdir().unwrap();
+        let path = planted_image(directory.path(), "unseekable", &image);
+        assert!(image_needs(&path).unwrap().needed.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_string_table_plans_no_libraries() {
+        super::super::failure_tests::in_fresh_process(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let mut image = synthetic_elf(None, &["fixture.so"], None);
+            image.resize(2048, 0);
+            let path = planted_image(directory.path(), "unreadable-strings", &image);
+            assert_eq!(image_needs(&path).unwrap().needed, ["fixture.so"]);
+            // A later read fails after the string reader has collected a valid dependency name.
+            super::super::failure_tests::refuse_syscall(libc::SYS_read, Some((2, 256)));
+            assert!(image_needs(&path).unwrap().needed.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_library_with_unverifiable_path_identity_refuses_dependency_planning() {
+        super::super::failure_tests::in_fresh_process(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let program = planted_image(
+                directory.path(),
+                "program",
+                &synthetic_elf(None, &["fixture.so"], Some("$ORIGIN")),
+            );
+            planted_image(directory.path(), "fixture.so", b"library");
+            assert_eq!(
+                elf_dependencies(&program, &ContainmentConfig::new())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            #[cfg(target_arch = "x86_64")]
+            let call = libc::SYS_readlink;
+            #[cfg(not(target_arch = "x86_64"))]
+            let call = libc::SYS_readlinkat;
+            super::super::failure_tests::refuse_syscall(call, None);
+            let error = elf_dependencies(&program, &ContainmentConfig::new())
+                .err()
+                .expect("an unverifiable library must be refused");
+            assert!(error.to_string().contains("cannot be granted"), "{error}");
+        });
+    }
+
+    #[test]
+    fn string_tables_outside_load_segment_ranges_plan_no_libraries() {
+        let directory = tempfile::tempdir().unwrap();
+        for (virtual_address, size) in [(1024u64, 4096u64), (0, 1)] {
+            let mut image = synthetic_elf(None, &["fixture.so"], None);
+            image[80..88].copy_from_slice(&virtual_address.to_le_bytes());
+            image[96..104].copy_from_slice(&size.to_le_bytes());
+            let path = planted_image(directory.path(), "outside-load", &image);
+            assert!(image_needs(&path).unwrap().needed.is_empty());
+        }
+    }
+
     /// **An exec file brings the libraries its `DT_RUNPATH` names, and theirs in turn**, each as
     /// a read-only executable file bind.
     #[test]
@@ -3020,6 +4246,171 @@ mod tests {
         assert!(
             !entries.iter().any(|entry| entry.target == root.join("lib")),
             "the library directory itself is not bound: {entries:#?}"
+        );
+    }
+
+    #[cfg(target_env = "gnu")]
+    #[test]
+    fn an_executable_runpath_does_not_shadow_a_system_librarys_child() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let app = planted_image(
+            &root,
+            "app",
+            &synthetic_elf(None, &["libm.so.6"], Some("$ORIGIN/private")),
+        );
+        let shadow = planted_image(&root, "private/libc.so.6", &synthetic_elf(None, &[], None));
+        let system_libc = resolve_needed("libc.so.6", None).expect("the GNU runtime supplies libc");
+        let entries = planned(
+            &ContainmentConfig::new()
+                .allow(&app, Operation::Exec, Scope::File)
+                .expect("execute grant"),
+        );
+
+        assert!(
+            entries.iter().any(|entry| entry.target == system_libc),
+            "libm must use the system libc"
+        );
+        assert!(
+            !entries.iter().any(|entry| entry.target == shadow),
+            "the executable's RUNPATH must not expose an indirect dependency"
+        );
+    }
+
+    #[cfg(target_env = "gnu")]
+    #[test]
+    fn library_search_inheritance_matches_the_native_loader() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir(root.join("deps")).expect("library directory");
+        for (name, source) in [
+            ("leaf.c", "int box_leaf(void) { return 42; }\n"),
+            (
+                "mid.c",
+                "extern int box_leaf(void); int box_mid(void) { return box_leaf(); }\n",
+            ),
+            (
+                "app.c",
+                "extern int box_mid(void); int main(void) { return box_mid() == 42 ? 0 : 1; }\n",
+            ),
+        ] {
+            std::fs::write(root.join(name), source).expect("fixture source");
+        }
+        let compile = |arguments: &[&str]| {
+            let output = std::process::Command::new("cc")
+                .current_dir(&root)
+                .args(arguments)
+                .output()
+                .expect("the C compiler used to build Box");
+            assert!(
+                output.status.success(),
+                "fixture compilation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        compile(&[
+            "-shared",
+            "-fPIC",
+            "leaf.c",
+            "-o",
+            "deps/libbox_search_leaf.so",
+        ]);
+        compile(&[
+            "-shared",
+            "-fPIC",
+            "mid.c",
+            "-Ldeps",
+            "-lbox_search_leaf",
+            "-o",
+            "deps/libbox_search_mid.so",
+        ]);
+        for (name, tag, should_start) in [
+            ("app-rpath", "--disable-new-dtags", true),
+            ("app-runpath", "--enable-new-dtags", false),
+        ] {
+            compile(&[
+                "app.c",
+                "-Ldeps",
+                "-lbox_search_mid",
+                "-Wl,-rpath-link,deps",
+                &format!("-Wl,{tag}"),
+                "-Wl,-rpath,$ORIGIN/deps",
+                "-o",
+                name,
+            ]);
+            let app = root.join(name);
+            let native = std::process::Command::new(&app)
+                .env_remove("LD_LIBRARY_PATH")
+                .env_remove("LD_PRELOAD")
+                .env_remove("LD_AUDIT")
+                .output()
+                .expect("run the trusted fixture");
+            assert_eq!(
+                native.status.success(),
+                should_start,
+                "{name}: {}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            let config = ContainmentConfig::new()
+                .allow(&app, Operation::Exec, Scope::File)
+                .expect("execute grant");
+            let plan = MountView::plan(&config);
+            assert_eq!(
+                plan.is_ok(),
+                should_start,
+                "the mount plan must agree with the native loader for {name}: {plan:?}"
+            );
+            if !should_start {
+                assert!(
+                    String::from_utf8_lossy(&native.stderr).contains("libbox_search_leaf.so"),
+                    "the native failure must name the indirect dependency"
+                );
+                assert!(
+                    plan.unwrap_err()
+                        .to_string()
+                        .contains("libbox_search_leaf.so"),
+                    "the planner must refuse the same missing dependency"
+                );
+            }
+        }
+    }
+
+    #[cfg(target_env = "gnu")]
+    #[test]
+    fn an_exec_file_pulls_system_libraries_transitively() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let app = planted_image(&root, "app", &synthetic_elf(None, &["libm.so.6"], None));
+        let libm = resolve_needed("libm.so.6", None).expect("the GNU runtime supplies libm");
+        let needs = image_needs(&libm).expect("read libm's dependencies");
+        assert!(
+            needs.needed.iter().any(|name| name == "libc.so.6"),
+            "the system library must require libc for this regression"
+        );
+        let libc = resolve_needed("libc.so.6", None).expect("libm's libc dependency exists");
+        let config = ContainmentConfig::new()
+            .allow(&app, Operation::Exec, Scope::File)
+            .expect("execute grant");
+
+        let entries = planned(&config);
+
+        for library in [&libm, &libc] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.target == *library)
+                .unwrap_or_else(|| panic!("{} must be planned", library.display()));
+            assert_eq!(entry.origin, MountOrigin::Library);
+            assert!(entry.executable && !entry.writable, "{entry:?}");
+        }
+        assert!(
+            !entries.iter().any(|entry| {
+                entry.kind == MountKind::Bind
+                    && entry.source.as_deref().is_some_and(Path::is_dir)
+                    && LIBRARY_DIRECTORIES
+                        .iter()
+                        .any(|directory| entry.target == Path::new(directory))
+            }),
+            "dependency discovery must not grant whole library directories"
         );
     }
 
@@ -3090,23 +4481,21 @@ mod tests {
         );
     }
 
-    /// **An executable run-path entry expands `$ORIGIN` against the executable**, not against the
-    /// transitive image whose need is being resolved.
     #[test]
-    fn an_executable_run_path_expands_against_the_executable() {
+    fn an_executable_rpath_keeps_its_origin_in_indirect_dependencies() {
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
             &home,
             "bin/app",
-            &synthetic_elf(None, &["libmid.so"], Some("$ORIGIN/../lib/nested")),
+            &synthetic_elf_paths(None, &["libmid.so"], None, Some("$ORIGIN/../lib/nested")),
         );
         planted_image(
             &home,
             "lib/nested/libmid.so",
             &synthetic_elf(None, &["libleaf.so"], None),
         );
-        planted_image(
+        let leaf = planted_image(
             &home,
             "lib/nested/libleaf.so",
             &synthetic_elf(None, &[], None),
@@ -3116,7 +4505,112 @@ mod tests {
             .expect("execute grant")
             .anchored_at(&home);
 
-        MountView::plan(&config).expect("the executable's own run path resolves the leaf");
+        let entries = planned(&config);
+        assert!(entries.iter().any(|entry| entry.target == leaf));
+    }
+
+    #[test]
+    fn an_empty_runpath_suppresses_local_and_inherited_rpath() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let app = planted_image(
+            &root,
+            "app",
+            &synthetic_elf_paths(None, &["libmid.so"], None, Some("$ORIGIN/lib")),
+        );
+        planted_image(
+            &root,
+            "lib/libmid.so",
+            &synthetic_elf_paths(None, &["libbox_leaf.so"], Some(""), Some("$ORIGIN")),
+        );
+        planted_image(&root, "lib/libbox_leaf.so", &synthetic_elf(None, &[], None));
+        let config = ContainmentConfig::new()
+            .allow(&app, Operation::Exec, Scope::File)
+            .expect("execute grant");
+
+        let error = MountView::plan(&config).expect_err("RUNPATH suppresses every RPATH here");
+        assert!(error.to_string().contains("libbox_leaf.so"), "{error}");
+    }
+
+    #[test]
+    fn an_ancestor_rpath_survives_a_descendants_runpath() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let app = planted_image(
+            &root,
+            "app",
+            &synthetic_elf_paths(None, &["libmid.so"], None, Some("$ORIGIN/parent")),
+        );
+        planted_image(
+            &root,
+            "parent/libmid.so",
+            &synthetic_elf(None, &["libleaf.so"], Some("$ORIGIN/../child")),
+        );
+        planted_image(
+            &root,
+            "child/libleaf.so",
+            &synthetic_elf(None, &["libdeep.so"], None),
+        );
+        let deep = planted_image(&root, "parent/libdeep.so", &synthetic_elf(None, &[], None));
+        let config = ContainmentConfig::new()
+            .allow(&app, Operation::Exec, Scope::File)
+            .expect("execute grant");
+
+        let entries = planned(&config);
+        assert!(entries.iter().any(|entry| entry.target == deep));
+    }
+
+    #[test]
+    fn the_first_loader_supplies_a_shared_librarys_inherited_rpath() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let shared = planted_image(
+            &root,
+            "shared.so",
+            &synthetic_elf(None, &["libchoice.so"], None),
+        );
+        let first = planted_image(
+            &root,
+            "first.so",
+            &synthetic_elf_paths(
+                None,
+                &[shared.to_str().unwrap()],
+                None,
+                Some("$ORIGIN/first"),
+            ),
+        );
+        let second = planted_image(
+            &root,
+            "second.so",
+            &synthetic_elf_paths(
+                None,
+                &[shared.to_str().unwrap()],
+                None,
+                Some("$ORIGIN/second"),
+            ),
+        );
+        let expected = planted_image(&root, "first/libchoice.so", &synthetic_elf(None, &[], None));
+        let unused = planted_image(
+            &root,
+            "second/libchoice.so",
+            &synthetic_elf(None, &[], None),
+        );
+        let app = planted_image(
+            &root,
+            "app",
+            &synthetic_elf(
+                None,
+                &[first.to_str().unwrap(), second.to_str().unwrap()],
+                None,
+            ),
+        );
+        let config = ContainmentConfig::new()
+            .allow(&app, Operation::Exec, Scope::File)
+            .expect("execute grant");
+
+        let entries = planned(&config);
+        assert!(entries.iter().any(|entry| entry.target == expected));
+        assert!(!entries.iter().any(|entry| entry.target == unused));
     }
 
     /// **An interpreter the floor refuses is refused by name**, because the workload authors the

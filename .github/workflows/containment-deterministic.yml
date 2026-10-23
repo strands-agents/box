@@ -16,12 +16,9 @@ name: "Containment: Deterministic"
 
 on:
   workflow_call:
-    inputs:
-      ref:
-        required: true
-        type: string
 
 env:
+  EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
   CARGO_TERM_COLOR: always
   # Same disk-pressure guard as rust-test-lint.yml: hosted runners give ~14 GB
   # free and full DWARF on the dev profile has overflowed it.
@@ -82,7 +79,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # Same reclaim rust-test-lint.yml does before its Rust build: the Linux
@@ -132,23 +129,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: containment-deterministic
-          # Restore on every run, but only WRITE a cache entry on a push to the
-          # default branch. Steps after this one execute code from `inputs.ref`,
-          # so if they could also write a cache entry, a run in the default
-          # branch's context could poison a cache that later trusted builds
-          # restore (CodeQL `actions/cache-poisoning/poisonable-step`, which
-          # names the `workflow_dispatch` path specifically -- a dispatch runs
-          # privileged, whereas a `pull_request` run is already confined to the
-          # PR branch's scope). Restoring is safe and is what makes a PR fast, so
-          # gating the write costs nothing a reviewer would notice.
-          #
-          # Note CodeQL evaluates the workflow statically and cannot see through
-          # this expression, so the three alerts on the steps below persist. They
-          # are the same shape as the ones already open against
-          # rust-test-lint.yml and deploy-box-artifact.yml: a test workflow
-          # exists to build and run the proposed code, so "do not execute
-          # untrusted code" is not available to it. What IS available is denying
-          # that code any way to write the cache, which is what this does.
+          # This condition controls the action's upload, not the job's cache permissions.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           workspaces: |
             .
@@ -159,6 +140,9 @@ jobs:
       # and `box-egress-probe`.
       - name: Build strands-box and the containment trampoline
         run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Test filesystem modes on a supported backend
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
 
       # On Linux the MCP cases install their fixture server into /usr/bin, because a leaf's filesystem
       # table cannot grant exec there. The runner is not root, so create each file

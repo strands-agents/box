@@ -7,6 +7,15 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ContainmentError {
+    /// The backend cannot isolate a write grant from content reads.
+    #[error("backend '{backend}' cannot enforce write-only access at {}", path.display())]
+    WriteOnlyUnsupported {
+        /// The writable path without sufficient read authority.
+        path: PathBuf,
+        /// The backend that requires read authority.
+        backend: String,
+    },
+
     /// Requested mechanism not available on this platform.
     #[error("mechanism '{requested}' is not available on {platform:?}")]
     MechanismUnavailable {

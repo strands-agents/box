@@ -1666,3 +1666,41 @@ The last `-n` or `-c` option selects the mode. Negative byte counts remain unsup
 The local `Mediated` parameter and `legacy_count` parser stay in place.
 The seven upstream `head_bytes_*` tests are copied unchanged.
 The separate `mv -f` change in upstream issue #134 remains outside this port.
+
+## 2026-10-20 — admission judged a spelling, and the effect acted on another host identity
+
+An upstream security bug in the effect seam. `Vfs::canonicalize_prefix` follows only VFS symbolic
+links, so `resolve` gave the interceptor the caller's spelling below a `HostDir` bind. Then
+`host_identity` canonicalized the host parent again, and nothing compared the two resolutions. A
+policy that forbids `private/*` therefore did not hold for a read through a link to `private`. And a
+symbolic link that a workload swaps in and out between the two resolutions sent a judged write to
+the link's target. An embedder that refuses non-canonical spellings, as the box floor does, still
+lost that race.
+
+`resolve` now translates a path below a `HostDir` bind into its host identity, in the VFS namespace,
+before it pins that identity (`host_canonical_spelling`). `Follow::Yes` follows every component, and
+`Follow::No` follows all but the leaf. A bind point, a missing parent, and an identity outside the
+bind keep the caller's spelling, and `resolve_host` still refuses the escape. `host_identity` then
+returns `HostIdentity::Unavailable` when the canonical parent and the leaf are not the spelling under
+the canonical bind root, so a swap between the translation and the pin refuses with
+`filesystem identity changed during effect admission`. `host_dir_ancestor` is the `HostDir` search
+that `resolve_host` did inline, and it also returns the bind's VFS path.
+
+The pin and the effect also reached the parent directory by path. `metadata` followed every
+component, and `O_NOFOLLOW` covered only the last one, so a symbolic link swapped into an ancestor
+after the check above moved both the pin and the effect outside the bind. `open_beneath` now opens
+the parent from the canonical bind root one component at a time with
+`O_DIRECTORY | O_NOFOLLOW`, and `pinned_identity` and `opened_parent` both use it.
+`HostIdentity::Present` and `Missing` carry that `root`.
+
+`resolve_host_tests::a_pin_whose_host_identity_is_not_the_spelling_is_unavailable` fails without the
+check, and `a_symlinked_ancestor_is_neither_pinned_nor_opened` fails with a path-following open. `a_spelling_under_a_bind_is_translated_to_its_host_identity` pins the translation.
+`tests/in_mount_symlink_admission.rs` now asserts that a read and a write through an in-mount link
+are judged on the target. In `crates/policy`,
+`a_directory_symlink_on_a_direct_bind_is_defended_by_a_subtree_read_forbid` asserts that the forbid
+holds.
+
+Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and the `openat` walk,
+so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
+`is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
+each canonicalize the bind root again for one path.

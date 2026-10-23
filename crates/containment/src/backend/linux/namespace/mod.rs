@@ -7,6 +7,9 @@ pub(crate) mod reaper;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
+#[cfg(test)]
+mod failure_tests;
+
 use crate::ContainmentConfig;
 use crate::backend::{ContainmentBackend, SupportInfo};
 use crate::error::ContainmentError;
@@ -123,6 +126,14 @@ impl ContainmentBackend for NamespaceBackend {
         }
 
         require_no_configured_devices(config)?;
+
+        crate::grants::require_read_for_writes(
+            &config
+                .authorizations()
+                .iter()
+                .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+                .collect::<Vec<_>>(),
+        )?;
 
         // Refuse a plan that cannot be built before any irreversible step runs.
         view::MountView::plan(config)?;
@@ -289,26 +300,46 @@ fn unenforceable(capability: &str) -> ContainmentError {
 fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     // Read the credentials BEFORE the unshare.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    enter_namespaces_using(
+        join_host_network,
+        uid,
+        gid,
+        |flags| {
+            // SAFETY: one syscall with scalar flags. Irreversible for this process.
+            if unsafe { libc::unshare(flags) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        },
+        |path, value| std::fs::write(path, value),
+    )
+}
 
-    // SAFETY: a single syscall with a constant argument. Irreversible for this
-    // process, which is the intent.
-    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+/// Keep setup ordering and refusal reporting testable without changing the caller's namespaces.
+fn enter_namespaces_using(
+    join_host_network: bool,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    mut unshare: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    mut write: impl FnMut(&str, &str) -> std::io::Result<()>,
+) -> Result<(), ContainmentError> {
+    if let Err(error) = unshare(libc::CLONE_NEWUSER) {
         return Err(apply_failure(format!(
-            "creating a user namespace: {}; this backend reported support, so a \
-             failure here means the host's policy changed since the probe",
-            std::io::Error::last_os_error()
+            "creating a user namespace: {error}; this backend reported support, so a \
+             failure here means the host's policy changed since the probe"
         )));
     }
 
-    std::fs::write("/proc/self/setgroups", "deny").map_err(|source| {
+    write("/proc/self/setgroups", "deny").map_err(|source| {
         apply_failure(format!(
             "denying setgroups: {source}; supplementary-group expansion must be \
              refused before the GID map is written"
         ))
     })?;
-    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1"))
+    write("/proc/self/uid_map", &format!("0 {uid} 1"))
         .map_err(|source| apply_failure(format!("writing the UID map: {source}")))?;
-    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
+    write("/proc/self/gid_map", &format!("0 {gid} 1"))
         .map_err(|source| apply_failure(format!("writing the GID map: {source}")))?;
 
     // One `unshare` for the rest: the kernel applies them atomically, so a partial
@@ -320,16 +351,14 @@ fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     if !join_host_network {
         remaining |= libc::CLONE_NEWNET;
     }
-    // SAFETY: a single syscall with a constant argument.
-    if unsafe { libc::unshare(remaining) } != 0 {
+    if let Err(error) = unshare(remaining) {
         return Err(apply_failure(format!(
-            "creating the mount, IPC, UTS{} namespaces: {}",
+            "creating the mount, IPC, UTS{} namespaces: {error}",
             if join_host_network {
                 ""
             } else {
                 ", and network"
-            },
-            std::io::Error::last_os_error()
+            }
         )));
     }
 
@@ -358,6 +387,23 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
             continue;
         }
         return;
+    }
+}
+
+/// Retry interrupted waits and propagate only a normal reaper exit.
+fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()>) -> libc::c_int {
+    let mut status = 0;
+    loop {
+        match wait(&mut status) {
+            Ok(()) => break,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            Err(_) => return 125,
+        }
+    }
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        125
     }
 }
 
@@ -394,22 +440,14 @@ fn establish_pid_namespace_and_reaper(
         }
         drop(parent_control);
         // The original caller.
-        let mut status: libc::c_int = 0;
-        loop {
+        let code = reaper_exit_code(|status| {
             // SAFETY: waiting on this process's own child.
-            if unsafe { libc::waitpid(reaper, &mut status, 0) } != -1 {
-                break;
+            if unsafe { libc::waitpid(reaper, status, 0) } != -1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
             }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                // SAFETY: an unsuccessful wait cannot report the workload's status.
-                unsafe { libc::_exit(125) };
-            }
-        }
-        let code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else {
-            125
-        };
+        });
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
@@ -537,6 +575,49 @@ mod tests {
         backend
             .validate_config(&acceptable())
             .expect("the default all-isolated request must validate");
+    }
+
+    #[test]
+    fn direct_and_decoded_writes_require_full_read_coverage() {
+        let backend = NamespaceBackend::with_probe_result(true);
+        let directory = tempfile::tempdir().expect("a project");
+        let project = directory
+            .path()
+            .canonicalize()
+            .expect("the project resolves");
+        let file = project.join("output");
+        std::fs::write(&file, "contents").expect("an output file");
+        for (write, scope) in [(&project, Scope::Root), (&file, Scope::File)] {
+            let config = acceptable()
+                .allow_prepared(
+                    ContainmentConfig::prepare_filesystem_path(write).expect("a prepared path"),
+                    Operation::Write,
+                    scope,
+                )
+                .expect("a write grant can precede a read grant");
+            let decoded = ContainmentConfig::from_json(&config.to_json().expect("serialize"))
+                .expect("a structurally valid configuration");
+            for candidate in [config, decoded] {
+                assert!(matches!(
+                    backend.validate_config(&candidate),
+                    Err(ContainmentError::WriteOnlyUnsupported { path, .. }) if path == *write
+                ));
+                let listed = candidate
+                    .clone()
+                    .allow(&project, Operation::Read, Scope::Dir)
+                    .expect("directory entries");
+                assert!(matches!(
+                    backend.validate_config(&listed),
+                    Err(ContainmentError::WriteOnlyUnsupported { .. })
+                ));
+                let readable = candidate
+                    .allow(&project, Operation::Read, Scope::Root)
+                    .expect("explicit content reads");
+                backend
+                    .validate_config(&readable)
+                    .expect("read-write access");
+            }
+        }
     }
 
     /// Each unrestricted reach mode is refused rather than over-enforced.
@@ -702,6 +783,27 @@ mod tests {
         backend
             .validate_config(&config)
             .expect("the fixed utility device must remain available");
+    }
+
+    #[test]
+    fn a_fixed_device_exception_does_not_extend_to_a_symlink_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("null-alias");
+        std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&alias, Operation::Read, Scope::File)
+            .unwrap();
+        let error = NamespaceBackend::with_probe_result(true)
+            .validate_config(&config)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContainmentError::UnsupportedCapability { .. }
+        ));
+        assert!(
+            error.to_string().contains("configured device grant"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2180,6 +2282,62 @@ mod tests {
         );
     }
 
+    /// A refusal beneath a metadata-only directory establishes, and its contents stay out of reach.
+    #[test]
+    fn a_refusal_beneath_a_metadata_only_directory_establishes() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let project = directory
+            .path()
+            .canonicalize()
+            .expect("the project resolves");
+        let refused = project.join("box/private");
+        std::fs::create_dir_all(&refused).expect("the refused tree");
+        let secret = refused.join("record");
+        std::fs::write(&secret, b"record").expect("write the refused file");
+        let config = ContainmentConfig::new()
+            .allow(&project, Operation::Metadata, Scope::Dir)
+            .expect("metadata grant")
+            .refuse(&refused, Scope::Root)
+            .expect("the refusal");
+
+        // SAFETY: the child applies containment and exits; it never returns into
+        // test-harness code.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+        if child == 0 {
+            let backend = NamespaceBackend::with_probe_result(true);
+            if let Err(error) = backend.apply(&config, None, None) {
+                eprintln!("apply failed: {error}");
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(20) };
+            }
+            let code = if std::fs::read(&secret).is_ok() {
+                22
+            } else if std::fs::write(refused.join("planted"), b"planted").is_ok() {
+                23
+            } else {
+                0
+            };
+            // SAFETY: terminating the workload with the verdict.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(libc::WIFEXITED(status), "the child must exit normally");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "20=apply failed, 22=REFUSED FILE READABLE, 23=REFUSED TREE WRITABLE"
+        );
+        assert!(!refused.join("planted").exists());
+    }
+
     /// The macOS discovery and runtime-service fields leave Linux mounts and filters unchanged.
     #[test]
     fn linux_validate_states_its_handling_of_macos_only_leaf_fields() {
@@ -2189,6 +2347,8 @@ mod tests {
         std::fs::create_dir_all(&state).expect("box state");
         let agent_shaped = ContainmentConfig::new()
             .anchored_at(home.path())
+            .allow(&workspace, Operation::Read, Scope::Root)
+            .expect("read grant")
             .allow(&workspace, Operation::Write, Scope::Root)
             .expect("write grant");
         let leaf = agent_shaped

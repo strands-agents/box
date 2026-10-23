@@ -1,6 +1,6 @@
 // The existence deny is scoped to the operator home.
 //
-// macOS only. A TRIPWIRE, not a recorded gap. An absent path outside the operator home must
+// A TRIPWIRE, not a recorded gap. An absent path outside the operator home must
 // answer ENOENT, so a workload can tell "there is nothing there" from "you may not look". A
 // harness that cannot tell them apart aborts on an optional configuration file it merely
 // probed for.
@@ -31,7 +31,7 @@ use strands_det_harness::det_case;
 det_case! {
     name: cn_e_05,
     id:   "CN-E-05",
-    platforms: [Macos],
+    platforms: [Macos, Linux],
     desc: "Tripwire: reading an absent path outside the operator home answers ENOENT, not EPERM",
     run: |b| {
         b.reset_policy();

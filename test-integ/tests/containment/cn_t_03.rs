@@ -116,6 +116,8 @@ fn with_fetch_server(config: String, b: &BoxFixture, native: bool, control: &Pat
     if Platform::current() == Platform::Macos {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("read = [{dir}]\n"));
+    } else {
+        tables.push_str(&format!("read = [{control}]\n"));
     }
     config + &tables
 }

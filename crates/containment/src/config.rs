@@ -607,7 +607,15 @@ impl ContainmentConfig {
                 )));
             }
         }
-        Ok(())
+        // Exact read pairing keeps coverage within credential consent, while the backend checks ordinary grants.
+        crate::validate_grants(
+            &self
+                .paths
+                .iter()
+                .filter(|grant| self.credential_store_exception_covers(grant))
+                .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -1139,6 +1147,30 @@ mod tests {
                 .contains("must have a read grant on Linux"),
             "the refusal names the missing operation: {error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credential_write_coverage_requires_contents_not_directory_entries() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let cache = home.path().join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).expect("a credential cache");
+        for (read_scope, accepted) in [(Scope::Dir, false), (Scope::Root, true)] {
+            let config = ContainmentConfig::new()
+                .anchored_at(home.path())
+                .allow_credential_store(&cache, Operation::Write, Scope::Root)
+                .expect("a write grant")
+                .allow_credential_store(&cache, Operation::Read, read_scope)
+                .expect("a read grant");
+            let result = ContainmentConfig::from_json(&config.to_json().expect("serialize"));
+            assert_eq!(result.is_ok(), accepted, "{read_scope:?}: {result:?}");
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(ContainmentError::WriteOnlyUnsupported { .. })
+                ));
+            }
+        }
     }
 
     #[test]

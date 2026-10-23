@@ -676,71 +676,60 @@ permit(principal, action == Box::Action::"fs:read", resource);
     );
 }
 
-/// Eight concurrent workloads, each doing agent-shaped work, all keep their own state.
-///
-/// Twice the four-workload case, because the per-connection Program cap is 8 and a bound is worth
-/// exercising at its edge rather than comfortably inside it.
+/// Eight clients in one Box run retain their own directories and file contents.
 #[test]
-/// # Flaky on a pre-existing lost write — `#[ignore]`d 2026-08-09
-///
-/// Fails roughly 1 run in 5, always the same way: a workload's `read=` is empty after its own
-/// `printf p{i} > f.txt` in the same command. That is the defect
-/// `redirection_and_append_behave_like_a_shell` already pins — `vfs_kernel.rs:215-229` spawns a
-/// detached task that accumulates writes and flushes only when the channel closes, and nothing
-/// awaits that flush, so a read can beat it.
-///
-/// **The streaming work makes this much better, not worse**: with the vendored channel-writer
-/// inheritance stashed it fails **4 runs out of 4**; with it, 1 in 5. So this is not a regression to
-/// bisect — it is the same upstream lost write, now rare enough to look intermittent.
-///
-/// Un-`#[ignore]` when the flush is joinable. Fixing it means making the writer task awaited on
-/// close rather than detached, which is a vendored change of its own and larger than this diff.
-#[ignore = "flaky on the pre-existing detached-flush lost write; see the doc comment"]
-fn eight_concurrent_workloads_all_make_progress() {
+fn eight_concurrent_clients_all_make_progress() {
+    if !fixture::namespace_launcher_is_usable() {
+        eprintln!("skipping: concurrent clients require a usable containment backend");
+        return;
+    }
     let box_ = Request::with_policy("prog-eight", PERMISSIVE).expect();
-
+    let mut script = String::from("printf 'EIGHT_CLIENTS_STARTED\n'\npids=''\n");
+    let release = await_file("$BOX_HOME/release-clients");
+    for i in 1..=8 {
+        script.push_str(&format!(
+            r#"(
+                : > "$BOX_HOME/ready-{i}"
+                {release}
+                zsh -c '
+                    mkdir -p {{box_home}}/w{i}
+                    cd {{box_home}}/w{i}
+                    printf p{i} > f.txt
+                    printf "|w={i}|cwd=%s|read=%s" "$(pwd)" "$(cat f.txt)"
+                ' > "$BOX_HOME/result-{i}"
+            ) &
+            pids="$pids $!"
+"#
+        ));
+    }
+    for i in 1..=8 {
+        script.push_str(&await_file(&format!("$BOX_HOME/ready-{i}")));
+        script.push('\n');
+    }
+    script.push_str(
+        r#": > "$BOX_HOME/release-clients"
+           status=0
+           for p in $pids; do wait "$p" || status=$?; done
+           exit "$status"
+"#,
+    );
     let start = Instant::now();
-    let workloads: Vec<_> = (1..=8)
-        .map(|i| {
-            spawn_run(
-                &box_,
-                &format!(
-                    r#"zsh -c '
-                        mkdir -p {{box_home}}/w{i}
-                        cd {{box_home}}/w{i}
-                        printf p{i} > f.txt
-                        printf "|w={i}|cwd=%s|read=%s" "$(pwd)" "$(cat f.txt)"
-                    '"#
-                ),
-            )
-        })
-        .collect();
-
-    let outputs: Vec<Output> = workloads
-        .into_iter()
-        .map(|child| {
-            child
-                .wait_with_output()
-                .expect("a concurrent workload finishes")
-        })
-        .collect();
-    let elapsed = start.elapsed();
-    eprintln!("EIGHT-WORKLOAD MEASURED: {elapsed:?}");
-
-    // The real path, because these read the workload's output rather than feed it a script.
+    let output = run_within_deadline(&box_, &script);
+    eprintln!("EIGHT-CLIENT MEASURED: {:?}", start.elapsed());
+    assert_workload_launched(&output, "the eight clients");
+    assert!(
+        output.status.success(),
+        "all clients must succeed: {output:?}"
+    );
+    assert!(stdout(&output).contains("EIGHT_CLIENTS_STARTED"));
     let home = box_.box_home();
-    let home = home.display();
-    for (index, output) in outputs.iter().enumerate() {
-        let i = index + 1;
-        let text = stdout(output);
-        assert_workload_launched(output, &format!("workload {i}"));
-        assert!(
-            text.contains(&format!("|cwd={home}/w{i}")),
-            "workload {i} must stay in its own directory: {output:?}"
-        );
-        assert!(
-            text.contains(&format!("|read=p{i}")),
-            "workload {i} must read its own file: {output:?}"
+    for i in 1..=8 {
+        let text = std::fs::read_to_string(home.join(format!("result-{i}")))
+            .expect("each client must write its response");
+        assert_eq!(
+            text,
+            format!("|w={i}|cwd={}/w{i}|read=p{i}", home.display()),
+            "client {i} must retain its directory and read its own write"
         );
     }
 }

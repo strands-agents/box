@@ -502,12 +502,20 @@ fn this_boxs_authority_survives_a_rename_of_its_parent() {
         );
         mid.clone()
     } else {
+        let ebusy_line = format!("parent_move_errno={}", libc::EBUSY);
         assert!(
-            subject.contains("parent_move=allowed") && mid2.is_dir(),
-            "Linux lets the rename land and the refusal follows the directory: \
+            subject.contains("parent_move=refused")
+                && subject.lines().any(|line| line == ebusy_line)
+                && subject.contains("source_write=refused"),
+            "Linux must refuse to move the mounted protected directory with EBUSY, \
+             and the policy must stay unwritable at its launch path: \
              subject=[{subject}] {output:?}"
         );
-        mid2.clone()
+        assert!(
+            mid.is_dir() && !mid2.exists(),
+            "the host must still hold the directory at its launch path: {output:?}"
+        );
+        mid.clone()
     };
     assert!(
         seen.contains(&format!("AUTHORITY_AT={}", landed.display())),

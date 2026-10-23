@@ -10,8 +10,10 @@ fn main() {
         },
         [mode, signal] if mode == "signal" => match signal.parse::<libc::c_int>() {
             Ok(signal) => {
-                // SAFETY: `kill` on this process's own pid takes no pointer.
-                unsafe { libc::kill(libc::getpid(), signal) };
+                // SAFETY: `raise` signals this thread and takes no pointer.
+                // Linux permits this path through tgkill in the workload's PID namespace.
+                let result = unsafe { libc::raise(signal) };
+                assert_eq!(result, 0, "the probe must deliver its own signal");
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 eprintln!("box-exit-probe: signal {signal} did not end the process");
                 std::process::exit(2);

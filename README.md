@@ -79,12 +79,14 @@ interpreters and keep those files out of the agent's direct grants. See
 Link the `strands-box` package in `crates/box`, then call:
 
 ```rust,no_run
-let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new());
+let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
 ```
 
 This runs the existing Box command in the calling process and waits until it finishes.
-It uses the process's terminal and returns its exit
+By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
+Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
+to start host threads after hardening and signal registration, before workload setup.
 Call it before starting application threads or loading secrets, and use one Box workload
 per host process. Later `run` calls fail, even if the first call failed.
 Ship the matching Box helper binaries beside the host application.

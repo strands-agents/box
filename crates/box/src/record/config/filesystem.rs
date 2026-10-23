@@ -33,6 +33,7 @@ pub(crate) struct DirectGrant {
     pub(crate) scope: Scope,
     /// Whether the entry names a credential store exactly, which is the one way through the floor.
     pub(crate) credential_store: bool,
+    access: &'static str,
 }
 
 impl DirectGrant {
@@ -43,17 +44,13 @@ impl DirectGrant {
         } else {
             ""
         };
-        // A writable bind reads on Linux, so a `write` tree is disclosed as the reach it is there.
-        let reads_too = if cfg!(target_os = "linux")
-            && self.operation == Operation::Write
-            && self.scope == Scope::Root
-        {
-            "  (readable too: a writable bind reads)"
+        let access = if self.access.is_empty() {
+            String::new()
         } else {
-            ""
+            format!("  ({})", self.access)
         };
         format!(
-            "  {:<10}  {}{store}{reads_too}",
+            "  {:<10}  {}{store}{access}",
             self.kind.key(),
             self.resolved.display()
         )
@@ -173,7 +170,82 @@ pub(crate) fn direct_grants(
     }
     require_no_grant_is_wholly_refused(&grants, &refusals, context)?;
     require_nothing_sensitive_stays_reachable(&grants, &refusals, context)?;
+    require_supported_grants(&grants, context)?;
+    let access: Vec<_> = grants
+        .iter()
+        .map(|grant| effective_access(grant, &grants))
+        .collect();
+    for (grant, access) in grants.iter_mut().zip(access) {
+        grant.access = access;
+    }
     Ok(DirectReach { grants, refusals })
+}
+
+fn covers(outer: &DirectGrant, inner: &DirectGrant) -> bool {
+    // Disclosure compares validated file/tree grants, which exclude directory-entry grants.
+    outer.resolved == inner.resolved
+        || outer.scope == Scope::Root && inner.resolved.starts_with(&outer.resolved)
+}
+
+fn require_supported_grants(
+    grants: &[DirectGrant],
+    context: &FilesystemContext<'_>,
+) -> Result<(), ConfigError> {
+    containment::validate_grants(
+        &grants
+            .iter()
+            .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| {
+        if let containment::ContainmentError::WriteOnlyUnsupported { ref path, .. } = error
+            && let Some(write) = grants
+                .iter()
+                .find(|grant| grant.operation == Operation::Write && grant.resolved == *path)
+        {
+            return refuse(
+                context,
+                &write.authored,
+                &format!(
+                    "Linux cannot enforce write-only access for `{}` at {}. \
+                     Add an explicit `read` or `read_file` grant covering the entire write scope \
+                     to request read-write access, or remove the write grant",
+                    write.kind.key(),
+                    write.resolved.display()
+                ),
+            );
+        }
+        refuse(context, "filesystem", &error.to_string())
+    })
+}
+
+fn effective_access(grant: &DirectGrant, grants: &[DirectGrant]) -> &'static str {
+    let (opposite, only, mixed) = match grant.operation {
+        Operation::Read => (
+            Operation::Write,
+            "read-only",
+            "read-only except read-write at overlapping write grants",
+        ),
+        Operation::Write => (
+            Operation::Read,
+            "write-only",
+            "write-only except read-write at overlapping read grants",
+        ),
+        _ => return "",
+    };
+    if grants
+        .iter()
+        .any(|other| other.operation == opposite && covers(other, grant))
+    {
+        "read-write"
+    } else if grants
+        .iter()
+        .any(|other| other.operation == opposite && covers(grant, other))
+    {
+        mixed
+    } else {
+        only
+    }
 }
 
 /// Refuse a spawn when a granted path no longer has the identity the run judged.
@@ -400,6 +472,7 @@ fn entry_grant(
         operation,
         scope,
         credential_store,
+        access: "",
     })
 }
 
@@ -659,15 +732,114 @@ mod tests {
         assert!(reach.refusals.is_empty());
     }
 
+    #[test]
+    fn linux_write_access_requires_explicit_read_coverage() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        for (body, accepted) in [
+            ("write_file = ['~/notes/api.md']", false),
+            ("write = ['~/notes/api.md']", false),
+            ("write = ['~/project']", false),
+            ("read = ['~/notes']\nwrite = ['~/project']", false),
+            ("read = ['~/project/src']\nwrite = ['~/project']", false),
+            ("read_file = ['~/notes/api.md']\nwrite = ['~/notes']", false),
+            (
+                "exec = ['~/tools/run']\nwrite_file = ['~/tools/run']",
+                false,
+            ),
+            ("read = ['~/project']\nwrite = ['~/project']", true),
+            ("read = ['~/project']\nwrite = ['~/project/src']", true),
+            ("read = ['~/notes']\nwrite_file = ['~/notes/api.md']", true),
+            (
+                "read_file = ['~/notes/api.md']\nwrite_file = ['~/notes/api.md']",
+                true,
+            ),
+            (
+                "read = ['~/notes/api.md']\nwrite = ['~/notes/api.md']",
+                true,
+            ),
+            ("read = ['~/project']", true),
+        ] {
+            let grants: Vec<_> = lists(body)
+                .entries()
+                .map(|(kind, path)| entry_grant(kind, path, &context).unwrap())
+                .collect();
+            let result = require_supported_grants(&grants, &context);
+            assert_eq!(
+                result.is_ok(),
+                accepted || !cfg!(target_os = "linux"),
+                "{body}: {result:?}"
+            );
+            if let Err(error) = result {
+                let error = error.to_string();
+                assert!(error.contains("Linux cannot enforce write-only"), "{error}");
+                assert!(error.contains("[agent]"), "{error}");
+                assert!(error.contains("explicit `read` or `read_file`"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn disclosures_distinguish_complete_and_partial_access() {
+        let fixture = Fixture::new();
+        for (body, modes) in [
+            ("read = ['~/notes']", vec!["read-only"]),
+            (
+                "read_file = ['~/notes/api.md']\nwrite_file = ['~/notes/api.md']",
+                vec!["read-write", "read-write"],
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project/src']",
+                vec![
+                    "read-only except read-write at overlapping write grants",
+                    "read-write",
+                ],
+            ),
+            (
+                "read = ['~/notes']\nwrite_file = ['~/notes/api.md']",
+                vec![
+                    "read-only except read-write at overlapping write grants",
+                    "read-write",
+                ],
+            ),
+        ] {
+            let reach = fixture.reach(&fixture.context(), body);
+            let actual: Vec<_> = reach.grants.iter().map(|grant| grant.access).collect();
+            assert_eq!(actual, modes, "{body}");
+            for grant in &reach.grants {
+                assert!(grant.disclosure().contains(&format!("({})", grant.access)));
+                assert!(!grant.disclosure().contains("readable too"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_preserves_write_only_and_partial_read_grants() {
+        let fixture = Fixture::new();
+        let reach = fixture.reach(&fixture.context(), "write_file = ['~/notes/api.md']");
+        assert_eq!(reach.grants[0].access, "write-only");
+        let reach = fixture.reach(
+            &fixture.context(),
+            "read_file = ['~/notes/api.md']\nwrite = ['~/notes']",
+        );
+        assert_eq!(
+            reach.grants[0].access,
+            "write-only except read-write at overlapping read grants"
+        );
+        assert_eq!(reach.grants[1].access, "read-write");
+    }
+
     /// **Each list maps to its cell**, on a directory and on a file where both are legal.
     #[test]
     fn every_list_translates_to_its_cell() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let body = format!(
-            "read = [{:?}]\nwrite = [{:?}]\nread_file = [{:?}]\nwrite_file = [{:?}]\n\
+            "read = [{:?}, {:?}]\nwrite = [{:?}]\nread_file = [{:?}]\nwrite_file = [{:?}]\n\
              metadata = [{:?}]\nexec = [{:?}, {:?}]\ndeny = [{:?}]",
             text(&home.join("vendor")),
+            text(&home.join("scratch")),
             text(&home.join("scratch")),
             text(&home.join("notes/api.md")),
             text(&home.join("notes/api.md")),
@@ -685,6 +857,7 @@ mod tests {
         assert_eq!(
             cells,
             [
+                (Grant::Read, Operation::Read, Scope::Root),
                 (Grant::Read, Operation::Read, Scope::Root),
                 (Grant::Write, Operation::Write, Scope::Root),
                 (Grant::ReadFile, Operation::Read, Scope::File),
@@ -876,12 +1049,12 @@ mod tests {
         let reach = fixture.reach(
             &fixture.context(),
             &format!(
-                "read = [{0:?}]\nwrite = [{0:?}, {1:?}]",
+                "read = [{0:?}, {1:?}]\nwrite = [{0:?}, {1:?}]",
                 text(&home.join("scratch")),
                 text(&home.join("notes"))
             ),
         );
-        assert_eq!(reach.grants.len(), 3);
+        assert_eq!(reach.grants.len(), 4);
         let reach = fixture.reach(
             &fixture.context(),
             &format!(
@@ -940,7 +1113,10 @@ mod tests {
         };
         let reach = fixture.reach(
             &context,
-            &format!("write = [{:?}]", text(&home.join("project"))),
+            &format!(
+                "read = [{0:?}]\nwrite = [{0:?}]",
+                text(&home.join("project"))
+            ),
         );
         assert_eq!(
             reach
@@ -974,7 +1150,10 @@ mod tests {
 
         let reach = fixture.reach(
             &context,
-            &format!("write = [{:?}]", text(&home.join("elsewhere"))),
+            &format!(
+                "read = [{0:?}]\nwrite = [{0:?}]",
+                text(&home.join("elsewhere"))
+            ),
         );
         assert_eq!(
             reach
@@ -988,7 +1167,10 @@ mod tests {
         // A grant that IS the directory, or lies inside it, is not subtracted: the sources keep
         // their identity protection, and a grant may not be refused whole and enforce nothing.
         for granted in [authority.clone(), authority.join("deeper")] {
-            let reach = fixture.reach(&context, &format!("write = [{:?}]", text(&granted)));
+            let reach = fixture.reach(
+                &context,
+                &format!("read = [{0:?}]\nwrite = [{0:?}]", text(&granted)),
+            );
             assert!(
                 reach.refusals.is_empty(),
                 "{granted:?}: {:?}",

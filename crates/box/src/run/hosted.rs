@@ -324,6 +324,7 @@ pub(crate) struct McpLeafLauncher {
     attachment: Attachment,
     layout: BoxRoot,
     record: Record,
+    approved: Arc<ApprovedReach>,
     protected_sources: Vec<AuthoritySource>,
     /// The agent's workspace — the contained MCP leaf's working directory. NOT the box's
     /// `private/mcp` (the non-unix/no-launcher fallback start's cwd): that is private Box state and
@@ -336,6 +337,7 @@ impl McpLeafLauncher {
         attachment: Attachment,
         layout: BoxRoot,
         record: Record,
+        approved: Arc<ApprovedReach>,
         protected_sources: Vec<AuthoritySource>,
         workspace: PathBuf,
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
@@ -348,6 +350,7 @@ impl McpLeafLauncher {
             attachment,
             layout,
             record,
+            approved,
             protected_sources,
             workspace,
         }
@@ -393,6 +396,11 @@ impl McpLeafLauncher {
             })
         })?;
         let table = format!("[mcp.{server}]");
+        let reach = self.approved.table(&table).ok_or_else(|| {
+            BoxError::from(ConfigError::Contract {
+                reason: format!("{table} has no reach judged for this run"),
+            })
+        })?;
         let site = Site {
             attachment: &self.attachment,
             layout: &self.layout,
@@ -410,7 +418,7 @@ impl McpLeafLauncher {
                 argument_zero: None,
                 runtime_reach: RuntimeReach::Leaf,
                 egress,
-                approved: None,
+                approved: Some(reach),
             },
             &site,
         )
@@ -421,6 +429,7 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
+        eprintln!("{}", boundary.disclosure());
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
@@ -706,6 +715,7 @@ impl HostedBox {
                 attachment.clone(),
                 root.clone(),
                 record.clone(),
+                Arc::clone(&approved),
                 protected_sources.to_vec(),
                 workspace.to_path_buf(),
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -1392,6 +1402,7 @@ while :; do :; done"#
             "hosted-v47-workload".to_string(),
             workload_pid_path.to_string_lossy().into_owned(),
         ];
+        agent.filesystem.read = vec![scratch.clone()];
         agent.filesystem.write = vec![scratch.clone()];
         let hosted = open_hosted(&operator, &root, &record);
         let registry = hosted
@@ -1493,6 +1504,7 @@ while :; do :; done"#
             "supervised-workload".to_string(),
             pid_path.to_string_lossy().into_owned(),
         ];
+        agent.filesystem.read = vec![scratch.clone()];
         agent.filesystem.write = vec![scratch.clone()];
         let hosted = open_hosted(&operator, &root, &record);
         let boundary = crate::test_support::with_operator_home(operator.path(), || {
@@ -1774,6 +1786,53 @@ while :; do :; done"#
             trust_bundle: None,
             phantoms: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_server_refuses_a_grant_replaced_after_startup_approval() {
+        let home = tempfile::tempdir().expect("operator home");
+        let operator = home.path().canonicalize().expect("canonical operator home");
+        let operator = operator.as_path();
+        let root = crate::record::layout::testing::box_root(operator, "codex");
+        crate::test_support::with_operator_home(operator, || {
+            let granted = operator.join("granted");
+            let workspace = operator.join("workspace");
+            std::fs::write(&granted, "seed").expect("granted file");
+            std::fs::create_dir(&workspace).expect("workspace directory");
+            let mut record = record(&root);
+            let mut spec = record.agent.clone().expect("agent spec");
+            spec.filesystem.read = vec![granted.clone()];
+            spec.filesystem.write = vec![granted.clone()];
+            record.contained_mcp.insert(
+                "alpha".to_string(),
+                crate::record::config::process::ContainedMcp { spec },
+            );
+            let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let launcher = McpLeafLauncher::new(
+                selection_attachment(),
+                root,
+                record,
+                approved,
+                Vec::new(),
+                workspace,
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                None,
+            );
+            launcher.prepare("alpha").expect("unchanged grant");
+            std::fs::rename(&granted, operator.join("moved")).expect("move granted file");
+            std::fs::create_dir(&granted).expect("replace file grant with directory");
+            let refusal = launcher
+                .prepare("alpha")
+                .err()
+                .expect("changed grant refused");
+            let message = refusal.to_string();
+            assert!(message.contains("[mcp.alpha]"), "{message}");
+            assert!(
+                message.contains("changed between a file and a directory"),
+                "{message}"
+            );
+        });
     }
 
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {

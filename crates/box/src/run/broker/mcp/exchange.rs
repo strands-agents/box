@@ -572,6 +572,29 @@ async fn handle_client_frame(
     let correlation = telemetry::Correlation::from_mcp(&frame);
     correlation
         .scope(async {
+            if let Err(refusal) = egress_gateway::refuse_duplicate_mcp_keys(frame.trim().as_bytes())
+            {
+                let reason = refusal.to_string();
+                exchange
+                    .connection
+                    .recorder
+                    .record(EffectiveDecision::enforcement_deny(
+                        r#"Box::Action::"mcp:call""#,
+                        exchange.running.server(),
+                        "mcp-frame",
+                        &reason,
+                    ));
+                emit_request_error(
+                    exchange.frames,
+                    exchange.program,
+                    None,
+                    -32600,
+                    &reason,
+                    None,
+                )
+                .await?;
+                return Ok(ProgramAction::Continue);
+            }
             // A `resources/read` is judged and forwarded with the one URI the server resolves.
             let text = egress_gateway::canonicalize_mcp_frame(frame.as_bytes())
                 .map_or(frame, |canonical| {
@@ -2186,6 +2209,247 @@ done"#
             assert_eq!(ping["id"], 3);
             assert!(ping.get("result").is_some());
             assert!(release.is_none());
+        }));
+    }
+
+    const DUPLICATE_KEY_POLICY: &str = r#"permit (principal, action == Box::Action::"mcp:call", resource);
+@id("blocked-tool")
+forbid (principal, action == Box::Action::"mcp:call", resource)
+when { context.input has tool && context.input.tool == "Delete" };
+@id("denied-argument")
+forbid (principal, action == issues_mcp::Action::"Search", resource)
+when { context.input has value && context.input.value == "secret" };"#;
+
+    async fn recorded_exchange(
+        command: Vec<String>,
+        fixture: &Fixture,
+    ) -> (
+        McpProgram,
+        tokio::sync::mpsc::Receiver<super::super::super::host::OutboundFrame>,
+        Arc<DecisionRecorder>,
+    ) {
+        let admitted = McpServer {
+            name: "issues-mcp".to_string(),
+            command,
+        };
+        let (running, stdout) =
+            RunningMcpServer::start(&admitted, Path::new("/tmp"), Path::new("/tmp"))
+                .await
+                .expect("the test MCP server starts");
+        let (frames, output) = tokio::sync::mpsc::channel(16);
+        let recorder = DecisionRecorder::discarding();
+        let (program, _completion) = McpProgram::spawn(
+            running,
+            stdout,
+            Arc::clone(&fixture.registry),
+            frames,
+            7,
+            Arc::clone(&fixture.policy),
+            GovernedBox::assigned("test-box"),
+            Arc::clone(&recorder),
+        );
+        (program, output, recorder)
+    }
+
+    /// Send `frame`, then a `tools/list` probe, and return every answer before the probe's reply.
+    async fn answers_before_probe(
+        program: &McpProgram,
+        output: &mut tokio::sync::mpsc::Receiver<super::super::super::host::OutboundFrame>,
+        frame: &str,
+        probe: u64,
+    ) -> Vec<Value> {
+        program
+            .input(format!("{frame}\n").into_bytes())
+            .await
+            .expect("send the client frame");
+        send(
+            program,
+            json!({"jsonrpc": "2.0", "id": probe, "method": "tools/list", "params": {}}),
+        )
+        .await;
+        let mut answers = Vec::new();
+        loop {
+            let answer = next_output(output).await;
+            if answer["id"] == probe {
+                return answers;
+            }
+            answers.push(answer);
+        }
+    }
+
+    fn forwarded(log: &Path, frame: &str) -> bool {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line == frame)
+    }
+
+    #[test]
+    fn a_stdio_frame_with_a_duplicate_key_is_refused_recorded_and_the_exchange_remains_usable() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(DUPLICATE_KEY_POLICY);
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output, recorder) =
+                recorded_exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+
+            let mut failures = Vec::new();
+            for (probe, (key, frame)) in (100..).zip([
+                (
+                    "method",
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Delete","arguments":{}},"method":"ping"}"#,
+                ),
+                (
+                    "params.name",
+                    r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"Delete","name":"Search","arguments":{}}}"#,
+                ),
+                (
+                    "params.arguments.value",
+                    r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"Search","arguments":{"value":"secret","value":"public"}}}"#,
+                ),
+            ]) {
+                let recorded = recorder.recorded().len();
+                let answers = answers_before_probe(&program, &mut output, frame, probe).await;
+                let decisions = recorder.recorded();
+                let denied = decisions[recorded..].iter().any(|decision| {
+                    let (action, resource, rule, verdict, _) = decision.parts();
+                    action == r#"Box::Action::"mcp:call""#
+                        && resource == "issues-mcp"
+                        && rule == &crate::run::telemetry::EffectiveRule::Enforcement("mcp-frame")
+                        && verdict == crate::run::telemetry::EffectiveVerdict::Deny
+                });
+                let answered = matches!(
+                    answers.as_slice(),
+                    [answer] if answer["error"]["code"] == -32600
+                        && answer["error"]["message"].as_str().is_some_and(|message| message.contains("duplicate"))
+                );
+                let forwarded = forwarded(log.path(), frame);
+                if !(denied && answered && !forwarded) {
+                    failures.push(format!(
+                        "{key}: forwarded {forwarded}, answers {answers:?}, decisions {:?}",
+                        decisions[recorded..]
+                            .iter()
+                            .map(|decision| {
+                                let (action, resource, rule, verdict, _) = decision.parts();
+                                format!("{action} {resource} {rule:?} {verdict:?}")
+                            })
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
+            assert!(failures.is_empty(), "{failures:#?}");
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_duplicate_key_is_refused_on_frames_the_classifier_never_sees() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(DUPLICATE_KEY_POLICY);
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output, recorder) =
+                recorded_exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+            let refused = |answer: Value, frame: &str| {
+                assert_eq!(answer["error"]["code"], -32600, "{frame}: {answer}");
+                assert_eq!(answer["id"], Value::Null, "{frame}: {answer}");
+            };
+
+            let padded = "\u{a0}{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"Delete\",\"arguments\":{}},\"method\":\"initialize\"}";
+            program
+                .input(format!("{padded}\n").into_bytes())
+                .await
+                .expect("send the padded frame");
+            refused(next_output(&mut output).await, padded);
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 1);
+            for frame in [
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{},"method":"tools/call"}"#,
+                r#"{"jsonrpc":"2.0","id":7,"id":8,"result":{}}"#,
+            ] {
+                program
+                    .input(format!("{frame}\n").into_bytes())
+                    .await
+                    .expect("send the frame");
+                refused(next_output(&mut output).await, frame);
+            }
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+            )
+            .await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+
+            let frames = std::fs::read_to_string(log.path()).unwrap_or_default();
+            assert!(!frames.contains("Delete"), "{frames}");
+            assert!(!frames.contains(r#""id":7"#), "{frames}");
+            assert_eq!(
+                recorder
+                    .recorded()
+                    .iter()
+                    .filter(|decision| decision.parts().2
+                        == &crate::run::telemetry::EffectiveRule::Enforcement("mcp-frame"))
+                    .count(),
+                3
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_stdio_frame_without_a_duplicate_key_forwards_byte_identical() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(DUPLICATE_KEY_POLICY);
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output, _recorder) =
+                recorded_exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+
+            for (probe, frame) in (100..).zip([
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"Search","arguments":{"value":"public"}}}"#,
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"Search","arguments":{"value":"public"},"_meta":{"name":"x","list":[{"value":1},{"value":2}],"nested":{"value":{"value":[]}}}}}"#,
+                r#"{ "jsonrpc" : "2.0" , "id" : 5 , "method" : "tools/call" , "params" : { "name" : "Search" , "arguments" : { } } }"#,
+            ]) {
+                let answers = answers_before_probe(&program, &mut output, frame, probe).await;
+                assert!(answers.is_empty(), "{frame}: {answers:?}");
+                assert!(forwarded(log.path(), frame), "{frame} reaches the server unchanged");
+            }
+            for (probe, frame) in (200..).zip([
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"Delete","arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"Search","arguments":{"value":"secret"}}}"#,
+            ]) {
+                let answers = answers_before_probe(&program, &mut output, frame, probe).await;
+                assert!(
+                    matches!(answers.as_slice(), [answer] if answer.get("error").is_some()),
+                    "{frame} is refused by policy: {answers:?}"
+                );
+                assert!(!forwarded(log.path(), frame), "{frame} is not forwarded");
+            }
+            program.stop_and_wait().await.expect("stop the exchange");
         }));
     }
 

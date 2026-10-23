@@ -34,8 +34,11 @@ det_case! {
         let with_list = Platform::current() == Platform::Macos;
         let edit = |list: bool| {
             let lists = format!(
-                "read = [{}]\ndeny = [{}]\nwrite_file = [{}]\n{}",
+                "read = [{}]\ndeny = [{}]\nwrite_file = [{}]\n{}{}",
                 quoted(&tree), quoted(&denied), quoted(&target),
+                if Platform::current() == Platform::Linux {
+                    format!("read_file = [{}]\n", quoted(&target))
+                } else { String::new() },
                 if list { format!("list = [{}]\n", quoted(&listed)) } else { String::new() },
             );
             let probe = quoted(&probe);

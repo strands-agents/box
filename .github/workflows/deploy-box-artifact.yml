@@ -3,7 +3,8 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS and ARM64 Linux tarballs and SHA256SUMS.txt to a GitHub Release.
+# the macOS tarball and SHA256SUMS.txt to a stable GitHub Release. Linux preview
+# versions also publish the ARM64 Linux tarball, on a prerelease only.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -31,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Explicit version, e.g. 0.1.0 (bare semver, no leading v). The tag is v<version>.'
+        description: 'Stable: 0.1.1. Experimental Linux preview: 0.1.1-linux-preview.1. No leading v.'
         required: true
         type: string
       sha:
@@ -68,6 +69,7 @@ jobs:
       release_sha: ${{ steps.scan.outputs.release_sha }}
       prev_tag: ${{ steps.scan.outputs.prev_tag }}
       new_tag: ${{ steps.scan.outputs.new_tag }}
+      linux_preview: ${{ steps.scan.outputs.linux_preview }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -86,10 +88,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1. Validate the typed version (bare semver, no prefix).
-          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::version '$NEW_VERSION' is not bare semver (expected MAJOR.MINOR.PATCH, no 'v')."
+          # 1. Derive the release channel from a strict version format.
+          if ! [[ "$NEW_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-linux-preview\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::expected MAJOR.MINOR.PATCH, optionally followed by -linux-preview.N with N greater than zero."
             exit 1
+          fi
+          BASE_VERSION="${NEW_VERSION%%-linux-preview.*}"
+          LINUX_PREVIEW=false
+          if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
+            LINUX_PREVIEW=true
           fi
 
           # 2. Dry runs can validate the dispatched commit before merge.
@@ -112,7 +119,8 @@ jobs:
 
           # 3. Resolve the previous tag. A baseline is required.
           TAG_PREFIX="v"
-          PREV_TAG=$(git tag --list "${TAG_PREFIX}*" --sort=-v:refname | head -n1)
+          PREV_TAG=$(git tag --list "${TAG_PREFIX}*" --sort=-v:refname |
+            awk '/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && !found {print; found=1}')
           if [ -z "$PREV_TAG" ]; then
             echo "::error::No prior tag matching ${TAG_PREFIX}* -- refusing to release without a baseline. (Fork-testing? Push a baseline tag first, e.g. \`git tag ${TAG_PREFIX}0.0.1 <sha> && git push origin ${TAG_PREFIX}0.0.1\`.)"
             exit 1
@@ -123,12 +131,12 @@ jobs:
           # 4. Reject duplicate / non-monotonic / pre-existing tags, and require a
           #    single-step increment (major, minor, or patch) so a typo like
           #    0.1.0 -> 0.10.0 fails here instead of relying on the approver.
-          if [ "$NEW_VERSION" = "$PREV_VERSION" ]; then
+          if [ "$BASE_VERSION" = "$PREV_VERSION" ]; then
             echo "::error::version $NEW_VERSION matches existing tag $PREV_TAG."
             exit 1
           fi
-          HIGHER=$(printf '%s\n%s\n' "$PREV_VERSION" "$NEW_VERSION" | sort -V | tail -n1)
-          if [ "$HIGHER" != "$NEW_VERSION" ]; then
+          HIGHER=$(printf '%s\n%s\n' "$PREV_VERSION" "$BASE_VERSION" | sort -V | tail -n1)
+          if [ "$HIGHER" != "$BASE_VERSION" ]; then
             echo "::error::version $NEW_VERSION is not greater than previous $PREV_VERSION."
             exit 1
           fi
@@ -141,7 +149,7 @@ jobs:
           IFS=. read -r P_MAJ P_MIN P_PAT <<< "$PREV_VERSION"
           VALID="$((P_MAJ+1)).0.0 ${P_MAJ}.$((P_MIN+1)).0 ${P_MAJ}.${P_MIN}.$((P_PAT+1))"
           case " $VALID " in
-            *" $NEW_VERSION "*) ;;
+            *" $BASE_VERSION "*) ;;
             *)
               echo "::error::version $NEW_VERSION is not a single increment of $PREV_VERSION (expected one of: $VALID)."
               exit 1;;
@@ -162,6 +170,7 @@ jobs:
             echo "release_sha=$RELEASE_SHA"
             echo "prev_tag=$PREV_TAG"
             echo "new_tag=$NEW_TAG"
+            echo "linux_preview=$LINUX_PREVIEW"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -171,6 +180,7 @@ jobs:
             echo "|---|---|"
             echo "| Previous tag | \`$PREV_TAG\` |"
             echo "| Proposed tag | \`$NEW_TAG\` |"
+            echo "| Experimental Linux prerelease | $LINUX_PREVIEW |"
             echo "| Pinned SHA | \`$RELEASE_SHA\` |"
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -227,7 +237,7 @@ jobs:
         run: rustup target add ${{ matrix.target.triple }}
 
       - name: Install cargo-edit
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-edit
 
@@ -303,6 +313,21 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
         run: |
           set -euo pipefail
+          # Check the selected source's consent behavior before using its smoke script.
+          if output=$(env -u EXPERIMENTAL_LINUX_SUPPORT stage/box-core/box run \
+            --config "$RUNNER_TEMP/missing-linux-preview.toml" 2>&1); then
+            echo "::error::Linux startup did not require explicit consent."
+            exit 1
+          fi
+          grep -Fq 'EXPERIMENTAL_LINUX_SUPPORT=TRUE' <<< "$output"
+          # This named profile permits user namespaces for the disposable test container.
+          cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
+          abi <abi/4.0>,
+          profile box-package-smoke flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/box-package-smoke.apparmor"
           docker run --rm \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
@@ -310,7 +335,7 @@ jobs:
           # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
           docker run --rm --cap-drop ALL --user 1000:1000 \
             --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
+            --security-opt apparmor=box-package-smoke \
             --security-opt systempaths=unconfined \
             --env HOME=/home/box-test \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
@@ -345,6 +370,7 @@ jobs:
         # Every target lands in built/. Only qualified architectures enter release/.
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           mkdir -p built release
@@ -359,7 +385,10 @@ jobs:
             echo "::error::missing the ARM64 Linux tarball $linux"
             exit 1
           fi
-          cp "$darwin" "$linux" release/
+          cp "$darwin" release/
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            cp "$linux" release/
+          fi
           (cd release && sha256sum *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
@@ -372,6 +401,7 @@ jobs:
       - name: Assert the expected tarballs, each carrying box
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           expected=(
@@ -398,9 +428,11 @@ jobs:
             exit 1
           fi
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
-          expected_release=$(printf '%s\n' \
-            "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
-            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz" | sort)
+          release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            release_assets+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          fi
+          expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
             echo "::error::release bundle has an unexpected asset set: $released"
             exit 1
@@ -481,6 +513,7 @@ jobs:
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           cat > body.md <<EOF
@@ -500,19 +533,31 @@ jobs:
 
           The downloader picks a tarball from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
 
-          For Linux ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
+          EOF
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            cat >> body.md <<EOF
+          ## Experimental Linux preview
+
+          Linux support is experimental and requires explicit opt-in. This preview does not establish security acceptance or production readiness.
+
+          For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
           \`\`\`sh
           awk '\$2 == "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"' SHA256SUMS.txt > box-linux.sha256 &&
             test -s box-linux.sha256 &&
             sha256sum --check box-linux.sha256 &&
             mkdir -p box-core &&
-            tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz
+            tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz &&
+            EXPERIMENTAL_LINUX_SUPPORT=TRUE ./box-core/box run --config ./box.toml
           \`\`\`
 
+          The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
+          EOF
+          fi
+          cat >> body.md <<EOF
           ## Assets
 
-          Both ARM64 tarballs unpack to the \`./box-core\` layout: \`box\` beside its helper binaries. The Linux build requires glibc 2.34 or newer and a host that permits Box's containment setup. \`SHA256SUMS.txt\` contains the checksum for each published archive.
+          Each tarball contains \`box\` beside its helper binaries. Keep all three files together. \`SHA256SUMS.txt\` contains the checksum for each published archive.
           EOF
 
       - name: Tag the pinned SHA
@@ -537,7 +582,8 @@ jobs:
           name: ${{ needs.scan.outputs.new_tag }}
           target_commitish: ${{ needs.scan.outputs.release_sha }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.scan.outputs.linux_preview == 'true' }}
+          make_latest: ${{ needs.scan.outputs.linux_preview == 'true' && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: release/*
           body_path: body.md
@@ -574,13 +620,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
-            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
             "SHA256SUMS.txt"
           )
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            expected+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
               missing=0
@@ -588,6 +637,11 @@ jobs:
                 grep -qx "$a" <<<"$names" || { echo "attempt $i/30: asset $a not present yet"; missing=1; break; }
               done
               if [ "$missing" = "0" ]; then
+                actual_preview=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')
+                if [ "$actual_preview" != "$LINUX_PREVIEW" ]; then
+                  echo "::error::$NEW_TAG has an incorrect prerelease setting."
+                  exit 1
+                fi
                 if [ "$(sort <<<"$names")" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
                   echo "::error::$NEW_TAG publishes assets beyond the expected set: $(tr '\n' ' ' <<<"$names")"
                   exit 1

@@ -1261,6 +1261,7 @@ pub(crate) enum HostIdentity {
     Present {
         path: PathBuf,
         parent: PathBuf,
+        root: PathBuf,
         #[cfg(unix)]
         device: u64,
         #[cfg(unix)]
@@ -1273,6 +1274,7 @@ pub(crate) enum HostIdentity {
     Missing {
         path: PathBuf,
         parent: PathBuf,
+        root: PathBuf,
         #[cfg(unix)]
         parent_device: u64,
         #[cfg(unix)]

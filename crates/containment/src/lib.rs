@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod facade;
 mod floors;
+mod grants;
 mod model;
 mod os_paths;
 mod platform;
@@ -21,6 +22,7 @@ pub use config::ContainmentConfig;
 pub use error::ContainmentError;
 pub use facade::Containment;
 pub use floors::{ContainmentWarning, home_relative_path_refusal, validate_grant};
+pub use grants::validate_grants;
 pub use model::{
     BackendOverride, IpcMode, Network, Operation, PreparedFilesystemPath, ProcessInfoMode, Scope,
     SignalMode,
