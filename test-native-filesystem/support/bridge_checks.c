@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
 
@@ -161,7 +162,53 @@ static void device_identity(void) {
     puts("PASS signed device identities in source, destinations, and executable checks");
 }
 
+static void path_tokens(void) {
+    char out[BOX_PATH_CAPACITY];
+    es_file_t directory = {0};
+    directory.path = (es_string_token_t){.data = "/dir", .length = 4};
+    const es_string_token_t invalid[] = {
+        {.data = NULL, .length = 1},
+        {.data = "", .length = 0},
+        {.data = ".", .length = 1},
+        {.data = "..", .length = 2},
+        {.data = "a/b", .length = 3},
+        {.data = "a\0b", .length = 3},
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        assert(!new_path(out, &directory, invalid[i]));
+    }
+    es_string_token_t leaf = {.data = "file", .length = 4};
+    assert(new_path(out, &directory, leaf));
+    assert(strcmp(out, "/dir/file") == 0);
+    directory.path_truncated = true;
+    assert(!new_path(out, &directory, leaf));
+    directory.path_truncated = false;
+    directory.path = (es_string_token_t){.data = "/", .length = 1};
+    assert(new_path(out, &directory, leaf));
+    assert(strcmp(out, "/file") == 0);
+
+    char name[BOX_PATH_CAPACITY];
+    memset(name, 'x', sizeof(name));
+    leaf = (es_string_token_t){.data = name, .length = BOX_PATH_CAPACITY - 2};
+    assert(new_path(out, &directory, leaf));
+    assert(strlen(out) == BOX_PATH_CAPACITY - 1);
+    leaf.length++;
+    assert(!new_path(out, &directory, leaf));
+
+    size_t page_size = (size_t)getpagesize();
+    void *unreadable = mmap(NULL, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(unreadable != MAP_FAILED);
+    leaf = (es_string_token_t){.data = unreadable, .length = BOX_PATH_CAPACITY};
+    assert(!copy_token(out, leaf));
+    assert(!new_path(out, &directory, leaf));
+    leaf.length = SIZE_MAX;
+    assert(!new_path(out, &directory, leaf));
+    assert(munmap(unreadable, page_size) == 0);
+    puts("PASS path token validation and bounds before reading filename bytes");
+}
+
 int main(void) {
+    path_tokens();
     device_identity();
     request_case("queue below limit allows", 1023, false);
     request_case("queue at limit denies and reports failure", 1024, false);

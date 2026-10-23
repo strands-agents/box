@@ -82,13 +82,13 @@ static bool file_path(char *out, const es_file_t *file) {
 }
 
 static bool new_path(char *out, const es_file_t *directory, es_string_token_t leaf) {
-    if (!file_path(out, directory) || !leaf.data || !leaf.length ||
+    if (!file_path(out, directory) || !leaf.data || !leaf.length) return false;
+    size_t length = strlen(out);
+    size_t separator = length && out[length - 1] != '/' ? 1 : 0;
+    if (leaf.length >= BOX_PATH_CAPACITY - length - separator ||
         memchr(leaf.data, '/', leaf.length) || memchr(leaf.data, 0, leaf.length) ||
         (leaf.length == 1 && leaf.data[0] == '.') ||
         (leaf.length == 2 && memcmp(leaf.data, "..", 2) == 0)) return false;
-    size_t length = strlen(out);
-    size_t separator = length && out[length - 1] != '/' ? 1 : 0;
-    if (leaf.length >= BOX_PATH_CAPACITY - length - separator) return false;
     if (separator) out[length++] = '/';
     memcpy(out + length, leaf.data, leaf.length);
     out[length + leaf.length] = 0;
