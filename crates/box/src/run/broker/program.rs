@@ -8,7 +8,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use strands_shell::os::{STDERR, STDIN, STDOUT};
@@ -16,8 +16,11 @@ use tokio::sync::mpsc;
 
 use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
 
-/// The stdin channel depth. One frame in flight is enough; the client waits for progress.
-const INPUT_CHANNEL_DEPTH: usize = 16;
+/// The stdin channel depth. For chunks of 4 KiB or more, [`MAX_BUFFERED_INPUT_BYTES`] binds first.
+const INPUT_CHANNEL_DEPTH: usize = 256;
+
+/// The most stdin bytes queued for a Program, beside one chunk its reader has partly read.
+pub(crate) const MAX_BUFFERED_INPUT_BYTES: usize = 1024 * 1024;
 
 /// The output channel depth, per stream. Bounded, so a Program that outruns its client stalls
 /// itself rather than growing a queue inside the daemon.
@@ -33,6 +36,8 @@ pub(crate) struct Program {
 #[derive(Clone)]
 pub(crate) struct ProgramControl {
     stdin_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<Bytes>>>>,
+    /// Stdin bytes queued and not yet dropped by the reader.
+    buffered_input: Arc<AtomicUsize>,
     /// Set when a `Signal` arrives, and read by the Call loop, which stops by **dropping** the Call
     /// future.
     cancel: Arc<AtomicBool>,
@@ -86,6 +91,7 @@ impl Program {
             },
             ProgramControl {
                 stdin_tx: Arc::new(std::sync::Mutex::new(Some(stdin_tx))),
+                buffered_input: Arc::new(AtomicUsize::new(0)),
                 cancel,
             },
         ))
@@ -160,6 +166,24 @@ impl ProgramOutput {
     }
 }
 
+/// One queued stdin chunk, which releases its bytes from the buffer count when the reader drops it.
+struct BufferedInput {
+    data: Vec<u8>,
+    buffered: Arc<AtomicUsize>,
+}
+
+impl AsRef<[u8]> for BufferedInput {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Drop for BufferedInput {
+    fn drop(&mut self) {
+        self.buffered.fetch_sub(self.data.len(), Ordering::SeqCst);
+    }
+}
+
 /// A `ProgramControl` lock poisoned by a panic in another holder.
 fn poisoned() -> io::Error {
     io::Error::other("the program's stdin lock is poisoned")
@@ -173,15 +197,25 @@ pub(crate) enum DrainOutcome {
 }
 
 impl ProgramControl {
-    /// Feed bytes to the Program's standard input.
+    /// Feed bytes to the Program's standard input, within [`MAX_BUFFERED_INPUT_BYTES`].
     pub(crate) fn feed_stdin(&self, data: &[u8]) -> io::Result<()> {
         let guard = self.stdin_tx.lock().map_err(|_| poisoned())?;
         let sender = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin is closed"))?;
+        self.buffered_input
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                held.checked_add(data.len())
+                    .filter(|total| *total <= MAX_BUFFERED_INPUT_BYTES)
+            })
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "stdin buffer is full"))?;
+        // A failed send drops the chunk, which releases its bytes.
         sender
-            .try_send(Bytes::copy_from_slice(data))
-            .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))
+            .try_send(Bytes::from_owner(BufferedInput {
+                data: data.to_vec(),
+                buffered: Arc::clone(&self.buffered_input),
+            }))
+            .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error.to_string()))
     }
 
     /// Close the Program's standard input, so a reader sees end-of-file.

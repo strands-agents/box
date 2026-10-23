@@ -559,9 +559,9 @@ fails, and it fails silently: every hook event reports
 `EPERM: operation not permitted, posix_spawn '/bin/sh'`, nothing reaches stderr, and `run` exits 0.
 Granting `process-exec` on `/bin/sh` would make it work, but the commands the hook issues would then
 raise no decision, so an authored `forbid` would never see them. Once rewritten, each hook command
-reaches the mediated Shell and raises `shell:exec`, and each file it touches raises its own `fs:*`. Two
-limits stay: a hook that reads its payload on stdin sees nothing, because the alias forwards no input,
-and plugin hooks stay broken because most of them exec a script.
+reaches the mediated Shell and raises `shell:exec`, and each file it touches raises its own `fs:*`.
+The alias forwards its stdin, so a hook that reads its payload there still gets it. One limit stays:
+plugin hooks stay broken because most of them exec a script.
 
 ## Policy
 
