@@ -7,9 +7,31 @@ fn forked(case: impl FnOnce() -> bool) -> bool {
 fn mount_namespace_is_available() -> bool {
     let available = forked(enter_private_namespace);
     if !available {
-        println!("skipping: this host refuses a private user/mount namespace with UID/GID mappings");
+        println!(
+            "skipping: this host refuses a private user/mount namespace with UID/GID mappings"
+        );
     }
     available
+}
+
+#[test]
+fn a_pinned_dependency_keeps_original_bytes_and_refuses_a_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().canonicalize().unwrap().join("library");
+    std::fs::write(&source, b"admitted bytes").unwrap();
+    let admitted = open_dependency(&source).unwrap();
+    let (_file, pinned) = pin_admitted_source(&admitted, &source).unwrap();
+    assert_eq!(std::fs::read(&pinned).unwrap(), b"admitted bytes");
+
+    std::fs::rename(&source, source.with_extension("saved")).unwrap();
+    std::fs::write(&source, b"replacement bytes").unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"replacement bytes");
+    assert_eq!(std::fs::read(&pinned).unwrap(), b"admitted bytes");
+    let error = pin_admitted_source(&admitted, &source).unwrap_err();
+    assert!(
+        error.to_string().contains("changed after admission"),
+        "{error}"
+    );
 }
 
 fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, ContainmentConfig) {

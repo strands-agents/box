@@ -665,24 +665,7 @@ impl MountView {
                 let dependency_sources = self.dependency_sources.borrow();
                 let pinned_source = dependency_sources
                     .get(&entry.target)
-                    .map(|admitted| {
-                        use std::os::unix::fs::MetadataExt as _;
-                        let file = open_dependency(source)?;
-                        let expected = admitted.metadata().map_err(|error| {
-                            refusal(format!("reading admitted dependency identity: {error}"))
-                        })?;
-                        let actual = file.metadata().map_err(|error| {
-                            refusal(format!("reading dependency mount identity: {error}"))
-                        })?;
-                        if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
-                            return Err(refusal(format!(
-                                "dependency '{}' changed after admission",
-                                source.display()
-                            )));
-                        }
-                        let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-                        Ok((file, path))
-                    })
+                    .map(|admitted| pin_admitted_source(admitted, source))
                     .transpose()?;
                 let source = pinned_source
                     .as_ref()
@@ -1144,6 +1127,30 @@ struct LibrarySearch {
 /// A ceiling on the images one closure walks.
 const MAXIMUM_IMAGES: usize = 512;
 
+/// Retain a mount source that matches the admitted dependency's identity.
+fn pin_admitted_source(
+    admitted: &std::fs::File,
+    source: &Path,
+) -> Result<(std::fs::File, PathBuf), ContainmentError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let file = open_dependency(source)?;
+    let expected = admitted
+        .metadata()
+        .map_err(|error| refusal(format!("reading admitted dependency identity: {error}")))?;
+    let actual = file
+        .metadata()
+        .map_err(|error| refusal(format!("reading dependency mount identity: {error}")))?;
+    if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        return Err(refusal(format!(
+            "dependency '{}' changed after admission",
+            source.display()
+        )));
+    }
+    let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    Ok((file, path))
+}
+
 /// Open a canonical dependency without following replacement links.
 fn open_dependency(path: &Path) -> Result<std::fs::File, ContainmentError> {
     use std::os::fd::FromRawFd as _;
@@ -1249,7 +1256,7 @@ fn elf_dependencies(
             rpath.clone()
         };
         if let Some(interpreter) = needs.interpreter {
-            let (resolved, file) = require_loadable(&image, &interpreter, config, restricted)?;
+            let (resolved, file, _) = require_loadable(&image, &interpreter, config, restricted)?;
             if seen.insert(interpreter.clone()) {
                 dependencies.push(Dependency {
                     path: interpreter,
@@ -1269,8 +1276,8 @@ fn elf_dependencies(
                     name
                 )));
             };
-            let (identity, file) = require_loadable(&image, &found, config, restricted)?;
-            let next_restricted = restricted || workload_writable(config, &found)?;
+            let (identity, file, next_restricted) =
+                require_loadable(&image, &found, config, restricted)?;
             pending.push_back((
                 identity.clone(),
                 file.clone(),
@@ -1296,7 +1303,7 @@ fn require_loadable(
     library: &Path,
     config: &ContainmentConfig,
     restricted: bool,
-) -> Result<(PathBuf, Rc<std::fs::File>), ContainmentError> {
+) -> Result<(PathBuf, Rc<std::fs::File>, bool), ContainmentError> {
     let restricted = restricted || workload_writable(config, library)?;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
@@ -1327,7 +1334,7 @@ fn require_loadable(
         )));
     }
     let file = Rc::new(open_dependency(&granted.resolved)?);
-    Ok((granted.resolved, file))
+    Ok((granted.resolved, file, restricted))
 }
 
 fn inside_loader_directory(identity: &Path) -> bool {
