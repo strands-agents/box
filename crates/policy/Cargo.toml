@@ -37,7 +37,7 @@ mcp-tools-sdk = "=0.4.1"
 # NOTE: `cedar-policy` above stays a DIRECT exact pin even though the Cedar authorizer is
 # gone — the schema and the request gate are Cedar types, and Dogwood's own constraint on
 # cedar is a caret range, so removing our pin would silently widen it.
-dogwood-language = "=1.0.0"
+dogwood-language = "=1.1.0"
 # The single-machine temporal engine. Its durable assembly appends each event before
 # evaluation and recovers monitor state from the box's private history file.
 dogwood-local-engine = "=1.0.0"
