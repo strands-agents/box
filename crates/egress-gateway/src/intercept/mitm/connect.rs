@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use crate::capability::normalize_host;
+use crate::capability::{is_bindable_host, normalize_host};
 
 /// A parsed CONNECT request: the target `host` and `port`, plus any `Proxy-Authorization` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,11 +86,11 @@ pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Opt
     // record must agree on (trailing-dot trim + lowercase), THEN validate the normalized value.
     // Validating the raw form first would accept an all-dots host like `.` or `...` (non-empty,
     // ASCII, only `.`), which normalizes to the empty string — binding an empty `context.input.host`
-    // and defeating `valid_host`'s non-empty guarantee. Binding the raw form instead would let a host
-    // `forbid` miss while DNS still reaches the host. A bare IP literal is unaffected (no trailing
-    // dot; only IPv6 hex is case-folded, which is canonical).
+    // and defeating `is_bindable_host`'s non-empty guarantee. Binding the raw form instead would let
+    // a host `forbid` miss while DNS still reaches the host. A bare IP literal is unaffected (no
+    // trailing dot; only IPv6 hex is case-folded, which is canonical).
     let host = normalize_host(host);
-    if !valid_host(&host) {
+    if !is_bindable_host(&host) {
         return None;
     }
     Some((host, explicit_port.or(default_port)?))
@@ -144,15 +144,6 @@ fn parse_port(port: &str) -> Option<u16> {
     }
     let port = port.parse::<u16>().ok()?;
     (port != 0).then_some(port)
-}
-
-fn valid_host(host: &str) -> bool {
-    !host.is_empty()
-        && (host.parse::<IpAddr>().is_ok()
-            || (host.is_ascii()
-                && host.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
-                })))
 }
 
 /// The best-effort session-token check.
@@ -239,7 +230,7 @@ mod tests {
         );
     }
 
-    /// FIX A edge: an all-dots host is non-empty and passes the raw `valid_host` check, but
+    /// FIX A edge: an all-dots host is non-empty and passes the raw `is_bindable_host` check, but
     /// normalizes to the empty string. Validating the normalized value refuses it, so no empty host
     /// is ever bound to `context.input.host` / the resolve / the audit legs.
     #[test]
