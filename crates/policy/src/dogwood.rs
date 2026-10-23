@@ -24,8 +24,8 @@ use dogwood_local_engine::{
 };
 
 use crate::error::{PolicyError, PolicyStagingError};
-use crate::outcome::Delivery;
-use crate::request::{Principal, Request};
+use crate::outcome::{Delivery, FsResult};
+use crate::request::{FsOperation, Principal, Request};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
     UNUSED_RESOURCE_ID, action, action_schema, attr,
@@ -862,10 +862,28 @@ fn outcome_event(
     principal: &Principal,
     outcome: &Outcome<'_>,
 ) -> EventBuilder {
+    let outcome = &answered(*outcome);
     let action = outcome_action_id(outcome);
     let builder = Event::builder_for(FIXED_ACTION_NAMESPACE, action, outcome_kind(outcome));
     let builder = with_fields(builder, governed, principal, outcome_fields(outcome));
     with_output_fields(builder, output_fields(outcome))
+}
+
+/// The outcome as history records it, where an answered metadata read is a response
+/// (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
+fn answered(outcome: Outcome<'_>) -> Outcome<'_> {
+    match outcome {
+        Outcome::Fs {
+            path,
+            operation: FsOperation::ReadMetadata,
+            result: FsResult::Failed,
+        } => Outcome::Fs {
+            path,
+            operation: FsOperation::ReadMetadata,
+            result: FsResult::Completed,
+        },
+        other => other,
+    }
 }
 
 /// `response` when the effect happened or may have happened; `error` when it did

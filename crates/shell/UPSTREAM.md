@@ -1704,3 +1704,14 @@ Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and
 so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
 `is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
 each canonicalize the bind root again for one path.
+
+## 2026-10-21 — a metadata probe answered "no" reported a failed effect
+
+`stat`, `lstat`, `access`, `is_executable`, and `glob` reported a "no" answer as
+`EffectResult::Failed(NotFound)`. The probe ran and its caller received the answer, so the effect
+occurred. A consumer that counts completed effects did not count these probes. Upstream would call
+this a bug, because `Failed` means that the effect did not occur.
+
+This copy changes `Mediated::report_probe` to report `EffectResult::Completed` for each answered
+probe. A denied probe still records no outcome, because admission refuses it first.
+`tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` pins the change.
