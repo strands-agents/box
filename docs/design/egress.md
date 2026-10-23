@@ -105,8 +105,12 @@ form: an IPv6 spelling of an IPv4 address, such as `::ffff:169.254.169.254`, bec
 address, and other IPv6 addresses are compressed and lowercase. A rule matches it with `==` or
 `like`.
 
-**The host is one spelling too.** The gateway lowercases it and removes a trailing dot, so
-`API.GitHub.com.` and `api.github.com` are the same host to a rule.
+**The host is one spelling too.** The gateway lowercases it and removes a trailing dot, so a request
+for `API.GitHub.com.` and a request for `api.github.com` reach policy as the same host. A rule
+carries that spelling as well, because a comparison is exact: the load refuses a host literal in any
+other form and names the form to write ([a rule that cannot fire is refused at
+load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). An
+internationalized domain reaches the gateway in its punycode form, so a rule names that form.
 
 ### TLS and `http:request`
 

@@ -405,9 +405,7 @@ fn unbindable_advice(canonical: &str) -> String {
         return punycode_advice();
     }
     if let Some(host) = host_before_port(canonical) {
-        return format!(
-            "a host carries no port; write \"{host}\" and compare context.input.port for the port"
-        );
+        return format!("a host carries no port; write \"{host}\" and compare context.input.port");
     }
     "a host holds only letters, digits, \".\", \"-\", and \"_\", or an IP address".to_string()
 }

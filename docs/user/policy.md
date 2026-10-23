@@ -561,6 +561,25 @@ when { context.input.path like "~/project/" };
 policy compares an inert literal: rule @id("project_read") compares context.input.path with the pattern "~/project/", and a directory is spelled without a trailing slash; write "~/project"
 ```
 
+A host reaches policy in lowercase and without a trailing dot:
+
+```text
+@id("block_host")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "API.Example.com" };
+```
+
+```text
+policy compares an inert literal: rule @id("block_host") compares context.input.host with "API.Example.com", and a host is spelled in lowercase and without a trailing dot; write "api.example.com"
+```
+
+Two other host spellings each get their own refusal:
+
+- **A host that carries a port**, such as `api.example.com:443`. Write the name alone, and compare
+  `context.input.port` for the port.
+- **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
+  write `xn--bcher-kva.example`.
+
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
 path is in `program_path`:

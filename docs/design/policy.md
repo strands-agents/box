@@ -198,8 +198,9 @@ A policy that validates can still fail to run, because opening the history has i
 The inert-rule check sorts each rule into one of three classes:
 
 - **Refused:** anything the load can prove inert. An action or field the schema doesn't declare, a
-  path literal no reported path can match, one `@id` on two rules, and a cap written as a `permit`
-  beside an unconditioned `permit` for the same action, which can't narrow it.
+  path literal no reported path can match, a host literal no destination host can equal, one `@id`
+  on two rules, and a cap written as a `permit` beside an unconditioned `permit` for the same
+  action, which can't narrow it.
 - **Warned:** a rule that might be inert, such as a `program` literal spelled as a path, or that cap
   beside a conditioned `permit`.
 - **Loads anyway:** two shapes the validator can't prove inert, a comparison between two different
