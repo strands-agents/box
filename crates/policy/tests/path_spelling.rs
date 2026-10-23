@@ -1,4 +1,4 @@
-//! A rule's path literal is judged at load against the spelling a decision reads.
+//! A rule's path and host literals are judged at load against the spelling a decision reads.
 
 use std::path::PathBuf;
 
@@ -69,6 +69,20 @@ fn reads(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
             &Request::Fs {
                 path,
                 operation: FsOperation::ReadContent,
+            },
+        )
+        .is_allow()
+}
+
+fn connects(engine: &PolicyEngine, host: &str) -> bool {
+    engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::Connect {
+                host,
+                ip: None,
+                port: 443,
             },
         )
         .is_allow()
@@ -434,4 +448,67 @@ fn a_multi_word_program_literal_loads_without_a_finding_and_never_matches() {
         !decision.is_allow(),
         "the permit the author believes exists matches no spawn: {decision:?}"
     );
+}
+
+const CONNECT_ALL: &str =
+    r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);"#;
+
+#[test]
+fn a_cased_host_literal_is_refused_and_its_lowercase_form_forbids_the_connect() {
+    let home = Home::new();
+    let cased = format!(
+        r#"{CONNECT_ALL}
+        @id("block_host")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input.host == "API.Example.com" }};"#
+    );
+    let reason = refusal(home.open("cased-host", &cased));
+    assert!(reason.contains("rule @id(\"block_host\")"), "{reason}");
+    assert!(reason.contains("write \"api.example.com\""), "{reason}");
+
+    let control = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input.host == "api.example.com" }};"#
+    );
+    let engine = home
+        .open("lowercase-host", &control)
+        .expect("the lowercase spelling loads");
+    assert!(
+        !connects(&engine, "api.example.com"),
+        "the spelling the judge names must be the spelling that denies"
+    );
+    assert!(connects(&engine, "other.example.com"));
+}
+
+/// The gateway binds a host its parser accepts, so the judge refuses every other spelling and
+/// refuses none of those.
+#[test]
+fn a_trailing_dot_and_an_internationalized_host_are_refused_and_punycode_loads() {
+    let home = Home::new();
+    let dotted = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input.host == "api.example.com." }};"#
+    );
+    let reason = refusal(home.open("dotted-host", &dotted));
+    assert!(reason.contains("write \"api.example.com\""), "{reason}");
+
+    let unicode = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input.host == "bücher.example" }};"#
+    );
+    let reason = refusal(home.open("idn-host", &unicode));
+    assert!(reason.contains("punycode"), "{reason}");
+
+    let ace = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input.host == "xn--bcher-kva.example" }};"#
+    );
+    let engine = home
+        .open("punycode-host", &ace)
+        .expect("the punycode spelling loads");
+    assert!(!connects(&engine, "xn--bcher-kva.example"));
 }

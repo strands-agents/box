@@ -1,13 +1,14 @@
-//! Load-time judgement of the path and program literals a rule compares.
+//! Load-time judgement of the path, program, and host literals a rule compares.
 
 use std::path::PathBuf;
 
 use cedar_policy::{ActionConstraint, EntityUid, Policy, PolicySet};
+use egress_gateway::{is_bindable_host, normalize_host};
 use serde_json::Value;
 
 use crate::PolicyError;
 use crate::schema::action::FS_OTHER;
-use crate::schema::attr::{PATH, PROGRAM, PROGRAM_PATH};
+use crate::schema::attr::{HOST, PATH, PROGRAM, PROGRAM_PATH};
 
 const BOX_ACTION_TYPE: &str = "Box::Action";
 
@@ -190,6 +191,7 @@ pub(crate) fn names_only_reserved_action(policy: &Policy) -> bool {
 enum Scope {
     Filesystem,
     Shell,
+    Network,
     /// Unconstrained, or more than one family, so `path` may be a URL path.
     Unscoped,
 }
@@ -233,6 +235,8 @@ impl Scope {
             Some(Self::Filesystem)
         } else if id.starts_with("shell:") {
             Some(Self::Shell)
+        } else if id.starts_with("net:") || id.starts_with("http:") {
+            Some(Self::Network)
         } else {
             None
         }
@@ -246,12 +250,18 @@ impl Scope {
             (Self::Unscoped, PATH | PROGRAM_PATH | PROGRAM) => Some(Checks {
                 trailing_slash: false,
             }),
+            (Self::Network | Self::Unscoped, HOST) => Some(Checks {
+                trailing_slash: false,
+            }),
             _ => None,
         }
     }
 }
 
 fn judge_literal(attribute: &str, literal: &str, homes: &[String], checks: Checks) -> Finding {
+    if attribute == HOST {
+        return judge_host_literal(literal);
+    }
     if attribute == PROGRAM {
         return if literal.contains('/') {
             Finding::ProgramPath(literal.to_string())
@@ -283,6 +293,9 @@ fn judge_pattern(
     checks: Checks,
 ) -> Finding {
     let pattern = render(elements);
+    if attribute == HOST {
+        return judge_host_pattern(elements, &pattern);
+    }
     if attribute == PROGRAM {
         let names_a_path = elements
             .iter()
@@ -322,6 +335,107 @@ fn judge_pattern(
         return Finding::Uncertain(pattern);
     }
     Finding::Sound
+}
+
+/// A host literal the gateway can bind, which it can only when the literal is its own
+/// [`normalize_host`] form and [`is_bindable_host`] accepts it.
+fn judge_host_literal(literal: &str) -> Finding {
+    let canonical = normalize_host(literal);
+    if !is_bindable_host(&canonical) {
+        return Finding::Inert(format!(
+            "compares context.input.{HOST} with \"{literal}\", which no destination host can \
+             equal; {}",
+            unbindable_advice(&canonical)
+        ));
+    }
+    if canonical != literal {
+        return Finding::Inert(format!(
+            "compares context.input.{HOST} with \"{literal}\", and a host is spelled in lowercase \
+             and without a trailing dot; write \"{canonical}\""
+        ));
+    }
+    Finding::Sound
+}
+
+/// A host pattern whose every literal element holds only bytes a bound host holds.
+fn judge_host_pattern(elements: &[PatternElement], pattern: &str) -> Finding {
+    let refuse = |advice: String| {
+        Finding::Inert(format!(
+            "compares context.input.{HOST} with the pattern \"{pattern}\", which no destination \
+             host can match; {advice}"
+        ))
+    };
+    for element in elements {
+        let PatternElement::Literal(text) = element else {
+            continue;
+        };
+        if !text.is_ascii() {
+            return refuse(punycode_advice());
+        }
+        if *text != text.to_ascii_lowercase() {
+            let corrected = render(&lowercased(elements));
+            return refuse(format!(
+                "a host is spelled in lowercase; write \"{corrected}\""
+            ));
+        }
+        if let Some(byte) = text.bytes().find(|byte| !is_host_byte(*byte)) {
+            return refuse(format!(
+                "a host holds no \"{}\"; it holds only letters, digits, \".\", \"-\", and \"_\", \
+                 or an IP address",
+                char::from(byte).escape_debug()
+            ));
+        }
+    }
+    if let Some(PatternElement::Literal(last)) = elements.last()
+        && last.ends_with('.')
+    {
+        let corrected = pattern.trim_end_matches('.');
+        return refuse(if corrected.is_empty() {
+            "a host is never empty".to_string()
+        } else {
+            format!("a host carries no trailing dot; write \"{corrected}\"")
+        });
+    }
+    Finding::Sound
+}
+
+/// Why no bound host equals `canonical`, which is already in [`normalize_host`] form.
+fn unbindable_advice(canonical: &str) -> String {
+    if !canonical.is_ascii() {
+        return punycode_advice();
+    }
+    if let Some(host) = host_before_port(canonical) {
+        return format!("a host carries no port; write \"{host}\" and compare context.input.port");
+    }
+    "a host holds only letters, digits, \".\", \"-\", and \"_\", or an IP address".to_string()
+}
+
+fn punycode_advice() -> String {
+    "an internationalized host reaches the gateway in its punycode form, so write the \"xn--…\" \
+     spelling"
+        .to_string()
+}
+
+/// The bindable host `canonical` holds before a numeric port suffix.
+fn host_before_port(canonical: &str) -> Option<&str> {
+    let (host, port) = canonical.rsplit_once(':')?;
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && is_bindable_host(host))
+        .then_some(host)
+}
+
+/// Whether a bound host ever holds `byte`, which it does for a lowercase name and for an IP.
+fn is_host_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_' | b':')
+}
+
+fn lowercased(elements: &[PatternElement]) -> Vec<PatternElement> {
+    elements
+        .iter()
+        .map(|element| match element {
+            PatternElement::Wildcard => PatternElement::Wildcard,
+            PatternElement::Literal(text) => PatternElement::Literal(text.to_ascii_lowercase()),
+        })
+        .collect()
 }
 
 /// Whether `text` holds `home` as a whole run of path components, bounded by `/` on both sides.
@@ -427,11 +541,11 @@ fn collect(node: &Value, out: &mut Vec<(String, Comparison)>) {
     }
 }
 
-/// `path`, `program_path`, or `program` when `node` is `context.input.<that>`.
+/// `path`, `program_path`, `program`, or `host` when `node` is `context.input.<that>`.
 fn input_attribute(node: &Value) -> Option<String> {
     let access = node.get(".")?;
     let attribute = access.get("attr")?.as_str()?;
-    if ![PATH, PROGRAM_PATH, PROGRAM].contains(&attribute) {
+    if ![PATH, PROGRAM_PATH, PROGRAM, HOST].contains(&attribute) {
         return None;
     }
     let input = access.get("left")?.get(".")?;
@@ -734,5 +848,157 @@ mod tests {
             when { context.input.path == "/etc/hosts" };"#,
         );
         assert!(judge(&policies, &anchored()).is_ok());
+    }
+
+    #[test]
+    fn a_cased_or_dotted_host_literal_is_refused_with_its_canonical_spelling() {
+        for (literal, canonical) in [
+            ("API.Example.com", "api.example.com"),
+            ("api.example.com.", "api.example.com"),
+            ("api.example.com..", "api.example.com"),
+            ("XN--Bcher-Kva.example", "xn--bcher-kva.example"),
+            ("2001:DB8::1", "2001:db8::1"),
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("block_host")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("rule @id(\"block_host\")"), "{error}");
+            assert!(error.contains(&format!("write \"{canonical}\"")), "{error}");
+        }
+    }
+
+    /// The gateway refuses a non-ASCII host, so no Unicode spelling of the literal can ever bind.
+    #[test]
+    fn an_internationalized_host_literal_is_refused_and_names_punycode() {
+        for literal in ["bücher.example", "BÜCHER.example", "ＡＰＩ.example.com"] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"http:request", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("punycode"), "{error}");
+            assert!(error.contains("xn--"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_host_literal_that_carries_a_port_names_the_port_attribute() {
+        let policies = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host == "api.example.com:443" };"#,
+        );
+        let error = judge(&policies, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("write \"api.example.com\""), "{error}");
+        assert!(error.contains("context.input.port"), "{error}");
+    }
+
+    #[test]
+    fn a_host_literal_no_authority_yields_is_refused() {
+        for literal in [
+            "",
+            "https://api.example.com",
+            "api.example.com/v1",
+            "[2001:db8::1]",
+        ] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&policies, &Operator::unanchored()).is_err(),
+                "{literal:?} binds to no host and must be refused"
+            );
+        }
+    }
+
+    /// Every spelling the gateway binds must load, so the judge refuses nothing an operator needs.
+    #[test]
+    fn a_canonical_host_literal_is_sound() {
+        for literal in [
+            "api.example.com",
+            ".api.example.com",
+            "api_internal.example",
+            "api-internal.example",
+            "xn--bcher-kva.example",
+            "localhost",
+            "127.0.0.1",
+            "2001:db8::1",
+            "::ffff:1.2.3.4",
+        ] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&policies, &Operator::unanchored()).is_ok(),
+                "{literal:?} is a host the gateway binds and must load"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_pattern_is_judged_for_case_a_trailing_dot_and_an_unreachable_byte() {
+        let cased = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "*.Example.com" };"#,
+        );
+        let error = judge(&cased, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("write \"*.example.com\""), "{error}");
+
+        let dotted = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "*.example.com." };"#,
+        );
+        let error = judge(&dotted, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("write \"*.example.com\""), "{error}");
+
+        let scheme = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "https://*" };"#,
+        );
+        assert!(judge(&scheme, &Operator::unanchored()).is_err());
+
+        let sound = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "*.example.com"
+                || context.input.host like "*bedrock-agentcore.*.amazonaws.com" };"#,
+        );
+        assert!(judge(&sound, &Operator::unanchored()).is_ok());
+    }
+
+    /// The host arm reaches the broad-forbid and set-membership shapes, not only a scoped `==`.
+    #[test]
+    fn a_broad_rule_and_a_set_membership_judge_the_host_too() {
+        let broad = parsed(
+            r#"forbid(principal, action, resource)
+            when { context has input && context.input has host
+                && context.input.host == "API.Example.com" };"#,
+        );
+        assert!(judge(&broad, &Operator::unanchored()).is_err());
+
+        let reversed = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { "API.Example.com" == context.input.host };"#,
+        );
+        assert!(judge(&reversed, &Operator::unanchored()).is_err());
+
+        let set = parsed(
+            r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"http:request"], resource)
+            when { ["api.example.com", "API.Other.com"].contains(context.input.host) };"#,
+        );
+        assert!(judge(&set, &Operator::unanchored()).is_err());
     }
 }

@@ -20,7 +20,7 @@ pub use boundary::{
 };
 pub use capability::{
     CapabilityContext, CapabilityFault, CapabilityOutcome, CapabilitySet, CapabilitySetBuilder,
-    CredentialCapability,
+    CredentialCapability, is_bindable_host, normalize_host,
 };
 pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, McpFrame, McpListReply,
