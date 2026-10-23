@@ -36,6 +36,8 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 ## Reference
 
+- [`cloud-deployments.md`](./cloud-deployments.md): tested cloud deployment profiles, Linux requirements,
+  and qualification limits for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box
