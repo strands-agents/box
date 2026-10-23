@@ -192,13 +192,13 @@ their place.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. `write` grants write only; add the path to `read` to read it. |
+| `write` | Write the path. On macOS, add `read` to permit reads. Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
-| `write_file` | Write one exact file. The entry names a file. |
-| `list` | List the directory, and read nothing in it. The entry names a directory. |
-| `metadata` | Stat everything below the directory, and read nothing. The entry names a directory. **`[agent.filesystem]` only.** |
+| `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
+| `list` | List the directory without content access on macOS. Linux refuses this list. |
+| `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
-| `deny` | Refuse the path, even when another list grants it. |
+| `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
 ### Direct access by operating system
 
@@ -227,9 +227,9 @@ operation still cause startup refusal.
 
 The example uses four lists. `read` covers the CLI's install tree and `strands-home`, `read_file`
 names the preload file and Homebrew's OpenSSL settings, `write` covers `strands-home`, and `list`
-names the project. `strands-home` is in both `read` and `write`, because `write` grants write only.
-The project is in `list` alone, so the CLI sees the names in it and the policy decides each file
-its shell opens.
+names the project. `strands-home` is in both `read` and `write` to request read-write access explicitly.
+On macOS, the project is in `list` alone, so the CLI sees its names while policy decides each file its shell opens.
+Linux refuses this example's `list` entry. See the [platform comparison](../design/platform-differences.md).
 
 Each entry is absolute, or is `~` or starts with `~/`. An entry carries no pattern, no control
 character, and no `..` component. A directory entry that encloses this box's `box.toml` and
