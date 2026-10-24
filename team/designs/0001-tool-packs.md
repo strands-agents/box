@@ -170,6 +170,3 @@ A tool pack's version is part of its namespace, for example `Tool::git::v2::Acti
 ### L1. The shell grammar sees only the command line
 
 It does not see environment variables, config files, child processes or a renamed binary. 
-
-### L2. 
-

@@ -269,11 +269,13 @@ cargo fmt     -p <package> --check
 
 ### Docs
 
-1. **Two places hold committed prose, and there is no third.** `docs/user/` answers "how do I use
-   it?", `docs/design/` answers "how does it work, and why trust it?". The `docs-writer`,
-   `docs-reviewer`, `docs-audit`, and `docs-planner` skills apply `.agents/references/voice-guide.md`
-   to both. `.agents/explorations/` and `.agents/drafts/` hold local working material that
-   is never committed. Add no doc a reader
+1. **Three places hold committed prose, and there is no fourth.** `docs/user/` answers "how do I use
+   it?", `docs/design/` answers "how does it work, and why trust it?", and `team/designs/` holds the
+   design documents that a human writes before a feature is built. A design document is a snapshot
+   that is not kept in step with the code. An agent does not write, audit, or update one. The
+   `docs-writer`, `docs-reviewer`, `docs-audit`, and `docs-planner` skills apply
+   `.agents/references/voice-guide.md` to `docs/user/` and `docs/design/`. `.agents/explorations/`
+   and `.agents/drafts/` hold local working material that is never committed. Add no doc a reader
    did not ask for. A decision that reaches shipped code gets one entry in
    `docs/design/decisions.md`, under a stable anchor that code cites by relative link.
    A change to behaviour that `docs/user/getting-started.md` describes updates that page.
