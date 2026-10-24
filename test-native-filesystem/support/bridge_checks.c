@@ -161,8 +161,39 @@ static void device_identity(void) {
     puts("PASS signed device identities in source, destinations, and executable checks");
 }
 
+static void permission_event(void) {
+    bool subscribed = false;
+    for (size_t i = 0; i < sizeof(subscriptions) / sizeof(*subscriptions); ++i)
+        subscribed |= subscriptions[i] == ES_EVENT_TYPE_AUTH_SETMODE;
+    assert(subscribed);
+    es_file_t file = {0};
+    file.path.data = "/target";
+    file.path.length = 7;
+    file.stat.st_dev = 3;
+    file.stat.st_ino = 7;
+    file.stat.st_mode = S_IFREG | 0640;
+    es_message_t message = {0};
+    message.action_type = ES_ACTION_TYPE_AUTH;
+    message.event_type = ES_EVENT_TYPE_AUTH_SETMODE;
+    message.event.setmode.target = &file;
+    message.event.setmode.mode = 0500;
+    box_event event = {0};
+    assert(decode(&message, &event));
+    assert(event.kind == BOX_SETMODE);
+    assert(event.mode == (S_IFREG | 0640));
+    assert(event.source_identity == BOX_FILE);
+    assert(event.source_dev == 3 && event.source_ino == 7);
+    assert(strcmp(event.path, "/target") == 0);
+    file.path_truncated = true;
+    assert(!decode(&message, &event));
+    message.event.setmode.target = NULL;
+    assert(!decode(&message, &event));
+    puts("PASS permission event preserves target type, path, and identity");
+}
+
 int main(void) {
     device_identity();
+    permission_event();
     request_case("queue below limit allows", 1023, false);
     request_case("queue at limit denies and reports failure", 1024, false);
     request_case("expired deadline denies despite policy permit", 0, true);
