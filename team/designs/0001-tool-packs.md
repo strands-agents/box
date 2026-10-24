@@ -1,8 +1,8 @@
-# Strands Box - Tool Packs
+# Feature - Tool Packs
 
 ## 1. Background
 
-John Tristan proposed policy packs in [box-staging#60](https://github.com/strands-agents/box-staging/pull/60), but the team decided not to merge it before launch as it was a big change to do last minute. This document is my attempt at formalizing the prototype and simplifying it. 
+John Tristan proposed this in [box-staging#60](https://github.com/strands-agents/box-staging/pull/60), but we decided not to merge it before launch as it was a big change to do last minute. This document is my attempt at formalizing the prototype and simplifying it. 
 
 > Note. The feature is now named Tool Packs
 
