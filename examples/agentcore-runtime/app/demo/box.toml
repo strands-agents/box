@@ -1,0 +1,22 @@
+name="runtime-claude"
+box_dir="/var/tmp/box-manual/state"
+policy="policy.dw"
+[agent]
+command=["/var/tmp/box-manual/bin/claude", "--bare", "--dangerously-skip-permissions", "--tools", "Bash,Read,Write,Edit", "--strict-mcp-config", "--mcp-config", "/var/tmp/box-manual/home/mcp.json"]
+workspace="/var/tmp/box-manual/project"
+env={ HOME="/var/tmp/box-manual/home", PATH="/usr/bin:/bin", LANG="C.UTF-8", TERM="xterm-256color", COLORTERM="truecolor", AWS_REGION="us-west-2", AWS_DEFAULT_REGION="us-west-2", AWS_EC2_METADATA_DISABLED="true", CLAUDE_CODE_USE_BEDROCK="1", ANTHROPIC_MODEL="us.anthropic.claude-sonnet-4-6", CLAUDE_CONFIG_DIR="/var/tmp/box-manual/home", CLAUDE_CODE_TMPDIR="/var/tmp/box-manual/project/.agent-tmp", TMPDIR="/var/tmp/box-manual/project/.agent-tmp", DISABLE_AUTOUPDATER="1", IS_SANDBOX="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1" }
+[agent.filesystem]
+read=["/var/tmp/box-manual/home", "/var/tmp/box-manual/project", "/usr/lib", "/usr/lib64"]
+write=["/var/tmp/box-manual/home", "/var/tmp/box-manual/project/.agent-tmp"]
+read_file=["/etc/ld.so.cache", "/etc/passwd", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"]
+[egress.model]
+destinations=["bedrock-runtime.us-west-2.amazonaws.com"]
+secret.ref="env://AWS_BEARER_TOKEN_BEDROCK"
+
+[mcp.runtime_demo]
+type="stdio"
+command=["runtime-demo-mcp", "/var/tmp/box-manual/mcp-data"]
+workspace="/var/tmp/box-manual/mcp-data"
+[mcp.runtime_demo.filesystem]
+read=["/usr/lib", "/usr/lib64", "/var/tmp/box-manual/mcp-data"]
+write=["/var/tmp/box-manual/mcp-data"]

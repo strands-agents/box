@@ -1,0 +1,13 @@
+app/demo/*.tar.gz
+app/demo/box-package.json
+agentcore/aws-targets.json
+agentcore/.cli/
+agentcore/.cache/
+agentcore/.llm-context/
+agentcore/*.zip
+agentcore/boxdemo_*/
+agentcore/cdk/node_modules/
+agentcore/cdk/cdk.out/
+agentcore/cdk/dist/
+__pycache__/
+results/

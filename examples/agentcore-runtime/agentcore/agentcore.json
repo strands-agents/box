@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "BoxRuntimeExample",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "Purpose": "BoxRuntimeExample",
+    "Retention": "KeepForReaccess"
+  },
+  "runtimes": [
+    {
+      "name": "boxdemo_managed",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/demo/",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "instrumentation": {
+        "enableOtel": false
+      },
+      "envVars": [
+        {
+          "name": "DEMO_MODE",
+          "value": "managed"
+        }
+      ],
+      "lifecycleConfiguration": {
+        "idleRuntimeSessionTimeout": 600,
+        "maxLifetime": 3600
+      }
+    },
+    {
+      "name": "boxdemo_container",
+      "build": "Container",
+      "entrypoint": "main.py",
+      "codeLocation": "app/demo/",
+      "runtimeVersion": "PYTHON_3_12",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "instrumentation": {
+        "enableOtel": false
+      },
+      "envVars": [
+        {
+          "name": "DEMO_MODE",
+          "value": "container"
+        }
+      ],
+      "lifecycleConfiguration": {
+        "idleRuntimeSessionTimeout": 600,
+        "maxLifetime": 3600
+      }
+    }
+  ],
+  "memories": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "httpGateways": []
+}

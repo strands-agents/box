@@ -1,0 +1,31 @@
+
+@id("shell_commands")
+permit(principal, action == Box::Action::"shell:exec", resource);
+@id("project_files")
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/var/tmp/box-manual/project" || context.input.path like "/var/tmp/box-manual/project/*" };
+@id("claude_state")
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/var/tmp/box-manual/home" || context.input.path like "/var/tmp/box-manual/home/*" };
+@id("no_deletes")
+forbid(principal, action == Box::Action::"fs:delete", resource);
+@id("model_connect")
+permit(principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "bedrock-runtime.us-west-2.amazonaws.com" && context.input.port == 443 };
+@id("model_request")
+permit(principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "bedrock-runtime.us-west-2.amazonaws.com" };
+@id("dev_null")
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/dev/null" };
+
+@id("demo_mcp_start")
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program == "runtime-demo-mcp" };
+@id("demo_mcp_calls")
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "runtime_demo" };
+@id("demo_mcp_no_delete")
+forbid(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "runtime_demo" && context.input.method == "tools/call"
+       && context.input has tool && context.input.tool == "delete_note" };

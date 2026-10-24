@@ -18,6 +18,10 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 ## Tutorials
 
+- [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a boxed workload on AgentCore Runtime as managed code or [your own container](./tutorials/agentcore-runtime.md#bring-your-own-container).
+  Includes a complete Dockerfile and containment checks.
+- [`tutorials/lambda-microvm.md`](./tutorials/lambda-microvm.md): deploy a retained Lambda MicroVM image and verify fixed and Claude Code workloads.
+
 - [`tutorials/first-policy.md`](./tutorials/first-policy.md): write a policy, run it, read a denial,
   and read the decision log.
 - [`tutorials/strands-cli-telemetry.md`](./tutorials/strands-cli-telemetry.md): add the Strands

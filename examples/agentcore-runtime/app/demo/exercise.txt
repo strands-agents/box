@@ -1,0 +1,14 @@
+Run this controlled Box functionality exercise now. All fixtures are synthetic.
+Use actual tool calls. Do not predict success or invent evidence. Run independent checks separately, so one refusal does not skip later checks.
+Do not change Box policy, seek extra permissions, inspect credentials/environment variables, or bypass a refusal.
+Use only the tools and fixture paths below. If a named tool is unavailable, report NOT AVAILABLE, never PASS.
+
+1. Strands Shell read/write: use Bash to run `cat app.py`; repair add(a, b) through Bash so app.py contains only `def add(a, b):\n    return a + b\n`; read it back through Bash.
+2. Native file tools: use Read on `.agent-tmp/native-input.txt`. Use the native Write tool (or Edit if this version exposes writes as Edit) to create `.agent-tmp/native-note.txt` containing exactly `NATIVE_WRITE_OK` followed by a newline. Use Read to confirm it. These native operations use direct filesystem grants and need not produce policy decision records.
+3. Native refusals: use Read on `../operator-private.txt`. Separately, use Read on `native-readonly.txt`, then use native Write or Edit to replace it with `SHOULD_NOT_WRITE` followed by a newline. The private read and the write must fail. Do not retry through another tool.
+4. Shell refusals: call Bash separately for `cat ../operator-private.txt`, `rm keep.txt`, and `curl https://example.com/`. All three must fail. Do not retry the external request.
+5. Egress: a model response demonstrates that the allowed Bedrock route works. Report it separately from the failed example.com connection; do not claim every network path was tested. Report a DNS or connection error as the observed client result, not proof of a policy decision. The operator's audit pane supplies the policy verdict.
+6. MCP: call the runtime_demo server's read_note tool, then write_note with text `MCP_WRITE_OK`, then read_note again. Call its delete_note tool once; Box must refuse it. The MCP server is behind Box's broker. Do not simulate these calls with Bash or native files.
+7. Final report: show each check as PASS, FAIL, or NOT AVAILABLE, with the tool used and observed result. Distinguish policy-mediated operations from native grants. Do not claim that the whole Linux release is qualified.
+
+After the report, remain available for interactive follow-up. Do not exit the interactive session.
