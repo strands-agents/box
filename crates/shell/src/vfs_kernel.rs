@@ -1191,9 +1191,9 @@ impl VfsKernel {
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
-            return host_stat(&host_path).await;
+            return host_stat(&host_path, Follow::Yes).await;
             #[cfg(target_arch = "wasm32")]
-            return host_stat_sync(&host_path);
+            return host_stat_sync(&host_path, Follow::Yes);
         }
 
         match vfs.resolve(&abs, true) {
@@ -1206,12 +1206,17 @@ impl VfsKernel {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
 
-        if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
+        let follow = if Self::is_bind_point(&vfs, &abs) {
+            Follow::Yes
+        } else {
+            Follow::No
+        };
+        if let Some((host_path, _ro, _)) = Self::resolve_host_for(&vfs, &abs, follow) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
-            return host_stat(&host_path).await;
+            return host_stat(&host_path, follow).await;
             #[cfg(target_arch = "wasm32")]
-            return host_stat_sync(&host_path);
+            return host_stat_sync(&host_path, follow);
         }
 
         match vfs.resolve(&abs, false) {
@@ -2235,8 +2240,12 @@ impl Kernel for VfsKernel {
 // --- host stat helper ---
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn host_stat(path: &std::path::Path) -> FileStat {
-    let meta = match tokio::fs::metadata(path).await {
+async fn host_stat(path: &std::path::Path, follow: Follow) -> FileStat {
+    let metadata = match follow {
+        Follow::Yes => tokio::fs::metadata(path).await,
+        Follow::No => tokio::fs::symlink_metadata(path).await,
+    };
+    let meta = match metadata {
         Ok(m) => m,
         Err(_) => return FileStat::default(),
     };
@@ -2268,8 +2277,12 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn host_stat_sync(path: &std::path::Path) -> FileStat {
-    let meta = match std::fs::metadata(path) {
+fn host_stat_sync(path: &std::path::Path, follow: Follow) -> FileStat {
+    let metadata = match follow {
+        Follow::Yes => std::fs::metadata(path),
+        Follow::No => std::fs::symlink_metadata(path),
+    };
+    let meta = match metadata {
         Ok(m) => m,
         Err(_) => return FileStat::default(),
     };

@@ -1704,3 +1704,47 @@ Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and
 so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
 `is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
 each canonicalize the bind root again for one path.
+
+## 2026-10-23 — `lstat` on a host bind followed the final symbolic link
+
+A wrong result in the host branch of `lstat`, so upstream would call it a bug. `Mediated::lstat`
+admits `FsOperation::ReadMetadata { follow_symlinks: false }`, and `Kernel::lstat` asserts that its
+token carries `Follow::No`. But `lstat_effect` resolved the host path with `resolve_host`, whose
+`canonicalize` replaces a final link with its target. Then `host_stat` called `tokio::fs::metadata`,
+which also follows the link.
+
+Thus on a `bind_direct` mount, a no-follow metadata read gave the metadata of the target of the link.
+`test -L`, `test -h`, `find -type l`, and `ls -l` did not see a host symbolic link. `rm` tests
+`is_dir && !is_symlink`, so `rm link` refused with "is a directory", and `rm -r link` removed the
+target directory and its contents. The link stayed. The token pinned the link, so the effect acted on
+an object that the decision did not name, with no swap and no race.
+
+`lstat_effect` now resolves with `resolve_host_for(.., Follow::No)`, which resolves the parent and
+joins the leaf. `host_stat` and `host_stat_sync` take a `Follow`, and they call `symlink_metadata`
+for `Follow::No`. A bind point keeps `Follow::Yes`, because the bind is the object that the VFS
+names, and its host source can be a link. `stat_effect` passes `Follow::Yes` and does not change.
+
+The rename destination facts also change when the destination is a host symbolic link. They now
+describe the link itself, as in the in-memory case: `destination_exists` is `true` for a dangling
+link, and `destination_is_dir` is `false` for a link to a directory. `rename_effect` still refuses a
+host symbolic link destination with `cannot rename onto a host symlink`.
+
+`tests/lstat_follow_on_a_host_bind.rs` pins the fix. These tests fail without it:
+`test_minus_l_sees_a_host_symlink`, `test_minus_l_sees_a_dangling_host_symlink`,
+`find_type_l_lists_a_host_symlink`, `ls_l_shows_a_host_symlink_as_a_link`,
+`rm_on_a_host_symlink_to_a_directory_removes_the_link`,
+`rm_r_on_a_host_symlink_to_a_directory_removes_only_the_link`, and
+`rm_r_on_a_host_symlink_out_of_the_mount_removes_only_the_link`.
+`a_file_bind_whose_source_is_a_symlink_is_not_a_link` fails when a bind point is read with
+`Follow::No`. `stat_still_follows_a_host_symlink` pins that `stat` still follows.
+`in_mount_admission_window.rs::a_rename_onto_a_dangling_host_symlink_is_refused_by_the_kernel` now
+expects the present destination fact, and it keeps the refusal.
+
+Follow-ups of the same class, not changed here:
+
+- `remove_dir` admits `Follow::Yes`, so `rmdir link` on a host bind removes an empty target
+  directory, where POSIX `rmdir` refuses a symbolic link with `ENOTDIR`. The decision names the
+  target, so the effect acts on the object that the decision named.
+- `rename_effect` resolves the source with `resolve_host`, which follows the link, but
+  `Mediated::rename` pins the source with `Follow::No`. So `mv link link2` on a host bind refuses
+  with `filesystem identity changed during effect admission`. It fails closed.
