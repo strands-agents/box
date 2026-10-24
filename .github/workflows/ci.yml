@@ -65,6 +65,22 @@ jobs:
               - '.github/workflows/verdict-hermetic.yml'
               - '.github/workflows/ci.yml'
 
+  packaging:
+    name: Packaging tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    cache-mode: read
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check release source and archive selection
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
   rust:
     name: Rust
     needs: detect-changes
@@ -109,7 +125,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [detect-changes, rust, containment, verdict, native]
+    needs: [detect-changes, packaging, rust, containment, verdict, native]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

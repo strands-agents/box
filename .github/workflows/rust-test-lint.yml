@@ -199,9 +199,6 @@ jobs:
       - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
 
-      - name: Check release source and archive selection
-        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
