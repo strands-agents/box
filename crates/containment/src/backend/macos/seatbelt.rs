@@ -448,6 +448,7 @@ pub(crate) fn render_profile_with_streams(
 
     let mut cells: BTreeMap<&str, String> = BTreeMap::new();
     let mut loaded_images: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut missing = crate::backend::dependencies::MissingReads::default();
 
     for granted in config.authorizations() {
         let path = escaped(&granted.resolved)?;
@@ -462,18 +463,8 @@ pub(crate) fn render_profile_with_streams(
                 cells.entry(EXEC_FILE).or_default().push_str(&rules);
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
-                for image in super::macho::dylib_closure(&granted.resolved)? {
-                    let loaded = PathGrant::new(&image, Operation::Read, Scope::File)?;
-                    require_bounded_grant(&loaded, config.operator_home(), false).map_err(
-                        |error| ContainmentError::ApplyFailed {
-                            backend: MECHANISM.to_string(),
-                            reason: format!(
-                                "'{}' loads '{}', which the floor refuses: {error}",
-                                granted.resolved.display(),
-                                image.display()
-                            ),
-                        },
-                    )?;
+                for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
+                    let image = &loaded.original;
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
@@ -481,7 +472,7 @@ pub(crate) fn render_profile_with_streams(
                         "(allow file-read* (literal \"{}\"))\n{}{}",
                         escaped(&loaded.resolved)?,
                         other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(&image)?
+                        linked_directory_metadata(image)?
                     ));
                 }
             }
@@ -583,6 +574,7 @@ pub(crate) fn render_profile_with_streams(
         }
     }
 
+    missing.require_complete(MECHANISM)?;
     let write_roots = config.grants_in(Operation::Write, Scope::Root);
     let mut fixed_ancestors = BTreeSet::new();
     for protected in config.write_protections() {

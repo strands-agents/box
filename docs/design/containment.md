@@ -187,6 +187,85 @@ The report leaves out two things, so check them in `box.toml`:
 - **The extra reach of a program with no tool table:** its file grants appear under `[agent]`, but
   the wider reach of its sandbox doesn't.
 
+<a id="dependency-read-startup-design"></a>
+### Dependency-read startup design
+
+Box checks dependency read authority before starting the affected workload on macOS and Linux.
+Discovery stays automatic. A missing required Read produces a startup error with additive configuration guidance.
+
+The [read-derivation decision](decisions.md#box-derives-a-read-closure-and-refuses-to-derive-an-exec-closure)
+keeps discovery automatic but restricts a branch when the workload can change its executable, a library, or a resolution path.
+This includes replacement through writable parents, symbolic links, and hard links.
+A hard link is another name for the same file. A write grant on either name can change its contents.
+If any directory is writable, Box restricts files with multiple hard links because their other names can be inside that directory.
+This conservative check can require Read entries even when every current link is outside the writable directories.
+The restriction follows dependencies of dependencies, even when a later library is not writable.
+Existing content-read grants or existing trusted system-library allowances must cover reads on that branch.
+Write, Exec, metadata, and directory-listing permissions do not substitute for content Read on macOS.
+
+For a required dependency identified during `box run` startup, missing Read coverage prevents the affected workload from starting.
+The command returns an error. The report groups files by their resolved path and names each requesting executable or library.
+It tells the operator to append missing paths to the existing `read_file` list. Existing entries remain necessary.
+The operator reviews the suggestion and changes the configuration; Box does not edit it automatically.
+Explicit denials and protected-path refusals remain separate errors without suggestions to override them.
+
+For example, a writable program can need two libraries outside its readable project.
+The startup error includes the following guidance (paths shortened for this example):
+
+```text
+2 dependencies lack read access; no filesystem grant reaches them.
+A writable dependency chain cannot add these reads.
+
+Dependency: "/opt/vendor/libcodec.dylib"
+Requested by: {"/demo/project/bin/app"}
+
+Dependency: "/opt/vendor/libstorage.dylib"
+Requested by: {"/demo/project/bin/app"}
+
+Keep existing filesystem entries. Append these paths to read_file in the affected process's filesystem table:
+  "/opt/vendor/libcodec.dylib",
+  "/opt/vendor/libstorage.dylib",
+Each added entry permits reading the file's contents. Review it before granting access.
+Discovery stopped at unreadable dependencies; more may appear after retry.
+No configuration files changed.
+```
+
+For example, update an existing list as follows:
+
+```toml
+# Before
+[agent.filesystem]
+read_file = ["/demo/config/settings.json"]
+```
+
+```toml
+# After
+[agent.filesystem]
+read_file = [
+  "/demo/config/settings.json",
+  "/opt/vendor/libcodec.dylib",
+  "/opt/vendor/libstorage.dylib",
+]
+```
+
+The example retains an existing settings-file entry and adds two library entries.
+A library already covered by an existing Read entry needs no individual entry.
+The report uses canonical paths and escaped file names. It suggests individual files, not wider directory grants.
+If a path cannot be represented in the configuration, the report says so.
+The [configuration reference](../user/config.md) defines the existing Read lists.
+
+Discovery continues through other permitted branches. It does not inspect refused files to complete the report.
+The report states when the walk stops at an inaccessible dependency or its diagnostic limit.
+Additional dependencies can appear after the operator grants access and retries.
+Libraries selected by application code after startup are outside this static discovery guarantee.
+An absent weak dependency remains optional. A present weak dependency still needs read coverage on a restricted branch.
+
+This choice preserves automatic reads for chains with no writable paths or unresolved hard-link aliases.
+It does not establish that their contents have a trusted origin.
+Programs from earlier runs can remain outside this restriction after their files become read-only.
+For writable chains, package changes can require new Read entries, while directory Read entries expose more contents than exact-file entries.
+Production acceptance still requires refusal-before-launch tests, permitted build controls, and platform-specific path-replacement tests.
+
 <a id="the-agents-box-and-leaf-boxes"></a>
 ## The agent's sandbox and the sandboxes for tools and local MCP servers
 

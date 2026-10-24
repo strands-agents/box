@@ -176,4 +176,26 @@ int main(int argc, char **argv) {
     eprintln!(
         "malicious compiled dependency: refused before target startup; operator bytes exposed=0"
     );
+    let installed = directory.path().join("installed-evil");
+    std::fs::hard_link(project.join("evil"), &installed).unwrap();
+    let linked = ContainmentConfig::new()
+        .allow(&project, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&project, Operation::Write, Scope::Root)
+        .unwrap()
+        .allow(&installed, Operation::Exec, Scope::File)
+        .unwrap()
+        .allow("/usr/bin/cat", Operation::Exec, Scope::File)
+        .unwrap();
+    let output = contained(&linked, &project, &["/usr/bin/cat", note.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "writable hard link was not refused: {output:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "operator bytes exposed: {output:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no filesystem grant reaches"));
 }
