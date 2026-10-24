@@ -188,12 +188,9 @@ impl MountView {
             // entry's own metadata, so it holds the requirement rather than widening it.
             if granted.scope == Scope::Dir {
                 for target in granted.reachable_paths() {
-                    // A refusal below needs a mountpoint, which a read-only filesystem cannot hold.
-                    let has_granted_descendant = config
-                        .authorizations()
-                        .into_iter()
-                        .chain(config.refusals())
-                        .any(|candidate| {
+                    // An authorized descendant supplies the contents beneath this directory.
+                    let has_granted_descendant =
+                        config.authorizations().into_iter().any(|candidate| {
                             candidate
                                 .reachable_paths()
                                 .iter()
@@ -432,10 +429,30 @@ impl MountView {
             }
         }
 
-        protected_parents.retain(|parent| {
-            !entries.iter().any(|entry| {
-                entry.origin == MountOrigin::Refusal && parent.starts_with(&entry.target)
+        // A fresh grant hides every descendant. Extra denial or protection mountpoints would
+        // reveal names beneath a metadata-only grant; the empty filesystem already denies access.
+        let empty_roots: Vec<_> = entries
+            .iter()
+            .filter(|entry| {
+                entry.origin == MountOrigin::Grant
+                    && entry.kind == MountKind::Fresh { fstype: "tmpfs" }
+                    && !entry.writable
             })
+            .map(|entry| entry.target.clone())
+            .collect();
+        entries.retain(|entry| {
+            !matches!(
+                entry.origin,
+                MountOrigin::Refusal | MountOrigin::Protection { .. }
+            ) || !empty_roots
+                .iter()
+                .any(|root| entry.target != *root && entry.target.starts_with(root))
+        });
+        protected_parents.retain(|parent| {
+            !empty_roots.iter().any(|root| parent.starts_with(root))
+                && !entries.iter().any(|entry| {
+                    entry.origin == MountOrigin::Refusal && parent.starts_with(&entry.target)
+                })
         });
 
         Ok(Self {
@@ -2438,10 +2455,9 @@ mod tests {
         assert!(!entry.writable);
     }
 
-    /// A refusal beneath a metadata-only directory keeps that directory out of the plan, so the
-    /// refusal's mountpoint can be created.
+    /// A refusal leaves its metadata-only ancestor empty and read-only.
     #[test]
-    fn a_refusal_replaces_its_metadata_only_ancestor() {
+    fn a_refusal_keeps_its_metadata_only_ancestor_read_only() {
         let ancestor = tempfile::tempdir().expect("ancestor");
         let refused = ancestor.path().join("box/private");
         std::fs::create_dir_all(&refused).expect("the refused tree");
@@ -2452,15 +2468,16 @@ mod tests {
             .expect("the refusal");
 
         let entries = planned(&config);
+        let parent = entry_for(&entries, ancestor.path());
+        assert_eq!(parent.origin, MountOrigin::Grant);
+        assert_eq!(parent.kind, MountKind::Fresh { fstype: "tmpfs" });
+        assert!(!parent.writable);
         assert!(
             entries.iter().all(|entry| {
-                entry.target != ancestor.path() || entry.origin != MountOrigin::Grant
+                entry.target == ancestor.path() || !entry.target.starts_with(ancestor.path())
             }),
-            "a read-only ancestor mount leaves no place for the refusal's mountpoint: {entries:?}"
+            "a descendant mountpoint would expose names below the metadata grant: {entries:?}"
         );
-        let entry = entry_for(&entries, &refused);
-        assert_eq!(entry.origin, MountOrigin::Refusal);
-        assert!(!entry.writable);
     }
 
     /// A read-write grant is writable — the box's home depends on this.
