@@ -8,6 +8,9 @@ pub(crate) mod syscall;
 pub(crate) mod view;
 
 #[cfg(test)]
+mod grant_identity_tests;
+
+#[cfg(test)]
 mod failure_tests;
 
 use crate::ContainmentConfig;
@@ -933,62 +936,65 @@ mod tests {
     /// **A read tree confers no exec and an exec tree does**, at the kernel.
     #[test]
     fn a_read_tree_confers_no_exec_and_an_exec_tree_does() {
-        use std::os::unix::fs::PermissionsExt as _;
+        super::failure_tests::in_fresh_process(|| {
+            use std::os::unix::fs::PermissionsExt as _;
 
-        if !the_host_can_build_a_view() {
-            println!("skipping: this host cannot build a namespace mount view");
-            return;
-        }
-        let directory = tempfile::tempdir().expect("tempdir");
-        let read_tree = directory.path().join("read");
-        let exec_tree = directory.path().join("exec");
-        for tree in [&read_tree, &exec_tree] {
-            std::fs::create_dir(tree).expect("a tree");
-            let program = tree.join("prog");
-            std::fs::write(&program, "not a program").expect("a file that is not a program");
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-                .expect("the execute bits, so only the mount can refuse");
-        }
-        let config = ContainmentConfig::new()
-            .allow(&read_tree, Operation::Read, Scope::Root)
-            .expect("a read tree")
-            .allow(&exec_tree, Operation::Exec, Scope::Root)
-            .expect("an exec tree");
-        let read_program = read_tree.join("prog");
-        let exec_program = exec_tree.join("prog");
-
-        // SAFETY: the child applies containment and exits; it never returns into test-harness code.
-        let child = unsafe { libc::fork() };
-        assert_ne!(child, -1, "fork failed");
-        if child == 0 {
-            let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
-                eprintln!("apply failed: {error}");
-                // SAFETY: terminating the child.
-                unsafe { libc::_exit(20) };
+            if !the_host_can_build_a_view() {
+                println!("skipping: this host cannot build a namespace mount view");
+                return;
             }
-            let read_answer = execve_errno(&read_program);
-            let exec_answer = execve_errno(&exec_program);
-            let code = if read_answer != libc::EACCES {
-                21
-            } else if exec_answer != libc::ENOEXEC {
-                22
-            } else {
-                0
-            };
-            // SAFETY: terminating the workload with the verdict.
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(child, &mut status, 0) };
-        assert!(libc::WIFEXITED(status), "the child must exit normally");
-        assert_eq!(
-            libc::WEXITSTATUS(status),
-            0,
-            "20 = apply failed, 21 = A FILE UNDER A READ TREE WAS NOT REFUSED WITH EACCES, \
-             22 = a file under an exec tree was not reached (ENOEXEC expected)"
-        );
+            let directory = tempfile::tempdir().expect("tempdir");
+            let read_tree = directory.path().join("read");
+            let exec_tree = directory.path().join("exec");
+            for tree in [&read_tree, &exec_tree] {
+                std::fs::create_dir(tree).expect("a tree");
+                let program = tree.join("prog");
+                std::fs::write(&program, "not a program").expect("a file that is not a program");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                    .expect("the execute bits, so only the mount can refuse");
+            }
+            let config = ContainmentConfig::new()
+                .allow(&read_tree, Operation::Read, Scope::Root)
+                .expect("a read tree")
+                .allow(&exec_tree, Operation::Exec, Scope::Root)
+                .expect("an exec tree");
+            let read_program = read_tree.join("prog");
+            let exec_program = exec_tree.join("prog");
+
+            // SAFETY: the child applies containment and exits; it never returns into test-harness code.
+            let child = unsafe { libc::fork() };
+            assert_ne!(child, -1, "fork failed");
+            if child == 0 {
+                let backend = NamespaceBackend::with_probe_result(true);
+                if let Err(error) = backend.apply(&config, None, None) {
+                    eprintln!("apply failed: {error}");
+                    // SAFETY: terminating the child.
+                    unsafe { libc::_exit(20) };
+                }
+                let read_answer = execve_errno(&read_program);
+                let exec_answer = execve_errno(&exec_program);
+                eprintln!("read-tree errno={read_answer}; exec-tree errno={exec_answer}");
+                let code = if read_answer != libc::EACCES {
+                    21
+                } else if exec_answer != libc::ENOEXEC {
+                    22
+                } else {
+                    0
+                };
+                // SAFETY: terminating the workload with the verdict.
+                unsafe { libc::_exit(code) };
+            }
+            let mut status = 0;
+            // SAFETY: waiting on this process's own child.
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            assert!(libc::WIFEXITED(status), "the child must exit normally");
+            assert_eq!(
+                libc::WEXITSTATUS(status),
+                0,
+                "20 = apply failed, 21 = A FILE UNDER A READ TREE WAS NOT REFUSED WITH EACCES, \
+                 22 = a file under an exec tree was not reached (ENOEXEC expected)"
+            );
+        });
     }
 
     /// **A workload marks its own output executable inside the box, and the mount decides whether it

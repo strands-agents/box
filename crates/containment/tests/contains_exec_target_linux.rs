@@ -233,12 +233,24 @@ fn a_leaf_runs_written_helpers_but_denied_paths_and_private_tmp_stay_non_executa
     let protected = work.join("protected");
     for path in [&helper, &refused, &outside, &protected] {
         std::fs::copy("/bin/sh", path).unwrap();
+        // A sibling namespace probe can inherit the copy's writer until its child exits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match Command::new(path).args(["-c", "exit 0"]).status() {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => break result,
+            }
+        };
         assert!(
-            Command::new(path)
-                .args(["-c", "exit 0"])
-                .status()
-                .unwrap()
-                .success()
+            status
+                .expect("the uncontained helper must execute")
+                .success(),
+            "the uncontained helper must exit successfully"
         );
     }
     let opened = std::fs::File::open(&protected).unwrap();

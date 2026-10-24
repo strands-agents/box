@@ -530,8 +530,13 @@ fn an_agent_entry_naming_a_box_directory_child_is_refused() {
             no_op_program(),
             "",
             &format!(
-                "[agent.filesystem]\nwrite = [{:?}]\n",
-                entry.display().to_string()
+                "[agent.filesystem]\nwrite = [{entry:?}]\n{read}",
+                entry = entry.display().to_string(),
+                read = if cfg!(target_os = "linux") {
+                    format!("read = [{:?}]\n", entry.display().to_string())
+                } else {
+                    String::new()
+                }
             ),
         );
 
@@ -581,8 +586,13 @@ fn a_symlinked_box_directory_still_guards_its_children() {
         no_op_program(),
         "",
         &format!(
-            "[agent.filesystem]\nwrite = [{:?}]\n",
-            entry.display().to_string()
+            "[agent.filesystem]\nwrite = [{entry:?}]\n{read}",
+            entry = entry.display().to_string(),
+            read = if cfg!(target_os = "linux") {
+                format!("read = [{:?}]\n", entry.display().to_string())
+            } else {
+                String::new()
+            }
         ),
     );
 

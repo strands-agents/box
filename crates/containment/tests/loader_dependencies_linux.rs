@@ -75,10 +75,16 @@ int main(int argc, char **argv) {
         .unwrap()
         .allow("/usr/lib", Operation::Read, Scope::Root)
         .unwrap();
+    if Path::new("/usr/lib64").is_dir() {
+        build = build
+            .allow("/usr/lib64", Operation::Read, Scope::Root)
+            .unwrap();
+    }
     for program in ["/bin/sh", "/usr/bin/cc", "/usr/bin/as", "/usr/bin/ld"] {
         build = build.allow(program, Operation::Exec, Scope::File).unwrap();
     }
-    for name in ["cc1", "collect2"] {
+    // GCC can install its loadable linker plugin beside its helpers, outside /usr/lib.
+    for name in ["cc1", "collect2", "liblto_plugin.so"] {
         let path = Command::new("/usr/bin/cc")
             .arg(format!("-print-prog-name={name}"))
             .output()

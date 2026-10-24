@@ -89,281 +89,322 @@ fn refuses_ungranted(config: &ContainmentConfig, note: &Path) {
 
 #[test]
 fn writable_image_cannot_name_an_ungranted_direct_dependency() {
-    let (_directory, program, note, config) = fixture();
-    assert_eq!(config.warnings().len(), 1);
-    std::fs::write(
-        &program,
-        synthetic_elf(None, &[note.to_str().unwrap()], None),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn writable_image_cannot_search_an_ungranted_directory() {
-    let (_directory, program, note, config) = fixture();
-    std::fs::write(
-        &program,
-        synthetic_elf(None, &["operator.txt"], Some("$ORIGIN/../../notes")),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn writable_image_cannot_name_an_ungranted_interpreter() {
-    let (_directory, program, note, config) = fixture();
-    std::fs::write(
-        &program,
-        synthetic_elf(Some(note.to_str().unwrap()), &[], None),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
-    let (_directory, program, note, config) = fixture();
-    let library = planted_image(
-        program.parent().unwrap(),
-        "libbuilt.so",
-        &synthetic_elf(None, &[note.to_str().unwrap()], None),
-    );
-    let launcher = planted_image(
-        note.parent().unwrap(),
-        "launcher",
-        &synthetic_elf(None, &[library.to_str().unwrap()], None),
-    );
-    let config = config
-        .allow(launcher, Operation::Exec, Scope::File)
-        .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn a_read_only_program_cannot_import_a_writable_dependency_links_target() {
-    let (_directory, program, note, config) = fixture();
-    let library = program.parent().unwrap().join("libbuilt.so");
-    std::os::unix::fs::symlink(&note, &library).unwrap();
-    let launcher = planted_image(
-        note.parent().unwrap(),
-        "launcher",
-        &synthetic_elf(None, &[library.to_str().unwrap()], None),
-    );
-    let config = config
-        .allow(launcher, Operation::Exec, Scope::File)
-        .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn a_writable_parent_in_a_dependency_link_chain_cannot_import_operator_bytes() {
-    let (_directory, program, note, config) = fixture();
-    let hop = program.parent().unwrap().join("hop");
-    std::os::unix::fs::symlink(note.parent().unwrap(), &hop).unwrap();
-    let outer = note.parent().unwrap().join("outer.so");
-    std::os::unix::fs::symlink(hop.join("operator.txt"), &outer).unwrap();
-    let launcher = planted_image(
-        note.parent().unwrap(),
-        "launcher",
-        &synthetic_elf(None, &[outer.to_str().unwrap()], None),
-    );
-    let config = config
-        .allow(launcher, Operation::Exec, Scope::File)
-        .unwrap();
-    refuses_ungranted(&config, &outer);
-}
-
-#[test]
-fn writable_rpath_cannot_extend_a_read_only_dependency() {
-    let (_directory, program, note, config) = fixture();
-    let library = planted_image(
-        note.parent().unwrap(),
-        "libmiddle.so",
-        &synthetic_elf(None, &["operator.txt"], None),
-    );
-    let config = config
-        .allow(&library, Operation::Read, Scope::File)
-        .unwrap();
-    std::fs::write(
-        &program,
-        synthetic_elf_paths(
-            None,
-            &[library.to_str().unwrap()],
-            None,
-            Some(note.parent().unwrap().to_str().unwrap()),
-        ),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn a_dependency_symlink_inside_a_write_grant_does_not_authorize_its_target() {
-    let (_directory, program, note, config) = fixture();
-    let link = program.parent().unwrap().join("libnote.so");
-    std::os::unix::fs::symlink(&note, &link).unwrap();
-    std::fs::write(
-        &program,
-        synthetic_elf(None, &[link.to_str().unwrap()], None),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &link);
-}
-
-#[test]
-fn a_replaceable_image_parent_cannot_supply_ungranted_dependencies() {
-    let (_directory, program, note, config) = fixture();
-    let parent = program.parent().unwrap();
-    let old = parent.with_extension("old");
-    std::fs::rename(parent, &old).unwrap();
-    std::fs::create_dir(parent).unwrap();
-    std::fs::write(
-        &program,
-        synthetic_elf(None, &[note.to_str().unwrap()], None),
-    )
-    .unwrap();
-    refuses_ungranted(&config, &note);
-}
-
-#[test]
-fn metadata_and_directory_entries_do_not_authorize_dependency_bytes() {
-    for (operation, scope) in [
-        (Operation::Metadata, Scope::Root),
-        (Operation::Read, Scope::Dir),
-    ] {
+    super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
-        let path = if scope == Scope::File {
-            note.as_path()
-        } else {
-            note.parent().unwrap()
-        };
-        let config = config.allow(path, operation, scope).unwrap();
+        assert_eq!(config.warnings().len(), 1);
         std::fs::write(
             &program,
             synthetic_elf(None, &[note.to_str().unwrap()], None),
         )
         .unwrap();
         refuses_ungranted(&config, &note);
-    }
+    });
 }
 
 #[test]
-fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
-    if !mount_namespace_is_available() {
-        return;
-    }
-    assert!(forked(|| {
-        assert!(enter_private_namespace());
-        mount_syscall(
-            Some(Path::new("tmpfs")),
-            Path::new("/usr/lib"),
-            Some("tmpfs"),
-            libc::MS_NOSUID | libc::MS_NODEV,
-            None,
+fn writable_image_cannot_search_an_ungranted_directory() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        std::fs::write(
+            &program,
+            synthetic_elf(None, &["operator.txt"], Some("$ORIGIN/../../notes")),
         )
         .unwrap();
+        refuses_ungranted(&config, &note);
+    });
+}
+
+#[test]
+fn writable_image_cannot_name_an_ungranted_interpreter() {
+    super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
-        let link = Path::new("/usr/lib/libbox_operator.so");
-        std::os::unix::fs::symlink(&note, link).unwrap();
+        std::fs::write(
+            &program,
+            synthetic_elf(Some(note.to_str().unwrap()), &[], None),
+        )
+        .unwrap();
+        refuses_ungranted(&config, &note);
+    });
+}
+
+#[test]
+fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        let library = planted_image(
+            program.parent().unwrap(),
+            "libbuilt.so",
+            &synthetic_elf(None, &[note.to_str().unwrap()], None),
+        );
+        let launcher = planted_image(
+            note.parent().unwrap(),
+            "launcher",
+            &synthetic_elf(None, &[library.to_str().unwrap()], None),
+        );
+        let config = config
+            .allow(launcher, Operation::Exec, Scope::File)
+            .unwrap();
+        refuses_ungranted(&config, &note);
+    });
+}
+
+#[test]
+fn a_read_only_program_cannot_import_a_writable_dependency_links_target() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        let library = program.parent().unwrap().join("libbuilt.so");
+        std::os::unix::fs::symlink(&note, &library).unwrap();
+        let launcher = planted_image(
+            note.parent().unwrap(),
+            "launcher",
+            &synthetic_elf(None, &[library.to_str().unwrap()], None),
+        );
+        let config = config
+            .allow(launcher, Operation::Exec, Scope::File)
+            .unwrap();
+        refuses_ungranted(&config, &note);
+    });
+}
+
+#[test]
+fn a_writable_parent_in_a_dependency_link_chain_cannot_import_operator_bytes() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        let hop = program.parent().unwrap().join("hop");
+        std::os::unix::fs::symlink(note.parent().unwrap(), &hop).unwrap();
+        let outer = note.parent().unwrap().join("outer.so");
+        std::os::unix::fs::symlink(hop.join("operator.txt"), &outer).unwrap();
+        let launcher = planted_image(
+            note.parent().unwrap(),
+            "launcher",
+            &synthetic_elf(None, &[outer.to_str().unwrap()], None),
+        );
+        let config = config
+            .allow(launcher, Operation::Exec, Scope::File)
+            .unwrap();
+        refuses_ungranted(&config, &outer);
+    });
+}
+
+#[test]
+fn writable_rpath_cannot_extend_a_read_only_dependency() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        let library = planted_image(
+            note.parent().unwrap(),
+            "libmiddle.so",
+            &synthetic_elf(None, &["operator.txt"], None),
+        );
+        let config = config
+            .allow(&library, Operation::Read, Scope::File)
+            .unwrap();
+        std::fs::write(
+            &program,
+            synthetic_elf_paths(
+                None,
+                &[library.to_str().unwrap()],
+                None,
+                Some(note.parent().unwrap().to_str().unwrap()),
+            ),
+        )
+        .unwrap();
+        refuses_ungranted(&config, &note);
+    });
+}
+
+#[test]
+fn a_dependency_symlink_inside_a_write_grant_does_not_authorize_its_target() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (_directory, program, note, config) = fixture();
+        let link = program.parent().unwrap().join("libnote.so");
+        std::os::unix::fs::symlink(&note, &link).unwrap();
         std::fs::write(
             &program,
             synthetic_elf(None, &[link.to_str().unwrap()], None),
         )
         .unwrap();
-        refuses_ungranted(&config, link);
-        true
-    }));
+        refuses_ungranted(&config, &link);
+    });
 }
 
 #[test]
-fn stated_byte_grants_admit_dependency_bytes() {
-    if !mount_namespace_is_available() {
-        return;
-    }
-    for operation in [Operation::Read, Operation::Write, Operation::Exec] {
-        for scope in [Scope::File, Scope::Root] {
+fn a_replaceable_image_parent_cannot_supply_ungranted_dependencies() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        let (directory, program, note, config) = fixture();
+        let parent = program.parent().unwrap();
+        let old = parent.with_extension("old");
+        std::fs::rename(parent, &old).unwrap();
+        std::fs::create_dir(parent).unwrap();
+        std::fs::write(
+            &program,
+            synthetic_elf(None, &[note.to_str().unwrap()], None),
+        )
+        .unwrap();
+        let error = crate::floors::require_all(&config).unwrap_err();
+        assert!(
+            error.to_string().contains("object changed before apply"),
+            "{error}"
+        );
+
+        // A fresh grant can approve the replacement image, but not its ungranted dependency.
+        let refreshed = ContainmentConfig::new()
+            .allow(parent.parent().unwrap(), Operation::Write, Scope::Root)
+            .unwrap()
+            .allow(&program, Operation::Exec, Scope::File)
+            .unwrap()
+            .anchored_at(directory.path());
+        refuses_ungranted(&refreshed, &note);
+    });
+}
+
+#[test]
+fn metadata_and_directory_entries_do_not_authorize_dependency_bytes() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        for (operation, scope) in [
+            (Operation::Metadata, Scope::Root),
+            (Operation::Read, Scope::Dir),
+        ] {
             let (_directory, program, note, config) = fixture();
-            let grant = if scope == Scope::Root {
-                note.parent().unwrap()
+            let path = if scope == Scope::File {
+                note.as_path()
             } else {
-                &note
+                note.parent().unwrap()
             };
-            let config = config.allow(grant, operation, scope).unwrap();
+            let config = config.allow(path, operation, scope).unwrap();
             std::fs::write(
                 &program,
                 synthetic_elf(None, &[note.to_str().unwrap()], None),
             )
             .unwrap();
-            let view = MountView::plan(&config).unwrap();
-            assert!(forked(|| {
-                assert!(enter_private_namespace());
-                let root = tempfile::tempdir().unwrap();
-                assert!(establish_every_entry(&view, root.path()));
-                let inside = root.path().join(note.strip_prefix("/").unwrap());
-                assert_eq!(
-                    std::fs::read(inside).unwrap(),
-                    std::fs::read(&note).unwrap()
-                );
-                true
-            }));
+            refuses_ungranted(&config, &note);
         }
-    }
+    });
+}
+
+#[test]
+fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        if !mount_namespace_is_available() {
+            return;
+        }
+        assert!(forked(|| {
+            assert!(enter_private_namespace());
+            mount_syscall(
+                Some(Path::new("tmpfs")),
+                Path::new("/usr/lib"),
+                Some("tmpfs"),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                None,
+            )
+            .unwrap();
+            let (_directory, program, note, config) = fixture();
+            let link = Path::new("/usr/lib/libbox_operator.so");
+            std::os::unix::fs::symlink(&note, link).unwrap();
+            std::fs::write(
+                &program,
+                synthetic_elf(None, &[link.to_str().unwrap()], None),
+            )
+            .unwrap();
+            refuses_ungranted(&config, link);
+            true
+        }));
+    });
+}
+
+#[test]
+fn stated_byte_grants_admit_dependency_bytes() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        if !mount_namespace_is_available() {
+            return;
+        }
+        for operation in [Operation::Read, Operation::Write, Operation::Exec] {
+            for scope in [Scope::File, Scope::Root] {
+                let (_directory, program, note, config) = fixture();
+                let grant = if scope == Scope::Root {
+                    note.parent().unwrap()
+                } else {
+                    &note
+                };
+                let config = config.allow(grant, operation, scope).unwrap();
+                std::fs::write(
+                    &program,
+                    synthetic_elf(None, &[note.to_str().unwrap()], None),
+                )
+                .unwrap();
+                let view = MountView::plan(&config).unwrap();
+                assert!(forked(|| {
+                    assert!(enter_private_namespace());
+                    let root = tempfile::tempdir().unwrap();
+                    assert!(establish_every_entry(&view, root.path()));
+                    let inside = root.path().join(note.strip_prefix("/").unwrap());
+                    assert_eq!(
+                        std::fs::read(inside).unwrap(),
+                        std::fs::read(&note).unwrap()
+                    );
+                    true
+                }));
+            }
+        }
+    });
 }
 
 #[test]
 fn dependency_mounts_refuse_leaf_or_parent_replacement() {
-    if !mount_namespace_is_available() {
-        return;
-    }
-    for interpreter in [false, true] {
-        for parent in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let home = directory.path().canonicalize().unwrap();
-            let library = planted_image(&home, "deps/library", b"admitted dependency bytes");
-            let note = planted_image(&home, "outside/library", b"ungranted operator bytes");
-            let image = if interpreter {
-                synthetic_elf(Some(library.to_str().unwrap()), &[], None)
-            } else {
-                synthetic_elf(None, &[library.to_str().unwrap()], None)
-            };
-            let program = planted_image(&home, "bin/program", &image);
-            let config = ContainmentConfig::new()
-                .allow(program, Operation::Exec, Scope::File)
-                .unwrap();
-            let view = MountView::plan(&config).unwrap();
-            let (replaced, destination) = if parent {
-                (library.parent().unwrap(), note.parent().unwrap())
-            } else {
-                (library.as_path(), note.as_path())
-            };
-            std::fs::rename(replaced, replaced.with_extension("saved")).unwrap();
-            std::os::unix::fs::symlink(destination, replaced).unwrap();
-            assert_eq!(
-                std::fs::read(&library).unwrap(),
-                b"ungranted operator bytes"
-            );
-            assert!(forked(|| {
-                assert!(enter_private_namespace());
-                let root = tempfile::tempdir().unwrap();
-                let established = establish_every_entry(&view, root.path());
-                let inside = root.path().join(library.strip_prefix("/").unwrap());
-                !established && std::fs::read(inside).is_err()
-            }));
-            eprintln!(
-                "pinned dependency: interpreter={interpreter}, parent={parent}, refused=1, leaked=0"
-            );
+    super::super::super::failure_tests::in_fresh_process(|| {
+        if !mount_namespace_is_available() {
+            return;
         }
-    }
+        for interpreter in [false, true] {
+            for parent in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let home = directory.path().canonicalize().unwrap();
+                let library = planted_image(&home, "deps/library", b"admitted dependency bytes");
+                let note = planted_image(&home, "outside/library", b"ungranted operator bytes");
+                let image = if interpreter {
+                    synthetic_elf(Some(library.to_str().unwrap()), &[], None)
+                } else {
+                    synthetic_elf(None, &[library.to_str().unwrap()], None)
+                };
+                let program = planted_image(&home, "bin/program", &image);
+                let config = ContainmentConfig::new()
+                    .allow(program, Operation::Exec, Scope::File)
+                    .unwrap();
+                let view = MountView::plan(&config).unwrap();
+                let (replaced, destination) = if parent {
+                    (library.parent().unwrap(), note.parent().unwrap())
+                } else {
+                    (library.as_path(), note.as_path())
+                };
+                std::fs::rename(replaced, replaced.with_extension("saved")).unwrap();
+                std::os::unix::fs::symlink(destination, replaced).unwrap();
+                assert_eq!(
+                    std::fs::read(&library).unwrap(),
+                    b"ungranted operator bytes"
+                );
+                assert!(forked(|| {
+                    assert!(enter_private_namespace());
+                    let root = tempfile::tempdir().unwrap();
+                    let established = establish_every_entry(&view, root.path());
+                    let inside = root.path().join(library.strip_prefix("/").unwrap());
+                    !established && std::fs::read(inside).is_err()
+                }));
+                eprintln!(
+                    "pinned dependency: interpreter={interpreter}, parent={parent}, refused=1, leaked=0"
+                );
+            }
+        }
+    });
 }
 
 #[test]
 fn concurrent_dependency_replacement_never_changes_the_mounted_bytes() {
-    if !mount_namespace_is_available() {
-        return;
-    }
-    race_dependency_replacement(false);
-    race_dependency_replacement(true);
+    super::super::super::failure_tests::in_fresh_process(|| {
+        if !mount_namespace_is_available() {
+            return;
+        }
+        race_dependency_replacement(false);
+        race_dependency_replacement(true);
+    });
 }
 
 fn race_dependency_replacement(parent: bool) {
