@@ -91,6 +91,10 @@ int main(int argc, char **argv) {
             .unwrap();
         assert!(path.status.success());
         let path = String::from_utf8(path.stdout).unwrap();
+        if name == "liblto_plugin.so" && path.trim() == name {
+            println!("skipping: the compiler does not report an installed linker plugin");
+            return;
+        }
         build = build
             .allow(path.trim(), Operation::Exec, Scope::File)
             .unwrap();
