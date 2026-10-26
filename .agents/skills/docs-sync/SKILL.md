@@ -64,25 +64,23 @@ For each surface that ships, open the page the row names and give it one status:
 - **missing**: no page states the surface.
 - **ok**: the page and the code agree.
 
-Then run these authorities, which beat any reading of the code:
+Run a command only for a surface Step 1 recorded. Most runs of this skill need none.
 
-```sh
-cargo build -p strands-box --all-features
-./target/debug/strands-box --help
-./target/debug/strands-box run --help
-./target/debug/strands-box policy generate-schema --help
-```
+- **A CLI verb, a flag, or a `box.toml` key needs no command here.**
+  `crates/box/tests/documented_commands.rs` and `documented_inputs.rs` already hold
+  `crates/box/README.md` to the parser, and continuous integration runs both. A diff that moves one
+  gets a failing test, which is a louder signal than this sweep.
+- **A policy action or a field does need a command**, because no test pins the page to the schema:
 
-- Each verb, flag, and short form that `--help` prints is in `crates/box/README.md`, and the README
-  names no verb that `--help` does not print. `crates/box/tests/documented_commands.rs` pins this,
-  so run it.
-- Each `box.toml` key the README claims exists on the parser.
-  `crates/box/tests/documented_inputs.rs` pins this.
-- Each action id and each field that `strands-box policy generate-schema` emits is in
-  `docs/user/policy/actions.md`, and the page names no action the schema omits. Check the count of
-  actions that `docs/user/policy.md` and `docs/user/policy/actions.md` state against `ACTION_IDS`.
+  ```sh
+  cargo run -p strands-box -- policy generate-schema
+  ```
 
-Run `.agents/skills/docs-reviewer/check-prose.sh <page>` on each page you change.
+  Each action id and each field the schema emits is in `docs/user/policy/actions.md`, and the page
+  names no action the schema omits. Check the count of actions that `docs/user/policy.md` and
+  `docs/user/policy/actions.md` state against `ACTION_IDS`.
+
+When you fix a page, run `.agents/skills/docs-reviewer/check-prose.sh <page>` on it.
 
 ### Step 4: Check the design guide
 
@@ -126,10 +124,9 @@ the diff moved, and the root `AGENTS.md` when the change moves a gate or a froze
 
 ### Checks run
 
-- `strands-box --help` against `crates/box/README.md`: <result>
-- `documented_commands.rs`, `documented_inputs.rs`: <result>
-- `policy generate-schema` against `docs/user/policy/actions.md`: <result>
-- `check-prose.sh`: <result>
+List each command you ran, with its result. Name the command you did not run and the surface it
+bears on, so a reader can see it was a choice. "None, because the diff touched no policy action" is
+a complete answer.
 ```
 
 When there is nothing to fix, say so, and still list the rows you walked. Silence reads as "not
