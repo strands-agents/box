@@ -356,11 +356,24 @@ fn entry_grant(
         ))
     })?;
     if metadata.is_symlink() {
-        return Err(named(&format!(
-            "{} is a symbolic link. A grant carries the identity the kernel checks, so a link \
-             renders a rule that matches nothing; name what it points at",
-            lexical.display()
-        )));
+        // Name the target so the operator can paste it into the grant. A missing target and a
+        // resolve failure (permission, link loop) are different problems; say which one it is.
+        return Err(match lexical.canonicalize() {
+            Ok(target) => named(&format!(
+                "{} is a symbolic link to {}. A grant carries the identity the kernel checks,                  so a link renders a rule that matches nothing; name {} instead",
+                lexical.display(),
+                target.display(),
+                target.display()
+            )),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => named(&format!(
+                "{} is a symbolic link whose target is missing. A grant carries the identity                  the kernel checks, so a link renders a rule that matches nothing; repair the                  link or name a path that exists",
+                lexical.display()
+            )),
+            Err(source) => named(&format!(
+                "{} is a symbolic link that cannot be resolved: {source}. A grant carries the                  identity the kernel checks, so a link renders a rule that matches nothing;                  repair the link or name a path that exists",
+                lexical.display()
+            )),
+        });
     }
     let resolved = lexical
         .canonicalize()
@@ -957,10 +970,36 @@ mod tests {
 
         // A symlinked entry, whose authored spelling and identity differ.
         let link = home.join("vendor-link");
-        std::os::unix::fs::symlink(home.join("vendor/sdk"), &link).expect("a link");
+        let target = home.join("vendor/sdk");
+        std::os::unix::fs::symlink(&target, &link).expect("a link");
         let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&link)));
         assert!(
-            refusal.contains("symbolic link") && refusal.contains(&text(&link)),
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&link))
+                && refusal.contains(&text(&target))
+                && refusal.contains("instead"),
+            "{refusal}"
+        );
+
+        // A broken symlink has no canonical target; the refusal must still name the link.
+        let broken = home.join("broken-link");
+        std::os::unix::fs::symlink(home.join("no-such-target"), &broken).expect("a broken link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&broken)));
+        assert!(
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&broken))
+                && refusal.contains("target is missing"),
+            "{refusal}"
+        );
+
+        // A link that points at itself fails canonicalize with a loop, not NotFound.
+        let looped = home.join("loop-link");
+        std::os::unix::fs::symlink(&looped, &looped).expect("a self link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&looped)));
+        assert!(
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&looped))
+                && refusal.contains("cannot be resolved"),
             "{refusal}"
         );
 

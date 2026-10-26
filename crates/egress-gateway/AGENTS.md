@@ -11,9 +11,11 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 42 names (`src/lib.rs`): 38 unconditional, and 4 behind the default-on
+The façade exports 44 names (`src/lib.rs`): 40 unconditional, and 4 behind the default-on
 `tls-intercept` feature — `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` — which stay
-behind it. `audit::Decision` exits as `AuditDecision`. A 43rd name needs a named external caller.
+behind it. `audit::Decision` exits as `AuditDecision`. `normalize_host` and `is_bindable_host` are
+the one host spelling, exported for `policy::spelling`, which refuses a host literal no bound host
+can equal. A 45th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
@@ -81,7 +83,7 @@ The capability modules carry no authority.
 
 Three divergences from `docs/conventions.md` are live, and none is license to rename:
 
-- No root noun: 42 exports, no single type reached by one verb, `Interceptor` a one-method port,
+- No root noun: 44 exports, no single type reached by one verb, `Interceptor` a one-method port,
   `MitmInterceptor::start` taking three arguments and returning `MitmHandle`, and
   `CapabilitySet::builder()` → `CapabilitySetBuilder::build()`.
 - A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.

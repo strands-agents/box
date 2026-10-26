@@ -267,7 +267,7 @@ happen after the box directory is created and before the workload starts.
 | A `..` component | ``` `filesystem.read` path "<entry>" carries `..`; name the path it means``` |
 | The same path twice in one list | ``` `filesystem.read` path <path> is duplicated``` |
 | A path that does not exist | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
-| A symbolic link | `<path> is a symbolic link. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name what it points at` |
+| A symbolic link | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
 | A spelling the kernel resolves elsewhere | `<path> is not the path the kernel checks, which is <path>. A grant carries the identity it acts on, so name that path instead` |
 | A directory in `read_file` or `write_file` | ``<path> is a directory; `read_file` names one file, and a tree belongs in `read` `` |
 | A file in `list` | ``<path> is a file, and `list` enumerates a directory tree`` |
