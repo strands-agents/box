@@ -372,17 +372,18 @@ fn judge_host_pattern(elements: &[PatternElement], pattern: &str) -> Finding {
         if !text.is_ascii() {
             return refuse(punycode_advice());
         }
-        if *text != text.to_ascii_lowercase() {
-            let corrected = render(&lowercased(elements));
-            return refuse(format!(
-                "a host is spelled in lowercase; write \"{corrected}\""
-            ));
-        }
-        if let Some(byte) = text.bytes().find(|byte| !is_host_byte(*byte)) {
+        let lowercase = text.to_ascii_lowercase();
+        if let Some(byte) = lowercase.bytes().find(|byte| !is_host_byte(*byte)) {
             return refuse(format!(
                 "a host holds no \"{}\"; it holds only letters, digits, \".\", \"-\", and \"_\", \
                  or an IP address",
                 char::from(byte).escape_debug()
+            ));
+        }
+        if *text != lowercase {
+            let corrected = render(&lowercased(elements));
+            return refuse(format!(
+                "a host is spelled in lowercase; write \"{corrected}\""
             ));
         }
     }
@@ -403,6 +404,9 @@ fn judge_host_pattern(elements: &[PatternElement], pattern: &str) -> Finding {
 fn unbindable_advice(canonical: &str) -> String {
     if !canonical.is_ascii() {
         return punycode_advice();
+    }
+    if canonical.is_empty() {
+        return "a host is never empty".to_string();
     }
     if let Some(host) = host_before_port(canonical) {
         return format!("a host carries no port; write \"{host}\" and compare context.input.port");
@@ -1021,5 +1025,48 @@ mod tests {
             when { context.input.host == "API.Example.com" };"#,
         );
         assert!(judge(&mixed, &Operator::unanchored()).is_ok());
+    }
+
+    /// A refusal never names a spelling that is itself unreachable, so the unreachable byte is
+    /// reported before the case.
+    #[test]
+    fn a_host_refusal_names_no_second_dead_spelling() {
+        let both = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "API/path*" };"#,
+        );
+        let error = judge(&both, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a host holds no \"/\""), "{error}");
+        assert!(!error.contains("write"), "{error}");
+
+        let cased_only = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.host like "API.Example.com" };"#,
+        );
+        let error = judge(&cased_only, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("write \"api.example.com\""), "{error}");
+    }
+
+    /// A literal and a pattern give one reason for a host that normalizes to nothing.
+    #[test]
+    fn a_host_that_normalizes_to_nothing_is_never_empty_in_both_shapes() {
+        for source in [
+            r#"when { context.input.host == ".." }"#,
+            r#"when { context.input.host == "" }"#,
+            r#"when { context.input.host like ".." }"#,
+        ] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                {source};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("a host is never empty"), "{source}: {error}");
+        }
     }
 }
