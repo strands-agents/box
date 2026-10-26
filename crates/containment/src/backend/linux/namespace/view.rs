@@ -11,7 +11,7 @@ use crate::error::ContainmentError;
 use crate::model::{Operation, Scope};
 
 use super::MECHANISM;
-use crate::backend::dependencies::{MissingReads, require_not_refused, workload_writable};
+use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
 
 /// What provides an entry's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1400,21 +1400,6 @@ fn resolve_needed(name: &str, search: Option<&LibrarySearch>) -> Option<PathBuf>
         .chain(LIBRARY_DIRECTORIES.iter().map(Path::new))
         .map(|directory| folded(&directory.join(name)))
         .find(|candidate| candidate.is_file())
-}
-
-/// The path with `.` and `..` folded lexically, which is the path the loader opens.
-fn folded(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                result.pop();
-            }
-            other => result.push(other.as_os_str()),
-        }
-    }
-    result
 }
 
 /// Whether `resolved` is one of the directories the loader maps code from.

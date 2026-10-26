@@ -26,6 +26,10 @@ impl MissingReads {
     }
 
     pub(super) fn require_complete(&self, backend: &str) -> Result<(), ContainmentError> {
+        // Box's supervise::trampoline_message allows 8192 characters, including error framing.
+        const MAXIMUM_REASON_BYTES: usize = 6000;
+        const TRUNCATED_REASON_BYTES: usize = 5500;
+
         if self.paths.is_empty() {
             return Ok(());
         }
@@ -52,17 +56,18 @@ impl MissingReads {
             }
         }
         reason.push_str("Each added entry permits reading the file's contents. Review it before granting access.\nDiscovery stopped at unreadable dependencies; more may appear after retry.\nNo configuration files changed.");
+        if self.paths.len() > 32 {
+            reason.push_str("\nOnly the first 32 missing files are shown.");
+        }
         // Keep the setup-status pipe's diagnostic bounded, including hostile path lengths.
-        if reason.len() > 6000 {
-            let mut end = 5500;
+        if reason.len() > MAXIMUM_REASON_BYTES {
+            let mut end = TRUNCATED_REASON_BYTES;
             while !reason.is_char_boundary(end) {
                 end -= 1;
             }
             reason.truncate(end);
             reason
                 .push_str("\nDiagnostic truncated; do not copy incomplete configuration guidance.");
-        } else if self.paths.len() > 32 {
-            reason.push_str("\nOnly the first 32 missing files are shown.");
         }
         Err(failure(backend, reason))
     }
@@ -188,7 +193,7 @@ pub(super) fn workload_writable(
     Ok(false)
 }
 
-fn folded(path: &Path) -> PathBuf {
+pub(super) fn folded(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -225,6 +230,48 @@ mod tests {
         assert!(
             text.contains("Keep existing filesystem entries")
                 && text.contains("No configuration files changed.")
+        );
+    }
+
+    #[test]
+    fn missing_read_diagnostics_bound_the_complete_reason() {
+        let reason = |count: usize, padding: &str| {
+            let mut missing = MissingReads::default();
+            for index in 0..count {
+                let image = if index == 0 {
+                    format!("/project/app{padding}")
+                } else {
+                    "/project/app".to_owned()
+                };
+                missing.add(Path::new(&format!("/vendor/{index:02}")), Path::new(&image));
+            }
+            let ContainmentError::ApplyFailed { reason, .. } =
+                missing.require_complete("test").unwrap_err()
+            else {
+                panic!("missing reads must fail application");
+            };
+            reason
+        };
+        for count in [2, 33] {
+            let padding = "x".repeat(6000 - reason(count, "").len());
+            let complete = reason(count, &padding);
+            assert_eq!(complete.len(), 6000);
+            assert!(complete.contains("No configuration files changed."));
+            assert_eq!(complete.contains("Only the first 32"), count > 32);
+
+            let oversized = reason(count, &format!("{padding}x"));
+            assert!(oversized.len() <= 6000, "{} bytes", oversized.len());
+            assert!(
+                oversized.ends_with(
+                    "Diagnostic truncated; do not copy incomplete configuration guidance."
+                )
+            );
+        }
+        let unicode = reason(2, &"界".repeat(3000));
+        assert!(unicode.len() <= 6000);
+        assert!(
+            unicode
+                .ends_with("Diagnostic truncated; do not copy incomplete configuration guidance.")
         );
     }
 
