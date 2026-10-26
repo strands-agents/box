@@ -116,8 +116,10 @@ or `#[ignore]` its test to green a suite.
 
 **Instead of changing an interface:** fix the defect behind it, because most findings are a
 missing refusal. If one must change, ask first and name what breaks. Bump `RECORD_VERSION`,
-`LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes. Add no doc obligation to a code
-change.
+`LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes. **An approved interface change
+carries the page that states that interface, in the same commit**, because a frozen surface is one
+an external party reads about before they depend on it. [What a change
+updates](#what-a-change-updates) names the page for each surface.
 
 ## Agent process boundary — DO NOT BROADEN
 
@@ -231,6 +233,9 @@ cargo fmt     -p <package> --check
 
 ## Working principles
 
+- **Docs ship with the code.** A change is not done until its docs match it, in the same commit.
+  [Docs](#docs) names each place that holds prose, and
+  [What a change updates](#what-a-change-updates) maps each observable surface to its page.
 - **Understand the problem before you reach for a solution.** Nothing is decided yet, so never
   present a candidate as chosen.
 - **Workflow: research, key decisions, align, spec and build.** Research goes to
@@ -263,37 +268,90 @@ cargo fmt     -p <package> --check
   needs a gloss at a call site is wrong.
 - **Adversarial review is mandatory for code, once, immediately before commit** — a gate beside
   build, clippy, fmt, and test. Never run one mid-task on work still being shaped.
-  `feature-critic` reviews code and runs the gates, and does not judge whether a doc matches the
-  diff. `decision-critic` reviews a decision or a spec and is not a gate. **No review asks a code
-  change to carry a doc change.** Triage every finding: fix it, or say why you left it.
+  `feature-critic` reviews code, runs the gates, and checks the prose that the diff falsifies.
+  `decision-critic` reviews a decision or a spec and is not a gate. **No review asks for a doc that
+  the change did not make wrong, and no review asks a code change to add a decision entry.** Triage
+  every finding: fix it, or say why you left it.
 
 ### Docs
 
-1. **Two places hold committed prose, and there is no third.** `docs/user/` answers "how do I use
-   it?", `docs/design/` answers "how does it work, and why trust it?". The `docs-writer`,
-   `docs-reviewer`, `docs-audit`, and `docs-planner` skills apply `.agents/references/voice-guide.md`
-   to both. `.agents/explorations/` and `.agents/drafts/` hold local working material that
-   is never committed. Add no doc a reader
-   did not ask for. A decision that reaches shipped code gets one entry in
-   `docs/design/decisions.md`, under a stable anchor that code cites by relative link.
-   A change to behaviour that `docs/user/getting-started.md` describes updates that page.
-2. **A decision enters `docs/design/decisions.md` through `/kd`, and only once the user decides
+**Docs ship with the code.** A change is not done until its docs match it, in the same commit. A
+checkout of any commit then shows the user guide and the design guide as they were at that commit,
+and `git log -p` on a page shows how it got there. So no page carries a date, a status, or a
+changelog.
+
+This repository is pre-1.0 and in flux. Document the surfaces that ship, not each step on the way to
+one. A behaviour that changes while a feature is in flux is not a regression, and an in-flux flag,
+message, or error with no `docs/user/` entry is not doc debt. Two things narrow this valve. A surface
+that the freeze above names is not in flux, so a change to one is never exempt from the table below.
+And the valve covers prose alone: a committed artifact that must still work, such as a policy under
+`examples/`, is not prose and no change may leave it broken.
+
+**Seven places hold committed prose that a code change can make wrong, and there is no eighth.**
+Each has one reader and one test for what belongs there. The `docs-writer`, `docs-reviewer`,
+`docs-audit`, and `docs-planner` skills apply
+[`.agents/references/voice-guide.md`](.agents/references/voice-guide.md) to the two guides, and
+`docs-sync` finds which of the seven a change makes wrong.
+
+| Place | Reader | Answers | Belongs here when |
+|---|---|---|---|
+| `docs/user/` | An operator who runs a box | How do I use it? | An operator needs it to run Box, without the source and without the design guide. |
+| `docs/design/<topic>.md` | A security evaluator or a contributor | How does it work, and why trust it? | A reader must trust the mechanism, or a new contributor loses an hour to rediscover it. |
+| `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides a choice through `/kd`. The page is a dated record and it ages, so a code change adds no entry here. |
+| `docs/dev/` | A contributor | How do I work on this repository? | A build, test, or debug step needs more than the command. |
+| `docs/conventions.md` | A contributor who adds a crate or public surface | What does house style require? | The rule is mechanical, so a reviewer or a gate can check it. |
+| `README.md`, here and in each crate | Someone who builds Box, and a consumer of that crate | What is this, and what is its surface? | The purpose, the `pub use` facade, or a gate changes. `crates/box/README.md` also holds the CLI verbs, the four box inputs, and the config keys, and two tests pin it. |
+| `AGENTS.md`, here and in each crate | A coding agent | What must I not break here? | A frozen surface, a premise, or a gate moves. |
+
+`.agents/explorations/`, `.agents/drafts/`, and `.agents/pocs/` hold local working material and are
+never committed. Add no doc a reader did not ask for.
+
+#### What a change updates
+
+The left column is the observable surface the diff touches. Each row that matches names the page to
+update in the same commit. A surface with no row and no page is in flux, and the valve above covers
+it.
+
+| When a change ... | Update |
+|---|---|
+| Adds, removes, or renames a CLI verb or a flag | `crates/box/README.md`, which `documented_commands.rs` pins, and each `docs/user/` page that spells that verb. |
+| Adds, removes, renames, or retypes a `box.toml` key, or a field in `[agent]` or `[tool.<name>]` | `docs/user/config.md`, and `crates/box/README.md`, which `documented_inputs.rs` pins. Also the key's own page when it has one: `egress.md`, `mcp.md`, `telemetry.md`, or `native-filesystem-policy.md`. |
+| Changes what a filesystem list grants, or adds or removes a list | `docs/user/config.md`, in the `[agent.filesystem]` section and in what is refused, and `docs/design/containment.md`. |
+| Adds, renames, or removes a policy action, an attribute a rule reads, or what `when temporal` observes | `docs/user/policy/actions.md`. Also `docs/user/policy.md` when the count of actions or a common rule moves, and `docs/design/policy.md` when a history rule sees something else. |
+| Changes a refusal, a denial, or a warning that an operator reads | The errors or exit-status section of the page for that surface, each under `docs/user/`: `config.md` for the loader, `policy.md` for a policy that fails to load and for how a denial reads, and `shell.md`, `monty.md`, `egress.md`, `mcp.md`, or `telemetry.md` for the rest. A refusal the load emits also reaches `docs/design/policy.md`, which lists the classes of rule the load refuses. |
+| Changes the startup disclosure on stderr | `docs/user/config.md`, which holds the example line, and `docs/design/architecture.md`. |
+| Changes the box directory, a file it holds, or an alias name | `docs/user/config.md` for what an operator supplies or reads, and `docs/design/binaries.md` for the alias and the socket. |
+| Changes the shape of a telemetry record | `docs/user/telemetry.md`, in what a record carries. |
+| Bumps `RECORD_VERSION` | `docs/user/native-filesystem-policy.md`, which names each record version by number. |
+| Bumps `LIVE_VERSION` or `PROTOCOL_VERSION`, and nothing else | No page. Neither version reaches a reference page, and `docs/user/config.md` states the mismatch refusal without a number. |
+| Adds or removes an environment name that the box reserves or composes | `docs/user/config.md` for the refusal the operator meets, and `docs/design/egress.md` for a proxy or a certificate name. |
+| Changes how a part works: the order a run comes up, which process decides, what a sandbox grants, what reaches the gateway | The `docs/design/` page for that part. `docs/design/README.md` maps each page to the question it answers. |
+| Changes a step in getting started, or a command a tutorial runs | `docs/user/getting-started.md`, and each page under `docs/user/tutorials/` that runs that step. |
+| Changes a build, test, or debug command, or a gate | `README.md`, the Building and testing section above, and `docs/dev/` when the step needs a guide. |
+| Adds a crate, or changes a crate's `pub use` facade | That crate's `README.md`, and `docs/conventions.md` when the change sets a new house rule. Recount the names from `src/lib.rs` and correct every count in the `README.md` and in the crate's `AGENTS.md`, because each states one. |
+| Changes the policy load, the policy grammar, or what a rule may spell | Each committed policy under `examples/` must still load, and each one a page shows must still match that page. |
+| Settles a choice that a reader could question or undo | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. |
+
+#### Rules
+
+1. **A decision enters `docs/design/decisions.md` through `/kd`, and only once the user decides
    it.** The analysis stays in the local draft. An entry states the answer, the alternative that
-   lost, and the cost, in the shape its neighbours use. It carries no status line and no date.
-3. **A decision that moves rewrites the entry it moves.** Rewrite its title, its answer, and every
+   lost, and the cost, in the shape its neighbours use. It carries no status line and no date. Each
+   entry sits under a stable anchor, and code cites that anchor by relative link.
+2. **A decision that moves rewrites the entry it moves.** Rewrite its title, its answer, and every
    cost the change makes false, and keep its `<a id>` anchor, because code cites it. Never leave a
    stale entry beside a second entry that corrects it.
    **No committed doc links a local draft or an exploration note**, because `.gitignore` holds
    `/.agents/drafts/` and `/.agents/explorations/`, so the link is dead in every clone.
-4. **One fact has one owner.** The code and its tests own behaviour, and a decision owns why.
+3. **One fact has one owner.** The code and its tests own behaviour, and a decision owns why.
    Never cite a `file.rs:LINE`: name the symbol or the test. Never cite a spec, a requirement
    number, or a draft's `KD-N` from code, because none of them is committed.
-5. **Mermaid: quote every edge label** as `A -.->|"source kind"| B`, and compile each block with
+4. **Mermaid: quote every edge label** as `A -.->|"source kind"| B`, and compile each block with
    `mmdc`. A grep check misses these lexer errors.
-6. **Use one word for one thing.** [docs/design/terminology.md](docs/design/terminology.md) gives
+5. **Use one word for one thing.** [docs/design/terminology.md](docs/design/terminology.md) gives
    the term to use and the words not to use. It is a rule, not a suggestion. Do not introduce a
    synonym because it reads better in one sentence.
-7. **Write every prose artifact in ASD-STE100 Simplified Technical English**, including code
+6. **Write every prose artifact in ASD-STE100 Simplified Technical English**, including code
    comments, commit messages, and code-review text. The rules are in the
    [ASD-STE100 specification](https://www.asd-ste100.org/). The style controls the sentences and this
    repository controls the structure. Identifiers are not prose. **The pages in `docs/user/` and

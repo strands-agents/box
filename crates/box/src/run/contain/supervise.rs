@@ -909,23 +909,26 @@ impl StreamingLeaf {
     }
 }
 
-/// The trampoline's own last line on a captured stderr, without its prefix.
+/// The trampoline's setup diagnostic, including continuation lines.
 fn trampoline_message(stderr: &[u8]) -> Option<String> {
     const PREFIX: &str = "strands-box-contain-trampoline: ";
-    const MAXIMUM_BYTES: usize = 2048;
+    // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
+    const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let line = lines
-        .iter()
-        .rev()
-        .find(|line| line.starts_with(PREFIX))
-        .map(|line| &line[PREFIX.len()..])
-        .or_else(|| lines.last().copied())?;
-    Some(line.chars().take(MAXIMUM_BYTES).collect())
+    let start = text
+        .match_indices(PREFIX)
+        .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
+        .last()
+        .map(|(offset, _)| offset + PREFIX.len());
+    let message = match start {
+        Some(start) => text[start..].trim(),
+        None => text
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())?
+            .trim(),
+    };
+    Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
 }
 
 /// A process's exit code, or `128 + signal` when it died from one.
@@ -1100,6 +1103,40 @@ mod tests {
             "the failure names the library and the binary: {text}"
         );
         assert!(trampoline_message(b"").is_none());
+    }
+
+    #[test]
+    fn a_startup_failure_preserves_grouped_reads_and_additive_guidance() {
+        let stderr = b"earlier log\nstrands-box-contain-trampoline: containment apply failed: 2 dependencies lack read access\nDependency: /vendor/codec\nDependency: /vendor/storage\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.\n";
+        let detail = trampoline_message(stderr).unwrap();
+        for required in [
+            "/vendor/codec",
+            "/vendor/storage",
+            "Keep existing",
+            "read_file",
+            "No configuration files changed.",
+        ] {
+            assert!(detail.contains(required), "{detail}");
+        }
+        assert!(!detail.contains("earlier log"));
+    }
+
+    #[test]
+    fn a_maximum_missing_read_reason_keeps_its_final_guidance() {
+        // This fixture reaches MissingReads::require_complete's 6000-byte reason limit.
+        let mut reason = "2 dependencies lack read access\nDependency: /vendor/界\nDependency: /vendor/storage\nRequested by: /project/".to_owned();
+        let guidance = "\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.";
+        reason.push_str(&"x".repeat(6000 - reason.len() - guidance.len()));
+        reason.push_str(guidance);
+        let error = containment::ContainmentError::ApplyFailed {
+            backend: "seatbelt".to_owned(),
+            reason,
+        };
+        let expected = format!("containment apply failed: {error}");
+        let stderr = format!("earlier log\nstrands-box-contain-trampoline: {expected}\n");
+        let detail = trampoline_message(stderr.as_bytes()).unwrap();
+        assert_eq!(detail, expected);
+        assert!(detail.ends_with("No configuration files changed."));
     }
 
     #[test]

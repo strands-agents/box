@@ -35,6 +35,7 @@ on:
         default: true
 
 env:
+  EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
   # Colorize cargo output in Actions logs (from the starter template).
   CARGO_TERM_COLOR: always
   # ubuntu-latest and macos-latest each give ~14 GB of free disk. Full DWARF

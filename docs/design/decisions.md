@@ -68,6 +68,16 @@ constrains what the program does.
 
 ## The box
 
+<a id="linux-evaluation-requires-explicit-consent"></a>
+### Linux evaluation requires explicit consent
+
+Linux evaluation requires the operator to set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` before using the command line or library.
+Help and version checks remain available without consent.
+Linux archives belong to `-linux-preview.N` prereleases; stable releases continue to distribute macOS alone.
+A stable Linux download would imply readiness that the current qualification does not establish, so it is excluded.
+Operators and test automation must opt in, and the flag does not grant filesystem access or establish security acceptance.
+Removing these controls requires a later readiness decision.
+
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
 
@@ -303,19 +313,17 @@ broker, so it cannot send a second request as the agent. Its network traffic
 still goes through the egress gateway, which judges that traffic as the agent.
 
 <a id="box-derives-a-read-closure-and-refuses-to-derive-an-exec-closure"></a>
-### Box derives a read closure and refuses to derive an exec closure
+### Box bounds derived reads from writable dependency chains and derives no exec closure
 
-A read root is established by a path shape and bounded by checks Box applies itself, so Box derives
-read roots and grants them. Box derives no exec literal from a runtime's own dependency graph: the exec set is the resolved
-workload program, each `exec` entry, and each `#!` interpreter hop. The agent's sandbox adds the five
-aliases and one alias per declared MCP server. A probe that traced a runtime's
-dependency graph would have to import the code it is bounding, which runs third-party module-level
-code in whichever process probes, and a dynamic trace only ever sees the paths it took. The
-load-bearing reason holds however the closure is computed: the interesting helpers are universal over
-authored data (`/bin/sh`, `/usr/bin/env`, `git`, a bundled agent binary inside a package tree), and a
-derived allowlist would grant these with no operator decision. The cost is that a dependency which
-shells out to a helper fails at the moment of the call rather than at startup, with a kernel `EPERM`
-naming the path.
+Box keeps automatic dependency discovery and derives bounded runtime read roots.
+A dependency branch the workload can change requires existing content-read authority or existing trusted system-library allowances, subject to the floors.
+That restriction includes replaceable resolution paths and follows indirect dependencies.
+With a writable directory, Box also restricts multiply linked files because path checks cannot exclude a writable alias.
+Other chains outside the workload's write reach retain automatic derived reads.
+Box derives no exec permission from a dependency graph because it could authorize general-purpose helpers without an operator decision.
+The cost is additional Read entries for writable programs and for hard-linked files whose other names cannot be ruled out as writable.
+A previously malicious artifact that is now read-only can remain outside this restriction.
+The [dependency startup design](containment.md#dependency-read-startup-design) states the operator experience and the limits of static discovery.
 
 <a id="a-program-starts-through-its-route-and-is-granted-on-its-target"></a>
 ### A program starts through its route and is granted on its target
@@ -976,9 +984,10 @@ closed choice, and never a wider one.
 Host detection, backend selection, support checks, validation, and the kernel apply all happen inside
 one call, and any error there means the workload does not run. There is no warning-only mode, no
 automatic weaker backend, and no uncontained fallback. Box also refuses to run when it cannot verify
-that the sandbox is in place for this box. The cost is on the operator: a platform or an architecture Box
-cannot enforce on stays unsupported until a mechanism covers it, and the operator gets a refusal rather
-than a degraded box.
+that the sandbox is in place for this box.
+The selected [dependency startup experience](containment.md#dependency-read-startup-design) requires grouped missing-read reports before launching the affected workload, with additive configuration guidance and explicit discovery limits.
+That guidance preserves existing entries and never suggests overriding explicit denials or protected paths.
+Operators must review additional access and retry, while platforms Box cannot enforce remain unsupported.
 
 <a id="the-linux-boundary-is-namespaces-not-landlock"></a>
 ### The Linux boundary is namespaces and a syscall filter, and never Landlock

@@ -11,6 +11,7 @@ use crate::error::ContainmentError;
 use crate::model::{ObjectIdentity, ObjectPin, Operation, Scope};
 
 use super::MECHANISM;
+use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
 
 /// What provides an entry's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,8 +283,9 @@ impl MountView {
             .map(|entry| entry.target.clone())
             .collect();
         let mut dependency_sources = BTreeMap::new();
+        let mut missing = MissingReads::default();
         for executable in exec_files {
-            for dependency in elf_dependencies(&executable, config)? {
+            for dependency in collect_elf_dependencies(&executable, config, &mut missing)? {
                 if covering
                     .iter()
                     .any(|tree| dependency.path.starts_with(tree))
@@ -305,6 +307,8 @@ impl MountView {
                 }
             }
         }
+
+        missing.require_complete(MECHANISM)?;
 
         // **A grant inside another grant's tree is established after it, whatever order the two
         // were stated in.** A nested bind sits on top of the tree that encloses it, and its own
@@ -1293,14 +1297,26 @@ fn open_dependency(path: &Path) -> Result<std::fs::File, ContainmentError> {
 
 /// The ELF interpreter and every shared library `executable` loads, through each library's own
 /// needs, resolved as the loader resolves them with no environment and no cache.
+#[cfg(test)]
 fn elf_dependencies(
     executable: &Path,
     config: &ContainmentConfig,
 ) -> Result<Vec<Dependency>, ContainmentError> {
+    let mut missing = MissingReads::default();
+    let dependencies = collect_elf_dependencies(executable, config, &mut missing)?;
+    missing.require_complete(MECHANISM)?;
+    Ok(dependencies)
+}
+
+fn collect_elf_dependencies(
+    executable: &Path,
+    config: &ContainmentConfig,
+    missing: &mut MissingReads,
+) -> Result<Vec<Dependency>, ContainmentError> {
     let mut dependencies: Vec<Dependency> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut walked = BTreeSet::new();
-    let restricted = workload_writable(config, executable)?;
+    let restricted = workload_writable(config, executable, MECHANISM)?;
     let resolved = executable.canonicalize().map_err(|error| {
         refusal(format!(
             "dependency '{}' cannot be granted: {error}",
@@ -1341,16 +1357,17 @@ fn elf_dependencies(
         } else {
             rpath.clone()
         };
-        if let Some(interpreter) = needs.interpreter {
-            let (resolved, file, _) = require_loadable(&image, &interpreter, config, restricted)?;
-            if seen.insert(interpreter.clone()) {
-                dependencies.push(Dependency {
-                    path: interpreter,
-                    resolved,
-                    file,
-                    origin: MountOrigin::Interpreter,
-                });
-            }
+        if let Some(interpreter) = needs.interpreter
+            && let Some((resolved, file, _)) =
+                require_loadable(&image, &interpreter, config, restricted, missing)?
+            && seen.insert(interpreter.clone())
+        {
+            dependencies.push(Dependency {
+                path: interpreter,
+                resolved,
+                file,
+                origin: MountOrigin::Interpreter,
+            });
         }
         for name in &needs.needed {
             let Some(found) = resolve_needed(name, search.as_deref()) else {
@@ -1362,8 +1379,11 @@ fn elf_dependencies(
                     name
                 )));
             };
-            let (identity, file, next_restricted) =
-                require_loadable(&image, &found, config, restricted)?;
+            let Some((identity, file, next_restricted)) =
+                require_loadable(&image, &found, config, restricted, missing)?
+            else {
+                continue;
+            };
             pending.push_back((
                 identity.clone(),
                 file.clone(),
@@ -1389,8 +1409,9 @@ fn require_loadable(
     library: &Path,
     config: &ContainmentConfig,
     restricted: bool,
-) -> Result<(PathBuf, Rc<std::fs::File>, bool), ContainmentError> {
-    let restricted = restricted || workload_writable(config, library)?;
+    missing: &mut MissingReads,
+) -> Result<Option<(PathBuf, Rc<std::fs::File>, bool)>, ContainmentError> {
+    let restricted = restricted || workload_writable(config, library, MECHANISM)?;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1408,81 +1429,22 @@ fn require_loadable(
             ))
         },
     )?;
+    require_not_refused(config, &granted, MECHANISM)?;
     if restricted
         && !inside_loader_directory(&granted.resolved)
         && !stated_grant_reaches(config, &granted.resolved)
     {
-        return Err(refusal(format!(
-            "'{}' needs '{}', which no filesystem grant reaches; \
-             a writable image cannot add dependency bytes outside the stated grants",
-            image.display(),
-            library.display()
-        )));
+        missing.add(&granted.resolved, image);
+        return Ok(None);
     }
     let file = Rc::new(open_dependency(&granted.resolved)?);
-    Ok((granted.resolved, file, restricted))
+    Ok(Some((granted.resolved, file, restricted)))
 }
 
 fn inside_loader_directory(identity: &Path) -> bool {
     LIBRARY_DIRECTORIES
         .iter()
         .any(|directory| identity.starts_with(directory))
-}
-
-fn workload_writable(config: &ContainmentConfig, image: &Path) -> Result<bool, ContainmentError> {
-    if !config
-        .authorizations()
-        .iter()
-        .any(|grant| grant.operation == Operation::Write)
-    {
-        return Ok(false);
-    }
-    let path = crate::model::PathGrant::new(image, Operation::Read, Scope::File)?;
-    let mut nodes = path.traversal_paths();
-    for grant in config
-        .authorizations()
-        .iter()
-        .filter(|grant| grant.operation == Operation::Exec && grant.resolved == path.resolved)
-    {
-        nodes.extend(grant.traversal_paths());
-    }
-    let mut visited = BTreeSet::new();
-    while let Some(node) = nodes.pop() {
-        if !visited.insert(node.clone()) {
-            continue;
-        }
-        if visited.len() > 256 {
-            return Err(refusal(format!(
-                "dependency '{}' has too many link paths to verify",
-                image.display()
-            )));
-        }
-        if config.authorizations().iter().any(|grant| {
-            grant.operation == Operation::Write
-                && match grant.scope {
-                    Scope::Root => {
-                        node.starts_with(&grant.resolved) || node.starts_with(&grant.original)
-                    }
-                    Scope::File => node == grant.resolved || node == grant.original,
-                    Scope::Dir => false,
-                }
-        }) {
-            return Ok(true);
-        }
-        for ancestor in node.ancestors() {
-            if let Ok(target) = std::fs::read_link(ancestor) {
-                let target = if target.is_absolute() {
-                    target
-                } else {
-                    ancestor.parent().unwrap_or(Path::new("/")).join(target)
-                };
-                let target = target.join(node.strip_prefix(ancestor).unwrap_or(Path::new("")));
-                nodes.push(folded(&target));
-                nodes.push(target);
-            }
-        }
-    }
-    Ok(false)
 }
 
 fn stated_grant_reaches(config: &ContainmentConfig, identity: &Path) -> bool {
@@ -1524,21 +1486,6 @@ fn resolve_needed(name: &str, search: Option<&LibrarySearch>) -> Option<PathBuf>
         .chain(LIBRARY_DIRECTORIES.iter().map(Path::new))
         .map(|directory| folded(&directory.join(name)))
         .find(|candidate| candidate.is_file())
-}
-
-/// The path with `.` and `..` folded lexically, which is the path the loader opens.
-fn folded(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                result.pop();
-            }
-            other => result.push(other.as_os_str()),
-        }
-    }
-    result
 }
 
 /// Whether `resolved` is one of the directories the loader maps code from.

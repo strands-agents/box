@@ -1,5 +1,6 @@
 //! Backend trait and platform-specific implementations.
 
+mod dependencies;
 pub(crate) mod macos;
 
 #[cfg(target_os = "linux")]

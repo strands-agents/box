@@ -504,3 +504,72 @@ fn race_dependency_replacement(parent: bool) {
         true
     }));
 }
+
+#[test]
+fn startup_groups_missing_reads_across_executables_without_inspecting_them() {
+    let (_directory, program, note, config) = fixture();
+    let hidden = planted_image(note.parent().unwrap(), "hidden", b"private bytes");
+    std::fs::write(
+        &note,
+        synthetic_elf(None, &[hidden.to_str().unwrap()], None),
+    )
+    .unwrap();
+    let second = planted_image(note.parent().unwrap(), "second", b"private bytes");
+    std::fs::write(
+        &program,
+        synthetic_elf(None, &[note.to_str().unwrap()], None),
+    )
+    .unwrap();
+    let other = planted_image(
+        program.parent().unwrap(),
+        "other",
+        &synthetic_elf(
+            None,
+            &[second.to_str().unwrap(), note.to_str().unwrap()],
+            None,
+        ),
+    );
+    let config = config.allow(other, Operation::Exec, Scope::File).unwrap();
+    let error = MountView::plan(&config).unwrap_err().to_string();
+    assert!(error.contains("2 dependencies lack read access"), "{error}");
+    assert!(
+        error.contains("operator.txt") && error.contains("second"),
+        "{error}"
+    );
+    assert!(!error.contains("/hidden"), "{error}");
+    let allowed = config
+        .allow(note.parent().unwrap(), Operation::Read, Scope::Root)
+        .unwrap();
+    assert!(MountView::plan(&allowed).is_ok());
+}
+
+#[test]
+fn an_explicitly_denied_dependency_is_not_offered_as_a_read_grant() {
+    let (_directory, program, note, config) = fixture();
+    std::fs::write(
+        &program,
+        synthetic_elf(None, &[note.to_str().unwrap()], None),
+    )
+    .unwrap();
+    let config = config.refuse(&note, Scope::File).unwrap();
+    let error = MountView::plan(&config).unwrap_err().to_string();
+    assert!(
+        error.contains("explicitly denied") && !error.contains("read_file"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_writable_hard_link_restricts_an_image_selected_through_another_path() {
+    let (_directory, program, note, config) = fixture();
+    let installed = planted_image(
+        note.parent().unwrap(),
+        "installed-program",
+        &synthetic_elf(None, &[note.to_str().unwrap()], None),
+    );
+    std::fs::hard_link(&installed, program.parent().unwrap().join("alias")).unwrap();
+    let config = config
+        .allow(&installed, Operation::Exec, Scope::File)
+        .unwrap();
+    refuses_ungranted(&config, &note);
+}

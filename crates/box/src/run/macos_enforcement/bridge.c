@@ -15,7 +15,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 
-enum { BOX_OPEN = 1, BOX_CREATE, BOX_UNLINK, BOX_RENAME, BOX_TRUNCATE };
+enum { BOX_OPEN = 1, BOX_CREATE, BOX_UNLINK, BOX_RENAME, BOX_TRUNCATE, BOX_SETMODE };
 enum { BOX_AUTH = 1, BOX_NOTIFY, BOX_REPLY };
 enum { BOX_FILE = 1, BOX_PARENT = 2 };
 enum { BOX_PATH_CAPACITY = 4096 };
@@ -115,6 +115,12 @@ static bool decode(const es_message_t *message, box_event *out) {
         case ES_EVENT_TYPE_NOTIFY_TRUNCATE:
             out->kind = BOX_TRUNCATE;
             return source_file(out, message->event.truncate.target, BOX_FILE);
+        case ES_EVENT_TYPE_AUTH_SETMODE:
+        case ES_EVENT_TYPE_NOTIFY_SETMODE:
+            out->kind = BOX_SETMODE;
+            if (!message->event.setmode.target) return false;
+            out->mode = message->event.setmode.target->stat.st_mode;
+            return source_file(out, message->event.setmode.target, BOX_FILE);
         case ES_EVENT_TYPE_AUTH_UNLINK:
         case ES_EVENT_TYPE_NOTIFY_UNLINK:
             out->kind = BOX_UNLINK;
@@ -321,9 +327,10 @@ static void receive(box_client *owner, es_client_t *client, const es_message_t *
 static const es_event_type_t subscriptions[] = {
     ES_EVENT_TYPE_AUTH_OPEN, ES_EVENT_TYPE_AUTH_CREATE,
     ES_EVENT_TYPE_AUTH_UNLINK, ES_EVENT_TYPE_AUTH_RENAME, ES_EVENT_TYPE_AUTH_TRUNCATE,
-    ES_EVENT_TYPE_AUTH_EXEC,
+    ES_EVENT_TYPE_AUTH_SETMODE, ES_EVENT_TYPE_AUTH_EXEC,
     ES_EVENT_TYPE_NOTIFY_OPEN, ES_EVENT_TYPE_NOTIFY_CREATE,
     ES_EVENT_TYPE_NOTIFY_UNLINK, ES_EVENT_TYPE_NOTIFY_RENAME, ES_EVENT_TYPE_NOTIFY_TRUNCATE,
+    ES_EVENT_TYPE_NOTIFY_SETMODE,
     ES_EVENT_TYPE_NOTIFY_FORK, ES_EVENT_TYPE_NOTIFY_EXEC, ES_EVENT_TYPE_NOTIFY_EXIT,
     ES_EVENT_TYPE_NOTIFY_CLOSE, ES_EVENT_TYPE_NOTIFY_WRITE
 };

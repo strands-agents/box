@@ -138,6 +138,15 @@ fn text(output: &Output) -> String {
     )
 }
 
+// Matching Linux read access lets the fixture reach the protected-directory guard.
+fn linux_read_grant(entry: &Path) -> String {
+    if cfg!(target_os = "linux") {
+        format!("read = [{:?}]\n", entry.display().to_string())
+    } else {
+        String::new()
+    }
+}
+
 /// **A box survives its first use, and a later run recovers from a partial private record.**
 ///
 /// The interrupted shapes are a `private/` left at each mode an earlier build wrote, holding a
@@ -525,18 +534,14 @@ fn an_agent_entry_naming_a_box_directory_child_is_refused() {
             .join(child)
             .canonicalize()
             .expect("the child resolves");
+        let read = linux_read_grant(&entry);
         fixture.write_document(
             None,
             no_op_program(),
             "",
             &format!(
-                "[agent.filesystem]\nwrite = [{entry:?}]\n{read}",
-                entry = entry.display().to_string(),
-                read = if cfg!(target_os = "linux") {
-                    format!("read = [{:?}]\n", entry.display().to_string())
-                } else {
-                    String::new()
-                }
+                "[agent.filesystem]\n{read}write = [{:?}]\n",
+                entry.display().to_string()
             ),
         );
 
@@ -581,18 +586,14 @@ fn a_symlinked_box_directory_still_guards_its_children() {
         .join("bin")
         .canonicalize()
         .expect("the canonical child resolves");
+    let read = linux_read_grant(&entry);
     fixture.write_document(
         None,
         no_op_program(),
         "",
         &format!(
-            "[agent.filesystem]\nwrite = [{entry:?}]\n{read}",
-            entry = entry.display().to_string(),
-            read = if cfg!(target_os = "linux") {
-                format!("read = [{:?}]\n", entry.display().to_string())
-            } else {
-                String::new()
-            }
+            "[agent.filesystem]\n{read}write = [{:?}]\n",
+            entry.display().to_string()
         ),
     );
 
