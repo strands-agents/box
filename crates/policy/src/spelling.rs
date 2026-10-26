@@ -250,7 +250,7 @@ impl Scope {
             (Self::Unscoped, PATH | PROGRAM_PATH | PROGRAM) => Some(Checks {
                 trailing_slash: false,
             }),
-            (Self::Network | Self::Unscoped, HOST) => Some(Checks {
+            (Self::Network, HOST) => Some(Checks {
                 trailing_slash: false,
             }),
             _ => None,
@@ -979,16 +979,9 @@ mod tests {
         assert!(judge(&sound, &Operator::unanchored()).is_ok());
     }
 
-    /// The host arm reaches the broad-forbid and set-membership shapes, not only a scoped `==`.
+    /// The host arm reaches the reversed-operand and set-membership shapes, not only a plain `==`.
     #[test]
-    fn a_broad_rule_and_a_set_membership_judge_the_host_too() {
-        let broad = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has host
-                && context.input.host == "API.Example.com" };"#,
-        );
-        assert!(judge(&broad, &Operator::unanchored()).is_err());
-
+    fn a_reversed_operand_and_a_set_membership_judge_the_host() {
         let reversed = parsed(
             r#"forbid(principal, action == Box::Action::"net:connect", resource)
             when { "API.Example.com" == context.input.host };"#,
@@ -1000,5 +993,33 @@ mod tests {
             when { ["api.example.com", "API.Other.com"].contains(context.input.host) };"#,
         );
         assert!(judge(&set, &Operator::unanchored()).is_err());
+    }
+
+    /// Under an unconstrained action, `host` may be the argument of a generated MCP tool action
+    /// rather than a destination, so no host literal is judged there.
+    #[test]
+    fn an_unconstrained_action_judges_no_host_literal() {
+        for literal in [
+            "API.Example.com",
+            "PROD",
+            "api.example.com:443",
+            "bücher.example",
+        ] {
+            let broad = parsed(&format!(
+                r#"forbid(principal, action, resource)
+                when {{ context has input && context.input has host
+                    && context.input.host == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&broad, &Operator::unanchored()).is_ok(),
+                "{literal:?} may be a tool argument under an unconstrained action"
+            );
+        }
+
+        let mixed = parsed(
+            r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"fs:read"], resource)
+            when { context.input.host == "API.Example.com" };"#,
+        );
+        assert!(judge(&mixed, &Operator::unanchored()).is_ok());
     }
 }
