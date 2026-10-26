@@ -83,7 +83,7 @@ The capability modules carry no authority.
 
 Three divergences from `docs/conventions.md` are live, and none is license to rename:
 
-- No root noun: 42 exports, no single type reached by one verb, `Interceptor` a one-method port,
+- No root noun: 44 exports, no single type reached by one verb, `Interceptor` a one-method port,
   `MitmInterceptor::start` taking three arguments and returning `MitmHandle`, and
   `CapabilitySet::builder()` → `CapabilitySetBuilder::build()`.
 - A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.
