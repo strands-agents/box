@@ -160,7 +160,9 @@ fn the_stored_record_carries_every_authored_key() {
         "the field reader found nothing: authored={authored:?} stored={stored:?}"
     );
 
-    for key in &authored {
+    // `upstream-ca-file` is read from `box.toml` on every `run` and reaches the gateway through
+    // `ConfigureRequest`, so the stored record has nothing to keep.
+    for key in authored.iter().filter(|key| *key != "upstream_ca_file") {
         assert!(
             stored.contains(key),
             "`Record` has no `{key}`, so `configure` drops that authored key and the operator's \
@@ -210,7 +212,8 @@ fn the_config_record_carries_only_the_four_inputs() {
             "name",
             "policy",
             "telemetry",
-            "tool"
+            "tool",
+            "upstream_ca_file"
         ],
         "the thirteen config keys include execution limits, explicit experimental enforcement selection, \
          `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
