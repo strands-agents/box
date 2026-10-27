@@ -8,6 +8,9 @@
     feature = "test-support"
 ))]
 use std::os::unix::fs::symlink;
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+use bounded_output::bounded_output;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -54,14 +57,15 @@ when { context.input.path == "~/workspace/target" };"#
         },
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_strands-box"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box"));
+    command
         .args(["run", "--config"])
         .arg(root.join("box.toml"))
         .env("HOME", &root)
         .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-        .env_remove("BOX_NATIVE_TEST_FAULT")
-        .output()
-        .unwrap();
+        .env_remove("BOX_NATIVE_TEST_FAULT");
+    command.stdin(std::process::Stdio::null());
+    let output = bounded_output(command);
     std::fs::write(root.join("stderr.log"), &output.stderr).unwrap();
     println!("fixture={}", root.display());
     assert!(output.status.success(), "{output:?}");
@@ -203,14 +207,15 @@ fn entry_suffix(
         "permit(principal, action, resource);\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_strands-box"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box"));
+    command
         .args(["run", "--config"])
         .arg(root.join("box.toml"))
         .env("HOME", &root)
         .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-        .env_remove("BOX_NATIVE_TEST_FAULT")
-        .output()
-        .unwrap();
+        .env_remove("BOX_NATIVE_TEST_FAULT");
+    command.stdin(std::process::Stdio::null());
+    let output = bounded_output(command);
     std::fs::write(root.join("stderr.log"), &output.stderr).unwrap();
     println!("fixture={}", root.display());
     assert!(output.status.success(), "{output:?}");
