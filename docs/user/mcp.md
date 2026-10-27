@@ -63,11 +63,21 @@ A server with no `filesystem` table reaches its own program and the runtime mini
 server that runs on an interpreter, such as Node or Python, needs `read` for that interpreter's
 install directory.
 
-The table takes no `metadata` or `exec` list, and `box run` refuses either one by name. On macOS,
-a server can test whether a path exists and read its metadata across the operator's home, and it
-can run any program it can read. On Linux, it can run only its own program, the interpreter its
-first line names, and code in the system library directories. So on Linux, a server installed under
-the home that loads native code at run time, such as a Python extension module, can't start.
+The table takes no `metadata` or `exec` list, and `box run` refuses either one by name.
+On macOS, a server can test whether a path exists and read its metadata across the operator's home.
+Linux does not provide that same discovery access.
+
+On Linux and macOS, a server can execute helpers and load native code from its readable and
+writable grants. For a Python extension outside the runtime minimum, grant `read` to its directory
+or `read_file` to the extension file. Grant access to any additional libraries and helpers it needs.
+A directory grant includes its descendants, so it also permits execution of programs there.
+File permissions, explicit denials, and protected paths still apply.
+
+On Linux, each write grant also needs a covering read grant. See
+[direct access by operating system](./config.md#direct-access-by-operating-system).
+A server can execute code it writes within those grants. Automatic temporary directories do not
+acquire this execution permission. The agent retains its separate execution restrictions.
+A filesystem grant does not grant network access.
 
 A credential store, such as `~/.aws` or `~/.ssh`, is reachable only from an entry that names it
 exactly. `box run` prints each credential store a server's lists name.
