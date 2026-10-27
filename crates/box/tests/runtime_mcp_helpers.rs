@@ -165,46 +165,34 @@ fn run_probe(grant: Grant) -> Option<Value> {
         assert!(
             records.lines().any(|line| {
                 let batch: Value = serde_json::from_str(line).expect("parse telemetry");
-                batch["resourceLogs"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|resource| {
-                        resource["scopeLogs"]
+                log_records(&batch).any(|record| {
+                    let attribute = |name: &str| {
+                        record["attributes"]
                             .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|scope| {
-                                scope["logRecords"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .any(|record| {
-                                        let attribute = |name: &str| {
-                                            record["attributes"]
-                                                .as_array()
-                                                .unwrap()
-                                                .iter()
-                                                .find(|entry| entry["key"] == name)
-                                                .and_then(|entry| {
-                                                    entry["value"]["stringValue"].as_str()
-                                                })
-                                        };
-                                        attribute("strands.box.policy.action")
-                                            == Some("net:connect")
-                                            && attribute("strands.box.policy.verdict")
-                                                == Some("deny")
-                                            && attribute("strands.box.policy.resource").is_some_and(
-                                                |value| value.contains("helper-proof.invalid"),
-                                            )
-                                    })
-                            })
-                    })
+                            .unwrap()
+                            .iter()
+                            .find(|entry| entry["key"] == name)
+                            .and_then(|entry| entry["value"]["stringValue"].as_str())
+                    };
+                    attribute("strands.box.policy.action") == Some("net:connect")
+                        && attribute("strands.box.policy.verdict") == Some("deny")
+                        && attribute("strands.box.policy.resource")
+                            .is_some_and(|value| value.contains("helper-proof.invalid"))
+                })
             }),
             "the gateway must record the refused child request; response: {response}"
         );
     }
     Some(response)
+}
+
+fn log_records(batch: &Value) -> impl Iterator<Item = &Value> {
+    batch["resourceLogs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|resource| resource["scopeLogs"].as_array().into_iter().flatten())
+        .flat_map(|scope| scope["logRecords"].as_array().into_iter().flatten())
 }
 
 #[test]
@@ -215,17 +203,20 @@ fn a_stdio_server_and_its_helper_load_granted_native_code_and_preserve_denials()
     assert_eq!(response["result"]["isError"], false, "{response}");
     let proof: Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(proof["server_extension"], proof["child"]["extension"]);
-    assert_eq!(proof["child"]["sqlite_result"], 42);
-    assert_eq!(proof["child"]["host"], false);
-    let mut refused: Vec<_> = proof["child"]["refused"]
-        .as_array()
+    let mut child = proof["child"].clone();
+    child["refused"]
+        .as_array_mut()
         .unwrap()
-        .iter()
-        .map(|name| name.as_str().unwrap())
-        .collect();
-    refused.sort_unstable();
-    assert_eq!(refused, ["config", "credential", "denied", "state"]);
+        .sort_unstable_by(|left, right| left.as_str().cmp(&right.as_str()));
+    assert_eq!(
+        child,
+        json!({
+            "extension": proof["server_extension"].as_str().expect("server extension path"),
+            "sqlite_result": 42,
+            "host": false,
+            "refused": ["config", "credential", "denied", "state"],
+        })
+    );
 }
 
 #[test]
