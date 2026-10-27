@@ -20,7 +20,7 @@ name: Release Box
 #           tag + release -> verify.
 #
 # Dry runs build and inspect without credentials by default. An upstream main
-# dry run can opt into signing and native tests. Forks support unsigned dry runs.
+# dry run can opt into signing and native tests. Protected premerge tests use a separate environment.
 #
 # Configure macos-signing and release-gate before a signed run.
 
@@ -42,7 +42,12 @@ on:
         default: true
         type: boolean
       sign_macos:
-        description: 'Also sign and test macOS in a dry run. Requires upstream main and the macos-signing environment. Real releases always sign.'
+        description: 'Also sign and test macOS in a dry run. Requires the protected signing environment. Real releases always sign.'
+        required: true
+        default: false
+        type: boolean
+      premerge_signing_test:
+        description: 'Protected PR signing test only. Requires dry_run=true, sign_macos=true, and macos-signing-test approval.'
         required: true
         default: false
         type: boolean
@@ -186,17 +191,27 @@ jobs:
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Restrict signing to upstream main
-        if: inputs.dry_run != true || inputs.sign_macos == true
+      - name: Validate signing mode and source
         env:
+          PREMERGE_TEST: ${{ inputs.premerge_signing_test }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
           WORKFLOW_REF: ${{ github.ref }}
           REPOSITORY: ${{ github.repository }}
           RELEASE_SHA: ${{ steps.scan.outputs.release_sha }}
         run: |
           set -euo pipefail
-          test "$REPOSITORY" = strands-agents/box
-          test "$WORKFLOW_REF" = refs/heads/main
-          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          if [ "$PREMERGE_TEST" = true ]; then
+            test "$DRY_RUN" = true
+            test "$SIGN_MACOS" = true
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-signing
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          elif [ "$DRY_RUN" != true ] || [ "$SIGN_MACOS" = true ]; then
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/main
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          fi
 
   # ── Build + lint + unit-test gate ──────────────────────────────────────
   test:
@@ -228,7 +243,7 @@ jobs:
           - triple: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
-            runner: macos-latest
+            runner: xcode-27
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -383,11 +398,13 @@ jobs:
     needs: [scan, test, build]
     if: >-
       github.repository == 'strands-agents/box' &&
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' ||
+       (inputs.premerge_signing_test == true && inputs.dry_run == true &&
+        github.ref == 'refs/heads/feature/macos-release-signing')) &&
       (inputs.dry_run != true || inputs.sign_macos == true)
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 40
-    environment: macos-signing
+    environment: ${{ inputs.premerge_signing_test == true && 'macos-signing-test' || 'macos-signing' }}
     outputs:
       team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
       profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
@@ -401,6 +418,19 @@ jobs:
       CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
       CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
     steps:
+      - name: Check approved test commits
+        if: inputs.premerge_signing_test == true
+        env:
+          APPROVED_WORKFLOW_SHA: ${{ vars.SIGNING_TEST_WORKFLOW_SHA }}
+          APPROVED_SOURCE_SHA: ${{ vars.SIGNING_TEST_SOURCE_SHA }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPROVED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$WORKFLOW_SHA" = "$APPROVED_WORKFLOW_SHA"
+          test "$SOURCE_SHA" = "$APPROVED_SOURCE_SHA"
       - name: Checkout trusted workflow tools
         uses: actions/checkout@v7
         with:
@@ -451,7 +481,7 @@ jobs:
     name: Test the signed macOS package
     cache-mode: none
     needs: [scan, sign-macos]
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 30
     permissions:
       contents: read
@@ -619,6 +649,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       (needs.test.result == 'success' ||
         (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
@@ -652,6 +683,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
@@ -773,6 +805,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:

@@ -108,25 +108,43 @@ class MacOSReleaseTests(unittest.TestCase):
         release.unpack_build(self.build(), binaries)
         app = release.prepare_bundle(binaries, self.root / "artifact", "0.1.1-linux-preview.1")
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-        self.assertEqual(info["CFBundleExecutable"], "box")
-        self.assertEqual(info["CFBundleIdentifier"], release.IDENTIFIER)
-        self.assertEqual(info["CFBundleVersion"], "0.1.1")
+        self.assertEqual(info, {
+            "CFBundleIdentifier": "com.amazon.strands.box",
+            "CFBundleExecutable": "box",
+            "CFBundleName": "Box",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "0.1.1",
+            "CFBundleShortVersionString": "0.1.1",
+        })
         self.assertEqual(set(p.name for p in (app / "Contents/MacOS").iterdir()), set(release.BINARIES))
         entitlement = plistlib.loads((app.parent / "SIGNING_METADATA/Box.entitlements").read_bytes())
         self.assertEqual(entitlement, {release.ENTITLEMENT: True})
 
     def test_profile_selection_enables_profile_fetching_and_helpers_use_developer_id(self):
-        app = release.manifest("ABCDEFGHIJ", "profile")
-        requirements = app["app"]["signing_requirements"]
-        self.assertEqual(requirements["profile_type"], "distribution")
-        self.assertEqual(requirements["profile_name"], "profile")
-        self.assertEqual(requirements["signing_args"]["entitlements_path"],
-                         "SIGNING_METADATA/Box.entitlements")
-        helper = release.manifest("ABCDEFGHIJ")
-        self.assertEqual(helper["outputs"][0]["path"], "EXECUTABLES_TO_SIGN")
-        self.assertEqual(helper["app"]["signing_requirements"]["certificate_type"],
-                         "developerIDAppDistribution")
-        self.assertNotIn("profile_name", helper["app"]["signing_requirements"])
+        self.assertEqual(release.manifest("ABCDEFGHIJ", "profile"), {
+            "type": "app", "os": "osx", "name": "Box",
+            "outputs": [{"label": "macos", "path": "Box.app"}],
+            "app": {
+                "identifier": "com.amazon.strands.box",
+                "signing_requirements": {
+                    "team_id": "ABCDEFGHIJ",
+                    "profile_name": "profile",
+                    "profile_type": "distribution",
+                    "signing_args": {"entitlements_path": "SIGNING_METADATA/Box.entitlements"},
+                },
+            },
+        })
+        self.assertEqual(release.manifest("ABCDEFGHIJ"), {
+            "type": "app", "os": "osx", "name": "Box",
+            "outputs": [{"label": "macos", "path": "EXECUTABLES_TO_SIGN"}],
+            "app": {
+                "identifier": "com.amazon.strands.box",
+                "signing_requirements": {
+                    "team_id": "ABCDEFGHIJ",
+                    "certificate_type": "developerIDAppDistribution",
+                },
+            },
+        })
 
     def test_launcher_preserves_arguments_and_executes_the_real_bundle_path(self):
         app = self.root / "input.app"
@@ -167,7 +185,7 @@ class WorkflowGateTests(unittest.TestCase):
         from test_release_source import workflow_command
         import os
 
-        command = workflow_command("Restrict signing to upstream main")
+        command = workflow_command("Validate signing mode and source")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
@@ -187,8 +205,66 @@ class WorkflowGateTests(unittest.TestCase):
                 with self.subTest(repo=repo, ref=ref, sha=sha):
                     result = subprocess.run(["bash", "-c", command], cwd=root, env={
                         **env, "REPOSITORY": repo, "WORKFLOW_REF": ref, "RELEASE_SHA": sha,
+                        "PREMERGE_TEST": "false", "DRY_RUN": "true", "SIGN_MACOS": "true",
                     }, capture_output=True)
                     self.assertEqual(result.returncode == 0, success)
+
+    def test_premerge_mode_requires_dry_run_branch_upstream_and_main_source(self):
+        import os
+        from test_release_source import ReleaseSourceTests, workflow_command
+
+        fixture = ReleaseSourceTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        command = workflow_command("Validate signing mode and source")
+        valid = {
+            **os.environ, "PREMERGE_TEST": "true", "DRY_RUN": "true", "SIGN_MACOS": "true",
+            "REPOSITORY": "strands-agents/box",
+            "WORKFLOW_REF": "refs/heads/feature/macos-release-signing",
+            "RELEASE_SHA": fixture.main,
+        }
+        changes = [
+            ({}, True),
+            ({"DRY_RUN": "false"}, False),
+            ({"SIGN_MACOS": "false"}, False),
+            ({"REPOSITORY": "someone/box"}, False),
+            ({"WORKFLOW_REF": "refs/heads/main"}, False),
+            ({"WORKFLOW_REF": "refs/heads/feature/other"}, False),
+            ({"RELEASE_SHA": fixture.candidate}, False),
+            ({"PREMERGE_TEST": "false"}, False),
+        ]
+        for change, success in changes:
+            with self.subTest(change=change):
+                result = subprocess.run(["bash", "-c", command], cwd=fixture.root,
+                                        env={**valid, **change}, capture_output=True)
+                self.assertEqual(result.returncode == 0, success)
+
+    def test_test_commit_pins_refuse_missing_malformed_and_different_commits(self):
+        import os
+        from test_release_source import workflow_command
+
+        command = workflow_command("Check approved test commits")
+        valid = {**os.environ, "APPROVED_WORKFLOW_SHA": "a" * 40, "WORKFLOW_SHA": "a" * 40,
+                 "APPROVED_SOURCE_SHA": "b" * 40, "SOURCE_SHA": "b" * 40}
+        cases = [({}, True)]
+        for key in ("APPROVED_WORKFLOW_SHA", "APPROVED_SOURCE_SHA"):
+            for value in ("", "main", "c" * 40):
+                cases.append(({key: value}, False))
+        for change, success in cases:
+            with self.subTest(change=change):
+                result = subprocess.run(["bash", "-c", command], env={**valid, **change},
+                                        capture_output=True)
+                self.assertEqual(result.returncode == 0, success)
+
+    def test_premerge_publication_jobs_are_excluded(self):
+        from test_release_source import WORKFLOW
+
+        workflow = WORKFLOW.read_text()
+        for name in ("approve-release", "release", "verify-published"):
+            job = workflow.split(f"\n  {name}:\n", 1)[1].split("\n  #", 1)[0]
+            condition = job.split("    if: |\n", 1)[1].split("    runs-on:", 1)[0]
+            self.assertIn("inputs.dry_run != true &&", condition)
+            self.assertIn("inputs.premerge_signing_test != true &&", condition)
 
 
 if __name__ == "__main__":

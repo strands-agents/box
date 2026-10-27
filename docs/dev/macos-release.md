@@ -12,7 +12,9 @@ Keep the existing `release-gate` environment for publication approval.
 
 Create an AWS role for GitHub's OpenID Connect identity.
 OpenID Connect lets a workflow obtain temporary AWS credentials without a stored AWS access key.
-Restrict its trust policy to audience `sts.amazonaws.com` and subject `repo:strands-agents/box:environment:macos-signing`.
+Restrict its trust policy to audience `sts.amazonaws.com` and the exact subject reported by the repository's identity configuration.
+With immutable repository identities enabled, the subject includes the organization and repository IDs before `:environment:macos-signing`.
+Read that configuration with `gh api repos/strands-agents/box/actions/oidc/customization/sub`; do not assume the older name-only format.
 The environment's branch restriction is required because that subject does not include the branch.
 
 Grant only the signing API calls, access to the designated signing bucket prefixes, and permission to pass the bucket-access role.
@@ -46,16 +48,50 @@ Account-specific values and access requests belong in the team's internal runboo
 
 Run `Release Box` with `dry_run=true` to build and inspect without signing credentials.
 These unsigned artifacts are for inspection and do not qualify native enforcement.
-Forks and unmerged workflow branches support only this mode.
+Forks support only unsigned dry runs.
+The protected premerge mode below also permits a signed test from one upstream workflow branch.
 
 For the complete signing test, dispatch from upstream `main` with `dry_run=true` and `sign_macos=true`.
 Select a source commit in `main` history.
 Approve the `macos-signing` environment request.
 This run signs and tests the package, but does not publish a GitHub release.
 
+The macOS jobs use the `xcode-27` hosted runner.
 The macOS build needs the macOS 27 SDK or later.
 The signed test runner also needs macOS 27 or later.
 The workflow refuses older hosts instead of reporting native qualification.
+
+## Test signing before merge
+
+Create a separate `macos-signing-test` environment in the upstream repository.
+Allow only `feature/macos-release-signing`, require a Box maintainer's approval, prevent self-review, and disable administrator bypass.
+Use a separate, limited AWS test role that trusts this environment's exact identity.
+Set the same seven signing variables listed above, with the test role as `CD_SIGNER_CALLER_ROLE`.
+Keep these permissions separate from the production `macos-signing` environment.
+
+Review the complete candidate workflow and scripts before approving a run.
+Set `SIGNING_TEST_WORKFLOW_SHA` to that full, reviewed workflow commit.
+Set `SIGNING_TEST_SOURCE_SHA` to the full product commit from `main` history.
+These environment variables must contain 40 lowercase hexadecimal characters.
+The signing job checks both values before checkout or AWS credential access.
+A branch update requires another reviewed workflow pin.
+The pin check guards accidental changes; the environment reviewer must still inspect the workflow that enforces it.
+
+Dispatch `Release Box` from `feature/macos-release-signing` with:
+
+- `dry_run=true`
+- `sign_macos=true`
+- `premerge_signing_test=true`
+- `skip_tests=false`
+- `sha` equal to `SIGNING_TEST_SOURCE_SHA`
+- A valid next version, such as `0.1.1` after `v0.1.0`.
+
+A different Box maintainer must approve the environment request.
+This mode rejects forks, other branches, unmerged product sources, and requests to publish.
+The production signing path still requires upstream `main`.
+The separate verification job runs without AWS credentials and uses the reviewed workflow's native tests.
+Record the run URL and results before removing the temporary role and environment.
+A successful premerge run does not replace qualification of the merged production workflow and its production role.
 
 ## Inspect a signed run
 
