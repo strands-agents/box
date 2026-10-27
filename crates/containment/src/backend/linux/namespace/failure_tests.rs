@@ -33,7 +33,7 @@ fn namespace_command() -> std::process::Command {
     command
 }
 
-fn namespace_test_is_permitted() -> bool {
+pub(super) fn namespace_test_is_permitted() -> bool {
     // Creating a user namespace alone does not prove that this host permits ID mapping.
     // Probe the exact prerequisites without running any production code or test body.
     let output = namespace_command().arg("/bin/true").output().unwrap();
