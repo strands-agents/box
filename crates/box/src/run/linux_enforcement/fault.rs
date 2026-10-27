@@ -63,6 +63,7 @@ pub(super) fn at(stage: &str) -> io::Result<()> {
             rlim_cur: 0,
             rlim_max: 0,
         };
+        // SAFETY: limit is initialized and live through both calls; SIG_IGN is a valid signal disposition.
         unsafe {
             if libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) != 0 {
                 return Err(io::Error::last_os_error());

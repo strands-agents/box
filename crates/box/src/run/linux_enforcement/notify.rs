@@ -61,13 +61,16 @@ pub(super) fn transfer(socket: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
         iov_len: 1,
     };
     let mut control = [0_usize; 8];
+    // SAFETY: Zero is valid for msghdr; the live buffers and their lengths are assigned before use.
     let mut message: libc::msghdr = unsafe { zeroed() };
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: The test callers supply small descriptor slices; the buffer-size assertion guards the subsequent copy.
     message.msg_controllen =
         unsafe { libc::CMSG_SPACE(std::mem::size_of_val(fds) as u32) } as usize;
     assert!(message.msg_controllen <= size_of::<[usize; 8]>());
+    // SAFETY: Aligned control storage fits the header and descriptors. All buffers remain live through sendmsg.
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
         (*header).cmsg_level = libc::SOL_SOCKET;
@@ -86,11 +89,14 @@ pub(super) fn receive_handles(socket: &UnixStream, count: usize) -> io::Result<V
         iov_len: 1,
     };
     let mut control = [0_usize; 8];
+    // SAFETY: Zero is valid for msghdr; the live buffers and their lengths are assigned before use.
     let mut message: libc::msghdr = unsafe { zeroed() };
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen = size_of::<[usize; 8]>();
+    // SAFETY: recvmsg receives live, aligned buffers. Header bounds precede descriptor reads.
+    // SCM_RIGHTS supplies fresh descriptors, each transferred once into OwnedFd for error-path cleanup.
     unsafe {
         let received = libc::recvmsg(socket.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC);
         checked(received as i32)?;
@@ -151,8 +157,11 @@ pub(super) fn validate_registration(
             ));
         }
     }
+    // SAFETY: Zero initializes every stat field before fstat fills the structure.
     let mut metadata = unsafe { zeroed::<libc::stat>() };
+    // SAFETY: The handle count was checked and metadata is writable for the duration of fstat.
     checked(unsafe { libc::fstat(handles[1].as_raw_fd(), &mut metadata) })?;
+    // SAFETY: F_GETFL takes no pointer argument and the OwnedFd keeps this descriptor live.
     let flags = checked(unsafe { libc::fcntl(handles[1].as_raw_fd(), libc::F_GETFL) })?;
     if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR || flags & libc::O_PATH == 0 {
         return Err(io::Error::other(
@@ -174,6 +183,7 @@ pub(super) fn receive(listener: RawFd) -> io::Result<Request> {
             events: libc::POLLIN,
             revents: 0,
         };
+        // SAFETY: poll receives one initialized pollfd and writes only that live structure.
         let polled = unsafe { libc::poll(&mut poll, 1, remaining.as_millis() as i32) };
         if polled < 0 {
             let error = io::Error::last_os_error();
@@ -192,6 +202,7 @@ pub(super) fn receive(listener: RawFd) -> io::Result<Request> {
             ));
         }
         let mut request = Request::default();
+        // SAFETY: The ioctl size matches Request, whose initialized storage remains writable throughout the call.
         let received = unsafe {
             checked(libc::ioctl(
                 listener,
@@ -216,6 +227,7 @@ pub(super) fn reply(listener: RawFd, id: u64, error: i32) -> io::Result<()> {
         error: -error,
         ..Response::default()
     };
+    // SAFETY: The ioctl size matches the initialized Response, which remains live throughout the call.
     unsafe {
         checked(libc::ioctl(
             listener,
@@ -227,6 +239,7 @@ pub(super) fn reply(listener: RawFd, id: u64, error: i32) -> io::Result<()> {
 }
 
 pub(super) fn valid(listener: RawFd, id: u64) -> io::Result<()> {
+    // SAFETY: ID_VALID reads one live u64, matching the encoded ioctl size.
     unsafe {
         checked(libc::ioctl(listener, ioctl(1, 2, size_of::<u64>()), &id))?;
     }
@@ -250,6 +263,7 @@ pub(super) fn inject(
         },
         ..AddFd::default()
     };
+    // SAFETY: The initialized AddFd layout and size match the ioctl; the kernel validates descriptor values.
     unsafe { checked(libc::ioctl(listener, ioctl(1, 3, size_of::<AddFd>()), &add)) }
 }
 
@@ -263,6 +277,7 @@ pub(super) fn read_path(request: &Request, argument: usize) -> io::Result<Vec<u8
         iov_base: request.data.args[argument] as *mut libc::c_void,
         iov_len: bytes.len(),
     };
+    // SAFETY: The local vector spans writable bytes. The kernel validates the remote address instead of Rust dereferencing it.
     let length = unsafe { libc::process_vm_readv(request.pid as i32, &local, 1, &remote, 1, 0) };
     if length == -1 {
         return Err(io::Error::last_os_error());
@@ -284,15 +299,19 @@ mod tests {
     fn refused_handoff_closes_received_descriptors() {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let mut pipe = [-1; 2];
+        // SAFETY: pipe contains space for both returned descriptors.
         checked(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) })
             .unwrap();
+        // SAFETY: Successful pipe2 returned a new reader with no existing Rust owner.
         let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        // SAFETY: Successful pipe2 returned a separate writer with no existing Rust owner.
         let writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
         transfer(&sender, &[writer.as_raw_fd()]).unwrap();
         drop(writer);
         assert!(receive_handles(&receiver, 2).is_err());
         let mut byte = 0_u8;
         assert_eq!(
+            // SAFETY: byte is writable for the one byte requested; the reader remains owned.
             unsafe { libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) },
             0
         );
@@ -303,6 +322,7 @@ mod tests {
         let (sender, receiver) = UnixStream::pair().unwrap();
         transfer(&sender, &[sender.as_raw_fd()]).unwrap();
         let handles = receive_handles(&receiver, 1).unwrap();
+        // SAFETY: F_GETFD takes no pointer argument; receive_handles checked the descriptor count.
         let flags = checked(unsafe { libc::fcntl(handles[0].as_raw_fd(), libc::F_GETFD) }).unwrap();
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
     }
@@ -312,6 +332,7 @@ mod tests {
     }
     impl Drop for Listener {
         fn drop(&mut self) {
+            // SAFETY: This guard owns the unreaped child; neither call accesses Rust memory.
             unsafe {
                 libc::kill(self.child, libc::SIGKILL);
                 libc::waitpid(self.child, std::ptr::null_mut(), 0);
@@ -323,11 +344,13 @@ mod tests {
         receiver
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        // SAFETY: The child follows the syscall-only branch below and exits without running Rust destructors.
         let child = unsafe { libc::fork() };
         assert!(child >= 0);
         if child == 0 {
             // The helper cannot run workload code. It installs a filter on getpid
             // solely to obtain a real listener, sends that descriptor, and waits.
+            // SAFETY: Filter and message buffers remain live through their calls; this child uses syscall wrappers and _exit.
             unsafe {
                 libc::alarm(10);
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -381,6 +404,7 @@ mod tests {
         }
     }
     fn root_directory() -> OwnedFd {
+        // SAFETY: The path is NUL-terminated and these flags require no mode argument.
         let descriptor = checked(unsafe {
             libc::open(
                 c"/".as_ptr(),
@@ -388,6 +412,7 @@ mod tests {
             )
         })
         .unwrap();
+        // SAFETY: open returned a new descriptor and checked rejected failure before this ownership transfer.
         unsafe { OwnedFd::from_raw_fd(descriptor) }
     }
     #[test]

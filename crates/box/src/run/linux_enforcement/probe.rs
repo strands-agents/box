@@ -8,6 +8,7 @@ use std::time::Duration;
 struct Child(libc::pid_t);
 impl Drop for Child {
     fn drop(&mut self) {
+        // SAFETY: This guard owns an unreaped child, so its PID remains reserved until waitpid collects it.
         unsafe {
             libc::kill(self.0, libc::SIGKILL);
             while libc::waitpid(self.0, std::ptr::null_mut(), 0) == -1
@@ -21,20 +22,24 @@ pub(super) fn path_handles() -> io::Result<bool> {
     super::fault::at("capability-probe")?;
     let (sender, receiver) = UnixStream::pair()?;
     receiver.set_read_timeout(Some(Duration::from_secs(3)))?;
+    // SAFETY: The literal path is NUL-terminated; checked rejects failure before OwnedFd takes the new descriptor.
     let readable = unsafe {
         OwnedFd::from_raw_fd(notify::checked(libc::open(
             c"/dev/null".as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC,
         ))?)
     };
+    // SAFETY: The literal path and flags are valid; the newly opened descriptor receives one Rust owner.
     let path = unsafe {
         OwnedFd::from_raw_fd(notify::checked(libc::open(
             c"/".as_ptr(),
             libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
         ))?)
     };
+    // SAFETY: The child immediately enters the syscall-only routine and exits without running Rust destructors.
     let pid = notify::checked(unsafe { libc::fork() })?;
     if pid == 0 {
+        // SAFETY: The forked child owns its copy of the live socket and never returns from child.
         unsafe { child(sender.as_raw_fd()) }
     }
     let child = Child(pid);
@@ -55,6 +60,7 @@ pub(super) fn path_handles() -> io::Result<bool> {
     let mut status = 0;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
+        // SAFETY: status is writable and pid names the child owned by this probe.
         let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if result == pid {
             break;
@@ -83,6 +89,8 @@ pub(super) fn path_handles() -> io::Result<bool> {
 }
 
 unsafe fn child(socket: i32) -> ! {
+    // SAFETY: All pointer arguments refer to initialized local buffers kept live through their syscalls.
+    // This post-fork path uses syscall wrappers and terminates with _exit rather than Rust cleanup.
     unsafe {
         libc::alarm(5);
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -174,11 +182,75 @@ unsafe fn child(socket: i32) -> ! {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/support/bounded_output.rs"]
+mod bounded_output;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn kernel_probe_completes_and_does_not_filter_the_parent() {
+        const REFUSED: &str = "BOX_NATIVE_PROBE_TEST_REFUSE_SECCOMP";
+        if std::env::var_os(REFUSED).is_some() {
+            // The child test withholds only the primitive the probe must exercise.
+            let mut instructions = [
+                libc::sock_filter {
+                    code: 0x20,
+                    jt: 0,
+                    jf: 0,
+                    k: 0,
+                },
+                libc::sock_filter {
+                    code: 0x15,
+                    jt: 0,
+                    jf: 1,
+                    k: libc::SYS_seccomp as u32,
+                },
+                libc::sock_filter {
+                    code: 0x06,
+                    jt: 0,
+                    jf: 0,
+                    k: 0x00050000 | libc::EPERM as u32,
+                },
+                libc::sock_filter {
+                    code: 0x06,
+                    jt: 0,
+                    jf: 0,
+                    k: 0x7fff0000,
+                },
+            ];
+            let filter = libc::sock_fprog {
+                len: instructions.len() as u16,
+                filter: instructions.as_mut_ptr(),
+            };
+            // SAFETY: This fresh test process owns the live filter array. prctl copies it synchronously.
+            unsafe {
+                assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+                assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, 2, &filter), 0);
+            }
+            assert!(
+                super::path_handles().is_err(),
+                "unavailable notification creation must fail the probe"
+            );
+            return;
+        }
         let first = super::path_handles().expect("kernel descriptor probe");
         assert_eq!(super::path_handles().unwrap(), first);
+        // SAFETY: getpid takes no pointers and must remain unfiltered in the parent.
         assert!(unsafe { libc::syscall(libc::SYS_getpid) } > 0);
+        let name = format!(
+            "{}::kernel_probe_completes_and_does_not_filter_the_parent",
+            module_path!().split_once("::").unwrap().1
+        );
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+            .env(REFUSED, "1")
+            .stdin(std::process::Stdio::null());
+        let output = super::bounded_output::bounded_output(command);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

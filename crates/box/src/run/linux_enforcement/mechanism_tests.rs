@@ -33,6 +33,7 @@ fn disabled_guard_removes_loader_capabilities_without_loading_hooks() {
     }
     let before = capabilities();
     assert_eq!(before.len(), 4);
+    // SAFETY: fork takes no pointers; the child operates on its copied address space and exits with _exit.
     let child = unsafe { libc::fork() };
     assert!(child >= 0);
     if child == 0 {
@@ -40,9 +41,11 @@ fn disabled_guard_removes_loader_capabilities_without_loading_hooks() {
         let loader = (1_u64 << 38) | (1_u64 << 39);
         let expected: Vec<_> = before.iter().map(|bits| bits & !loader).collect();
         let success = matches!(result, Ok(None)) && capabilities() == expected;
+        // SAFETY: This is the child branch; _exit terminates it without running inherited Rust destructors.
         unsafe { libc::_exit(if success { 0 } else { 1 }) };
     }
     let mut status = 0;
+    // SAFETY: status is writable, and child names the unreaped process created above.
     assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
     assert!(libc::WIFEXITED(status));
     assert_eq!(libc::WEXITSTATUS(status), 0);
