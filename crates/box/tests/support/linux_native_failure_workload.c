@@ -149,7 +149,7 @@ void native_main(long *stack) {
         invoke(__NR_exit, 0, 0, 0, 0, 0);
         __builtin_unreachable();
     }
-    gate();
+    if (argv[1][0] != 'e') gate();
     invoke(__NR_exit, 0, 0, 0, 0, 0);
     __builtin_unreachable();
 }

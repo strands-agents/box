@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
@@ -43,8 +43,18 @@ struct State {
     resolver: PathResolver,
     governed: GovernedBox,
     stopped: AtomicBool,
+    fatal_reason: OnceLock<String>,
     workers: Mutex<Vec<Worker>>,
     fatal: tokio::sync::mpsc::UnboundedSender<BoxError>,
+}
+impl State {
+    fn fail(&self, reason: impl ToString) {
+        // Workload exit can win the supervisor's select before it reads this channel.
+        // Keep the first error until stop has joined the worker that reported it.
+        let reason = self.fatal_reason.get_or_init(|| reason.to_string());
+        self.stopped.store(true, Ordering::Release);
+        let _ = self.fatal.send(failure(reason));
+    }
 }
 #[derive(Clone)]
 pub(crate) struct Registration(Arc<State>);
@@ -89,6 +99,7 @@ impl FileMonitor {
                 .reporting_under(home),
             governed: GovernedBox::assigned(name),
             stopped: AtomicBool::new(false),
+            fatal_reason: OnceLock::new(),
             workers: Mutex::new(Vec::new()),
             fatal,
         });
@@ -118,10 +129,7 @@ impl FileMonitor {
                         })
                         .unwrap_or(true);
                     if expired {
-                        state.stopped.store(true, Ordering::Release);
-                        let _ = state
-                            .fatal
-                            .send(failure("native request deadline exceeded"));
+                        state.fail("native request deadline exceeded");
                         break;
                     }
                     drop(state);
@@ -158,6 +166,9 @@ impl FileMonitor {
             && watchdog.join().is_err()
         {
             incomplete = true;
+        }
+        if let Some(reason) = self.registration.0.fatal_reason.get() {
+            return Err(failure(reason));
         }
         if incomplete {
             return Err(failure(
@@ -277,8 +288,7 @@ impl Registration {
                     Err(_) => Some("native worker panicked".to_string()),
                 };
                 if let Some(reason) = reason {
-                    state.stopped.store(true, Ordering::Release);
-                    let _ = state.fatal.send(failure(reason));
+                    state.fail(reason);
                 }
             })?;
         let mut workers = self

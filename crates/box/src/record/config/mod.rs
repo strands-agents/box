@@ -1344,6 +1344,16 @@ native-filesystem-policy = false
         ] {
             let file = ConfigFile::parse(&format!("{base}{extra}"), Path::new("box.toml")).unwrap();
             assert_eq!(file.uses_native_filesystem(), expected, "{extra}");
+            let contained_mcp = crate::record::config::mcp::contained_specs(&file.mcp);
+            let mut normalized = record(file.agent, file.egress);
+            normalized.experimental_features = file.experimental_features;
+            normalized.tool = file.tool;
+            normalized.contained_mcp = contained_mcp;
+            assert_eq!(
+                crate::run::native_enforcement::selected(&normalized),
+                expected,
+                "{extra}"
+            );
         }
     }
 

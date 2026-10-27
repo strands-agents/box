@@ -298,6 +298,34 @@ fn an_outcome_storage_failure_stops_box_after_descriptor_delivery() {
             || std::fs::read(&run.file).unwrap() == b"changed\n"
     );
 }
+#[test]
+fn immediate_exit_preserves_a_completed_native_outcome() {
+    let mut run = Run::start("exit", None, true);
+    assert_eq!(run.line(), "READY");
+    run.release();
+    assert_eq!(run.line(), "ALLOWED");
+    assert!(run.wait().success());
+    assert_eq!(std::fs::read(&run.file).unwrap(), b"changed\n");
+    assert!(
+        run.stderr
+            .lock()
+            .unwrap()
+            .contains("\"outcome\":\"descriptor_issued\"")
+    );
+}
+
+#[cfg(box_native_test_faults)]
+#[test]
+fn immediate_exit_cannot_hide_an_outcome_storage_failure() {
+    let mut run = Run::start("exit", Some("outcome-storage"), true);
+    assert_eq!(run.line(), "READY");
+    run.release();
+    assert!(!run.wait().success());
+    let stderr = run.stderr.lock().unwrap();
+    assert!(stderr.contains("NATIVE_TEST_FAULT=outcome-storage"));
+    assert!(stderr.contains("policy history failure: durable log"));
+}
+
 #[cfg(box_native_test_faults)]
 #[test]
 fn a_stalled_policy_worker_stops_box_within_the_deadline() {

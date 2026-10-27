@@ -34,7 +34,7 @@ test_support`, which exists only behind the non-default `test-support` feature.
 Every other module is private, so this list is the whole API rather than a
 selection from it.
 
-### `apply` takes two arguments
+### `apply` takes four arguments
 
 ```rust,ignore
 use containment::{Containment, ContainmentConfig, Network, Operation, Scope};
@@ -58,6 +58,17 @@ endpoint through the stream. The macOS backend passes `None`, because it pins a
 localhost port that already exists. The Linux namespace launcher **refuses**
 `Network::Localhost` when the handoff is absent, rather than binding an endpoint
 that nothing can accept on.
+
+The third argument, `confirm_fd`, is an optional setup-status pipe writer.
+The Linux reaper writes a status byte when the filesystem view is ready.
+The supervisor uses that byte to confirm startup before a long-lived workload exits.
+macOS ignores this argument because successful `exec` closes the status pipe.
+
+The fourth argument, `native_filesystem_handoff`, is an optional Unix stream to the
+trusted native filesystem monitor. On Linux, it transfers the notification listener
+and filesystem root, then waits for registration before the workload runs.
+Pass `None` when native filesystem checks are disabled.
+Builds without Linux native filesystem support refuse a supplied handoff.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no
