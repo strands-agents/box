@@ -18,6 +18,8 @@ export RUSTFLAGS="--cfg box_native_kernel_tests"
 cargo build --locked --target aarch64-unknown-linux-gnu -p strands-box -p strands-box-containment --all-features
 cargo test --locked --target aarch64-unknown-linux-gnu -p strands-box --all-features --lib run::native_enforcement:: -- --nocapture --test-threads=1
 cargo test --locked --target aarch64-unknown-linux-gnu -p strands-box --all-features --test linux_native_research --test linux_native_paths --test linux_native_directories --test linux_native_failures -- --nocapture --test-threads=1
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="sudo -n env EXPERIMENTAL_LINUX_SUPPORT=TRUE NATIVE_TEST_ROOT=$NATIVE_TEST_ROOT" \
+  cargo test --locked --target aarch64-unknown-linux-gnu -p strands-box --all-features --test linux_native_root
 export RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_test_faults"
 cargo build --locked --target aarch64-unknown-linux-gnu -p strands-box -p strands-box-containment --all-features
 cargo test --locked --target aarch64-unknown-linux-gnu -p strands-box --all-features --test linux_native_failures --test linux_native_entry_races -- --nocapture --test-threads=1

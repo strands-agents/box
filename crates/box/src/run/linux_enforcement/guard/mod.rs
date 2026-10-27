@@ -49,21 +49,17 @@ impl Guard {
         let mut effective = 0_u64;
         checked(unsafe { box_guard_capabilities(&mut effective) })?;
         let required = (1_u64 << 39) | (1_u64 << 38);
-        if effective & required == 0 {
-            return Ok(None);
-        }
-        if !enabled {
-            checked(unsafe { box_guard_drop_capabilities() })?;
-            return Ok(None);
-        }
-        if effective & required != required {
-            return Err(io::Error::other(
+        let guard = if !enabled || effective & required == 0 {
+            Ok(None)
+        } else if effective & required != required {
+            Err(io::Error::other(
                 "native entry guard requires CAP_BPF and CAP_PERFMON together",
-            ));
-        }
-        let guard = Self::load();
+            ))
+        } else {
+            Self::load().map(Some)
+        };
         checked(unsafe { box_guard_drop_capabilities() })?;
-        guard.map(Some)
+        guard
     }
 
     pub(super) fn load() -> io::Result<Arc<Self>> {

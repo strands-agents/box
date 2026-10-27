@@ -99,7 +99,14 @@ int box_guard_capabilities(uint64_t *effective) {
 int box_guard_drop_capabilities(void) {
     struct __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, 0};
     struct __user_cap_data_struct data[2] = {{0}};
-    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) < 0) return -1;
+    if (syscall(SYS_capget, &header, data) < 0) return -1;
+    const uint32_t loader = (1U << (CAP_BPF - 32)) | (1U << (CAP_PERFMON - 32));
+    if (!((data[1].effective | data[1].permitted | data[1].inheritable) & loader)) return 0;
+    data[1].effective &= ~loader;
+    data[1].permitted &= ~loader;
+    data[1].inheritable &= ~loader;
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_LOWER, CAP_BPF, 0, 0) < 0) return -1;
+    if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_LOWER, CAP_PERFMON, 0, 0) < 0) return -1;
     if (syscall(SYS_capset, &header, data) < 0) return -1;
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 }

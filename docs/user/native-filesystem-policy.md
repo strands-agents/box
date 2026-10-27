@@ -41,6 +41,9 @@ Start the trusted Box process with `CAP_BPF` and `CAP_PERFMON` when any workload
 These are Linux capabilities for loading BPF programs and accessing the required tracing hooks.
 The Box process need not run as root.
 It loads its checks and drops these capabilities before creating runtime threads or launching workloads.
+It preserves other inherited capabilities, including the authority root needs to create its user namespace.
+Inherited `CAP_SYS_ADMIN` remains baseline host authority and can also authorize BPF operations.
+Use the restricted capability set below to avoid retaining `CAP_SYS_ADMIN` after native setup.
 Missing capabilities or kernel support stop launch.
 For a command-line run, Box does not load these checks if every workload opts out.
 A library caller can create its configuration in `RunOptions::on_ready`.
