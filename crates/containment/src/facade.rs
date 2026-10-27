@@ -154,6 +154,7 @@ pub(crate) fn apply_backend<B: std::ops::Deref<Target = dyn ContainmentBackend>>
     confirm_fd: Option<std::os::fd::RawFd>,
     native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
 ) -> Result<(), ContainmentError> {
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     if native_filesystem_handoff.is_some() {
         return Err(ContainmentError::UnsupportedCapability {
             capability: "native filesystem notification handoff".to_string(),
@@ -328,6 +329,7 @@ mod tests {
             "{error}"
         );
     }
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     #[test]
     fn an_unavailable_native_handoff_refuses_before_backend_selection() {
         let (handoff, _) = std::os::unix::net::UnixStream::pair().unwrap();
