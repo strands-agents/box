@@ -8,7 +8,12 @@ fn main() {
 }
 
 #[cfg(all(target_os = "linux", box_native_kernel_tests))]
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+
+#[cfg(all(target_os = "linux", box_native_kernel_tests))]
 mod root {
+    use super::bounded_output::bounded_output;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
 
@@ -87,12 +92,13 @@ mod root {
             std::fs::write(&path, config(root.path(), global)).unwrap();
             let binary = binary();
             let installed = install_bundle(root.path(), &binary, binary.parent().unwrap());
-            let output = Command::new(installed)
+            let mut command = Command::new(installed);
+            command
                 .args(["run", "--config"])
                 .arg(&path)
-                .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-                .output()
-                .unwrap();
+                .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
+            command.stdin(std::process::Stdio::null());
+            let output = bounded_output(command);
             assert!(
                 output.status.success(),
                 "global={global}: {}",
@@ -105,11 +111,12 @@ mod root {
         let companions = binary.parent().unwrap();
         let installed = install_bundle(root.path(), &executable, companions);
         for argument in ["--callback-full", "--callback-permitted-only"] {
-            let output = Command::new(&installed)
+            let mut command = Command::new(&installed);
+            command
                 .arg(argument)
-                .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-                .output()
-                .unwrap();
+                .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
+            command.stdin(std::process::Stdio::null());
+            let output = bounded_output(command);
             assert!(
                 output.status.success(),
                 "{argument}: {}",

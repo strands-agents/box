@@ -7,6 +7,9 @@
     feature = "test-support"
 ))]
 
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+use bounded_output::bounded_output;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -140,13 +143,13 @@ fn run(
     } else {
         Command::new(env!("CARGO_BIN_EXE_strands-box"))
     };
-    let output = launch
+    launch
         .args(["run", "--config"])
         .arg(&config_path)
         .env("HOME", root.as_path())
-        .current_dir(&workspace)
-        .output()
-        .unwrap();
+        .current_dir(&workspace);
+    launch.stdin(std::process::Stdio::null());
+    let output = bounded_output(launch);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let path_handles = !stderr.contains("this kernel cannot transfer O_PATH");
     let expected = if expected == "probe" {
@@ -412,13 +415,14 @@ fn dynamic_program(permit: bool) {
         },
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_strands-box"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box"));
+    command
         .args(["run", "--config"])
         .arg(root.join("box.toml"))
         .env("HOME", &root)
-        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-        .output()
-        .unwrap();
+        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
+    command.stdin(std::process::Stdio::null());
+    let output = bounded_output(command);
     let stderr = String::from_utf8_lossy(&output.stderr);
     std::fs::write(root.join("stderr.log"), stderr.as_bytes()).unwrap();
     println!(

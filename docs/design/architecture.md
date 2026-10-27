@@ -293,6 +293,11 @@ part of what you have to trust.
    translated refuses the box before the agent exists.
 7. **It starts the trampoline**, which becomes the agent, and then it waits.
 
+Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
+When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.
+Other supported native operations remain available. Unexpected probe errors stop startup.
+The [native policy guide](../user/native-filesystem-policy.md#linux-arm64) explains this distinction.
+
 Teardown runs in the reverse direction, and the order is the point. The workload is reaped first, so
 nothing contained is alive while the box's authority is still up. Then the broker unbinds, the gateway
 finishes, the record that names the running box is withdrawn, and the lock releases last among the
