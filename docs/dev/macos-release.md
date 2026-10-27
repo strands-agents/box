@@ -20,7 +20,7 @@ The signing service must be able to assume that bucket-access role.
 Complete the service's application authorization for the caller account before a signed run.
 The workflow does not create roles, change their policies, or claim application ownership.
 
-Set these variables in `macos-signing`:
+Set these required variables in `macos-signing` before a signed run:
 
 | Variable | Value |
 |---|---|
@@ -30,11 +30,16 @@ Set these variables in `macos-signing`:
 | `CD_SIGNER_BUCKET` | Bucket for unsigned and signed artifacts. |
 | `CD_SIGNER_BUCKET_ACCESS_ROLE` | Role that the signing service assumes for that bucket. |
 | `CD_SIGNER_TEAM_ID` | Apple team that owns the signing certificate and profile. |
-| `CD_SIGNER_PROFILE_NAME` | Exact Developer ID profile name for `com.amazon.strands.box`. |
+| `CD_SIGNER_PROFILE_NAME` | Required for signing and verification: the exact Developer ID profile name for `com.amazon.strands.box`. |
 
-The profile must authorize `com.apple.developer.endpoint-security.client`.
+The signing client rejects a missing or blank profile name.
+The profile must authorize `com.apple.developer.endpoint-security.client` for the application and its signing certificate.
 The application manifest sets both `profile_name` and `profile_type: distribution`.
 The latter enables profile fetching in the macOS signing path.
+The signed application includes the profile, and verification checks its identity, expiration, and certificate authorization.
+This supplies the Apple authorization needed by the native Endpoint Security feature.
+It does not enable the runtime experiment or replace native enforcement tests.
+Unsigned dry runs do not need these signing variables.
 Account-specific values and access requests belong in the team's internal runbook.
 
 ## Run a dry run
