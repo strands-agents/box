@@ -44,7 +44,7 @@ agent (curl) ──HTTPS──▶ egress gateway (MITM, body buffered)
 - `Inspection::Domain([...])` on `net:resolve` sends a `dns` subject before any DNS query leaves.
   `Inspection::Address([...])` on `net:connect` sends a `connect` subject per resolved address.
   Box reuses a `dns` or `connect` answer for its `cache_ttl_s` (in memory, at most 4096 entries),
-  and prints `cached` on the `inspection:` line. `policy-dns.dw` is the example.
+  so a cached answer makes no new `classify` line in the inspector's log. `policy-dns.dw` is the example.
 - If the inspector fails, times out, or the body is over the inspector's `max_body_bytes`, the
   request is denied.
 - If the policy never calls `Inspection::Content`, the inspector is not called at all.
@@ -149,11 +149,10 @@ post '{"aws_access_key_id":"AKIAIOSFODNN7EXAMPLE"}'        # 403, labels=["SECRE
 What to point at on screen:
 
 - the clean request returns httpbin's echo and `status=200`;
-- the box prints one line per inspected request, for example
-  `inspection: POST https://httpbin.org/post labels=["PII"] backend=decider 0.2-prototype latency=1400ms`;
+- the box prints nothing per request; the inspector's log (Terminal 1) has one `classify` line per
+  inspected request, for example `box-2 classify POST https://httpbin.org/post ... -> ['PII'] 1400ms`;
 - the PII and secret requests get `status=403` from the gateway, and the request never leaves
   the machine;
-- Terminal 1 logs each request it classified.
 
 **Redaction.** Credentials in headers are not sent to the inspector:
 
@@ -162,8 +161,8 @@ $BOX run --config "$DEMO/box.toml" -- -sS -o /dev/null -w 'status=%{http_code}\n
   -H 'authorization: Bearer ghp_notarealtoken' https://httpbin.org/get     # 200
 ```
 
-**No rule, no inspection.** Switch to the control policy, and the same SSN request passes. No
-`inspection:` line is printed, and Terminal 1 stays quiet.
+**No rule, no inspection.** Switch to the control policy, and the same SSN request passes. Terminal 1
+logs no `classify` line.
 
 ```sh
 cp .agents/pocs/content-inspection-e2e/policy-noinspect.dw "$DEMO/policy.dw"
@@ -173,18 +172,19 @@ cp .agents/pocs/content-inspection-e2e/policy.dw "$DEMO/policy.dw"
 
 **Fail closed.** Stop the inspector in Terminal 1 (Ctrl-C), and send the clean request again.
 It gets 403 if the box is already running; a new box refuses to start, because `capabilities`
-fails. The box prints `inspection: POST ... refused: inspector failed: ...`.
+fails. The 403 body says `content inspection failed: ...`.
 
 ## Demo 2: Box starts the inspector in a contained leaf, on the GPU
 
 The leaf needs read grants for the Python interpreter, the venv, and the model cache, so the e2e
 script writes this config for you. It runs a clean POST (200), an SSN POST (403), and an SSN POST
 under the control policy (200, inspector not called). Then, under `policy-dns.dw`: (d) a GET to
-httpbin.org (200, `resolve` and `connect` lines with `labels=[]`), (e) a GET to a 40-hex-character
-subdomain (denied at resolve with `TUNNELING`, no `connect` line, curl exit 7, CONNECT 403), (f) a
+httpbin.org (200, inspector `classify dns` and `classify connect` lines with `-> []`), (e) a GET to a
+40-hex-character subdomain (denied at resolve with `TUNNELING`, no `classify connect` line, curl
+exit 7, CONNECT 403), (f) a
 GET to a name in `--domain-blocklist` (denied with `MALICIOUS_DOMAIN`), (g) a GET with httpbin's
 address ranges in `--ip-blocklist` (denied at connect with `MALICIOUS_IP`), and (h) two GETs in one
-box (the second `resolve` line ends in `cached`). The `fake` backend runs only a to c.
+box (one `classify dns` line, because Box caches the second resolve). The `fake` backend runs only a to c.
 
 ```sh
 cd .agents/pocs/content-inspection-e2e

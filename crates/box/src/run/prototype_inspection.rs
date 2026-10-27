@@ -135,7 +135,7 @@ impl PrototypeInspector {
         let binding = self.config.binding();
         let transport = match (&binding, leaf) {
             (Binding::Stdio, Some(parts)) => {
-                let sender = spawn_lines(&runtime, parts.stdout, parts.stdin, "leaf");
+                let sender = spawn_lines(&runtime, parts.stdout, parts.stdin);
                 eprintln!(
                     "strands-box: inspection: inspector leaf started (pid {})",
                     parts.leader
@@ -634,7 +634,6 @@ fn spawn_lines<R, W>(
     runtime: &tokio::runtime::Handle,
     reader: R,
     mut writer: W,
-    label: &'static str,
 ) -> tokio::sync::mpsc::UnboundedSender<Pending>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -660,25 +659,19 @@ where
                     waiting.insert(id, reply);
                 }
                 read = lines.next_line() => {
-                    let Ok(Some(line)) = read else {
-                        eprintln!("strands-box: inspection: the inspector {label} closed its stream");
-                        break;
-                    };
+                    let Ok(Some(line)) = read else { break };
                     if line.len() > MAX_MESSAGE_BYTES {
-                        eprintln!("strands-box: inspection: dropped a response over 16 MiB");
                         continue;
                     }
                     let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                        eprintln!("strands-box: inspection: the inspector sent a line that is not JSON");
                         continue;
                     };
-                    match value.get("id").and_then(Value::as_str).map(str::to_owned) {
-                        Some(id) => {
-                            if let Some(reply) = waiting.remove(&id) {
-                                let _ = reply.send(Ok(value));
-                            }
-                        }
-                        None => eprintln!("strands-box: inspection: unpaired response: {line}"),
+                    if let Some(reply) = value
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| waiting.remove(id))
+                    {
+                        let _ = reply.send(Ok(value));
                     }
                 }
             }
@@ -718,7 +711,7 @@ fn connect_unix(
     let _entered = runtime.enter();
     let stream = tokio::net::UnixStream::from_std(stream).map_err(|e| e.to_string())?;
     let (reader, writer) = stream.into_split();
-    Ok(spawn_lines(runtime, reader, writer, "socket"))
+    Ok(spawn_lines(runtime, reader, writer))
 }
 
 fn https_client(config: &InspectionConfig) -> Result<reqwest::Client, String> {

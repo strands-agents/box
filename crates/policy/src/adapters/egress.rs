@@ -124,17 +124,10 @@ impl EgressPolicyInterceptor {
             format!("{scheme}://{host}:{port}{path}")
         };
         let Some(inspector) = &self.inspector else {
-            eprintln!(
-                "inspection: {method} {url} refused: the policy uses Inspection::Content and no inspector is configured"
-            );
             return Err("content inspection: no inspector is configured".to_string());
         };
         let limit = inspector.max_body_bytes();
         if body.len() > limit {
-            eprintln!(
-                "inspection: {method} {url} refused: body of {} bytes is over the inspector's max_body_bytes {limit}",
-                body.len()
-            );
             return Err("content inspection: body is over the inspection limit".to_string());
         }
         let request = crate::InspectionRequest {
@@ -145,17 +138,8 @@ impl EgressPolicyInterceptor {
             body,
         };
         match inspector.inspect(&request) {
-            Ok(verdict) => {
-                eprintln!(
-                    "inspection: {method} {url} labels={:?} backend={} latency={}ms",
-                    verdict.labels, verdict.backend, verdict.latency_ms
-                );
-                Ok(Some(verdict.labels))
-            }
-            Err(error) => {
-                eprintln!("inspection: {method} {url} refused: inspector failed: {error}");
-                Err(format!("content inspection failed: {error}"))
-            }
+            Ok(verdict) => Ok(Some(verdict.labels)),
+            Err(error) => Err(format!("content inspection failed: {error}")),
         }
     }
 
@@ -180,29 +164,14 @@ impl EgressPolicyInterceptor {
         port: u16,
     ) -> Result<Option<Vec<String>>, String> {
         let used = self.policy.uses_inspection();
-        let (requested, provider, shown) = match kind {
-            crate::NameSubjectKind::Dns => (
-                used.domain,
-                "Inspection::Domain",
-                format!("resolve {host}:{port}"),
-            ),
-            crate::NameSubjectKind::Connect => {
-                let address =
-                    ip.map_or_else(String::new, |ip| SocketAddr::new(ip, port).to_string());
-                (
-                    used.address,
-                    "Inspection::Address",
-                    format!("connect {host} {address}"),
-                )
-            }
+        let (requested, provider) = match kind {
+            crate::NameSubjectKind::Dns => (used.domain, "Inspection::Domain"),
+            crate::NameSubjectKind::Connect => (used.address, "Inspection::Address"),
         };
         let Some(requested) = requested else {
             return Ok(None);
         };
         let Some(inspector) = &self.inspector else {
-            eprintln!(
-                "inspection: {shown} refused: the policy uses {provider} and no inspector is configured"
-            );
             return Err(format!("{provider}: no inspector is configured"));
         };
         let request = crate::NameInspection {
@@ -213,20 +182,8 @@ impl EgressPolicyInterceptor {
             port,
         };
         match inspector.inspect_name(&request) {
-            Ok(verdict) => {
-                eprintln!(
-                    "inspection: {shown} labels={:?} backend={} latency={}ms{}",
-                    verdict.labels,
-                    verdict.backend,
-                    verdict.latency_ms,
-                    if verdict.cached { " cached" } else { "" }
-                );
-                Ok(Some(verdict.labels))
-            }
-            Err(error) => {
-                eprintln!("inspection: {shown} refused: inspector failed: {error}");
-                Err(format!("{provider} failed: {error}"))
-            }
+            Ok(verdict) => Ok(Some(verdict.labels)),
+            Err(error) => Err(format!("{provider} failed: {error}")),
         }
     }
 

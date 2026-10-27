@@ -148,44 +148,58 @@ fi
 trap '[ -n "$INSPECTOR_PID" ] && kill "$INSPECTOR_PID" 2>/dev/null' EXIT
 
 mkdir -p "$WORK/home" "$WORK/ws" ${LEAF_TMP:+"$LEAF_TMP"}
+# PROTOTYPE(content-inspection): Box prints nothing per request, so the checks read the inspector's
+# own log, scoped to one case: the shared log's new lines (unix, https) or the box's stderr, where
+# the leaf's stderr passes through (stdio).
+CLASSIFY=' classify |^fake_inspector: '
+log_mark() { if [ "$MODE" = stdio ]; then echo 0; else wc -l < "$INSPECTOR_LOG" 2>/dev/null || echo 0; fi; }
+log_slice() { # $1 = case name, $2 = mark before the case
+  if [ "$MODE" = stdio ]; then
+    grep -E "$CLASSIFY" "$WORK/$1.stderr" > "$WORK/$1.inspector" || true
+  else
+    tail -n +"$(($2 + 1))" "$INSPECTOR_LOG" | grep -E "$CLASSIFY" > "$WORK/$1.inspector" || true
+  fi
+}
 run_case() { # $1 = name, $2 = policy, $3 = body, $4 = expected status
-  local name="$1" state="$WORK/state-$1" config="$WORK/box-$1.toml" out
+  local name="$1" state="$WORK/state-$1" config="$WORK/box-$1.toml" out mark
   write_config "$HERE/$2" "$config" "$state"
+  mark="$(log_mark)"
   cp "$config" "$HERE/box-$MODE-$name.toml"
   out="$("$BOX" run --config "$config" -- -sS -o /dev/null -w 'status=%{http_code}\n' \
         -X POST -H 'content-type: application/json' -H 'authorization: Bearer hunter2' \
         --data "$3" "$URL" 2> "$WORK/$name.stderr")"
+  log_slice "$name" "$mark"
   local status; status="$(sed -n 's/^status=//p' <<<"$out")"
   echo "--- case $name: expect $4, got ${status:-none}"
-  grep -E '^inspection:|inspection:|http:request gate' "$WORK/$name.stderr" | sed 's/^/    /'
+  { grep -E 'http:request gate' "$WORK/$name.stderr"; cat "$WORK/$name.inspector"; } | sed 's/^/    /'
   [ "$status" = "$4" ] && echo "    PASS" || { echo "    FAIL"; sed 's/^/    | /' "$WORK/$name.stderr" | tail -25; }
 }
 
 run_case a-clean policy.dw '{"msg":"hello"}' 200
 run_case b-pii policy.dw '{"ssn":"123-45-6789"}' 403
-calls_before="$(grep -c " classify " "$INSPECTOR_LOG" 2>/dev/null || true)"
 run_case c-no-rule policy-noinspect.dw '{"ssn":"123-45-6789"}' 200
-if grep -q '^inspection:' "$WORK/c-no-rule.stderr"; then
+if [ -s "$WORK/c-no-rule.inspector" ]; then
   echo "    FAIL: the inspector was called under a policy with no inspection rule"
 else
-  echo "    PASS: no inspection line under the no-rule policy"
+  echo "    PASS: the inspector logged no classify line under the no-rule policy"
 fi
-[ "$MODE" != stdio ] && echo "--- inspector classify lines before/after case c: $calls_before/$(grep -c " classify " "$INSPECTOR_LOG" || true)"
 
 # PROTOTYPE(content-inspection): dns and connect subjects. $1 = name, $2 = expect (200 or deny),
 # then curl URLs. The status is curl's %{http_code}, the CONNECT reply, and curl's exit code.
 run_get() {
-  local name="$1" expect="$2" state="$WORK/state-$1" config="$WORK/box-$1.toml" out args=() u rc
+  local name="$1" expect="$2" state="$WORK/state-$1" config="$WORK/box-$1.toml" out args=() u rc mark
   shift 2
   for u in "$@"; do args+=(-o /dev/null "$u"); done
   write_config "$HERE/policy-dns.dw" "$config" "$state"
+  mark="$(log_mark)"
   cp "$config" "$HERE/box-$MODE-$name.toml"
   out="$("$BOX" run --config "$config" -- -sS -w 'status=%{http_code} connect=%{http_connect}\n' \
         "${args[@]}" 2> "$WORK/$name.stderr")"
   rc=$?
+  log_slice "$name" "$mark"
   local statuses; statuses="$(sed -n 's/^status=\([0-9]*\).*/\1/p' <<<"$out" | tr '\n' ' ')"
   echo "--- case $name: expect $expect, got: $(tr '\n' ';' <<<"$out") curl exit=$rc"
-  grep -E 'inspection:|gate|forbid|denied' "$WORK/$name.stderr" | grep -v 'strands-box: inspection: inspector' | sed 's/^/    /'
+  { grep -E 'gate|forbid|denied' "$WORK/$name.stderr"; cat "$WORK/$name.inspector"; } | sed 's/^/    /'
   local ok=1
   if [ "$expect" = 200 ]; then
     for u in "$@"; do :; done
@@ -200,25 +214,28 @@ check() { # $1 = description, then a command that must succeed
   local what="$1"; shift
   if "$@"; then echo "    PASS: $what"; else echo "    FAIL: $what"; fi
 }
-has() { grep -qE "$2" "$WORK/$1.stderr"; }
-hasnt() { ! grep -qE "$2" "$WORK/$1.stderr"; }
+has() { grep -qE "$2" "$WORK/$1.inspector"; }
+hasnt() { ! grep -qE "$2" "$WORK/$1.inspector"; }
+count() { [ "$(grep -cE "$2" "$WORK/$1.inspector")" = "$3" ]; }
+DNS=' classify dns '
+CONNECT=' classify connect '
 
 if [ "$BACKEND" != fake ]; then
   run_get d-dns-clean 200 https://httpbin.org/get
   check "status 200" [ "$CASE_OK" = 1 ]
-  check "resolve inspected with labels=[]" has d-dns-clean '^inspection: resolve httpbin.org:443 labels=\[\]'
-  check "connect inspected with labels=[]" has d-dns-clean '^inspection: connect httpbin.org [0-9.:]+ labels=\[\]'
+  check "resolve inspected with labels=[]" has d-dns-clean "${DNS}httpbin.org:443 asked=.* -> \[\]$"
+  check "connect inspected with labels=[]" has d-dns-clean "${CONNECT}httpbin.org [0-9a-f.:]+:443 asked=.* -> \[\]$"
 
   TUNNEL="$(head -c 20 /dev/urandom | od -An -tx1 | tr -d ' \n').httpbin.org"
   run_get e-dns-tunnel deny "https://$TUNNEL/get"
   check "denied" [ "$CASE_OK" = 1 ]
-  check "resolve labelled TUNNELING" has e-dns-tunnel "^inspection: resolve $TUNNEL:443 labels=\[\"TUNNELING\"\]"
-  check "never reached connect (no DNS query)" hasnt e-dns-tunnel '^inspection: connect'
+  check "resolve labelled TUNNELING" has e-dns-tunnel "${DNS}$TUNNEL:443 asked=.* -> \['TUNNELING'\]$"
+  check "never reached connect (no DNS query)" hasnt e-dns-tunnel "$CONNECT"
 
   run_get f-dns-blocked deny https://blocked.httpbin.org/get
   check "denied" [ "$CASE_OK" = 1 ]
-  check "resolve labelled MALICIOUS_DOMAIN" has f-dns-blocked '^inspection: resolve blocked.httpbin.org:443 labels=\["MALICIOUS_DOMAIN"\]'
-  check "never reached connect" hasnt f-dns-blocked '^inspection: connect'
+  check "resolve labelled MALICIOUS_DOMAIN" has f-dns-blocked "${DNS}blocked.httpbin.org:443 asked=.* -> \['MALICIOUS_DOMAIN'\]$"
+  check "never reached connect" hasnt f-dns-blocked "$CONNECT"
 
   # Every /16 that httpbin.org resolves to here, so a rotated address is still listed.
   python3 -c 'import ipaddress, socket
@@ -229,12 +246,12 @@ for a in sorted({i[4][0] for i in socket.getaddrinfo("httpbin.org", 443)}):
   run_get g-connect-blocked deny https://httpbin.org/get
   : > "$LISTS/ips"
   check "denied" [ "$CASE_OK" = 1 ]
-  check "resolve passed with labels=[]" has g-connect-blocked '^inspection: resolve httpbin.org:443 labels=\[\]'
-  check "connect labelled MALICIOUS_IP" has g-connect-blocked '^inspection: connect httpbin.org [0-9.:]+ labels=\["MALICIOUS_IP"\]'
+  check "resolve passed with labels=[]" has g-connect-blocked "${DNS}httpbin.org:443 asked=.* -> \[\]$"
+  check "connect labelled MALICIOUS_IP" has g-connect-blocked "${CONNECT}httpbin.org [0-9a-f.:]+:443 asked=.* -> \['MALICIOUS_IP'\]$"
 
   run_get h-dns-cached 200 https://httpbin.org/get https://httpbin.org/anything
   check "both 200" [ "$CASE_OK" = 1 ]
-  check "first resolve not cached" has h-dns-cached '^inspection: resolve httpbin.org:443 labels=\[\] .*ms$'
-  check "second resolve cached" has h-dns-cached '^inspection: resolve httpbin.org:443 labels=\[\] .* cached$'
+  check "resolve classified with labels=[]" has h-dns-cached "${DNS}httpbin.org:443 asked=.* -> \[\]$"
+  check "second resolve cached (one dns classify for two GETs)" count h-dns-cached "${DNS}httpbin.org:443 " 1
 fi
 echo "work dir: $WORK"
