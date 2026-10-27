@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep]
+    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
