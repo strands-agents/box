@@ -119,6 +119,15 @@ fn wait_for_launch(descriptor: i32) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    let descriptor = {
+        // SAFETY: duplicate the live socket; the original serves later native registration.
+        let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        duplicate
+    };
     // SAFETY: the trusted launcher supplies one owned descriptor, above the standard streams.
     let mut gate = unsafe { UnixStream::from_raw_fd(descriptor) };
     gate.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
@@ -260,14 +269,27 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
     // Pass the setup-status writer so the Linux reaper can signal "reached exec" with one byte: a
     // long-lived leaf (a streaming MCP server) never lets the pipe EOF during its life, so the
     // supervisor cannot rely on EOF alone to know containment came up.
-    Containment::apply(&config, egress_handoff.as_deref(), args.setup_status_fd).map_err(
-        |error| match error {
-            error @ ContainmentError::PlatformUnsupported { .. } => {
-                setup_status.fail(SetupStage::Apply, 2, error)
-            }
-            error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
-        },
-    )?;
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    let native_filesystem_handoff = args.launch_gate_fd.map(|descriptor| {
+        // SAFETY: the trusted launcher passed this descriptor; it has no other owner here.
+        unsafe {
+            <std::os::unix::net::UnixStream as std::os::fd::FromRawFd>::from_raw_fd(descriptor)
+        }
+    });
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
+    let native_filesystem_handoff: Option<std::os::unix::net::UnixStream> = None;
+    Containment::apply(
+        &config,
+        egress_handoff.as_deref(),
+        args.setup_status_fd,
+        native_filesystem_handoff.as_ref(),
+    )
+    .map_err(|error| match error {
+        error @ ContainmentError::PlatformUnsupported { .. } => {
+            setup_status.fail(SetupStage::Apply, 2, error)
+        }
+        error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
+    })?;
     // Enforcement is kernel-side and survives `exec`.
     Ok(())
 }

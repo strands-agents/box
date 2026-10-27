@@ -1,6 +1,8 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
+#[cfg(feature = "native-filesystem-policy")]
+mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
@@ -153,6 +155,7 @@ impl ContainmentBackend for NamespaceBackend {
         config: &ContainmentConfig,
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
+        native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
@@ -161,7 +164,16 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
-        let filters = syscall::SyscallPolicy::for_config(config.network()).compile()?;
+        let policy = syscall::SyscallPolicy::for_config(config.network());
+        #[cfg(feature = "native-filesystem-policy")]
+        let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
+        #[cfg(not(feature = "native-filesystem-policy"))]
+        if native_filesystem_handoff.is_some() {
+            return Err(unenforceable(
+                "native filesystem interception is absent from this build",
+            ));
+        }
+        let filters = policy.compile()?;
 
         // --- From here every step is irreversible for this process.
 
@@ -208,6 +220,10 @@ impl ContainmentBackend for NamespaceBackend {
         // The PID namespace must exist *before* the view is built, because mounting a fresh `/proc`
         // requires the caller to be inside the PID namespace that procfs will describe.
         let mut keep = vec![0, 1, 2];
+        if let Some(handoff) = native_filesystem_handoff {
+            use std::os::fd::AsRawFd as _;
+            keep.push(handoff.as_raw_fd());
+        }
         {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
@@ -217,6 +233,14 @@ impl ContainmentBackend for NamespaceBackend {
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
+        #[cfg(feature = "native-filesystem-policy")]
+        if let Some(handoff) = native_filesystem_handoff {
+            native_filesystem::handoff(handoff).map_err(|error| {
+                apply_failure(format!(
+                    "registering native filesystem interception: {error}"
+                ))
+            })?;
+        }
         install_syscall_filters(&filters)?;
 
         // Every listener belongs to a relay, and each relay lives in the box.
@@ -966,7 +990,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -1039,7 +1063,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1171,7 +1195,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1239,7 +1263,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1927,7 +1951,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(30) };
             }
@@ -2004,7 +2028,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
@@ -2103,7 +2127,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
             }
@@ -2191,7 +2215,7 @@ mod tests {
             let backend = NamespaceBackend::with_probe_result(true);
             // No handoff: this test asserts the filesystem, process, and authority properties, and
             // the request below is `Blocked` by default so no egress endpoint is created.
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 // Printed rather than swallowed: exit code 20 says "apply failed" and this says
                 // why, which is the difference between a five-minute diagnosis and an afternoon of
                 // bisecting namespaces.
@@ -2316,7 +2340,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -2438,7 +2462,7 @@ mod tests {
                 // SAFETY: closing the child's copy of the read end.
                 unsafe { libc::close(reader) };
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(config, None, Some(writer)) {
+                if let Err(error) = backend.apply(config, None, Some(writer), None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };

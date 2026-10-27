@@ -5,10 +5,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(box_native_test_faults)");
+    println!("cargo::rustc-check-cfg=cfg(box_native_kernel_tests)");
     println!("cargo:rerun-if-env-changed=SDKROOT");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
     println!("cargo:rerun-if-changed=src/run/macos_enforcement/bridge.c");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && std::env::var_os("CARGO_FEATURE_NATIVE_FILESYSTEM_POLICY").is_some()
+    {
+        compile_linux_guard();
+        if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some()
+        {
+            compile_linux_test_workloads();
+        }
+    }
     // Only macOS binaries carry the section; Linux links unchanged.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -92,4 +104,77 @@ fn compile_bridge() {
     println!("cargo:rustc-link-lib=static=box_endpoint_security");
     println!("cargo:rustc-link-lib=EndpointSecurity");
     println!("cargo:rustc-link-lib=bsm");
+}
+
+fn compile_linux_guard() {
+    let source = "src/run/linux_enforcement/guard/api.c";
+    println!("cargo:rerun-if-changed={source}");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("build output"));
+    let object = output.join("box_entry_guard.o");
+    let archive = output.join("libbox_entry_guard.a");
+    let status = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-D_GNU_SOURCE",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-c",
+            source,
+            "-o",
+        ])
+        .arg(&object)
+        .status()
+        .expect("compile entry guard");
+    assert!(status.success(), "entry guard compilation failed");
+    let status = Command::new("ar")
+        .args(["crs"])
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("archive entry guard");
+    assert!(status.success(), "entry guard archive failed");
+    println!("cargo:rustc-link-search=native={}", output.display());
+    println!("cargo:rustc-link-lib=static=box_entry_guard");
+}
+
+fn compile_linux_test_workloads() {
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("build output"));
+    for (source, name, variable) in [
+        (
+            "tests/support/linux_native_workload.c",
+            "native-workload",
+            "NATIVE_WORKLOAD",
+        ),
+        (
+            "tests/support/linux_native_failure_workload.c",
+            "native-failure-workload",
+            "NATIVE_FAILURE_WORKLOAD",
+        ),
+    ] {
+        println!("cargo:rerun-if-changed={source}");
+        let binary = output.join(name);
+        let status = Command::new("cc")
+            .args([
+                "-D_GNU_SOURCE",
+                "-std=c11",
+                "-O2",
+                "-nostdlib",
+                "-static",
+                "-fno-builtin",
+                "-fno-stack-protector",
+                "-fno-pie",
+                "-no-pie",
+                source,
+                "-o",
+            ])
+            .arg(&binary)
+            .status()
+            .expect("compile native filesystem test workload");
+        assert!(
+            status.success(),
+            "native filesystem test workload compilation failed"
+        );
+        println!("cargo:rustc-env={variable}={}", binary.display());
+    }
 }

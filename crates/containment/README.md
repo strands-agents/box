@@ -19,7 +19,7 @@ The public API describes one complete request and applies it once:
 | `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
-| `Containment::apply(&config, egress_handoff)` | Detect the host backend and irreversibly contain the calling process. |
+| `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
 
 The crate root exports **13 names**: `Containment`, `ContainmentConfig`,
@@ -49,7 +49,7 @@ let config = ContainmentConfig::new()
     .allow(&home, Operation::Write, Scope::Root)?;
 
 // The second argument is `Option<&std::os::unix::net::UnixStream>`.
-Containment::apply(&config, None)?;
+Containment::apply(&config, None, None, None)?;
 ```
 
 The second argument is the egress handoff, and it is not a second entry point.

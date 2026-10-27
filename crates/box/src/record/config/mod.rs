@@ -319,6 +319,11 @@ impl RunContract {
         &self.file.experimental_features
     }
 
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    pub(crate) fn uses_native_filesystem(&self) -> bool {
+        self.file.uses_native_filesystem()
+    }
+
     pub(crate) fn box_directory(&self) -> &Path {
         &self.box_directory
     }
@@ -600,9 +605,9 @@ impl ExperimentalFeatures {
 
     fn validate(&self) -> Result<(), ConfigError> {
         if self.native_filesystem_policy
-            && !cfg!(all(
-                target_os = "macos",
-                feature = "native-filesystem-policy"
+            && !cfg!(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))
         {
             return Err(ConfigError::ExperimentalFeatureUnavailable {
@@ -1112,6 +1117,19 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    fn uses_native_filesystem(&self) -> bool {
+        let contained = crate::record::config::mcp::contained_specs(&self.mcp);
+        self.agent
+            .iter()
+            .chain(self.tool.values())
+            .chain(contained.values().map(|server| &server.spec))
+            .any(|spec| {
+                spec.native_filesystem_policy
+                    .unwrap_or(self.experimental_features.native_filesystem_policy)
+            })
+    }
+
     fn read(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -1282,6 +1300,53 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    #[test]
+    fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
+        let base = r#"name = "selection"
+box_dir = "/var/lib/box"
+[experimental-features]
+native-filesystem-policy = true
+[agent]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#;
+        for (extra, expected) in [
+            ("", false),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+        ] {
+            let file = ConfigFile::parse(&format!("{base}{extra}"), Path::new("box.toml")).unwrap();
+            assert_eq!(file.uses_native_filesystem(), expected, "{extra}");
+        }
+    }
+
     #[test]
     fn process_policy_overrides_require_the_global_gate_and_a_new_record() {
         for table in ["agent", "tool.cargo", "mcp.files"] {
@@ -1350,9 +1415,9 @@ native-filesystem-policy = false
             &format!("{required}[experimental-features]\nnative-filesystem-policy = true\n"),
             Path::new("box.toml"),
         );
-        if cfg!(all(
-            target_os = "macos",
-            feature = "native-filesystem-policy"
+        if cfg!(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
         )) {
             assert!(
                 enabled
