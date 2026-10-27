@@ -27,7 +27,7 @@ on:
         required: false
         type: choice
         default: both
-        options: [both, ubuntu-latest, macos-latest]
+        options: [both, ubuntu-24.04-arm, macos-latest]
       lint:
         description: "Also run fmt/clippy. Off by default for a scoped diagnostic run."
         required: false
@@ -46,5 +46,5 @@ jobs:
       fail_fast: false
       filter: ${{ inputs.filter }}
       # Map the OS choice to the JSON array the reusable matrix consumes.
-      os: ${{ inputs.os == 'both' && '["ubuntu-latest", "macos-latest"]' || format('["{0}"]', inputs.os) }}
+      os: ${{ inputs.os == 'both' && '["ubuntu-24.04-arm", "macos-latest"]' || format('["{0}"]', inputs.os) }}
       run_lint: ${{ inputs.lint }}

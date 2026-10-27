@@ -27,7 +27,7 @@ on:
         description: 'JSON array of runner OSes for the test matrix. Default runs both; a dispatch narrows it, e.g. ["macos-latest"].'
         required: false
         type: string
-        default: '["ubuntu-latest", "macos-latest"]'
+        default: '["ubuntu-24.04-arm", "macos-latest"]'
       run_lint:
         description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
         required: false
@@ -79,7 +79,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         # ubuntu-latest starts with about 1 GB free after the checkout. A debug
         # `--all-targets` link of the workspace (many test binaries that each
         # statically link pyo3, napi, mlua, rustls, and now opentelemetry) fills
@@ -92,6 +92,16 @@ jobs:
         # parallelism. The runner is a single-use VM, so the delete is local to
         # this job.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          test "$(uname -m)" = aarch64
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
 
       - name: Cache cargo
         # Wraps actions/cache with keys tuned for cargo (registry, git, target).
@@ -140,34 +150,33 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features --verbose
 
+      - name: Install the alias image beside unit-test binaries
+        if: runner.os == 'Linux'
+        run: install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+
       - name: Run tests (linux)
-        if: matrix.os == 'ubuntu-latest'
-        # The `backend::linux::namespace::*` tests need capabilities the
-        # runner's AppArmor `unprivileged_userns` profile refuses:
-        # `unshare(CLONE_NEWUSER)`, `mount(2)`, and `capset` inside a fresh
-        # user namespace. Those tests belong on the AL2023 EC2 host that
-        # `scripts/test-linux-i4.sh` and `scripts/al2023-i4-test-host.yaml`
-        # provision, not on a hosted GitHub runner. The `view::tests` cases
-        # that only build a mount plan run here; the ones that actually enter a
-        # namespace and mount are skipped by name alongside the module skips.
-        # The four `*_establishes` / `*_is_refused` / `*_not_created_on_the_host`
-        # cases below are in that set too. Every remaining test in the workspace
-        # stays fatal.
+        shell: bash
+        if: runner.os == 'Linux'
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
         run: |
+          set -o pipefail
+          set +e
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
-            -- --show-output \
-            --skip 'backend::linux::namespace::authority' \
-            --skip 'backend::linux::namespace::netns' \
-            --skip 'backend::linux::namespace::reaper' \
-            --skip 'backend::linux::namespace::view::tests::a_read_only_directory_grant_may_enclose_an_exec_literals_file_bind' \
-            --skip 'backend::linux::namespace::view::tests::a_submount_under_a_read_only_grant_is_also_read_only' \
-            --skip 'backend::linux::namespace::view::tests::an_exec_file_under_a_read_root_establishes' \
-            --skip 'backend::linux::namespace::view::tests::a_symlinked_exec_file_under_a_read_root_establishes' \
-            --skip 'backend::linux::namespace::view::tests::a_symlink_at_a_mountpoint_outside_any_bind_is_refused' \
-            --skip 'backend::linux::namespace::view::tests::an_absent_mountpoint_is_not_created_on_the_host'
+            -- --show-output 2>&1 | tee linux-workspace-tests.log
+          test_status=$?
+          set -e
+          python3 scripts/check-linux-test-output.py linux-workspace-tests.log | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$test_status"
+
+      - name: Upload Linux workspace test output
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests-${{ matrix.os }}
+          path: linux-workspace-tests.log
+          if-no-files-found: warn
 
       - name: Run tests (macos)
         if: matrix.os == 'macos-latest'

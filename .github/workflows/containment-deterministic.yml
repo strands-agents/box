@@ -35,40 +35,7 @@ jobs:
     # than running to the 6-hour default -- CN-* cases spawn real subprocesses
     # under a cage, and a wedged one would otherwise burn the whole budget.
     timeout-minutes: 45
-    # The two legs differ: macOS BLOCKS, Linux is advisory. See
-    # test-integ/README.md.
-    #
-    #   macos-latest — BLOCKING. No case is quarantined on macOS. This is
-    #     the platform the suite was written against and the only one that binds
-    #     `file-graft`, so a regression here is a real defect and must stop the
-    #     merge.
-    #
-    #   ubuntu-24.04-arm — ADVISORY, and it MUST be an arm64 runner. Linux
-    #     containment is aarch64-only by construction: facade.rs maps
-    #     `Platform::Linux if architecture == "aarch64"` to the namespace
-    #     mechanism and refuses everything else, so on x86_64 the trampoline
-    #     exits with "Linux containment supports ARM64 (aarch64), not x86_64"
-    #     and every case errors out at the harness's positive control. A first CI
-    #     run on `ubuntu-latest` (x86_64) confirmed this: 57 errors, 0 passes.
-    #     Advisory because no arm64 run has gone green yet, not because the
-    #     platform is expected to fail. Flip it by deleting the expression below
-    #     once it has a green baseline.
-    #
-    #     Note the AppArmor question is settled and was NOT the blocker: the
-    #     sysctl step below demonstrably works (the run logged `before: 1` ->
-    #     `after: 0` and `unshare(CLONE_NEWUSER): OK`). It stays because Ubuntu
-    #     24.04 restricts unprivileged user namespaces on arm64 too, and the
-    #     cage needs that primitive either way.
-    #
-    # NOTE: a leg being advisory is not the same as a leg being watched. Neither
-    # a red advisory leg nor a red blocking leg notifies anyone; the blocking one
-    # at least fails CI Gate. Adding CI Gate as a required status check on the
-    # `block-main` ruleset is a separate, admin-only step.
-    #
-    # The Linux-only conditions below match on the runner FAMILY rather than the
-    # exact label, so changing the Ubuntu image again cannot silently strand a
-    # step behind a stale `== 'ubuntu-latest'`.
-    continue-on-error: ${{ startsWith(matrix.os, 'ubuntu') }}
+    # Both platforms affect CI Gate. Linux needs ARM64 to execute the namespace backend.
     strategy:
       # Report every OS's outcome even if one fails. A Linux failure is not a
       # reason to hide the macOS one.

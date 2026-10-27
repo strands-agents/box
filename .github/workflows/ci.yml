@@ -46,6 +46,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/rust-*'
+              - 'scripts/check-linux-test-output.py'
+              - 'scripts/test_linux_test_output.py'
               - '.github/workflows/ci.yml'
             containment:
               - 'crates/**/!(*.md)'
