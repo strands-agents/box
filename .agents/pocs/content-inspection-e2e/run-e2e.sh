@@ -14,7 +14,7 @@
 set -uo pipefail
 
 MODE="${1:-stdio}"
-case "$MODE" in stdio|unix|https) ;; *) echo "usage: $0 <stdio|unix|https> [backend]"; exit 2 ;; esac
+case "$MODE" in stdio|unix|https) ;; *) echo "usage: $0 <stdio|unix|https> [regex|presidio|decider|fake]"; exit 2 ;; esac
 BACKEND="${2:-regex}"
 TIMEOUT_MS="${TIMEOUT_MS:-$([ "$BACKEND" = decider ] && echo 120000 || echo 2000)}"
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
@@ -46,8 +46,13 @@ if [ "$BACKEND" = fake ]; then
   LEAF_ENV=""
 else
   PY="$INSPECTOR_DIR/.venv/bin/python"
-  SCRIPT="$INSPECTOR_DIR/inspector.py"
-  INSPECTOR_ARGS=(--backend "$BACKEND" --domain-blocklist "$LISTS/domains" --ip-blocklist "$LISTS/ips")
+  case "$BACKEND" in
+  regex) SCRIPT="$INSPECTOR_DIR/regex-rules.py" ;;
+  presidio) SCRIPT="$INSPECTOR_DIR/presidio.py" ;;
+  decider) SCRIPT="$INSPECTOR_DIR/strands-decider.py" ;;
+  *) echo "usage: $0 <stdio|unix|https> <regex|presidio|decider|fake>"; exit 2 ;;
+  esac
+  INSPECTOR_ARGS=(--domain-blocklist "$LISTS/domains" --ip-blocklist "$LISTS/ips")
   # DEVICE=mps on an Apple Silicon Mac, DEVICE=cuda on an NVIDIA host.
   [ "$BACKEND" = decider ] && INSPECTOR_ARGS+=(--device "${DEVICE:-cpu}")
   # The venv python links to the system (mise) interpreter, so the leaf reads both trees.

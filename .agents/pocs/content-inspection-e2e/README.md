@@ -26,8 +26,9 @@ agent (curl) ──HTTPS──▶ egress gateway (MITM, body buffered)
 ```
 
 - The inspector is any program that speaks the protocol in
-  `../egress-classification-protocol/SPEC.md` (draft 0.2). `../content-inspector/inspector.py`
-  wraps three backends: `regex`, `presidio`, and `decider` (Strands Decider, a local 2B model).
+  `../egress-classification-protocol/SPEC.md` (draft 0.2). `../content-inspector/` holds three
+  separate inspectors: `regex-rules.py`, `presidio.py`, and `strands-decider.py` (Strands Decider,
+  a local 2B model).
 - Box reaches the inspector in one of three ways:
   - **unix**: the inspector runs outside the box, started by you, on a socket you own that is not
     group- or other-writable. Box keeps one connection and reconnects after it drops.
@@ -67,7 +68,7 @@ endpoint = "unix:///abs/path/inspector.sock"
 # ca_file = "/abs/path/ca.pem"           # optional extra trust root (prototype knob)
 
 # stdio: Box starts it in a leaf.
-# command = ["/path/to/python3", "/path/to/inspector.py", "--stdio", "--backend", "regex"]
+# command = ["/path/to/python3", "/path/to/regex-rules.py", "--stdio"]
 # env = { HOME = "/Users/you" }
 # gpu = true                       # macOS only: Metal for the leaf, and only this leaf
 # [egress.inspector.filesystem]
@@ -98,10 +99,10 @@ credentials are needed.
 
 ```sh
 cd .agents/pocs/content-inspector
-.venv/bin/python -I inspector.py --socket /tmp/inspector.sock --backend decider --device mps
+.venv/bin/python -I strands-decider.py --socket /tmp/inspector.sock --device mps
 ```
 
-Use `--backend regex` instead for an instant start and ~1 ms answers.
+Use `regex-rules.py` instead for an instant start and ~1 ms answers.
 
 **Terminal 2** — write a box. Run this from the repository root.
 
@@ -238,10 +239,10 @@ is accepted there and does nothing.
 
 - A denial from inspection is not written to the policy history.
 - The leaf is not restarted if it exits; every request after that is denied.
-- `NEWLY_REGISTERED` is not implemented by `inspector.py`, so it is not advertised.
+- `NEWLY_REGISTERED` is not implemented by the inspectors in `../content-inspector/`, so it is not advertised.
 - A provider used on another action than its own (for example `Inspection::Domain` in an
   `http:request` rule) sees no labels.
 - The inspector only sees request bodies. Responses, MCP tool arguments, and file writes are not
   inspected.
 - Decider's accuracy is not measured. In one smoke test it missed a GitHub token that the regex
-  backend caught.
+  inspector caught.
