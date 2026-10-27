@@ -253,7 +253,6 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    #[cfg(box_native_adapter_tests)]
     #[test]
     fn path_only_broker_delivery_preserves_policy_and_handle_restrictions() {
         use super::*;

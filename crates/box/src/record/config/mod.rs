@@ -319,11 +319,7 @@ impl RunContract {
         &self.file.experimental_features
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     pub(crate) fn uses_native_filesystem(&self) -> bool {
         self.file.uses_native_filesystem()
     }
@@ -611,11 +607,7 @@ impl ExperimentalFeatures {
         if self.native_filesystem_policy
             && !cfg!(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))
         {
             return Err(ConfigError::ExperimentalFeatureUnavailable {
@@ -1125,11 +1117,7 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     fn uses_native_filesystem(&self) -> bool {
         let contained = crate::record::config::mcp::contained_specs(&self.mcp);
         self.agent
@@ -1312,11 +1300,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     #[test]
     fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
         let base = r#"name = "selection"
@@ -1443,11 +1427,7 @@ native-filesystem-policy = false
         );
         if cfg!(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         )) {
             assert!(
                 enabled

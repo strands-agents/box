@@ -6,11 +6,7 @@ use std::fs::File;
 #[cfg(any(
     target_os = "macos",
     test,
-    all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )
+    all(target_os = "linux", feature = "native-filesystem-policy")
 ))]
 use std::io::Write as _;
 #[cfg(unix)]
@@ -38,11 +34,7 @@ const EXECUTABLE_MARKER: &[u8] =
 /// A private handshake that holds the trusted trampoline before workload execution.
 #[cfg(any(
     all(target_os = "macos", feature = "native-filesystem-policy"),
-    all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )
+    all(target_os = "linux", feature = "native-filesystem-policy")
 ))]
 pub(crate) struct LaunchGate {
     parent: std::os::unix::net::UnixStream,
@@ -51,11 +43,7 @@ pub(crate) struct LaunchGate {
 
 #[cfg(any(
     all(target_os = "macos", feature = "native-filesystem-policy"),
-    all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )
+    all(target_os = "linux", feature = "native-filesystem-policy")
 ))]
 impl LaunchGate {
     pub(crate) fn attach(command: &mut Command) -> std::io::Result<Self> {
@@ -66,11 +54,7 @@ impl LaunchGate {
         Ok(Self { parent, child })
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     pub(crate) fn release_native(
         mut self,
         registration: crate::run::native_enforcement::Registration,
@@ -110,11 +94,7 @@ pub(crate) struct Trampoline {
     bootstrap: Option<File>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     launch_gate: Option<LaunchGate>,
     setup_status: SetupStatusPipe,
@@ -130,11 +110,7 @@ impl Trampoline {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn take_launch_gate(&mut self) -> Option<LaunchGate> {
         self.launch_gate.take()
@@ -151,11 +127,7 @@ impl Trampoline {
             bootstrap: None,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             launch_gate: None,
             setup_status: SetupStatusPipe {
@@ -211,11 +183,7 @@ pub(crate) type ImageName<'a> = &'a dyn Fn(&str) -> Result<ImageCache, BoxError>
 pub(crate) struct Launch<'a> {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) hold_for_registration: bool,
     /// The serialized containment config, and the digest of the exact bytes written.
@@ -255,11 +223,7 @@ pub(crate) fn command(launch: Launch<'_>) -> Result<(Command, Trampoline), BoxEr
     }
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     let launch_gate = if launch.hold_for_registration {
         Some(
@@ -281,11 +245,7 @@ pub(crate) fn command(launch: Launch<'_>) -> Result<(Command, Trampoline), BoxEr
             setup_status,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             launch_gate,
         },
@@ -962,11 +922,7 @@ mod tests {
         Launch {
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             hold_for_registration: false,
             config_path: config,

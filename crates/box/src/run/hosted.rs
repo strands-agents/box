@@ -237,11 +237,7 @@ fn tool_spawner(
     recorder: Arc<telemetry::DecisionRecorder>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
 ) -> strands_shell::os::HostSpawner {
@@ -249,11 +245,7 @@ fn tool_spawner(
         let recorder = Arc::clone(&recorder);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let registration = registration.clone();
         let attachment = attachment.clone();
@@ -312,11 +304,7 @@ fn tool_spawner(
                 &layout,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 registration,
             )
@@ -342,11 +330,7 @@ fn tool_spawner(
 pub(crate) struct McpLeafLauncher {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
     attachment: Attachment,
@@ -370,22 +354,14 @@ impl McpLeafLauncher {
         workspace: PathBuf,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<super::native_enforcement::Registration>,
     ) -> Self {
         Self {
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
             attachment,
@@ -476,11 +452,7 @@ impl McpLeafLauncher {
             &self.layout,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             self.registration.clone(),
         )
@@ -538,11 +510,7 @@ pub(crate) struct HostedBox {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
@@ -574,11 +542,7 @@ pub(crate) struct HostedBox {
 impl HostedBox {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn native_registration(&self) -> Option<super::native_enforcement::Registration> {
         self._file_monitor
@@ -611,12 +575,9 @@ impl HostedBox {
         owned: Lock,
         workspace: &Path,
         home: &Path,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
-        entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+            std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+        >,
     ) -> Result<Self, BoxError> {
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
@@ -752,19 +713,11 @@ impl HostedBox {
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let monitor_required = record.experimental_features.native_filesystem_policy;
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         let monitor_required = super::native_enforcement::selected(record);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let file_monitor = if monitor_required {
             Some(super::native_enforcement::FileMonitor::start(
@@ -773,11 +726,7 @@ impl HostedBox {
                 root.name(),
                 &crate::record::layout::operator_home_directory()?,
                 coordinator_fatal_sender.clone(),
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 entry_guard,
             )?)
         } else {
@@ -795,11 +744,7 @@ impl HostedBox {
             Arc::clone(&recorder),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
@@ -816,11 +761,7 @@ impl HostedBox {
                 workspace.to_path_buf(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
@@ -846,11 +787,7 @@ impl HostedBox {
             broker: Some(broker),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
@@ -889,11 +826,7 @@ impl HostedBox {
     pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         if self._file_monitor.is_some() {
             if let Some(discovery) = &self.discovery {
@@ -1073,11 +1006,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             owned,
             &workspace,
             &workspace,
-            #[cfg(all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            ))]
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             None,
         )
         .expect("the box is hosted");
@@ -1143,11 +1072,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 owned,
                 &workspace,
                 &workspace,
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 None,
             )
         })
@@ -1947,11 +1872,7 @@ while :; do :; done"#
                 workspace,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 None,
             );

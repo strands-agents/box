@@ -120,6 +120,11 @@ The default is `false`. Unknown feature names are errors.
 The standard release excludes this experiment. An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
+On Linux, startup can report `this kernel cannot transfer O_PATH handles; path-only opens are refused`.
+`O_PATH` handles identify a file or directory without granting content access.
+This warning disables path-only opens. Other supported native operations remain available.
+See [Linux coverage and limits](native-filesystem-policy.md#linux-arm64) for the probe and its failure behavior.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:

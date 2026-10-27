@@ -107,5 +107,4 @@ path = "tests/child_ipc.rs"
 required-features = ["test-support"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(box_native_adapter_tests)"] }
 unused_must_use = "deny"

@@ -24,23 +24,9 @@ pub(crate) mod lock;
 pub(crate) mod macos_enforcement;
 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
 pub(crate) use macos_enforcement as native_enforcement;
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 #[path = "linux_enforcement/mod.rs"]
 pub(crate) mod native_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
 pub(crate) mod telemetry;
-
-#[cfg(all(
-    test,
-    box_native_kernel_tests,
-    not(box_native_adapter_tests),
-    target_os = "linux",
-    feature = "native-filesystem-policy"
-))]
-#[path = "linux_enforcement/kernel.rs"]
-mod native_enforcement;

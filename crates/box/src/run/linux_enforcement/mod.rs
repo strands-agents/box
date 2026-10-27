@@ -351,5 +351,5 @@ pub(crate) fn preflight() -> Result<(), BoxError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, box_native_kernel_tests))]
 mod mechanism_tests;

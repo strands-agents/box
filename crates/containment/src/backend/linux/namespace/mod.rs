@@ -1,7 +1,7 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
-#[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+#[cfg(feature = "native-filesystem-policy")]
 mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
@@ -165,9 +165,9 @@ impl ContainmentBackend for NamespaceBackend {
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
         let policy = syscall::SyscallPolicy::for_config(config.network());
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
-        #[cfg(not(all(feature = "native-filesystem-policy", box_native_adapter_tests)))]
+        #[cfg(not(feature = "native-filesystem-policy"))]
         if native_filesystem_handoff.is_some() {
             return Err(unenforceable(
                 "native filesystem interception is absent from this build",
@@ -233,7 +233,7 @@ impl ContainmentBackend for NamespaceBackend {
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         if let Some(handoff) = native_filesystem_handoff {
             native_filesystem::handoff(handoff).map_err(|error| {
                 apply_failure(format!(

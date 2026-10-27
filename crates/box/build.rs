@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo::rustc-check-cfg=cfg(box_native_adapter_tests)");
     println!("cargo::rustc-check-cfg=cfg(box_native_test_faults)");
     println!("cargo::rustc-check-cfg=cfg(box_native_kernel_tests)");
     println!("cargo:rerun-if-env-changed=SDKROOT");
