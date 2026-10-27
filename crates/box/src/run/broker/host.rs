@@ -672,6 +672,9 @@ async fn serve_transport(
             }
             // Either the peeked frame or the next one off the wire. A finished Call is taken first, so
             // its Program is back in `programs` before any frame naming it is handled.
+            // Keep partially read frames alive while completions are handled.
+            let next_frame = read_frame::<Frame, _>(&mut reader);
+            tokio::pin!(next_frame);
             let frame: Frame = match pending.take() {
                 Some(value) => serde_json::from_value(value)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
@@ -712,7 +715,7 @@ async fn serve_transport(
                         }
                         next = tokio::time::timeout(
                             idle_timeout(!mcp.is_empty()),
-                            read_frame::<Frame, _>(&mut reader),
+                            &mut next_frame,
                         ) => {
                             match next.map_err(|_| timed_out("read a transport frame"))?? {
                                 Some(frame) => break frame,
@@ -3864,6 +3867,105 @@ done"#;
             Some("reopened"),
             "the stale completion must leave the reopened program registered"
         );
+    }
+
+    /// A completed Call preserves the next frame's partially read prefix.
+    #[test]
+    fn a_partial_transport_frame_survives_another_calls_completion() {
+        use std::os::fd::{AsFd, AsRawFd};
+        use tokio::io::AsyncWriteExt;
+
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let marker = tempfile::tempdir().expect("marker");
+                let spec = connection_spec(marker.path());
+                let (client, server) = UnixStream::pair().expect("transport pair");
+                let observer = server
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .expect("socket observer");
+                let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+                let first = serde_json::to_value(Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 1,
+                    body: Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                })
+                .expect("first frame");
+                let server =
+                    tokio::task::spawn_local(serve_transport(server, spec, first, None, shutdown));
+                let (mut reader, mut writer) = client.into_split();
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source:
+                            "printf running; while test ! -f \"$HOME/release\"; do sleep 0.01; done"
+                                .to_string(),
+                    },
+                )
+                .await;
+                await_output(&mut reader, 1, "running").await;
+
+                let payload = serde_json::to_vec(&Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 2,
+                    body: Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                })
+                .expect("next frame");
+                let length = u32::try_from(payload.len()).unwrap().to_be_bytes();
+                writer
+                    .write_all(&length[..1])
+                    .await
+                    .expect("partial prefix");
+                loop {
+                    let mut unread: libc::c_int = 0;
+                    // SAFETY: the owned descriptor is live and unread points to a writable integer.
+                    let result =
+                        unsafe { libc::ioctl(observer.as_raw_fd(), libc::FIONREAD, &mut unread) };
+                    assert_eq!(result, 0, "inspect queued socket bytes");
+                    if unread == 0 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                drop(observer);
+                std::fs::write(marker.path().join("release"), "").expect("release the call");
+                let (_, status) = collect(&mut reader, 1).await;
+                assert_eq!(
+                    status, 0,
+                    "the first call completes during the partial frame"
+                );
+
+                writer
+                    .write_all(&length[1..])
+                    .await
+                    .expect("remaining prefix");
+                writer.write_all(&payload).await.expect("remaining frame");
+                put(
+                    &mut writer,
+                    2,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: "printf replacement".to_string(),
+                    },
+                )
+                .await;
+                let (text, status) = collect(&mut reader, 2).await;
+                assert_eq!(status, 0);
+                assert_eq!(text, "replacement");
+                drop(reader);
+                drop(writer);
+                server.await.expect("server task").expect("clean transport");
+            })
+            .await
+            .expect("the fragmented exchange must finish");
+        }));
     }
 
     /// A reused `ProgramId` is never answered with a closed Call's status.
