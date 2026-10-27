@@ -25,3 +25,12 @@ pub(crate) mod macos_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
 pub(crate) mod telemetry;
+
+#[cfg(all(
+    test,
+    box_native_kernel_tests,
+    target_os = "linux",
+    feature = "native-filesystem-policy"
+))]
+#[path = "linux_enforcement/kernel.rs"]
+mod native_enforcement;
