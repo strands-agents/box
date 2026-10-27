@@ -103,7 +103,7 @@ one. A directory entry is recursive, and a file entry is exact. `write` does not
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
+What a grant costs is that no `fs:*` decision records these operations, so the box prints each one
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.

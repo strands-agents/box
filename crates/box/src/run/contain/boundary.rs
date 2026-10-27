@@ -197,10 +197,7 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
-    #[cfg(any(
-        all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(target_os = "linux", feature = "native-filesystem-policy")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
     executable: PathBuf,
@@ -687,10 +684,7 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             native_filesystem_policy: spec
                 .native_filesystem_policy
                 .unwrap_or(site.stored.experimental_features.native_filesystem_policy),
@@ -709,10 +703,7 @@ impl Boundary {
         })
     }
 
-    #[cfg(any(
-        all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(target_os = "linux", feature = "native-filesystem-policy")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
     }

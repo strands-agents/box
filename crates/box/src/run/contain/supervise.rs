@@ -22,26 +22,17 @@ async fn spawn_registered(
     configure_streams: impl FnOnce(&mut Command),
     own_terminal: bool,
     #[cfg(target_os = "linux")] relay_control: Option<&std::os::unix::net::UnixStream>,
-    #[cfg(any(
-        all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(target_os = "linux", feature = "native-filesystem-policy")
-    ))]
-    registration: Option<crate::run::native_enforcement::Registration>,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+        crate::run::macos_enforcement::Registration,
+    >,
 ) -> Result<(ProcessGroup, Trampoline), BoxError> {
     #[cfg_attr(
-        not(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        )),
+        not(all(target_os = "macos", feature = "native-filesystem-policy")),
         allow(unused_mut)
     )]
     let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        hold_for_registration: registration.is_some()
-            && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()),
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        hold_for_registration: registration.is_some(),
         config_path: boundary.containment_config(),
         config_file: boundary.containment_config_file(),
         config_sha256: boundary.containment_digest(),
@@ -60,19 +51,10 @@ async fn spawn_registered(
         relay_control,
     })?;
     configure_streams(&mut command);
-    #[cfg(any(
-        all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(target_os = "linux", feature = "native-filesystem-policy")
-    ))]
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     let gate = trampoline.take_launch_gate();
-    #[cfg(any(
-        all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(target_os = "linux", feature = "native-filesystem-policy")
-    ))]
-    if (registration.is_some()
-        && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()))
-        != gate.is_some()
-    {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    if registration.is_some() != gate.is_some() {
         return Err(SuperviseError::Control {
             reason: "native launch gate and registration disagree".into(),
         }
@@ -89,10 +71,7 @@ async fn spawn_registered(
             .map_err(|source| SuperviseError::Spawn { source })?;
     }
     #[cfg_attr(
-        not(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        )),
+        not(all(target_os = "macos", feature = "native-filesystem-policy")),
         allow(unused_mut)
     )]
     let mut group = ProcessGroup::spawn_with_terminal(command, own_terminal).await?;
@@ -110,19 +89,6 @@ async fn spawn_registered(
             gate.release(|| registration.set_mode(pid, mediated))
         })
         .await;
-        let error = match result {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(error) => Some(error.to_string()),
-        };
-        if let Some(reason) = error {
-            let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
-        }
-    }
-    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
-    if let (Some(gate), Some(registration)) = (gate, registration) {
-        let result = tokio::task::spawn_blocking(move || gate.release_native(registration)).await;
         let error = match result {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error.to_string()),
@@ -535,10 +501,7 @@ impl Contained {
             own_terminal,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             hosted.native_registration(),
         )
         .await?;
@@ -683,11 +646,9 @@ impl LeafBox {
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<LaunchedLeaf, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned, because the
         // trampoline sends its listening descriptor over it during containment setup.
@@ -705,10 +666,7 @@ impl LeafBox {
             false,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             registration,
         )
         .await?;
@@ -758,11 +716,9 @@ impl LeafBox {
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
         // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
@@ -777,10 +733,7 @@ impl LeafBox {
             Stdio::null(),
             Stdio::piped(),
             Stdio::piped(),
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             registration,
         )
         .await?;
@@ -819,11 +772,9 @@ impl LeafBox {
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
     ) -> Result<StreamingLeaf, BoxError> {
         // stderr is piped, not nulled: a containment setup failure must carry the trampoline's own
         // message as `detail`, the same reason the buffered `run` path reports. On success the
@@ -841,10 +792,7 @@ impl LeafBox {
             Stdio::piped(),
             Stdio::piped(),
             Stdio::piped(),
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             registration,
         )
         .await?;

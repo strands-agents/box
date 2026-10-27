@@ -10,7 +10,6 @@ name = "containment"
 path = "src/lib.rs"
 
 [features]
-native-filesystem-policy = []
 # Opt-in test doubles (see src/test_support.rs). Not enabled by default so shipped
 # binaries never carry mocks.
 test-support = []

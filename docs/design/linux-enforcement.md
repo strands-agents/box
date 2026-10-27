@@ -32,23 +32,13 @@ The [network exception](#network-access) changes only the network namespace choi
 
 Strands Shell, Monty, and the policy engine run in the box's trusted process, outside these sandboxes.
 Policy decides requests that reach those components.
-Without native filesystem policy, the workload's own file operations use filesystem grants and produce no individual policy decision.
+The workload's own file operations use its filesystem grants and produce no individual policy decision.
 See [the two enforcement paths](containment.md#two-kinds-of-enforcement).
 
 The [Linux boundary uses namespaces rather than Landlock](decisions.md#the-linux-boundary-is-namespaces-not-landlock), a mechanism for additional process access restrictions.
-The optional [native filesystem policy](../user/native-filesystem-policy.md) adds policy decisions to selected direct filesystem operations.
-It requires a feature-enabled build and a kernel with seccomp notification, descriptor transfer, and BPF security hooks.
-The trusted process loads its identity guard with `CAP_BPF` and `CAP_PERFMON`, then drops those capabilities.
-Selected workloads pass their notification listener and filesystem root through the trusted launcher.
-The broker resolves paths inside that root and checks the same policy engine used by mediated requests.
-It transfers approved open descriptors and applies delete or rename through kernel-checked file identities.
-It never resumes an unchecked pathname operation after an approval.
-
-The running kernel determines whether path-only descriptor transfer is available.
-An active probe checks both ordinary and path-only transfer before workload launch.
-Unsupported path-only transfer is disclosed; other probe failures stop startup.
-Existing handles remain usable without fresh read, write, or directory-listing decisions.
-The [native policy guide](../user/native-filesystem-policy.md#coverage-and-limits) lists operations, failure behavior, and remaining limits.
+Direct Linux file operations use filesystem grants rather than individual policy decisions.
+Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
+See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
 ## How the filesystem view changes access
 
