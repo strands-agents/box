@@ -203,3 +203,23 @@ Two are worth knowing even if you are only reading: the unusable-secret decision
 `Secret` type is the reason three sources cannot each be wrong about content; and the
 endpoint-breadth decision, because the guard it replaced had been bypassable by writing `*:443`
 instead of `*`.
+
+## Live daemon test
+
+The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
+credsd daemon. Configure a test environment that permits the test process to list
+credentials, then run:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+```
+
+The test checks daemon health and caller access to the configured environment before
+requesting an unknown environment. It requires the specific unknown-environment error.
+A connection failure cannot satisfy that assertion. The configured environment is used
+only for the credential-list check, not for credential acquisition.
+
+An explicit socket or test environment makes setup failures fatal. Without either
+setting, the test reports a skip. A skipped test does not prove daemon compatibility.
