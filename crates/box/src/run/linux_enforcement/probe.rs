@@ -181,4 +181,92 @@ mod tests {
         assert_eq!(super::path_handles().unwrap(), first);
         assert!(unsafe { libc::syscall(libc::SYS_getpid) } > 0);
     }
+    #[cfg(box_native_adapter_tests)]
+    #[test]
+    fn path_only_broker_delivery_preserves_policy_and_handle_restrictions() {
+        use super::*;
+        use crate::run::native_enforcement::{PATH_HANDLES, broker};
+        use crate::run::telemetry::DecisionRecorder;
+        use policy::{GovernedBox, PathResolver, Policy};
+        let supported = path_handles().unwrap();
+        let _ = PATH_HANDLES.set(supported);
+        for permitted in [true, false] {
+            let fixture = tempfile::tempdir().unwrap();
+            let name =
+                std::ffi::CString::new(fixture.path().as_os_str().as_encoded_bytes()).unwrap();
+            let engine = crate::test_support::open_policy(vec![Policy {
+                origin: "native-handle.dw".into(),
+                text: if permitted {
+                    "permit(principal, action, resource);"
+                } else {
+                    "forbid(principal, action, resource);"
+                }
+                .into(),
+            }]);
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            receiver
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let readable = std::fs::File::open("/dev/null").unwrap();
+            let root = unsafe {
+                OwnedFd::from_raw_fd(
+                    notify::checked(libc::open(
+                        c"/".as_ptr(),
+                        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    ))
+                    .unwrap(),
+                )
+            };
+            let pid = notify::checked(unsafe { libc::fork() }).unwrap();
+            if pid == 0 {
+                unsafe { child(sender.as_raw_fd()) }
+            }
+            let child = Child(pid);
+            drop(sender);
+            let handles = notify::receive_handles(&receiver, 1).unwrap();
+            let listener = handles[0].as_raw_fd();
+            let control = notify::receive(listener).unwrap();
+            notify::inject(listener, control.id, readable.as_raw_fd(), true).unwrap();
+            let mut request = notify::receive(listener).unwrap();
+            request.data.number = libc::SYS_openat as i32;
+            request.data.args = [
+                libc::AT_FDCWD as u64,
+                name.as_ptr() as u64,
+                (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
+                0,
+                0,
+                0,
+            ];
+            let resolver = PathResolver::over([std::path::PathBuf::from("/")]).unwrap();
+            let event = broker::file_request(
+                &resolver,
+                &engine,
+                root.as_raw_fd(),
+                listener,
+                &request,
+                &GovernedBox::assigned("native-handle"),
+                &DecisionRecorder::discarding(),
+            )
+            .unwrap();
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            std::mem::forget(child);
+            assert!(libc::WIFEXITED(status));
+            if !supported {
+                assert_eq!(event["refusal"], "kernel cannot transfer path-only handles");
+                assert_eq!(libc::WEXITSTATUS(status), 6);
+            } else {
+                assert_eq!(event["decisions"][0]["operation"], "ReadMetadata");
+                assert_eq!(
+                    event["outcome"],
+                    if permitted {
+                        "descriptor_issued"
+                    } else {
+                        "denied"
+                    }
+                );
+                assert_eq!(libc::WEXITSTATUS(status), if permitted { 0 } else { 6 });
+            }
+        }
+    }
 }
