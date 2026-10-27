@@ -29,6 +29,8 @@ enforcement, [`policy.md`](./policy.md) for decisions, and
 | [`credentials.md`](./credentials.md) | How Box keeps each real secret in the box's trusted process, how the gateway swaps or signs it onto a permitted request, and what a tool or local MCP server gets. |
 | [`monty.md`](./monty.md) | How Box runs a Python script in Monty, decides each file operation it makes, and sends its `fetch()` through the egress gateway. |
 | [`macos-enforcement.md`](./macos-enforcement.md) | How Seatbelt enforces each sandbox on macOS, how the profile for a tool or local MCP server differs from the agent's, and where the restrictions end. |
+| [`linux-enforcement.md`](./linux-enforcement.md) | How Linux constructs the filesystem, process, and network restrictions, and which behavior still needs qualification. |
+| [`platform-differences.md`](./platform-differences.md) | How operating system differences affect grants, startup results, and available alternatives. |
 | [`containment.md`](./containment.md) | What a box guarantees, where its reach comes from, how the agent's sandbox differs from a tool's or a local MCP server's sandbox, and what sits outside operating system enforcement. |
 | [`shell.md`](./shell.md) | How Strands Shell decides each command and file operation, and where a program it doesn't implement runs. |
 | [`telemetry.md`](./telemetry.md) | What a box records, which process writes it, and why an agent can neither forge a record nor suppress one. |
@@ -36,4 +38,4 @@ enforcement, [`policy.md`](./policy.md) for decisions, and
 | [`terminology.md`](./terminology.md) | The word to use for each thing, and the words not to use. |
 | [`tenets.md`](./tenets.md) | How an agent sandbox should work, in priority order, and what is out of scope. |
 
-These pages are still to come: operating system enforcement on Linux, and the platform differences.
+The Linux pages explain implementation behavior. Release support requires separate installation and workload qualification.
