@@ -190,7 +190,7 @@ impl PathResolver {
         self
     }
 
-    /// Approve a path in the **host** namespace, following symlinks.
+    /// Approve a host path through symlink resolution where only `NotFound` indicates absence and all other lookup errors cause refusal.
     ///
     /// This is the box's seam. It resolves with the filesystem, refuses a spelling that
     /// differs from the canonical identity, and refuses an identity outside every
