@@ -19,7 +19,7 @@ The public API describes one complete request and applies it once:
 | `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
-| `Containment::apply(&config, egress_handoff)` | Detect the host backend and irreversibly contain the calling process. |
+| `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
 
 The crate root exports **13 names**: `Containment`, `ContainmentConfig`,
@@ -34,7 +34,7 @@ test_support`, which exists only behind the non-default `test-support` feature.
 Every other module is private, so this list is the whole API rather than a
 selection from it.
 
-### `apply` takes two arguments
+### `apply` takes four arguments
 
 ```rust,ignore
 use containment::{Containment, ContainmentConfig, Network, Operation, Scope};
@@ -49,7 +49,7 @@ let config = ContainmentConfig::new()
     .allow(&home, Operation::Write, Scope::Root)?;
 
 // The second argument is `Option<&std::os::unix::net::UnixStream>`.
-Containment::apply(&config, None)?;
+Containment::apply(&config, None, None, None)?;
 ```
 
 The second argument is the egress handoff, and it is not a second entry point.
@@ -58,6 +58,15 @@ endpoint through the stream. The macOS backend passes `None`, because it pins a
 localhost port that already exists. The Linux namespace launcher **refuses**
 `Network::Localhost` when the handoff is absent, rather than binding an endpoint
 that nothing can accept on.
+
+The third argument, `confirm_fd`, is an optional setup-status pipe writer.
+The Linux reaper writes a status byte when the filesystem view is ready.
+The supervisor uses that byte to confirm startup before a long-lived workload exits.
+macOS ignores this argument because successful `exec` closes the status pipe.
+
+The fourth argument, `native_filesystem_handoff`, reserves an optional Unix stream
+for native filesystem registration. This preparation does not implement that registration.
+Pass `None`. A supplied handoff returns `UnsupportedCapability` before backend selection.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no

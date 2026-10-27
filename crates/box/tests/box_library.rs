@@ -33,6 +33,21 @@ fn main() {
         hardening_and_repeat_run();
         return;
     }
+    if std::env::args().any(|argument| argument == "--callback-config") {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("created-by-callback.toml");
+        let code = strands_box::run(
+            config.clone(),
+            Vec::new(),
+            strands_box::RunOptions {
+                on_ready: Some(Box::new(|| std::fs::write(&config, "["))),
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, std::process::ExitCode::FAILURE);
+        assert!(config.exists());
+        return;
+    }
     if std::env::args().any(|argument| argument == "--callback-error") {
         let code = strands_box::run(
             "/missing-callback-config.toml".into(),
@@ -72,6 +87,19 @@ fn main() {
         "{stderr}"
     );
     assert!(!stderr.contains("missing-callback-config.toml"), "{stderr}");
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--callback-config")
+        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("cannot parse config file"), "{stderr}");
+    assert!(
+        !stderr.contains("cannot read configuration source"),
+        "{stderr}"
+    );
 
     #[cfg(target_os = "linux")]
     for value in [None, Some("true"), Some("1")] {

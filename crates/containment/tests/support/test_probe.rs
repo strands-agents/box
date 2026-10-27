@@ -277,7 +277,7 @@ fn macos_main() -> ExitCode {
     // No egress handoff: the probe exercises the macOS Seatbelt path, which pins the
     // workload to the proxy port directly and has no namespace to relay across; and no
     // exec-confirm fd (that signal is only read by the Linux reaper path).
-    match Containment::apply(&config, None, None) {
+    match Containment::apply(&config, None, None, None) {
         Ok(()) => {}
         Err(e @ ContainmentError::PlatformUnsupported { .. }) => {
             eprintln!("probe: containment refused: {e}");

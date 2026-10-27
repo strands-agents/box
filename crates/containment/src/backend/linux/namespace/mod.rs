@@ -153,6 +153,7 @@ impl ContainmentBackend for NamespaceBackend {
         config: &ContainmentConfig,
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
@@ -966,7 +967,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -1039,7 +1040,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1171,7 +1172,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1239,7 +1240,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1927,7 +1928,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(30) };
             }
@@ -2004,7 +2005,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
@@ -2103,7 +2104,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
             }
@@ -2191,7 +2192,7 @@ mod tests {
             let backend = NamespaceBackend::with_probe_result(true);
             // No handoff: this test asserts the filesystem, process, and authority properties, and
             // the request below is `Blocked` by default so no egress endpoint is created.
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 // Printed rather than swallowed: exit code 20 says "apply failed" and this says
                 // why, which is the difference between a five-minute diagnosis and an afternoon of
                 // bisecting namespaces.
@@ -2316,7 +2317,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -2438,7 +2439,7 @@ mod tests {
                 // SAFETY: closing the child's copy of the read end.
                 unsafe { libc::close(reader) };
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(config, None, Some(writer)) {
+                if let Err(error) = backend.apply(config, None, Some(writer), None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };
