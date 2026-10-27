@@ -127,5 +127,50 @@ mod tests {
         for bytes in [&[][..], &[0x9f, 0xeb, 1, 0][..], &[0; 24][..]] {
             assert!(Btf::parse(bytes).is_err());
         }
+
+        // One structure member, a one-argument prototype, and its function.
+        let words = [
+            1_u32,
+            (4 << 24) | 1,
+            8,
+            8,
+            0,
+            8,
+            0,
+            (13 << 24) | 1,
+            0,
+            0,
+            0,
+            14,
+            12 << 24,
+            2,
+        ];
+        let types: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let blob = |types: &[u8]| {
+            let strings = b"\0sample\0field\0hook\0";
+            let mut bytes = vec![0x9f, 0xeb, 1, 0];
+            for word in [
+                24,
+                0,
+                types.len() as u32,
+                types.len() as u32,
+                strings.len() as u32,
+            ] {
+                bytes.extend(word.to_le_bytes());
+            }
+            bytes.extend(types);
+            bytes.extend(strings);
+            bytes
+        };
+        let parsed = Btf::parse(&blob(&types)).unwrap();
+        assert_eq!(parsed.member("sample", "field").unwrap(), 1);
+        assert_eq!(parsed.hook("hook", 1).unwrap(), 3);
+        assert!(parsed.hook("hook", 2).is_err());
+        for length in [1, 11, 12, 23, 25, 35, 43, 45, 55] {
+            assert!(
+                Btf::parse(&blob(&types[..length])).is_err(),
+                "type bytes={length}"
+            );
+        }
     }
 }
