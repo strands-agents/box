@@ -1,6 +1,6 @@
 //! The checked tool pack that loading builds from the file.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::format::{OperandSpec, OptionSpec, PackFile, ShellActionSpec, ValueSpec, WhenSpec};
 use super::{PackRefusal, Place};
@@ -13,7 +13,7 @@ pub(crate) struct Pack {
     name: String,
     version: u32,
     program: String,
-    effects: BTreeSet<String>,
+    effects: BTreeMap<String, String>,
     global_options: BTreeMap<String, ShellOption>,
     actions: BTreeMap<String, ShellAction>,
 }
@@ -93,11 +93,10 @@ impl Pack {
         {
             return Err(PackRefusal::BadProgram(file.program));
         }
-        let mut effects = BTreeSet::new();
-        for effect in file.effects.into_keys() {
-            identifier(Place::Effect(effect.clone()), &effect)?;
-            effects.insert(effect);
+        for effect in file.effects.keys() {
+            identifier(Place::Effect(effect.clone()), effect)?;
         }
+        let effects = file.effects;
         let mut global_options = BTreeMap::new();
         for (name, spec) in file.global.options {
             let place = Place::GlobalOption(name.clone());
@@ -125,7 +124,7 @@ impl ShellAction {
         name: &str,
         spec: ShellActionSpec,
         program: &str,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<String, String>,
     ) -> Result<Self, PackRefusal> {
         let place = Place::Action(name.to_string());
         identifier(place.clone(), name)?;
@@ -170,7 +169,7 @@ impl ShellOption {
     fn read(
         spec: OptionSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<String, String>,
     ) -> Result<Self, PackRefusal> {
         Ok(Self {
             flags: spec.flag,
@@ -198,7 +197,7 @@ impl Operand {
     fn read(
         spec: OperandSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<String, String>,
     ) -> Result<Self, PackRefusal> {
         Ok(Self {
             rest: spec.rest,
@@ -221,7 +220,7 @@ impl EffectChanges {
         adds: Vec<String>,
         removes: Vec<String>,
         when: Vec<WhenSpec>,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<String, String>,
     ) -> Result<Self, PackRefusal> {
         let adds = declared(place, adds, effects)?;
         let removes = declared(place, removes, effects)?;
@@ -258,9 +257,9 @@ fn identifier(place: Place, name: &str) -> Result<(), PackRefusal> {
 fn declared(
     place: &Place,
     names: Vec<String>,
-    effects: &BTreeSet<String>,
+    effects: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, PackRefusal> {
-    match names.iter().find(|name| !effects.contains(*name)) {
+    match names.iter().find(|name| !effects.contains_key(*name)) {
         None => Ok(names),
         Some(name) => Err(PackRefusal::UndeclaredEffect {
             place: place.clone(),
@@ -338,7 +337,17 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             name: "git".to_string(),
             version: 2,
             program: "git".to_string(),
-            effects: BTreeSet::from(["force_push", "network", "override_config"].map(String::from)),
+            effects: BTreeMap::from(
+                [
+                    ("force_push", "Replaces commits on a remote branch"),
+                    ("network", "Contacts a remote repository"),
+                    (
+                        "override_config",
+                        "Overrides git configuration for this one command",
+                    ),
+                ]
+                .map(|(name, description)| (name.to_string(), description.to_string())),
+            ),
             global_options: BTreeMap::from([
                 (
                     "config".to_string(),
