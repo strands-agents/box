@@ -45,6 +45,7 @@ enum Reply {
     Silent,
     Deaf,
     Sip(Duration),
+    SipThenAnswer(Duration, Arc<[u8]>),
     Early(Arc<[u8]>),
 }
 
@@ -112,6 +113,21 @@ impl TlsUpstream {
     /// the peer makes progresses while the whole request outlasts a deadline.
     pub fn start_sipping(host: &str, interval: Duration) -> Self {
         Self::start_serving(host, Reply::Sip(interval), None)
+    }
+
+    /// Start a TLS upstream that reads the request body 64 KiB per `interval`, and writes
+    /// `response` after the last body byte, so the upload outlasts a deadline and the reply follows
+    /// it.
+    pub fn start_sipping_then_answering(
+        host: &str,
+        interval: Duration,
+        response: &'static [u8],
+    ) -> Self {
+        Self::start_serving(
+            host,
+            Reply::SipThenAnswer(interval, Arc::from(response)),
+            None,
+        )
     }
 
     /// Start a TLS upstream that answers with `response` as soon as it has read a request head, and
@@ -199,6 +215,22 @@ impl TlsUpstream {
                         }
                         return;
                     }
+                    if let Reply::SipThenAnswer(interval, response) = &reply {
+                        let head = read_head(&mut tls);
+                        let mut left = content_length(&head);
+                        let mut chunk = vec![0u8; 65536];
+                        while left > 0 {
+                            let want = left.min(chunk.len());
+                            if tls.read_exact(&mut chunk[..want]).is_err() {
+                                return;
+                            }
+                            left -= want;
+                            std::thread::sleep(*interval);
+                        }
+                        let _ = tls.write_all(response);
+                        let _ = tls.flush();
+                        return;
+                    }
                     if let Reply::Early(response) = &reply {
                         let head = read_head(&mut tls);
                         let _ = tls.write_all(response);
@@ -235,7 +267,10 @@ impl TlsUpstream {
                                 let mut sink = [0u8; 1024];
                                 while matches!(tls.read(&mut sink), Ok(n) if n > 0) {}
                             }
-                            Reply::Deaf | Reply::Sip(_) | Reply::Early(_) => {}
+                            Reply::Deaf
+                            | Reply::Sip(_)
+                            | Reply::SipThenAnswer(..)
+                            | Reply::Early(_) => {}
                         }
                     }
                 });

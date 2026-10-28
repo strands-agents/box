@@ -1,8 +1,9 @@
 //! The idle bound on each socket of an exchange.
 //!
 //! A bound counts the time with no byte, never the total time: a body or a reply that keeps moving
-//! passes, whatever its length. Reads and writes have one clock each, so a read that waits does not
-//! end a write that moves, and the reverse.
+//! passes, whatever its length. Reads and writes have one clock each, and a byte in either direction
+//! restarts both. So a read that waits does not end a write that moves, and the reverse: hyper waits
+//! for the reply head while it still writes the request body.
 
 use std::future::Future;
 use std::io;
@@ -20,7 +21,7 @@ pub(super) const CLIENT_IDLE_PASSED: &str = "client idle bound passed";
 pub(super) const UPSTREAM_IDLE_PASSED: &str = "upstream idle bound passed";
 
 /// A stream whose reads and writes fail with `TimedOut` once one of them has waited `idle` with no
-/// byte.
+/// byte in either direction.
 pub(super) struct Idle<S> {
     inner: S,
     idle: Duration,
@@ -49,9 +50,23 @@ impl<S> Idle<S> {
             write: Clock::default(),
         }
     }
+
+    /// Restart the read clock when a write moved a byte.
+    fn wrote(&mut self, written: &Poll<io::Result<usize>>) {
+        if matches!(written, Poll::Ready(Ok(bytes)) if *bytes > 0) {
+            self.read.restart(self.idle);
+        }
+    }
 }
 
 impl Clock {
+    /// Restart the wait of the current call, because a byte moved in the other direction.
+    fn restart(&mut self, idle: Duration) {
+        if let Some(wait) = self.wait.as_mut() {
+            wait.as_mut().reset(Instant::now() + idle);
+        }
+    }
+
     /// The result of one call of a direction: `Ready` resets the clock, and `Pending` starts it or
     /// checks it.
     fn bound<T>(
@@ -90,9 +105,15 @@ impl<S: AsyncRead + Unpin> AsyncRead for Idle<S> {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let inner = &mut this.inner;
-        this.read.bound(cx, this.idle, this.passed, |cx| {
+        let before = buf.filled().len();
+        let read = this.read.bound(cx, this.idle, this.passed, |cx| {
             Pin::new(inner).poll_read(cx, buf)
-        })
+        });
+        // A read that moved a byte restarts the write clock.
+        if matches!(read, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.write.restart(this.idle);
+        }
+        read
     }
 }
 
@@ -104,9 +125,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Idle<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let inner = &mut this.inner;
-        this.write.bound(cx, this.idle, this.passed, |cx| {
+        let written = this.write.bound(cx, this.idle, this.passed, |cx| {
             Pin::new(inner).poll_write(cx, buf)
-        })
+        });
+        this.wrote(&written);
+        written
     }
 
     fn poll_write_vectored(
@@ -116,9 +139,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Idle<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let inner = &mut this.inner;
-        this.write.bound(cx, this.idle, this.passed, |cx| {
+        let written = this.write.bound(cx, this.idle, this.passed, |cx| {
             Pin::new(inner).poll_write_vectored(cx, bufs)
-        })
+        });
+        this.wrote(&written);
+        written
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -197,6 +222,34 @@ mod tests {
             assert_eq!(&got, b"xxxxx");
             assert!(started.elapsed() > IDLE * 3, "{:?}", started.elapsed());
             drop(dripper.await.unwrap());
+        });
+    }
+
+    /// **A read that waits while writes move is not cut.** hyper waits for the reply head while it
+    /// still writes the request body, so each written byte restarts the read clock. The reply comes
+    /// after the last write, more than three bounds after the read started.
+    #[test]
+    fn a_read_that_waits_while_writes_move_is_not_cut() {
+        block_on(async {
+            let (gateway, mut peer) = tokio::io::duplex(64);
+            let idle = Idle::new(gateway, IDLE, UPSTREAM_IDLE_PASSED);
+            let (mut reads, mut writes) = tokio::io::split(idle);
+            let started = Instant::now();
+            let reader = tokio::spawn(async move {
+                let mut got = [0; 2];
+                reads.read_exact(&mut got).await.map(|_| got)
+            });
+            for _ in 0..5 {
+                tokio::time::sleep(IDLE * 3 / 4).await;
+                writes.write_all(b"x").await.unwrap();
+            }
+            tokio::time::sleep(IDLE / 2).await;
+            peer.write_all(b"ok").await.unwrap();
+            assert_eq!(&reader.await.unwrap().unwrap(), b"ok");
+            assert!(started.elapsed() > IDLE * 3, "{:?}", started.elapsed());
+            let mut sent = [0; 5];
+            peer.read_exact(&mut sent).await.unwrap();
+            assert_eq!(&sent, b"xxxxx");
         });
     }
 

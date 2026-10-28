@@ -245,10 +245,11 @@ never a TCP port. Every admitted connection is terminated and inspected, so TLS
 interception is not selective. The adapter runs on its own tokio runtime, on a
 thread that it starts, and `max_connections` bounds the connections that it
 serves at once. `upstream_read_deadline` bounds each read and each
-write on an upstream socket by the time with no byte, so an upstream that never drains the request
-or never replies ends the exchange with one `http:request::response` that has no `output`. There
-is no total bound: a request or a reply that keeps moving goes through, whatever its length;
-`box.toml` exposes no key for it.
+write on an upstream socket by the time with no byte in either direction, so an upstream that never
+drains the request or never replies ends the exchange with one `http:request::response` that has no
+`output`. A byte that leaves or arrives restarts the bound, so the wait for a reply counts from the
+last byte of the request. There is no total bound: a request or a reply that keeps moving goes
+through, whatever its length; `box.toml` exposes no key for it.
 
 Each read and each write on a client socket waits at most 60 s, and the gateway closes the
 connection at the first read or write that moves no byte in that time. One write can copy a part of

@@ -809,7 +809,7 @@ fn an_upstream_that_never_drains_the_request_is_bounded_by_the_write_deadline() 
 /// An upstream that accepts the request 64 KiB at a time, so every write progresses under the
 /// per-write wait while the whole request outlasts the deadline: the deadline counts only the time
 /// with no byte, so the whole request leaves. The upstream then never replies, and the wait for the
-/// reply ends at the deadline with no status.
+/// reply ends one deadline after the last byte left, with no status.
 #[test]
 fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     let host = "sip.test";
@@ -817,7 +817,7 @@ fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
     // The 192 sips of 64 KiB take about 3.8 s: the request alone takes longer than the deadline,
-    // and then the wait for the reply takes the deadline.
+    // and then the wait for the reply takes one deadline after the last byte.
     let deadline = Duration::from_secs(1);
     let config = MitmConfig {
         upstream_read_deadline: deadline,
@@ -858,6 +858,66 @@ fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     );
 }
 
+/// An upstream that sips the request and answers after its last body byte. The upload outlasts the
+/// deadline, and hyper waits for the reply head from the moment it wrote the request head. Each
+/// byte that leaves restarts the upstream clock, so the wait for the reply counts only from the
+/// last byte, and the reply is released.
+#[test]
+fn a_reply_after_an_upload_longer_than_the_deadline_is_released() {
+    let host = "sip-answer.test";
+    let upstream = TlsUpstream::start_sipping_then_answering(
+        host,
+        Duration::from_millis(20),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    );
+    let port = upstream.port();
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    // The 192 sips of 64 KiB take about 3.8 s, nearly two deadlines. The send buffers hold the
+    // last bytes for less than one deadline, so the reply comes inside one deadline of the last
+    // write.
+    let deadline = Duration::from_secs(2);
+    let config = MitmConfig {
+        upstream_read_deadline: deadline,
+        ..config_for(host, &upstream)
+    };
+    let handle = MitmInterceptor::start(
+        config,
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(shared.clone())),
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let body = vec![b'x'; 12 << 20];
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request("POST", "/sip", &[], &body);
+    let reply = client.read_response();
+    let took = started.elapsed();
+    assert!(reply.starts_with("HTTP/1.1 200 "), "{reply:?}");
+    assert!(reply.ends_with("\r\n\r\nok"), "{reply:?}");
+    assert!(
+        took > deadline,
+        "the upload outlasted the deadline: {took:?}"
+    );
+
+    let events = wait_for_event_count(&shared, 7);
+    assert!(
+        matches!(
+            &events[4],
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Replied { accepted_bytes, status: 200 }
+            ) if *accepted_bytes > body.len()
+        ),
+        "{:?}",
+        events[4]
+    );
+    assert_eq!(
+        event_names(&events[5..]),
+        vec!["attempt:response", "outcome:response"]
+    );
+}
+
 /// The plain-HTTP twin of the sipping case. The deadline counts only the time with no byte, so the
 /// whole request leaves although it outlasts the deadline, and the wait for the reply that never
 /// comes ends at the deadline with no status.
@@ -888,7 +948,7 @@ fn an_upstream_that_sips_a_plain_request_is_not_cut_while_bytes_move() {
     });
     let shared = Arc::new(Mutex::new(Vec::new()));
     // The 192 sips of 64 KiB take about 3.8 s: the request alone takes longer than the deadline,
-    // and then the wait for the reply takes the deadline.
+    // and then the wait for the reply takes one deadline after the last byte.
     let deadline = Duration::from_secs(1);
     let config = MitmConfig {
         upstream_read_deadline: deadline,

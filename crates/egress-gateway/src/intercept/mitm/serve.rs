@@ -662,8 +662,8 @@ struct Trip {
 
 /// Send `request` over the pinned socket and read the whole reply.
 ///
-/// Each read and write of the upstream socket waits at most the upstream deadline with no byte;
-/// there is no total bound. The TLS handshake starts here, after the request decision, so no
+/// Each read and write of the upstream socket waits at most the upstream deadline with no byte in
+/// either direction; there is no total bound. The TLS handshake starts here, after the request decision, so no
 /// upstream byte leaves before it.
 async fn round_trip(
     state: &SharedState,
