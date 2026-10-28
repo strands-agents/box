@@ -8,7 +8,11 @@ use std::sync::Mutex;
 use dogwood_local_engine::DurableError;
 
 use super::{Policy, SchemaStage, authored};
-use crate::dogwood::{DogwoodEngine, parse_policy_source, validate_canonical_policy_set};
+use crate::check::{Finding, Refused, RuleRef, annotated_id};
+use crate::dogwood::{
+    DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
+    validate_canonical_policy_set,
+};
 use crate::schema::{ActionIdentity, GovernedBox};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
@@ -128,7 +132,7 @@ impl Authority {
         };
         let complete = proposal.complete_policy_set();
         let (readiness, pending_tools, warnings) =
-            match validate_canonical_policy_set(&complete, &[], operator) {
+            match validate_canonical_policy_set(&complete, &[], operator, &[]) {
                 Ok((effective_schema, warnings)) => {
                     engine
                         .commit_staged(&complete, effective_schema)
@@ -151,8 +155,12 @@ impl Authority {
                     // never stages (its `tools/list` is denied) is not refused here;
                     // `finish_mcp_discovery` degrades that one server instead.
                     let subset = proposal.ready_policy_set();
-                    let (effective_schema, warnings) =
-                        validate_canonical_policy_set(&subset, &[], operator)?;
+                    let (effective_schema, warnings) = validate_canonical_policy_set(
+                        &subset,
+                        &[],
+                        operator,
+                        &proposal.ready_positions(),
+                    )?;
                     engine
                         .commit_staged(&subset, effective_schema)
                         .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -219,7 +227,7 @@ impl Authority {
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
         let (effective_schema, _) =
-            validate_canonical_policy_set(&complete, &schemas, &proposed.operator)?;
+            validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[])?;
 
         let mut live = self.live.lock().map_err(|_| {
             PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -261,7 +269,7 @@ impl Authority {
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
 
-        match validate_canonical_policy_set(&complete, &schemas, &proposed.operator) {
+        match validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[]) {
             Ok((effective_schema, _)) => {
                 let mut live = self.live.lock().map_err(|_| {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -305,8 +313,12 @@ impl Authority {
                 // so they enforce live, and refresh the held-tool set. Readiness stays `Discovering`
                 // until the complete bundle validates.
                 let subset = proposed.ready_policy_set();
-                let (subset_schema, _) =
-                    validate_canonical_policy_set(&subset, &schemas, &proposed.operator)?;
+                let (subset_schema, _) = validate_canonical_policy_set(
+                    &subset,
+                    &schemas,
+                    &proposed.operator,
+                    &proposed.ready_positions(),
+                )?;
                 let mut live = self.live.lock().map_err(|_| {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
                 })?;
@@ -541,6 +553,21 @@ impl ProposalState {
             .collect()
     }
 
+    /// The authored index of each statement in `ready_policy_set`.
+    fn ready_positions(&self) -> Vec<usize> {
+        self.ready.iter().copied().collect()
+    }
+
+    /// The authored index of each statement in `candidate_policy_set(ordinal)`.
+    fn candidate_positions(&self, ordinal: usize) -> Vec<usize> {
+        let mut positions = self.ready_positions();
+        if !self.ready.contains(&ordinal) {
+            positions.push(ordinal);
+            positions.sort_unstable();
+        }
+        positions
+    }
+
     fn candidate_policy_set(&self, ordinal: usize) -> Vec<String> {
         self.candidates
             .iter()
@@ -552,10 +579,22 @@ impl ProposalState {
     }
 
     fn validate_ready(&self, schemas: &[String]) -> Result<(), PolicyError> {
-        validate_canonical_policy_set(&self.ready_policy_set(), schemas, &self.operator).map(|_| ())
+        validate_canonical_policy_set(
+            &self.ready_policy_set(),
+            schemas,
+            &self.operator,
+            &self.ready_positions(),
+        )
+        .map(|_| ())
     }
 
     fn classify(&mut self, schemas: &[String]) -> Result<(), PolicyError> {
+        self.classify_naming(schemas)
+            .map_err(|(_, refused)| refused.into_error())
+    }
+
+    /// Classify each candidate, and name the candidate whose refusal stopped it.
+    fn classify_naming(&mut self, schemas: &[String]) -> Result<(), (usize, Refused)> {
         loop {
             let mut changed = false;
             for ordinal in 0..self.candidates.len() {
@@ -563,25 +602,25 @@ impl ProposalState {
                     continue;
                 }
                 let candidate = self.candidate_policy_set(ordinal);
-                match validate_canonical_policy_set(&candidate, schemas, &self.operator) {
+                match check_canonical_policy_set(
+                    &candidate,
+                    schemas,
+                    &self.operator,
+                    &self.candidate_positions(ordinal),
+                ) {
                     Ok(_) => {
                         self.ready.insert(ordinal);
                         self.pending.remove(&ordinal);
                         changed = true;
                     }
-                    Err(
-                        inert @ (PolicyError::Spelling(_)
-                        | PolicyError::SharedRuleId(_)
-                        | PolicyError::ReservedAction(_)
-                        | PolicyError::InertTemporalPermit(_)),
-                    ) => {
-                        return Err(inert);
+                    Err(refused) if is_inert(&refused.error) => {
+                        return Err((ordinal, refused));
                     }
-                    Err(error) => {
+                    Err(refused) => {
                         if !self.names_a_typed_action(ordinal) {
-                            return Err(error);
+                            return Err((ordinal, refused));
                         }
-                        self.pending.insert(ordinal, error.to_string());
+                        self.pending.insert(ordinal, refused.error.to_string());
                     }
                 }
             }
@@ -599,6 +638,15 @@ impl ProposalState {
             collect_typed_actions(&candidate.expanded_source, &mut typed);
         }
         !typed.is_empty()
+    }
+
+    /// The rule that candidate `ordinal` stands for, with the `@id` its expanded source carries.
+    fn rule(&self, ordinal: usize) -> RuleRef {
+        let id = self
+            .candidates
+            .get(ordinal)
+            .and_then(|candidate| annotated_id(&candidate.expanded_source));
+        RuleRef::new(ordinal, id)
     }
 
     fn mark_all_ready(&mut self) {
@@ -661,6 +709,73 @@ fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
             None => break,
         }
     }
+}
+
+/// What `open_staged` refuses in `sources`, or its warnings and the rules it holds pending.
+pub(super) fn check_staged(
+    operator: &Operator,
+    sources: &[Policy],
+) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
+    let candidates = check_policy_source(&authored(sources))
+        .map_err(|refused| refused.findings)?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, expanded_source)| CandidatePolicy {
+            ordinal,
+            expanded_source,
+        })
+        .collect::<Vec<_>>();
+    let mut proposal = ProposalState {
+        operator: operator.clone(),
+        candidates,
+        schemas: BTreeMap::new(),
+        ready: BTreeSet::new(),
+        pending: BTreeMap::new(),
+    };
+    let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
+        findings.into_iter().map(Finding::without_span).collect()
+    };
+    match check_canonical_policy_set(&proposal.complete_policy_set(), &[], operator, &[]) {
+        Ok((_, warnings)) => return Ok((warnings, Vec::new())),
+        Err(refused) if is_inert(&refused.error) => return Err(unlocated(refused.findings)),
+        Err(_) => {}
+    }
+    if let Err((ordinal, refused)) = proposal.classify_naming(&[]) {
+        return Err(unlocated(refused.findings)
+            .into_iter()
+            .map(|finding| {
+                if finding.rules().is_empty() {
+                    finding.with_rules(vec![proposal.rule(ordinal)])
+                } else {
+                    finding
+                }
+            })
+            .collect());
+    }
+    let (_, warnings) = check_canonical_policy_set(
+        &proposal.ready_policy_set(),
+        &[],
+        operator,
+        &proposal.ready_positions(),
+    )
+    .map_err(|refused| unlocated(refused.findings))?;
+    let unchecked = proposal
+        .pending
+        .keys()
+        .map(|ordinal| proposal.rule(*ordinal))
+        .collect();
+    Ok((warnings, unchecked))
+}
+
+/// Whether a refusal names a rule that no discovered schema can make valid.
+fn is_inert(error: &PolicyError) -> bool {
+    matches!(
+        error,
+        PolicyError::Spelling(_)
+            | PolicyError::SharedRuleId(_)
+            | PolicyError::ReservedAction(_)
+            | PolicyError::InertTemporalPermit(_)
+    )
 }
 
 #[cfg(test)]

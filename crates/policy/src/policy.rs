@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 mod authority;
 
-use crate::dogwood::{DogwoodEngine, parse_policy_source};
+use crate::check::{Finding, PolicyCheck};
+use crate::dogwood::{DogwoodEngine, check_and_expand, parse_policy_source};
 use crate::schema::GovernedBox;
 use crate::{
     Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
@@ -191,6 +192,42 @@ impl PolicyEngine {
     ) -> Result<(), PolicyError> {
         DogwoodEngine::validate_with_mcp_schemas(&authored(sources), mcp_schemas, operator)
             .map(|_| ())
+    }
+
+    /// Return every finding in `sources`, as `open` (`complete`) or `open_staged` would load them.
+    pub fn check(operator: &Operator, sources: &[Policy], complete: bool) -> PolicyCheck {
+        let text = authored(sources);
+        let warning = |warning: PolicyWarning| Finding::new(warning.to_string());
+        let placed = |findings: Vec<Finding>| {
+            findings
+                .into_iter()
+                .map(|finding| {
+                    if sources.len() == 1 {
+                        finding
+                    } else {
+                        finding.without_span()
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if complete {
+            return match check_and_expand(&text, &[], operator, true, &[]) {
+                Ok((_, _, warnings)) => PolicyCheck::new(
+                    Vec::new(),
+                    warnings.into_iter().map(warning).collect(),
+                    Vec::new(),
+                ),
+                Err(refused) => PolicyCheck::new(placed(refused.findings), Vec::new(), Vec::new()),
+            };
+        }
+        match authority::check_staged(operator, sources) {
+            Ok((warnings, unchecked)) => PolicyCheck::new(
+                Vec::new(),
+                warnings.into_iter().map(warning).collect(),
+                unchecked,
+            ),
+            Err(findings) => PolicyCheck::new(placed(findings), Vec::new(), Vec::new()),
+        }
     }
 
     /// Validate syntax, macro expansion, and provider use without an action schema.

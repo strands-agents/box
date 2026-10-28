@@ -1,0 +1,313 @@
+# Draft pack for the AWS CLI v2 (checked against aws-cli 2.36 `help` synopses).
+# Keys beyond design.md section 3 are marked "EXT-n"; crates/policy/src/pack/grammar.rs reads them.
+#
+# Shape: `aws [global options] <service> <operation> [parameters]`. An action is one
+# service/operation pair. Its usage line names both words as literals (EXT-3 lets literals be
+# more than one word), and the action key joins them with `_`: `aws s3 rm` is
+# `Tool::aws::Action::"s3_rm"`. The key is only a name. The parser matches the literal words
+# in `usage`.
+#
+# Every aws parameter is a long option. aws accepts `--opt value` and `--opt=value`, and
+# global options anywhere on the line, also between the service and the operation.
+# aws (argparse) also accepts any unique prefix of an option (`--dry` for `--dryrun`).
+# The parser does not, so a prefix makes the line unmodeled. No prefix matching.
+#
+# Not seen by the parser (L1): AWS_PROFILE, AWS_REGION, AWS_ENDPOINT_URL, ~/.aws/config
+# (profiles, `endpoint_url`, `cli_pager`, aliases in ~/.aws/cli/alias), and the contents of a
+# `file://` parameter.
+
+format  = 1       # The pack file language. Box reads 1.
+version = 1       # The major version of this pack.
+pack    = "aws"
+program = "aws"
+
+# aws v2 loads a parameter value from a file when the value starts with file:// or fileb://.
+# The parser sees only the file name (`--bucket file://name.txt` gives bucket="file://name.txt").
+# A rule on such a value must match it with `like`. L1.
+
+[effects]
+read_only              = "Makes no change: reads or lists only"
+read_data              = "Reads object data from S3"
+write_data             = "Creates or overwrites object data in S3"
+delete_data            = "Deletes stored data"
+make_public            = "Grants access to everyone"
+modify_resource_policy = "Changes a resource-based access policy"
+terminate_compute      = "Terminates compute instances"
+modify_iam             = "Changes IAM users, roles, or policies"
+create_credentials     = "Creates long-lived credentials"
+assume_role            = "Obtains credentials for another role"
+delete_infrastructure  = "Deletes a CloudFormation stack and the resources it owns"
+invoke_function        = "Runs a Lambda function"
+custom_endpoint        = "Sends the signed request, with its session token, to a URL the command names"
+insecure_tls           = "Turns off TLS certificate checks"
+
+# EXT-3. Global options, accepted anywhere on the line (`anywhere = true`).
+# Left out on purpose, so each makes the line unmodeled: --cli-auto-prompt (the user edits the
+# command interactively before it runs), --version, --cli-input-json/--cli-input-yaml (they
+# replace every parameter), --generate-cli-skeleton.
+[global]
+options.profile             = { flag = ["--profile"], value = "required", anywhere = true }
+options.region              = { flag = ["--region"], value = "required", anywhere = true }
+options.output              = { flag = ["--output"], value = "required", anywhere = true }
+options.query               = { flag = ["--query"], value = "required", anywhere = true }
+options.endpoint_url        = { flag = ["--endpoint-url"], value = "required", anywhere = true, adds = ["custom_endpoint"] }
+options.no_verify_ssl       = { flag = ["--no-verify-ssl"], anywhere = true, adds = ["insecure_tls"] }
+options.ca_bundle           = { flag = ["--ca-bundle"], value = "required", anywhere = true, adds = ["insecure_tls"] }
+options.no_sign_request     = { flag = ["--no-sign-request"], anywhere = true }
+options.debug               = { flag = ["--debug"], anywhere = true }
+options.no_paginate         = { flag = ["--no-paginate"], anywhere = true }
+options.no_cli_pager        = { flag = ["--no-cli-pager"], anywhere = true }
+options.no_cli_auto_prompt  = { flag = ["--no-cli-auto-prompt"], anywhere = true }
+options.color               = { flag = ["--color"], value = "required", anywhere = true }
+options.cli_read_timeout    = { flag = ["--cli-read-timeout"], value = "required", anywhere = true }
+options.cli_connect_timeout = { flag = ["--cli-connect-timeout"], value = "required", anywhere = true }
+options.cli_binary_format   = { flag = ["--cli-binary-format"], value = "required", anywhere = true }
+options.cli_error_format    = { flag = ["--cli-error-format"], value = "required", anywhere = true }
+
+# ================================================================ s3 (high-level commands)
+
+[shell.s3_ls]
+usage = "aws [global options] s3 ls [<path>] [options]"
+adds  = ["read_only"]
+options.recursive          = { flag = ["--recursive"] }
+options.human_readable     = { flag = ["--human-readable"] }
+options.summarize          = { flag = ["--summarize"] }
+options.page_size          = { flag = ["--page-size"], value = "required" }
+options.request_payer      = { flag = ["--request-payer"], value = "required" }
+options.bucket_name_prefix = { flag = ["--bucket-name-prefix"], value = "required" }
+options.bucket_region      = { flag = ["--bucket-region"], value = "required" }
+operands.path = {}
+
+[shell.s3_rm]
+usage = "aws [global options] s3 rm <path> [options]"
+adds  = ["delete_data"]
+options.dryrun           = { flag = ["--dryrun"], removes = ["delete_data"] }
+options.recursive        = { flag = ["--recursive"] }
+options.include          = { flag = ["--include"], value = "required", repeated = true }
+options.exclude          = { flag = ["--exclude"], value = "required", repeated = true }
+options.quiet            = { flag = ["--quiet"] }
+options.only_show_errors = { flag = ["--only-show-errors"] }
+options.page_size        = { flag = ["--page-size"], value = "required" }
+options.request_payer    = { flag = ["--request-payer"], value = "required" }
+operands.path = {}
+
+[shell.s3_rb]
+usage = "aws [global options] s3 rb <path> [options]"
+adds  = ["delete_data"]
+options.force = { flag = ["--force"] }
+operands.path = {}
+
+# `--sse` is left out: argparse gives it an optional value that also takes the next word
+# (`--sse a.txt s3://b/` reads `a.txt` as the value), which `value = "optional"` does not mean.
+# s3 cp / mv / sync share one option set. `source` and `destination` are either a local path
+# or an s3:// URI; `like` on each operand says which direction the data moves.
+[shell.s3_cp]
+usage = "aws [global options] s3 cp <source> <destination> [options]"
+options.dryrun             = { flag = ["--dryrun"], removes = ["read_data", "write_data", "make_public"] }
+options.recursive          = { flag = ["--recursive"] }
+options.no_overwrite       = { flag = ["--no-overwrite"] }
+options.include            = { flag = ["--include"], value = "required", repeated = true }
+options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }   # EXT-5
+options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }   # EXT-6
+options.follow_symlinks    = { flag = ["--follow-symlinks"] }
+options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
+options.sse_kms_key_id     = { flag = ["--sse-kms-key-id"], value = "required" }
+options.storage_class      = { flag = ["--storage-class"], value = "required" }
+options.content_type       = { flag = ["--content-type"], value = "required" }
+options.cache_control      = { flag = ["--cache-control"], value = "required" }
+options.metadata           = { flag = ["--metadata"], value = "required" }
+options.metadata_directive = { flag = ["--metadata-directive"], value = "required" }
+options.copy_props         = { flag = ["--copy-props"], value = "required" }
+options.source_region      = { flag = ["--source-region"], value = "required" }
+options.expected_size      = { flag = ["--expected-size"], value = "required" }
+options.checksum_algorithm = { flag = ["--checksum-algorithm"], value = "required" }
+options.request_payer      = { flag = ["--request-payer"], value = "required" }
+options.quiet              = { flag = ["--quiet"] }
+options.only_show_errors   = { flag = ["--only-show-errors"] }
+options.no_progress        = { flag = ["--no-progress"] }
+options.page_size          = { flag = ["--page-size"], value = "required" }
+operands.source      = { like = "s3://*", adds = ["read_data"] }
+operands.destination = { like = "s3://*", adds = ["write_data"] }
+
+[shell.s3_mv]
+usage = "aws [global options] s3 mv <source> <destination> [options]"
+options.dryrun             = { flag = ["--dryrun"], removes = ["read_data", "write_data", "delete_data", "make_public"] }
+options.recursive          = { flag = ["--recursive"] }
+options.no_overwrite       = { flag = ["--no-overwrite"] }
+options.validate_same_s3_paths = { flag = ["--validate-same-s3-paths"] }
+options.include            = { flag = ["--include"], value = "required", repeated = true }
+options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }
+options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }
+options.follow_symlinks    = { flag = ["--follow-symlinks"] }
+options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
+options.sse_kms_key_id     = { flag = ["--sse-kms-key-id"], value = "required" }
+options.storage_class      = { flag = ["--storage-class"], value = "required" }
+options.content_type       = { flag = ["--content-type"], value = "required" }
+options.metadata_directive = { flag = ["--metadata-directive"], value = "required" }
+options.request_payer      = { flag = ["--request-payer"], value = "required" }
+options.quiet              = { flag = ["--quiet"] }
+options.only_show_errors   = { flag = ["--only-show-errors"] }
+options.no_progress        = { flag = ["--no-progress"] }
+# A move deletes its source. A local source is deleted too, so delete_data has no `like`.
+operands.source      = { adds = ["delete_data"], when = [ { like = "s3://*", adds = ["read_data"] } ] }
+operands.destination = { like = "s3://*", adds = ["write_data"] }
+
+[shell.s3_sync]
+usage = "aws [global options] s3 sync <source> <destination> [options]"
+options.dryrun             = { flag = ["--dryrun"], removes = ["read_data", "write_data", "delete_data", "make_public"] }
+options.delete             = { flag = ["--delete"], adds = ["delete_data"] }
+options.size_only          = { flag = ["--size-only"] }
+options.exact_timestamps   = { flag = ["--exact-timestamps"] }
+options.no_overwrite       = { flag = ["--no-overwrite"] }
+options.include            = { flag = ["--include"], value = "required", repeated = true }
+options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }
+options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }
+options.follow_symlinks    = { flag = ["--follow-symlinks"] }
+options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
+options.sse_kms_key_id     = { flag = ["--sse-kms-key-id"], value = "required" }
+options.storage_class      = { flag = ["--storage-class"], value = "required" }
+options.content_type       = { flag = ["--content-type"], value = "required" }
+options.cache_control      = { flag = ["--cache-control"], value = "required" }
+options.metadata_directive = { flag = ["--metadata-directive"], value = "required" }
+options.request_payer      = { flag = ["--request-payer"], value = "required" }
+options.quiet              = { flag = ["--quiet"] }
+options.only_show_errors   = { flag = ["--only-show-errors"] }
+options.no_progress        = { flag = ["--no-progress"] }
+options.page_size          = { flag = ["--page-size"], value = "required" }
+operands.source      = { like = "s3://*", adds = ["read_data"] }
+operands.destination = { like = "s3://*", adds = ["write_data"] }
+
+# ================================================================ s3api
+
+[shell.s3api_delete_bucket]
+usage = "aws [global options] s3api delete-bucket [options]"
+adds  = ["delete_data"]
+options.bucket                = { flag = ["--bucket"], value = "required" }
+options.expected_bucket_owner = { flag = ["--expected-bucket-owner"], value = "required" }
+
+[shell.s3api_delete_object]
+usage = "aws [global options] s3api delete-object [options]"
+adds  = ["delete_data"]
+options.bucket                     = { flag = ["--bucket"], value = "required" }
+options.key                        = { flag = ["--key"], value = "required" }
+options.version_id                 = { flag = ["--version-id"], value = "required" }
+options.mfa                        = { flag = ["--mfa"], value = "required" }
+options.bypass_governance_retention = { flag = ["--bypass-governance-retention"] }
+options.request_payer              = { flag = ["--request-payer"], value = "required" }
+options.expected_bucket_owner      = { flag = ["--expected-bucket-owner"], value = "required" }
+
+[shell.s3api_put_bucket_policy]
+usage = "aws [global options] s3api put-bucket-policy [options]"
+adds  = ["modify_resource_policy"]
+options.bucket                = { flag = ["--bucket"], value = "required" }
+options.policy                = { flag = ["--policy"], value = "required" }
+options.confirm_remove_self_bucket_access = { flag = ["--confirm-remove-self-bucket-access"] }
+options.checksum_algorithm    = { flag = ["--checksum-algorithm"], value = "required" }
+options.expected_bucket_owner = { flag = ["--expected-bucket-owner"], value = "required" }
+
+# ================================================================ ec2
+
+[shell.ec2_terminate_instances]
+usage = "aws [global options] ec2 terminate-instances [options]"
+adds  = ["terminate_compute"]
+options.instance_ids     = { flag = ["--instance-ids"], value = "many" }        # EXT-6
+options.dry_run          = { flag = ["--dry-run"], removes = ["terminate_compute"] }
+options.force            = { flag = ["--force"] }
+options.skip_os_shutdown = { flag = ["--skip-os-shutdown"] }
+# `--no-dry-run`, `--no-force`, `--no-skip-os-shutdown` are left out: a negation after its
+# flag makes the flag false (last wins), and `removes` cannot express that. Unmodeled.
+
+[shell.ec2_describe_instances]
+usage = "aws [global options] ec2 describe-instances [options]"
+adds  = ["read_only"]
+options.instance_ids   = { flag = ["--instance-ids"], value = "many" }
+options.filters        = { flag = ["--filters"], value = "many" }
+options.dry_run        = { flag = ["--dry-run"] }
+options.max_items      = { flag = ["--max-items"], value = "required" }
+options.page_size      = { flag = ["--page-size"], value = "required" }
+options.starting_token = { flag = ["--starting-token"], value = "required" }
+
+# ================================================================ sts
+
+[shell.sts_get_caller_identity]
+usage = "aws [global options] sts get-caller-identity"
+adds  = ["read_only"]
+
+[shell.sts_assume_role]
+usage = "aws [global options] sts assume-role [options]"
+adds  = ["assume_role"]
+options.role_arn          = { flag = ["--role-arn"], value = "required" }
+options.role_session_name = { flag = ["--role-session-name"], value = "required" }
+options.duration_seconds  = { flag = ["--duration-seconds"], value = "required" }
+options.external_id       = { flag = ["--external-id"], value = "required" }
+options.serial_number     = { flag = ["--serial-number"], value = "required" }
+options.token_code        = { flag = ["--token-code"], value = "required" }
+options.source_identity   = { flag = ["--source-identity"], value = "required" }
+options.policy            = { flag = ["--policy"], value = "required" }
+options.policy_arns       = { flag = ["--policy-arns"], value = "many" }
+options.tags              = { flag = ["--tags"], value = "many" }
+
+# ================================================================ iam
+
+[shell.iam_list_roles]
+usage = "aws [global options] iam list-roles [options]"
+adds  = ["read_only"]
+options.path_prefix    = { flag = ["--path-prefix"], value = "required" }
+options.max_items      = { flag = ["--max-items"], value = "required" }
+options.page_size      = { flag = ["--page-size"], value = "required" }
+options.starting_token = { flag = ["--starting-token"], value = "required" }
+
+[shell.iam_get_role]
+usage = "aws [global options] iam get-role [options]"
+adds  = ["read_only"]
+options.role_name = { flag = ["--role-name"], value = "required" }
+
+[shell.iam_create_access_key]
+usage = "aws [global options] iam create-access-key [options]"
+adds  = ["modify_iam", "create_credentials"]
+options.user_name = { flag = ["--user-name"], value = "required" }
+
+[shell.iam_attach_role_policy]
+usage = "aws [global options] iam attach-role-policy [options]"
+adds  = ["modify_iam"]
+options.role_name  = { flag = ["--role-name"], value = "required" }
+options.policy_arn = { flag = ["--policy-arn"], value = "required" }
+
+[shell.iam_put_role_policy]
+usage = "aws [global options] iam put-role-policy [options]"
+adds  = ["modify_iam"]
+options.role_name       = { flag = ["--role-name"], value = "required" }
+options.policy_name     = { flag = ["--policy-name"], value = "required" }
+options.policy_document = { flag = ["--policy-document"], value = "required" }
+
+[shell.iam_delete_role]
+usage = "aws [global options] iam delete-role [options]"
+adds  = ["modify_iam"]
+options.role_name = { flag = ["--role-name"], value = "required" }
+
+# ================================================================ cloudformation
+
+[shell.cloudformation_delete_stack]
+usage = "aws [global options] cloudformation delete-stack [options]"
+adds  = ["delete_infrastructure", "delete_data"]
+options.stack_name           = { flag = ["--stack-name"], value = "required" }
+options.retain_resources     = { flag = ["--retain-resources"], value = "many" }
+options.role_arn             = { flag = ["--role-arn"], value = "required" }
+options.client_request_token = { flag = ["--client-request-token"], value = "required" }
+options.deletion_mode        = { flag = ["--deletion-mode"], value = "required" }
+
+# ================================================================ lambda
+
+[shell.lambda_invoke]
+usage = "aws [global options] lambda invoke [options] <outfile>"
+adds  = ["invoke_function"]
+options.function_name  = { flag = ["--function-name"], value = "required" }
+options.invocation_type = { flag = ["--invocation-type"], value = "required", like = "DryRun", removes = ["invoke_function"] }
+options.payload        = { flag = ["--payload"], value = "required" }
+options.qualifier      = { flag = ["--qualifier"], value = "required" }
+options.log_type       = { flag = ["--log-type"], value = "required" }
+options.client_context = { flag = ["--client-context"], value = "required" }
+operands.outfile = {}

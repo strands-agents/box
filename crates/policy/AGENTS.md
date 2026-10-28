@@ -30,13 +30,26 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 ## Public Contract Discipline
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
-  `PolicyEngine::validate` sits off it and returns no authority.
-- The root `pub use` set is the whole API: `Policy`, `PolicyEngine`, `PolicyError`, `Request`,
-  `FsOperation`, `FsAccess`, `Principal`, `Decision`, `DenyReason`, `RuleId`, `Outcome`,
-  `Delivery`, `FsResult`, `EffectivePolicy`, `ENGINE_ID`, `SELF_DEFENDED_FILES`, `ApprovedPath`,
-  `PathRefusal`, `PathResolver`, `GovernedBox`, `EgressPolicyInterceptor`,
-  `ScriptPolicyInterceptor`, `ScriptPermit`, `ShellPolicyInterceptor`. That is 24 names with
-  `--all-features` and 20 by default; recompute it when you touch the façade.
+  `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
+- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
+  `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
+  `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
+  `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`, `ToolCatalogs`,
+  `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
+  `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
+  `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
+  `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
+  `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
+  `Request`, `GovernedBox`, `Operator`, `PolicyWarning`. That is 52 names with `--all-features` and
+  46 by default; recompute it when you touch the façade.
+- `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
+  the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
+  is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
+  the complete set. Box's own checks and every staged validation name rules and carry no span,
+  because Dogwood exposes no span for a parsed rule. Keep `tests/policy_check.rs`
+  `a_check_refuses_exactly_what_open_refuses` and
+  `a_staged_check_refuses_exactly_what_open_staged_refuses`.
 - Keep modules private. Keep every `dogwood_language` and `cedar_policy` type out of the façade.
 - Keep `cedar-policy = "=4.11.0"` exact: the schema and the request gate are Cedar types, and
   Dogwood's own constraint is a caret range.
@@ -64,7 +77,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - `policy.rs` the lifecycle. `dogwood.rs` the private engine, event mapping, scope lock, and clock.
   `schema.rs` the `.cedarschema`, the name constants, and the request gate. `request.rs`,
-  `outcome.rs`, `decision.rs`, `error.rs` their public types. `path.rs` the path types.
+  `outcome.rs`, `decision.rs`, `error.rs`, `check.rs` their public types. `path.rs` the path types.
   `adapters/` one module per enforcement point, each behind its own feature.
 - Put a new boundary in `adapters/`, not in a new root file. Keep a method with its type.
 

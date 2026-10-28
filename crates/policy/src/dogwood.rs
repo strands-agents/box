@@ -23,6 +23,7 @@ use dogwood_local_engine::{
     PolicyToken, Verb,
 };
 
+use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
 use crate::request::{Principal, Request};
@@ -520,16 +521,15 @@ impl DogwoodEngine {
 
 /// Parse and macro-expand a source bundle without an action schema.
 pub(crate) fn parse_policy_source(source: &str) -> Result<Vec<String>, PolicyError> {
+    check_policy_source(source).map_err(Refused::into_error)
+}
+
+/// Parse and macro-expand a source bundle, keeping the findings of a refusal.
+pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> {
     let service = service_schema()?;
     let parsed = dogwood_language::ParsedPolicySet::parse(source, &service)
-        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
-
-    if parsed.policies().any(|policy| policy.uses_providers()) {
-        return Err(PolicyError::Parse(
-            "dogwood: information providers are not enabled in this build".to_string(),
-        ));
-    }
-
+        .map_err(|error| parse_refused(source, &error, true))?;
+    refuse_providers(&parsed, &[])?;
     Ok(parsed
         .policies()
         .map(|policy| policy.expanded_source())
@@ -537,13 +537,28 @@ pub(crate) fn parse_policy_source(source: &str) -> Result<Vec<String>, PolicyErr
 }
 
 /// Strict-validate canonical policy statements against an ordered schema set.
+///
+/// `positions` holds the authored index of each statement, and an empty slice means the statements
+/// are the authored rules in order.
 pub(crate) fn validate_canonical_policy_set(
     canonical_policies: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
+    positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), PolicyError> {
+    check_canonical_policy_set(canonical_policies, mcp_schemas, operator, positions)
+        .map_err(Refused::into_error)
+}
+
+/// Strict-validate canonical policy statements, keeping the findings of a refusal.
+pub(crate) fn check_canonical_policy_set(
+    canonical_policies: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+    positions: &[usize],
+) -> Result<(ActionSchema, Vec<PolicyWarning>), Refused> {
     let source = canonical_policies.join("\n");
-    validate_and_expand(&source, mcp_schemas, operator)
+    check_and_expand(&source, mcp_schemas, operator, false, positions)
         .map(|(_, schema, warnings)| (schema, warnings))
 }
 
@@ -553,6 +568,17 @@ fn validate_and_expand(
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), PolicyError> {
+    check_and_expand(source, mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
+}
+
+/// Parse and validate a bundle, keeping the findings of a refusal, located when `source` is authored.
+pub(crate) fn check_and_expand(
+    source: &str,
+    mcp_schemas: &[String],
+    operator: &Operator,
+    authored: bool,
+    positions: &[usize],
+) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
     // Parse the Cedar-side schema here, not on the first decision. The request gate
     // caches it behind a `OnceLock`, so leaving it lazy charged the workload's *first*
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
@@ -565,17 +591,8 @@ fn validate_and_expand(
 
     let service = service_schema()?;
     let parsed = dogwood_language::ParsedPolicySet::parse(source, &service)
-        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
-
-    // An information provider runs a sandboxed script on the decision path. We
-    // ship none, and an erroring provider is documented upstream as undefined
-    // behaviour, so a policy that uses one is refused at load rather than trusted
-    // to fail closed.
-    if parsed.policies().any(|policy| policy.uses_providers()) {
-        return Err(PolicyError::Parse(
-            "dogwood: information providers are not enabled in this build".to_string(),
-        ));
-    }
+        .map_err(|error| parse_refused(source, &error, authored))?;
+    refuse_providers(&parsed, positions)?;
     let canonical_policies = parsed
         .policies()
         .map(|policy| policy.expanded_source())
@@ -583,9 +600,9 @@ fn validate_and_expand(
     let lowered: LoweredPolicySet = parsed
         .lower(&policy_schema)
         .map_err(|error| PolicyError::Schema(format!("dogwood lower: {error}")))?;
-    refuse_shared_rule_ids(&lowered)?;
-    refuse_reserved_action_rules(&lowered)?;
-    let cap_warnings = crate::cap::judge(&parsed, &lowered)?;
+    refuse_shared_rule_ids(&lowered, positions)?;
+    refuse_reserved_action_rules(&lowered, positions)?;
+    let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a
     // typo'd action (`Box::Action::"fs:raed"`) and an undeclared context attribute, which
@@ -594,26 +611,37 @@ fn validate_and_expand(
     // keeps an authoring mistake from becoming a permanent hole.
     let validation = Validator::new().validate(&lowered);
     if !validation.validation_passed() {
-        let errors = validation
+        let (messages, findings): (Vec<String>, Vec<Finding>) = validation
             .validation_errors()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let joined = errors.join("; ");
+            .map(|error| validation_finding(&lowered, error, positions))
+            .map(|(message, finding)| (message, place(finding, source, authored)))
+            .unzip();
+        let joined = messages
+            .iter()
+            .zip(&findings)
+            .map(|(message, finding)| finding.described(message))
+            .collect::<Vec<_>>()
+            .join("; ");
         // An unrecognized action keeps its own variant. It is the single most likely
         // authoring mistake (a typo in a verb) and the one whose silent-no-match
         // failure mode this crate names explicitly, so a caller can report it as
         // "you named an action that does not exist" rather than a generic schema
         // fault.
-        if errors
+        let error = if messages
             .iter()
-            .any(|error| error.contains("unrecognized action"))
+            .any(|message| message.contains("unrecognized action"))
         {
-            return Err(PolicyError::UnknownAction(joined));
-        }
-        return Err(PolicyError::Schema(joined));
+            PolicyError::UnknownAction(joined)
+        } else {
+            PolicyError::Schema(joined)
+        };
+        return Err(Refused::new(error, findings));
     }
 
-    let warnings = crate::spelling::judge(lowered.as_cedar(), operator)?
+    let warnings =
+        crate::spelling::judge_naming(lowered.as_cedar(), operator, &|cedar_policy_id| {
+            rule_ref(&lowered, cedar_policy_id, positions)
+        })?
         .into_iter()
         .chain(cap_warnings)
         .collect();
@@ -621,8 +649,143 @@ fn validate_and_expand(
     Ok((canonical_policies, effective_schema, warnings))
 }
 
+/// `finding` located in `source` when the source is authored, and with no position otherwise.
+fn place(finding: Finding, source: &str, authored: bool) -> Finding {
+    if authored {
+        finding.located_in(source)
+    } else {
+        finding.without_span()
+    }
+}
+
+/// The refusal of a source that does not parse, with the position of each parse error.
+fn parse_refused(source: &str, error: &dogwood_language::Error, authored: bool) -> Refused {
+    let findings: Vec<Finding> = match error {
+        dogwood_language::Error::Parse(errors) => errors
+            .iter()
+            .map(|error| {
+                let span = error.location().span();
+                Finding::new(error.to_string()).with_span(span.offset()..span.offset() + span.len())
+            })
+            .collect(),
+        dogwood_language::Error::Macro(error) => {
+            let span = error.location().span();
+            vec![
+                Finding::new(error.to_string())
+                    .with_span(span.offset()..span.offset() + span.len()),
+            ]
+        }
+        other => vec![Finding::new(other.to_string())],
+    };
+    let findings: Vec<Finding> = findings
+        .into_iter()
+        .map(|finding| place(finding, source, authored))
+        .collect();
+    let text = match findings.first() {
+        Some(first) => Finding::new("")
+            .with_location_of(first)
+            .described(&format!("dogwood parse: {error}")),
+        None => format!("dogwood parse: {error}"),
+    };
+    Refused::new(PolicyError::Parse(text), findings)
+}
+
+/// Refuse a bundle that uses an information provider.
+fn refuse_providers(
+    parsed: &dogwood_language::ParsedPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    // An information provider runs a sandboxed script on the decision path. We
+    // ship none, and an erroring provider is documented upstream as undefined
+    // behaviour, so a policy that uses one is refused at load rather than trusted
+    // to fail closed.
+    let rules: Vec<RuleRef> = parsed
+        .policies()
+        .filter(|policy| policy.uses_providers())
+        .map(|policy| {
+            RuleRef::new(
+                authored_index(positions, policy.index()),
+                annotated_id(&policy.expanded_source()),
+            )
+        })
+        .collect();
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let text = "dogwood: information providers are not enabled in this build";
+    Err(Refused::new(
+        PolicyError::Parse(text.to_string()),
+        vec![Finding::new(text).with_rules(rules)],
+    ))
+}
+
+/// The validator's message for one error, and its finding with its rule, span, and help.
+fn validation_finding(
+    lowered: &LoweredPolicySet,
+    error: &dogwood_language::ValidationError,
+    positions: &[usize],
+) -> (String, Finding) {
+    let (message, span, help) = match error {
+        dogwood_language::ValidationError::Cedar {
+            message,
+            span,
+            help,
+            ..
+        }
+        | dogwood_language::ValidationError::Extension {
+            message,
+            span,
+            help,
+            ..
+        } => (
+            message.clone(),
+            Some(span.offset()..span.offset() + span.len()),
+            help.clone(),
+        ),
+        other => (other.to_string(), None, None),
+    };
+    let named = cedar_policy_id(&message);
+    let rule = named.and_then(|(id, _)| rule_ref(lowered, id, positions));
+    let own = named.map_or(message.as_str(), |(_, rest)| rest);
+    let whole_rule = own.starts_with("unable to find an applicable action");
+    let mut finding = Finding::new(own)
+        .with_help(help)
+        .with_rules(rule.into_iter().collect());
+    if let Some(span) = span.filter(|_| !whole_rule) {
+        finding = finding.with_span(span);
+    }
+    (message, finding)
+}
+
+/// The Cedar policy id that a validator message names, such as `policy_0`, and the rest of it.
+fn cedar_policy_id(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("for policy `")?;
+    let (id, after) = rest.split_once('`')?;
+    Some((id, after.strip_prefix(", ").unwrap_or(after)))
+}
+
+/// The rule that a lowered Cedar policy id stands for, with its `@id`.
+pub(crate) fn rule_ref(
+    lowered: &LoweredPolicySet,
+    cedar_policy_id: &str,
+    positions: &[usize],
+) -> Option<RuleRef> {
+    let rule = lowered.rule_ref(cedar_policy_id)?;
+    let id = cedar_policy_id
+        .parse::<cedar_policy::PolicyId>()
+        .ok()
+        .and_then(|policy_id| lowered.as_cedar().annotation(&policy_id, "id"))
+        .map(str::to_string);
+    Some(RuleRef::new(authored_index(positions, rule.rule_index), id))
+}
+
+/// The authored index of the statement at `index`, as `positions` maps it.
+pub(crate) fn authored_index(positions: &[usize], index: usize) -> usize {
+    positions.get(index).copied().unwrap_or(index)
+}
+
 /// Refuse a bundle in which two rules carry one non-blank `@id`.
-fn refuse_shared_rule_ids(lowered: &LoweredPolicySet) -> Result<(), PolicyError> {
+fn refuse_shared_rule_ids(lowered: &LoweredPolicySet, positions: &[usize]) -> Result<(), Refused> {
     let cedar = lowered.as_cedar();
     let mut rules_by_id: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for rule in lowered.rules() {
@@ -634,35 +797,47 @@ fn refuse_shared_rule_ids(lowered: &LoweredPolicySet) -> Result<(), PolicyError>
             Some(id) if !id.trim().is_empty() => rules_by_id
                 .entry(id)
                 .or_default()
-                .push(rule.rule_index.saturating_add(1)),
+                .push(authored_index(positions, rule.rule_index)),
             _ => {}
         }
     }
-    let shared: Vec<String> = rules_by_id
+    let findings: Vec<Finding> = rules_by_id
         .into_iter()
         .filter(|(_, rules)| rules.len() > 1)
         .map(|(id, rules)| {
             let positions = rules
                 .iter()
-                .map(ToString::to_string)
+                .map(|index| index.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("@id(\"{id}\") is on rules {positions}")
+            Finding::new(format!("@id(\"{id}\") is on rules {positions}")).with_rules(
+                rules
+                    .iter()
+                    .map(|index| RuleRef::new(*index, Some(id.to_string())))
+                    .collect(),
+            )
         })
         .collect();
-    if shared.is_empty() {
+    if findings.is_empty() {
         return Ok(());
     }
-    Err(PolicyError::SharedRuleId(format!(
-        "{}; a denial and a telemetry record name a rule by its @id, so give each rule its own @id",
-        shared.join("; ")
-    )))
+    let shared = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::SharedRuleId(format!(
+            "{}; a denial and a telemetry record name a rule by its @id, so give each rule its own @id",
+            shared.join("; ")
+        )),
+        findings,
+    ))
 }
 
 /// Refuse a bundle in which a rule's scope is only the reserved `fs:other`.
-fn refuse_reserved_action_rules(lowered: &LoweredPolicySet) -> Result<(), PolicyError> {
+fn refuse_reserved_action_rules(
+    lowered: &LoweredPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
     let cedar = lowered.as_cedar();
-    let mut inert = Vec::new();
+    let mut findings = Vec::new();
     for rule in lowered.rules() {
         let policy_id = rule
             .cedar_policy_id
@@ -671,22 +846,33 @@ fn refuse_reserved_action_rules(lowered: &LoweredPolicySet) -> Result<(), Policy
         if let Some(policy) = cedar.policy(&policy_id)
             && crate::spelling::names_only_reserved_action(policy)
         {
-            inert.push(format!(
-                "{} (rule {}) names only the reserved action \"{}\"",
-                crate::spelling::rule_name(policy),
-                rule.rule_index.saturating_add(1),
-                action::FS_OTHER
-            ));
+            let index = authored_index(positions, rule.rule_index);
+            findings.push(
+                Finding::new(format!(
+                    "{} (rule {}) names only the reserved action \"{}\"",
+                    crate::spelling::rule_name(policy),
+                    index.saturating_add(1),
+                    action::FS_OTHER
+                ))
+                .with_rules(vec![RuleRef::new(
+                    index,
+                    policy.annotation("id").map(str::to_string),
+                )]),
+            );
         }
     }
-    if inert.is_empty() {
+    if findings.is_empty() {
         return Ok(());
     }
-    Err(PolicyError::ReservedAction(format!(
-        "{}; no operation raises it, so the rule cannot match; name fs:read, fs:write, \
-         fs:delete, or fs:move, alone or beside fs:other",
-        inert.join("; ")
-    )))
+    let inert = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::ReservedAction(format!(
+            "{}; no operation raises it, so the rule cannot match; name fs:read, fs:write, \
+             fs:delete, or fs:move, alone or beside fs:other",
+            inert.join("; ")
+        )),
+        findings,
+    ))
 }
 
 fn reconcile_staged_policy_set(
@@ -2247,5 +2433,39 @@ when temporal {
             !recovered.decide(&governed(), &egress, &http()).is_allow(),
             "inserting an unrelated statement must not reset an unchanged budget"
         );
+    }
+}
+
+#[cfg(test)]
+mod authored_positions {
+    use super::*;
+
+    #[test]
+    fn a_subset_refusal_numbers_each_rule_by_its_authored_position() {
+        let subset = [
+            r#"@id("x") permit (principal, action == Box::Action::"fs:read", resource);"#
+                .to_string(),
+            r#"@id("x") permit (principal, action == Box::Action::"fs:write", resource);"#
+                .to_string(),
+        ];
+        let Err(refused) =
+            check_canonical_policy_set(&subset, &[], &Operator::unanchored(), &[3, 7])
+        else {
+            panic!("one @id on two rules must refuse");
+        };
+        assert!(
+            refused
+                .error
+                .to_string()
+                .contains("@id(\"x\") is on rules 4, 8"),
+            "{}",
+            refused.error
+        );
+        let positions: Vec<usize> = refused.findings[0]
+            .rules()
+            .iter()
+            .map(RuleRef::position)
+            .collect();
+        assert_eq!(positions, [4, 8]);
     }
 }

@@ -85,7 +85,8 @@ The `native-filesystem-policy` Cargo feature includes the adapter but does not a
 `[experimental-features] native-filesystem-policy = true` enables the mechanism and supplies the default for each workload.
 An optional `native-filesystem-policy` boolean in `[agent]`, `[tool.<name>]`, or a local `[mcp.<name>]` overrides that default.
 Each table inherits the global default independently. Remote MCP entries refuse the setting.
-An explicit process enablement requires the global gate. Standard release builds exclude the adapter.
+An explicit process enablement requires the global gate.
+Signed macOS releases include the adapter, but retain this explicit runtime selection.
 
 The trusted launcher holds each workload before execution and registers its selection against the kernel-observed process identity.
 Children inherit the selection across forks and executable changes. Only trusted launches apply table overrides.
@@ -947,6 +948,23 @@ because it faces every author with a blank file. Agent generation alone was reje
 strands an operator who runs no agent and leaves review without a trusted reference. The cost is a
 standing maintenance burden: the examples and the authoring skill must track the action vocabulary as
 it moves.
+
+<a id="a-tool-pack-holds-grammars-never-code"></a>
+### A tool pack holds grammars, never code
+
+A tool pack is a TOML file that describes one tool: its actions, its effects, and the grammar Box uses
+to recognize those actions. It holds no code. So Box puts no external code inside its trusted process,
+and a pack stays easy to write and to review. Parsers written as Python code that runs in Monty were
+rejected. The cost is that a pack can describe only what its grammar can express.
+
+<a id="box-owns-the-tool-pack-format"></a>
+### Box owns the tool pack file format, and it is separate from the pack's own version
+
+A tool pack file declares two versions. `format` is the version of the pack file language, and Box owns
+it: Box bumps it when it adds or changes keys in a way an older Box cannot read. `version` is the major
+version of the pack's content, and the pack author owns it. Box refuses a file with no `format`, or with
+a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
+file must state `format = 1`.
 
 ## Containment
 

@@ -1,9 +1,10 @@
 //! [`MitmHandle`] — the supervisor's control surface for a running adapter.
 
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::audit::{NetworkAuditEvent, SharedAuditLog};
@@ -34,6 +35,7 @@ pub struct MitmHandle {
     audit: SharedAuditLog,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
+    shutdown_connection: OnceLock<OwnedFd>,
 }
 
 impl MitmHandle {
@@ -55,6 +57,7 @@ impl MitmHandle {
             audit,
             stop,
             accept_thread: Some(accept_thread),
+            shutdown_connection: OnceLock::new(),
         }
     }
 
@@ -120,15 +123,15 @@ impl MitmHandle {
         if self.stop.swap(true, Ordering::SeqCst) {
             return; // already shutting down
         }
-        // Unblock the blocking `accept()` by opening (and dropping) a throwaway connection over the
-        // same transport the accept loop is waiting on.
-        match &self.transport {
+        // Keep the wakeup connection open until the accept thread exits.
+        let connection = match &self.transport {
             BoundTransport::Tcp(port) => {
-                let _ = std::net::TcpStream::connect(("127.0.0.1", *port));
+                std::net::TcpStream::connect(("127.0.0.1", *port)).map(OwnedFd::from)
             }
-            BoundTransport::Unix(path) => {
-                let _ = UnixStream::connect(path);
-            }
+            BoundTransport::Unix(path) => UnixStream::connect(path).map(OwnedFd::from),
+        };
+        if let Ok(connection) = connection {
+            let _ = self.shutdown_connection.set(connection);
         }
     }
 }

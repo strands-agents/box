@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use command::cli::{Cli, Command, PolicyCommand};
 
+pub use policy::{Finding, Location, PolicyCheck, RuleRef};
+
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Optional terminal attachment and host initialization for one run.
@@ -48,6 +50,29 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
         options,
     )
 }
+
+/// Check the policy that a Box configuration selects, as a box checks it when it opens.
+pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
+    let (source, complete) = record::config::read_checked_policy(&config).map_err(CheckFailed)?;
+    let operator = record::config::policy_operator().map_err(CheckFailed)?;
+    Ok(policy::PolicyEngine::check(
+        &operator,
+        source.as_slice(),
+        complete,
+    ))
+}
+
+/// A policy check that could not run: the configuration or its policy file cannot be read.
+#[derive(Debug)]
+pub struct CheckFailed(error::BoxError);
+
+impl std::fmt::Display for CheckFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for CheckFailed {}
 
 /// Generate policy action and event schemas from a Box configuration.
 pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode {

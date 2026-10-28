@@ -7,6 +7,7 @@ use egress_gateway::{is_bindable_host, normalize_host};
 use serde_json::Value;
 
 use crate::PolicyError;
+use crate::check::{Refused, RuleRef};
 use crate::schema::action::FS_OTHER;
 use crate::schema::attr::{HOST, PATH, PROGRAM, PROGRAM_PATH};
 
@@ -126,11 +127,21 @@ enum Finding {
     ProgramPath(String),
 }
 
-/// Refuse every literal that no reported spelling can match; return the uncertain ones.
+/// `judge_naming` with no rule names, for the tests that read only the refusal text.
+#[cfg(test)]
 pub(crate) fn judge(
     policies: &PolicySet,
     operator: &Operator,
 ) -> Result<Vec<PolicyWarning>, PolicyError> {
+    judge_naming(policies, operator, &|_| None).map_err(Refused::into_error)
+}
+
+/// Refuse every literal that no reported spelling can match; return the uncertain ones.
+pub(crate) fn judge_naming(
+    policies: &PolicySet,
+    operator: &Operator,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<Vec<PolicyWarning>, Refused> {
     let homes = operator.homes();
     let mut warnings = Vec::new();
     for policy in policies.policies() {
@@ -154,7 +165,12 @@ pub(crate) fn judge(
             match finding {
                 Finding::Sound => {}
                 Finding::Inert(reason) => {
-                    return Err(PolicyError::Spelling(format!("{rule} {reason}")));
+                    let text = format!("{rule} {reason}");
+                    let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+                    return Err(Refused::new(
+                        PolicyError::Spelling(text.clone()),
+                        vec![crate::check::Finding::new(text).with_rules(rules)],
+                    ));
                 }
                 Finding::Uncertain(pattern) => warnings.push(PolicyWarning::HomeAfterWildcard {
                     rule: rule.clone(),

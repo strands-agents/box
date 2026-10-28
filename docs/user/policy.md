@@ -422,7 +422,9 @@ strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will no
 Each refusal below is the text after `will not load: `. Two numberings appear. `rule N` counts from
 `1` in file order. `policy_N` is the engine's own name and counts from `0`, so `policy_0` is rule
 1. A rule with no `@id` is named by its effect and position, as
-`the permit rule with no @id (rule 1)`.
+`the permit rule with no @id (rule 1)`. When the engine can point at the text, the refusal ends
+with the line and column in the file, and often a hint in parentheses, such as
+``(did you mean `path`?)``.
 
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
@@ -439,7 +441,7 @@ permit (principal, action == Box::Action::"fs:read", resource)
 ```
 
 ```text
-failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition
+failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition at line 2, column 1
 ```
 
 A rule reads the request's own fields and the recorded history. This one calls out to an external
@@ -464,7 +466,7 @@ permit (principal, action == Box::Action::"fs:raed", resource);
 ```
 
 ```text
-policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"`; for policy `policy_0`, unable to find an applicable action given the policy scope constraints
+policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"` at line 1, column 30 (did you mean `Box::Action::"fs:read"`?); for policy `policy_0`, unable to find an applicable action given the policy scope constraints
 ```
 
 A field name is one the action carries, and [the action vocabulary](policy/actions.md) lists them.
@@ -476,7 +478,7 @@ when { context.input.paht like "~/project/*" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found
+policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found at line 2, column 8 (did you mean `path`?)
 ```
 
 An `operation` value is one of the fixed set its action has. The value for a listing is
@@ -488,7 +490,7 @@ when { context.input.operation == Box::FsReadOperation::"list" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid
+policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid at line 1, column 1 (valid entity eids: "read_content", "read_metadata", "enumerate", "read_link", "change_dir", "exec")
 ```
 
 ### An optional field read without a guard
@@ -503,7 +505,7 @@ when { context.input.program == "rm" && context.input.arg1 == "-rf" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec"
+policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec" at line 2, column 41 (try testing for the attribute's presence with `context.input has arg1 && ..`)
 ```
 
 ### A temporal clause the engine cannot evaluate
@@ -519,7 +521,7 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`)
+policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`) at line 3, column 3 (check the action name and event kind; event kinds are typically `request` or `response` and derive from the schema)
 ```
 
 The longest window is `24h`. The refusal offers to raise `max_window`, but that schema ships inside
@@ -533,7 +535,7 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema
+policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema at line 3, column 3 (every temporal `within` window is capped by the event schema's `max_window` (default 24h); either shorten this window or raise the cap with a `max_window = <interval>` directive at the top of the event schema)
 ```
 
 ### A literal that nothing can match

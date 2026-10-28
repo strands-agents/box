@@ -192,6 +192,16 @@ the policy refused degrades alone: its per-tool rules don't load, and the box st
 ([a server whose discovery a policy denies degrades
 alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).
 
+A library caller checks a policy without a run through `check_policy`. It reads `box.toml` and the
+policy file it names with the reader that `run` uses, and it applies the same validation: the
+complete check when the box declares no local MCP server, and otherwise the classification that
+staging applies before any server reports. In the second case each per-tool rule is listed as
+unchecked, because only a running box can learn the server's tools, and every other rule is
+validated. The check starts no process, resolves no secret, writes no box state, and doesn't use the
+one run that a process allows. Each finding names its rules by their position in the authored file
+and their `@id`, the line and column when the engine reports a span, and the validator's hint, such
+as ``did you mean `path`?``.
+
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them.
 

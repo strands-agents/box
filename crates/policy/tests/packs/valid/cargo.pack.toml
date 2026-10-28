@@ -1,0 +1,328 @@
+# Draft pack for cargo (checked against cargo 1.98 `--help` and behaviour).
+# Keys beyond design.md section 3 are marked "EXT-n"; crates/policy/src/pack/grammar.rs reads them.
+#
+# Only `--locked` and `--frozen` stop a lockfile write. `--offline` alone does not: cargo can
+# still resolve from the local cache and rewrite Cargo.lock. `--offline` removes `network`.
+# CARGO_NET_OFFLINE, `net.offline` in a config file, and `[alias]` entries in
+# `.cargo/config.toml` are invisible to the parser (L1). A config-file alias can redefine
+# `t` to mean `publish`: see cargo.corpus.md.
+
+format  = 1       # The pack file language. Box reads 1.
+version = 1       # The major version of this pack.
+pack    = "cargo"
+program = "cargo"
+
+[effects]
+update_lockfile   = "Can create or rewrite Cargo.lock"
+modify_manifest   = "Rewrites a Cargo.toml"
+network           = "Can download from a registry or a git source"
+run_build_scripts = "Compiles and runs build scripts and proc macros"
+execute_built_code = "Runs a binary or test that the build produced"
+install_binary    = "Installs a binary into the cargo install root"
+publish_crate     = "Uploads a crate to a registry"
+modify_sources    = "Rewrites source files"
+override_config   = "Overrides cargo configuration for this one command"
+
+# EXT-3. The rustup toolchain selector `+<toolchain>` is a usage token (EXT-8), not an
+# option. clap marks every option below as global except -C, so they may also follow the
+# subcommand (`anywhere = true`).
+[global]
+options.verbose   = { flag = ["-v", "--verbose"], anywhere = true }
+options.quiet     = { flag = ["-q", "--quiet"], anywhere = true }
+options.color     = { flag = ["--color"], value = "required", anywhere = true }
+options.locked    = { flag = ["--locked"], anywhere = true, removes = ["update_lockfile"] }
+options.offline   = { flag = ["--offline"], anywhere = true, removes = ["network"] }
+options.frozen    = { flag = ["--frozen"], anywhere = true, removes = ["update_lockfile", "network"] }
+options.config    = { flag = ["--config"], value = "required", repeated = true, anywhere = true, adds = ["override_config"] }
+options.unstable  = { flag = ["-Z"], value = "required", repeated = true, anywhere = true }
+options.directory = { flag = ["-C"], value = "required" }
+
+# ---------------------------------------------------------------- shared shape
+# Every build-like action repeats this option block. TOML has no include, and the design
+# keeps a pack to one flat file, so the duplication is deliberate.
+
+# ---------------------------------------------------------------- test
+[shell.test]
+usage   = "cargo [+<toolchain>] [global options] test [options] [<testname>] [-- <test_args>...]"
+aliases = ["t"]                                                           # EXT-1 (plan Q6)
+adds    = ["update_lockfile", "network", "run_build_scripts", "execute_built_code"]   # EXT-2
+options.no_run        = { flag = ["--no-run"], removes = ["execute_built_code"] }
+options.no_fail_fast  = { flag = ["--no-fail-fast"] }
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["--workspace", "--all"] }
+options.exclude       = { flag = ["--exclude"], value = "required", repeated = true }
+options.lib           = { flag = ["--lib"] }
+options.bins          = { flag = ["--bins"] }
+options.bin           = { flag = ["--bin"], value = "required", repeated = true }
+options.examples      = { flag = ["--examples"] }
+options.example       = { flag = ["--example"], value = "required", repeated = true }
+options.tests         = { flag = ["--tests"] }
+options.test          = { flag = ["--test"], value = "required", repeated = true }
+options.benches       = { flag = ["--benches"] }
+options.bench         = { flag = ["--bench"], value = "required", repeated = true }
+options.all_targets   = { flag = ["--all-targets"] }
+options.doc           = { flag = ["--doc"] }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.release       = { flag = ["-r", "--release"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required", repeated = true }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required", repeated = true }
+options.timings       = { flag = ["--timings"] }
+options.keep_going    = { flag = ["--keep-going"] }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+options.future_incompat_report = { flag = ["--future-incompat-report"] }
+operands.testname  = {}
+operands.test_args = {}
+
+# ---------------------------------------------------------------- build
+[shell.build]
+usage   = "cargo [+<toolchain>] [global options] build [options]"
+aliases = ["b"]
+adds    = ["update_lockfile", "network", "run_build_scripts"]
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["--workspace", "--all"] }
+options.exclude       = { flag = ["--exclude"], value = "required", repeated = true }
+options.lib           = { flag = ["--lib"] }
+options.bins          = { flag = ["--bins"] }
+options.bin           = { flag = ["--bin"], value = "required", repeated = true }
+options.examples      = { flag = ["--examples"] }
+options.example       = { flag = ["--example"], value = "required", repeated = true }
+options.tests         = { flag = ["--tests"] }
+options.test          = { flag = ["--test"], value = "required", repeated = true }
+options.benches       = { flag = ["--benches"] }
+options.bench         = { flag = ["--bench"], value = "required", repeated = true }
+options.all_targets   = { flag = ["--all-targets"] }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.release       = { flag = ["-r", "--release"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required", repeated = true }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.artifact_dir  = { flag = ["--artifact-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required", repeated = true }
+options.timings       = { flag = ["--timings"] }
+options.keep_going    = { flag = ["--keep-going"] }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+options.future_incompat_report = { flag = ["--future-incompat-report"] }
+
+# ---------------------------------------------------------------- check
+[shell.check]
+usage   = "cargo [+<toolchain>] [global options] check [options]"
+aliases = ["c"]
+adds    = ["update_lockfile", "network", "run_build_scripts"]
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["--workspace", "--all"] }
+options.exclude       = { flag = ["--exclude"], value = "required", repeated = true }
+options.lib           = { flag = ["--lib"] }
+options.bins          = { flag = ["--bins"] }
+options.bin           = { flag = ["--bin"], value = "required", repeated = true }
+options.examples      = { flag = ["--examples"] }
+options.example       = { flag = ["--example"], value = "required", repeated = true }
+options.tests         = { flag = ["--tests"] }
+options.test          = { flag = ["--test"], value = "required", repeated = true }
+options.benches       = { flag = ["--benches"] }
+options.bench         = { flag = ["--bench"], value = "required", repeated = true }
+options.all_targets   = { flag = ["--all-targets"] }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.release       = { flag = ["-r", "--release"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required", repeated = true }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required", repeated = true }
+options.timings       = { flag = ["--timings"] }
+options.keep_going    = { flag = ["--keep-going"] }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+
+# ---------------------------------------------------------------- run
+# clap sets trailing_var_arg on `cargo run`: from the first operand on, every word goes to
+# the program, even one that looks like a cargo option (`cargo run x --release` runs a debug
+# build and passes `--release` to it). EXT-9 `rest = true` says that.
+[shell.run]
+usage   = "cargo [+<toolchain>] [global options] run [options] [--] [<program_args>...]"
+aliases = ["r"]
+adds    = ["update_lockfile", "network", "run_build_scripts", "execute_built_code"]
+options.package       = { flag = ["-p", "--package"], value = "required" }
+options.bin           = { flag = ["--bin"], value = "required" }
+options.example       = { flag = ["--example"], value = "required" }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.release       = { flag = ["-r", "--release"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required" }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required", repeated = true }
+options.timings       = { flag = ["--timings"] }
+options.keep_going    = { flag = ["--keep-going"] }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+operands.program_args = { rest = true }                                   # EXT-9
+
+# ---------------------------------------------------------------- update
+[shell.update]
+usage = "cargo [+<toolchain>] [global options] update [options] [<spec>...]"
+adds  = ["update_lockfile", "network"]
+options.dry_run       = { flag = ["-n", "--dry-run"], removes = ["update_lockfile"] }
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["-w", "--workspace"] }
+options.recursive     = { flag = ["--recursive"] }
+options.precise       = { flag = ["--precise"], value = "required" }
+options.breaking      = { flag = ["-b", "--breaking"], adds = ["modify_manifest"] }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+operands.spec = {}
+
+# ---------------------------------------------------------------- add
+# With --locked, `cargo add` still edits Cargo.toml and then fails if Cargo.lock must change.
+# The manifest write is not undone, so --locked removes only update_lockfile.
+[shell.add]
+usage = "cargo [+<toolchain>] [global options] add [options] <dependency>..."
+adds  = ["modify_manifest", "update_lockfile", "network"]
+options.dry_run       = { flag = ["-n", "--dry-run"], removes = ["modify_manifest", "update_lockfile"] }
+options.dev           = { flag = ["--dev"] }
+options.build         = { flag = ["--build"] }
+options.target        = { flag = ["--target"], value = "required" }
+options.path          = { flag = ["--path"], value = "required" }
+options.base          = { flag = ["--base"], value = "required" }
+options.git           = { flag = ["--git"], value = "required" }
+options.branch        = { flag = ["--branch"], value = "required" }
+options.tag           = { flag = ["--tag"], value = "required" }
+options.rev           = { flag = ["--rev"], value = "required" }
+options.registry      = { flag = ["--registry"], value = "required" }
+options.rename        = { flag = ["--rename"], value = "required" }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.default_features = { flag = ["--default-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.optional      = { flag = ["--optional"] }
+options.no_optional   = { flag = ["--no-optional"] }
+options.package       = { flag = ["-p", "--package"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+operands.dependency = {}
+
+# ---------------------------------------------------------------- remove
+[shell.remove]
+usage   = "cargo [+<toolchain>] [global options] remove [options] <dependency>..."
+aliases = ["rm"]
+adds    = ["modify_manifest", "update_lockfile"]
+options.dry_run       = { flag = ["-n", "--dry-run"], removes = ["modify_manifest", "update_lockfile"] }
+options.dev           = { flag = ["--dev"] }
+options.build         = { flag = ["--build"] }
+options.target        = { flag = ["--target"], value = "required" }
+options.package       = { flag = ["-p", "--package"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+operands.dependency = {}
+
+# ---------------------------------------------------------------- publish
+[shell.publish]
+usage = "cargo [+<toolchain>] [global options] publish [options]"
+adds  = ["publish_crate", "network", "run_build_scripts"]
+options.dry_run       = { flag = ["-n", "--dry-run"], removes = ["publish_crate"] }
+options.no_verify     = { flag = ["--no-verify"], removes = ["run_build_scripts"] }
+options.allow_dirty   = { flag = ["--allow-dirty"] }
+options.token         = { flag = ["--token"], value = "required" }
+options.index         = { flag = ["--index"], value = "required" }
+options.registry      = { flag = ["--registry"], value = "required" }
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["--workspace"] }
+options.exclude       = { flag = ["--exclude"], value = "required", repeated = true }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.target        = { flag = ["--target"], value = "required" }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.keep_going    = { flag = ["--keep-going"] }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+
+# ---------------------------------------------------------------- install
+# install does not touch the project's Cargo.lock, so it never raises update_lockfile.
+[shell.install]
+usage = "cargo [+<toolchain>] [global options] install [options] [<crate>...]"
+adds  = ["install_binary", "network", "run_build_scripts"]
+options.list          = { flag = ["--list"], removes = ["install_binary", "network", "run_build_scripts"] }
+options.version       = { flag = ["--version", "--vers"], value = "required" }
+options.git           = { flag = ["--git"], value = "required" }
+options.branch        = { flag = ["--branch"], value = "required" }
+options.tag           = { flag = ["--tag"], value = "required" }
+options.rev           = { flag = ["--rev"], value = "required" }
+options.path          = { flag = ["--path"], value = "required" }
+options.root          = { flag = ["--root"], value = "required" }
+options.index         = { flag = ["--index"], value = "required" }
+options.registry      = { flag = ["--registry"], value = "required" }
+options.force         = { flag = ["-f", "--force"] }
+options.no_track      = { flag = ["--no-track"] }
+options.bin           = { flag = ["--bin"], value = "required", repeated = true }
+options.bins          = { flag = ["--bins"] }
+options.example       = { flag = ["--example"], value = "required", repeated = true }
+options.examples      = { flag = ["--examples"] }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.debug         = { flag = ["--debug"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required" }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.keep_going    = { flag = ["--keep-going"] }
+options.ignore_rust_version = { flag = ["--ignore-rust-version"] }
+operands.crate = {}
+
+# ---------------------------------------------------------------- clippy
+# `cargo clippy` runs the external `cargo-clippy` found on PATH or in ~/.cargo/bin.
+# Any other unknown `cargo <word>` runs `cargo-<word>` and is unmodeled.
+[shell.clippy]
+usage = "cargo [+<toolchain>] [global options] clippy [options] [-- <clippy_args>...]"
+adds  = ["update_lockfile", "network", "run_build_scripts"]
+options.fix           = { flag = ["--fix"], adds = ["modify_sources"] }
+options.allow_dirty   = { flag = ["--allow-dirty"] }
+options.allow_staged  = { flag = ["--allow-staged"] }
+options.allow_no_vcs  = { flag = ["--allow-no-vcs"] }
+options.no_deps       = { flag = ["--no-deps"] }
+options.package       = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.workspace     = { flag = ["--workspace", "--all"] }
+options.exclude       = { flag = ["--exclude"], value = "required", repeated = true }
+options.lib           = { flag = ["--lib"] }
+options.bins          = { flag = ["--bins"] }
+options.bin           = { flag = ["--bin"], value = "required", repeated = true }
+options.tests         = { flag = ["--tests"] }
+options.examples      = { flag = ["--examples"] }
+options.benches       = { flag = ["--benches"] }
+options.all_targets   = { flag = ["--all-targets"] }
+options.features      = { flag = ["-F", "--features"], value = "required", repeated = true }
+options.all_features  = { flag = ["--all-features"] }
+options.no_default_features = { flag = ["--no-default-features"] }
+options.release       = { flag = ["-r", "--release"] }
+options.profile       = { flag = ["--profile"], value = "required" }
+options.target        = { flag = ["--target"], value = "required", repeated = true }
+options.target_dir    = { flag = ["--target-dir"], value = "required" }
+options.jobs          = { flag = ["-j", "--jobs"], value = "required" }
+options.manifest_path = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required", repeated = true }
+operands.clippy_args = {}
+
+# ---------------------------------------------------------------- fmt
+# `cargo fmt` runs the external `cargo-fmt`, which takes no global cargo options after the
+# subcommand except its own -v/-q.
+[shell.fmt]
+usage = "cargo [+<toolchain>] [global options] fmt [options] [-- <rustfmt_args>...]"
+adds  = ["modify_sources"]
+options.check          = { flag = ["--check"], removes = ["modify_sources"] }
+options.all            = { flag = ["--all"] }
+options.package        = { flag = ["-p", "--package"], value = "required", repeated = true }
+options.manifest_path  = { flag = ["--manifest-path"], value = "required" }
+options.message_format = { flag = ["--message-format"], value = "required" }
+operands.rustfmt_args = { when = [ { like = "--check", removes = ["modify_sources"] } ] }
