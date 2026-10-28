@@ -4,6 +4,9 @@
 //! passes, whatever its length. Reads and writes have one clock each, and a byte in either direction
 //! restarts both. So a read that waits does not end a write that moves, and the reverse: hyper waits
 //! for the reply head while it still writes the request body.
+//!
+//! An upgraded session lifts both bounds ([`Disarm`]): the relay then bounds the session by its own
+//! idle limit, with no byte in either direction toward either peer.
 
 use std::future::Future;
 use std::io;
@@ -24,7 +27,8 @@ pub(super) const UPSTREAM_IDLE_PASSED: &str = "upstream idle bound passed";
 /// byte in either direction.
 pub(super) struct Idle<S> {
     inner: S,
-    idle: Duration,
+    /// The bound of each wait; `None` once the stream is disarmed.
+    idle: Option<Duration>,
     passed: &'static str,
     read: Clock,
     write: Clock,
@@ -44,7 +48,7 @@ impl<S> Idle<S> {
     pub(super) fn new(inner: S, idle: Duration, passed: &'static str) -> Self {
         Self {
             inner,
-            idle,
+            idle: Some(idle),
             passed,
             read: Clock::default(),
             write: Clock::default(),
@@ -59,23 +63,52 @@ impl<S> Idle<S> {
     }
 }
 
+/// A stream with an idle bound under it, which an upgraded session lifts.
+pub(super) trait Disarm {
+    /// Remove the idle bound: each later read and write waits as long as the stream does.
+    fn disarm(&mut self);
+}
+
+impl<S> Disarm for Idle<S> {
+    fn disarm(&mut self) {
+        self.idle = None;
+        self.read = Clock::default();
+        self.write = Clock::default();
+    }
+}
+
+impl<S: Disarm> Disarm for tokio_rustls::server::TlsStream<S> {
+    fn disarm(&mut self) {
+        self.get_mut().0.disarm();
+    }
+}
+
+impl<S: Disarm> Disarm for tokio_rustls::client::TlsStream<S> {
+    fn disarm(&mut self) {
+        self.get_mut().0.disarm();
+    }
+}
+
 impl Clock {
     /// Restart the wait of the current call, because a byte moved in the other direction.
-    fn restart(&mut self, idle: Duration) {
-        if let Some(wait) = self.wait.as_mut() {
+    fn restart(&mut self, idle: Option<Duration>) {
+        if let (Some(wait), Some(idle)) = (self.wait.as_mut(), idle) {
             wait.as_mut().reset(Instant::now() + idle);
         }
     }
 
     /// The result of one call of a direction: `Ready` resets the clock, and `Pending` starts it or
-    /// checks it.
+    /// checks it. With no `idle`, the call is not bounded.
     fn bound<T>(
         &mut self,
         cx: &mut Context<'_>,
-        idle: Duration,
+        idle: Option<Duration>,
         passed: &'static str,
         call: impl FnOnce(&mut Context<'_>) -> Poll<io::Result<T>>,
     ) -> Poll<io::Result<T>> {
+        let Some(idle) = idle else {
+            return call(cx);
+        };
         if self.passed {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::TimedOut, passed)));
         }
@@ -250,6 +283,27 @@ mod tests {
             let mut sent = [0; 5];
             peer.read_exact(&mut sent).await.unwrap();
             assert_eq!(&sent, b"xxxxx");
+        });
+    }
+
+    /// **A disarmed stream waits with no bound**: a read that waits more than the bound gets its
+    /// byte, and a stream whose wait already passed works again.
+    #[test]
+    fn a_disarmed_stream_waits_with_no_bound() {
+        block_on(async {
+            let (gateway, mut peer) = tokio::io::duplex(64);
+            let mut idle = Idle::new(gateway, IDLE, CLIENT_IDLE_PASSED);
+            assert!(idle.read(&mut [0; 8]).await.is_err(), "the bound passes");
+            idle.disarm();
+            let writer = tokio::spawn(async move {
+                tokio::time::sleep(IDLE * 2).await;
+                peer.write_all(b"late").await.unwrap();
+                peer
+            });
+            let mut got = [0; 4];
+            idle.read_exact(&mut got).await.unwrap();
+            assert_eq!(&got, b"late");
+            drop(writer.await.unwrap());
         });
     }
 

@@ -108,6 +108,7 @@ pub(super) async fn accept_loop(
             Arc::clone(&state),
             slot,
             head_deadline,
+            stopping.clone(),
         ));
     }
     // The listener and the state drop before the caller reports the end of the loop.
@@ -116,16 +117,21 @@ pub(super) async fn accept_loop(
 }
 
 /// Serve one connection: read its first head, then route it. The task holds the slot until the
-/// connection ends.
+/// connection ends, also while it relays a WebSocket. `stop` ends a relay.
 async fn serve_connection(
     client: Accepted,
     state: Arc<SharedState>,
     slot: Slot,
     head_deadline: Instant,
+    stop: watch::Receiver<bool>,
 ) {
     let handled = match client {
-        Accepted::Tcp(stream) => route(stream, &state, slot, head_deadline).await,
-        Accepted::Unix(stream) => route(stream, &state, slot, head_deadline).await,
+        Accepted::Tcp(stream) => {
+            // Small writes, such as a WebSocket frame, leave at once.
+            let _ = stream.set_nodelay(true);
+            route(stream, &state, slot, head_deadline, stop).await
+        }
+        Accepted::Unix(stream) => route(stream, &state, slot, head_deadline, stop).await,
     };
     if let Err(err) = handled {
         // Never silently swallow a handler failure — record it (secret-free) so a broken
@@ -169,6 +175,7 @@ async fn route<C: Client>(
     state: &Arc<SharedState>,
     slot: Slot,
     head_deadline: Instant,
+    stop: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
     let idle = state.client_limits.idle;
     let head = match read_until_headers_end(&mut client, idle, head_deadline).await {
@@ -177,13 +184,14 @@ async fn route<C: Client>(
     };
     match connect::parse_connect(&head) {
         // HTTPS via CONNECT: terminate TLS and inspect.
-        Some(connect) => tls_path(client, connect, state, slot).await,
+        Some(connect) => tls_path(client, connect, state, slot, stop).await,
         None if C::PLAIN_HTTP => {
             let _slot = slot;
             let session = PlainSession {
                 client,
                 proxy_authorization: connect::proxy_authorization_from_head(&head),
                 head: head.into_bytes(),
+                stop,
             };
             serve_plain(Arc::clone(state), session).await
         }
@@ -209,6 +217,7 @@ async fn tls_path<C: Client>(
     connect: ConnectRequest,
     state: &Arc<SharedState>,
     slot: Slot,
+    stop: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
     let idle = state.client_limits.idle;
     let correlation = RequestId::unique();
@@ -265,6 +274,7 @@ async fn tls_path<C: Client>(
         upstream,
         connect,
         correlation,
+        stop,
     };
     serve_tls(Arc::clone(state), session).await
 }
@@ -446,8 +456,10 @@ fn open_upstream(
             .record_outcome(EffectOutcome::Connected(peer))
             .map_err(|_| unfinished(Unfinished::OutcomeUnrecorded))?;
         // The gateway runtime registers the socket, and its idle bound replaces socket timeouts.
+        // Small writes, such as a WebSocket frame, leave at once.
         upstream
             .set_nonblocking(true)
+            .and_then(|()| upstream.set_nodelay(true))
             .map_err(|_| unfinished(Unfinished::SocketUnprepared))?;
         return Ok(upstream);
     }
@@ -760,6 +772,7 @@ mod tests {
             effect_interceptor: policy,
             expected_token: None,
             client_limits: ClientLimits::default(),
+            sessions: Arc::new(Semaphore::new(0)),
         }
     }
 
@@ -825,6 +838,25 @@ mod tests {
         );
         assert_eq!(refused.accepted(), refused_before);
         drop(upstream);
+    }
+
+    /// **The dialed socket sends small writes at once** (`TCP_NODELAY`), so a WebSocket frame does
+    /// not wait for the next one.
+    #[test]
+    fn the_dialed_socket_sends_small_writes_at_once() {
+        let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = origin.local_addr().unwrap().port();
+        let shared = state(AddressPolicy::permit_all());
+        let pinned = PinnedDestination::from_ips(port, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let upstream = open_upstream(
+            &shared,
+            &connect_to("nodelay.test", port),
+            &pinned,
+            &RequestId::new("test"),
+        )
+        .ok()
+        .expect("the permitted address connects");
+        assert!(upstream.nodelay().unwrap());
     }
 
     /// A dead endpoint plus a live refused recorder that share one port, on two loopback addresses

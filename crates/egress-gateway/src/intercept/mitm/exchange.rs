@@ -13,14 +13,15 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::connect::ConnectRequest;
-use super::convert::{UpstreamRequest, Whole, response_out, upstream_request};
+use super::convert::{UpstreamRequest, Whole, response_out, upstream_handshake, upstream_request};
 use super::l7::{canonicalize_request_path, reconstruct_target, validate_request_binding};
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
 use super::serve::WriteCount;
-use super::websocket::Handshake;
+use super::websocket::{self, Handshake};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent, RequestId};
@@ -40,6 +41,8 @@ pub(super) struct Exchange<'a> {
     pub(super) method: String,
     /// What the request head asks for in `Upgrade`.
     handshake: Handshake,
+    /// The session slot of a handshake that the screen admitted, held until its relay ends.
+    session: Option<OwnedSemaphorePermit>,
     /// The judged path, before any credential mutation.
     workload_path: String,
     forward_target: String,
@@ -147,6 +150,7 @@ impl<'a> Exchange<'a> {
             correlation,
             method: request.method.clone().unwrap_or_else(|| "GET".to_string()),
             handshake,
+            session: None,
             workload_path: request.target.path.clone(),
             request,
             forward_target: String::new(),
@@ -166,6 +170,30 @@ impl<'a> Exchange<'a> {
             method: &self.method,
             path: &self.workload_path,
             correlation: &self.correlation,
+        }
+    }
+
+    /// The key of the WebSocket handshake that this request is, if it is one.
+    pub(super) fn websocket_key(&self) -> Option<&str> {
+        match &self.handshake {
+            Handshake::WebSocket { key } => Some(key),
+            Handshake::None | Handshake::Malformed(_) => None,
+        }
+    }
+
+    /// The relay of this handshake after its `101`, with the upgraded `upstream`. It takes the
+    /// session slot that the screen took.
+    pub(super) fn relay(&mut self, upstream: Box<dyn websocket::Duplex>) -> websocket::Pending {
+        websocket::Pending {
+            host: self.connect.host.clone(),
+            port: self.connect.port,
+            path: self.workload_path.clone(),
+            correlation: self.correlation.clone(),
+            upstream,
+            slot: self
+                .session
+                .take()
+                .expect("the screen takes a session slot for each handshake that it admits"),
         }
     }
 
@@ -270,7 +298,7 @@ fn canonicalize_path(
 }
 
 /// Refuse a WebSocket handshake that the gateway does not relay, before any credential or policy
-/// sees it, and remove the extensions of one that it relays.
+/// sees it. For one that it relays, take a session slot, and remove the extensions and the length.
 fn screen_websocket(
     exchange: &mut Exchange<'_>,
     state: &SharedState,
@@ -291,12 +319,37 @@ fn screen_websocket(
             403,
             b"WebSocket refused for an MCP server",
         ),
-        Handshake::WebSocket { .. } => {
-            // `permessage-deflate` compresses each message before the gateway reads it, so the
-            // scrub could not find a secret in it. The fold and the upstream never see the offer.
-            exchange.request.headers.remove("sec-websocket-extensions");
-            return Ok(());
+        // Until the relay scrubs each server message, a message could carry the injected secret
+        // back to the workload.
+        Handshake::WebSocket { .. }
+            if state
+                .controls
+                .matches_any(&exchange.request.target.as_destination()) =>
+        {
+            (
+                "a credential route matches the destination, and the relay does not scrub server messages",
+                403,
+                b"WebSocket refused for a credential route",
+            )
         }
+        Handshake::WebSocket { .. } => match Arc::clone(&state.sessions).try_acquire_owned() {
+            Ok(slot) => {
+                exchange.session = Some(slot);
+                // `permessage-deflate` compresses each message before the gateway reads it, so the
+                // scrub could not find a secret in it. The fold and the upstream never see the
+                // offer. The handshake has no body, so a signer must not sign a length.
+                exchange.request.headers.remove("sec-websocket-extensions");
+                exchange.request.headers.remove("content-length");
+                return Ok(());
+            }
+            // Open WebSockets hold their share of the connection slots; the rest stay free for
+            // ordinary requests.
+            Err(_) => (
+                "the open WebSockets hold their share of the connection slots",
+                503,
+                b"WebSocket session limit reached",
+            ),
+        },
     };
     Err(Refusal {
         reason: format!("websocket: {reason}"),
@@ -438,6 +491,10 @@ pub(super) fn prepare_request(
     state: &SharedState,
     writes: Arc<WriteCount>,
 ) -> Result<UpstreamRequest> {
+    // A handshake has no body (the classification refuses one), so it forwards none.
+    if exchange.websocket_key().is_some() {
+        return upstream_handshake(&exchange.forward_target, &exchange.request.headers, writes);
+    }
     let body = match canonical_frame(exchange) {
         Some(frame) => frame,
         // A request to a remote MCP server keeps its body for the JSON-RPC refusal and the catalog
@@ -783,6 +840,7 @@ mod tests {
             effect_interceptor: Arc::new(Unconsulted),
             expected_token: None,
             client_limits: ClientLimits::default(),
+            sessions: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 

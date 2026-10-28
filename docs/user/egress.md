@@ -132,12 +132,18 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 | `WebSocket requires TLS` | A WebSocket handshake came on a plain `http://` request. Use `wss://`. |
 | `WebSocket refused for an MCP server` | A WebSocket handshake went to the host of an http MCP server. |
+| `WebSocket refused for a credential route` | A WebSocket handshake went to a route's destination. The gateway does not yet remove a secret from the server's messages. |
 
 A request that names `websocket` in its `Upgrade` header and is not a valid WebSocket handshake
 gets an HTTP 400 with the same header and the body `malformed WebSocket handshake`. A valid
 handshake is a `GET` over HTTP/1.1 with `Connection: Upgrade`, `Sec-WebSocket-Version: 13`, one
 `Sec-WebSocket-Key`, and no body. The gateway removes `Sec-WebSocket-Extensions` from each
 handshake, so no message is compressed.
+
+A WebSocket handshake past the session limit gets an HTTP 503 with the same header and the body
+`WebSocket session limit reached`. When the server's `101` does not answer the handshake (a wrong
+`Sec-WebSocket-Accept`, an extension, or a subprotocol that the request did not offer), the
+workload gets an HTTP 502 with the same header and the body `WebSocket upgrade response refused`.
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 
@@ -147,6 +153,28 @@ seconds later. The gateway also closes a connection when the client takes longer
 send the request line and headers of its first request, the `CONNECT` or a plain `http://` request.
 A plain `http://` request whose body stops for 60 seconds gets a 400 with no `x-strands-box-egress`
 header.
+
+## WebSocket
+
+A workload can open a `wss://` WebSocket through the gateway. The policy decides the handshake as
+an ordinary `http:request` `GET` on its path; there is no other action. After the `101`, the gateway
+reads every frame in both directions, checks it, and frames it again. Ping, pong, and close pass
+from one peer to the other.
+
+- A permit for `GET` to a host and path also admits a WebSocket there. The session then carries
+  any number of messages in both directions with no more decisions, so a permit for `GET` only, or
+  for `body_bytes == 0`, admits an upload channel.
+- History records one `http:request` event for the session, with status 101. A byte budget over
+  `http:request` counts only the bytes of the handshake.
+- A temporal rule that matches after the handshake does not close an open WebSocket. It refuses
+  the next request and the next handshake.
+- To refuse a WebSocket, `forbid http:request` on its path or its host.
+
+Each message is at most 16 MiB. The gateway closes a session with code 1001
+when no byte moves in either direction for 300 seconds, and when the box stops. It closes a peer
+that breaks a frame rule with 1002, 1007, or 1009, and the other peer with 1001, or with 1014
+when the server broke the rule. Open WebSockets hold at most three quarters of the gateway's
+connections.
 
 ## See also
 

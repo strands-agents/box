@@ -6,7 +6,8 @@
 //! | [`serve_tls`] | Accept the workload's TLS with the minted leaf, then serve one exchange on hyper |
 //! | [`serve_plain`] | Serve one plain-HTTP exchange on hyper, after the first head that the front read |
 //! | `Session` | Run one request: intake, the request phases and the decision, the round trip, the release |
-//! | `round_trip` | Send the decided request over the pinned socket, and read the whole reply |
+//! | `round_trip` | Send the decided request over the pinned socket, and read the whole reply or take the upgrade |
+//! | `Session::switch` | Release the `101` of a WebSocket handshake; the connection task then runs the relay |
 //! | [`WriteCount`], `Counted` | Count the bytes that a stream accepted, for the outcome of each permit |
 //!
 //! Each block of synchronous phases runs in one [`off_worker`] call with no `.await` inside it, so
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
-use http::{Request, Response, Version};
+use http::{Request, Response, StatusCode, Version};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rustls::pki_types::ServerName;
@@ -32,7 +33,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use super::connect::{self, ConnectRequest};
 use super::convert::{self, UpstreamRequest, Whole, error_text};
-use super::deadline::{CLIENT_IDLE_PASSED, Idle, UPSTREAM_IDLE_PASSED};
+use super::deadline::{CLIENT_IDLE_PASSED, Disarm, Idle, UPSTREAM_IDLE_PASSED};
 use super::exchange::{
     Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, Unfinished,
     audit_release, claim_release, decide_request, prepare_request, prepare_response,
@@ -40,6 +41,7 @@ use super::exchange::{
 };
 use super::l7::{split_target, validate_request_binding};
 use super::listener::{PROXY_AUTHENTICATION_REQUIRED, open_governed_upstream};
+use super::websocket::{self, Expected};
 use super::{SharedState, http1, tls};
 use crate::audit::RequestId;
 use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse, Target};
@@ -61,6 +63,8 @@ pub(super) struct TlsSession<C> {
     pub(super) upstream: std::net::TcpStream,
     pub(super) connect: ConnectRequest,
     pub(super) correlation: RequestId,
+    /// The gateway's stop signal, which ends a relay.
+    pub(super) stop: watch::Receiver<bool>,
 }
 
 /// Terminate the workload's TLS with the leaf minted for the CONNECT host, and serve one exchange.
@@ -90,6 +94,7 @@ where
             correlation: session.correlation,
             upstream: Mutex::new(Some(upstream)),
         },
+        session.stop,
     );
     session.serve(client).await
 }
@@ -103,6 +108,8 @@ pub(super) struct PlainSession<C> {
     /// The `Proxy-Authorization` of the raw head. The hop-by-hop strip removes it from the request,
     /// so reading it there would always see nothing and the token check would accept every request.
     pub(super) proxy_authorization: Option<String>,
+    /// The gateway's stop signal.
+    pub(super) stop: watch::Receiver<bool>,
 }
 
 /// Serve one plain-HTTP (absolute-form) exchange: the same controls as the CONNECT path —
@@ -121,6 +128,7 @@ where
         Route::Plain {
             proxy_authorization: session.proxy_authorization,
         },
+        session.stop,
     );
     session.serve(client).await
 }
@@ -145,6 +153,10 @@ struct Session {
     client_writes: Arc<WriteCount>,
     /// The release that waits until hyper has written the governed response.
     pending: Mutex<Option<PendingRelease>>,
+    /// The WebSocket that waits until hyper has written its `101`.
+    relay: Mutex<Option<websocket::Pending>>,
+    /// The gateway's stop signal, which ends a relay.
+    stop: watch::Receiver<bool>,
     /// Why the service ended the exchange, for the audit line.
     failure: Mutex<Option<ProxyError>>,
     /// Whether a request head arrived.
@@ -175,22 +187,25 @@ impl std::error::Error for Ended {}
 type Answer = Pin<Box<dyn Future<Output = std::result::Result<Response<Whole>, Ended>> + Send>>;
 
 impl Session {
-    fn new(state: Arc<SharedState>, route: Route) -> Arc<Self> {
+    fn new(state: Arc<SharedState>, route: Route, stop: watch::Receiver<bool>) -> Arc<Self> {
         Arc::new(Self {
             state,
             route,
             client_writes: WriteCount::new(),
             pending: Mutex::new(None),
+            relay: Mutex::new(None),
+            stop,
             failure: Mutex::new(None),
             requested: AtomicBool::new(false),
             forwarded: AtomicBool::new(false),
         })
     }
 
-    /// Serve the connection on hyper, then record the outcome of the release.
+    /// Serve the connection on hyper, then record the outcome of the release, and relay a WebSocket
+    /// whose `101` hyper wrote.
     async fn serve<C>(self: Arc<Self>, client: C) -> Result<()>
     where
-        C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        C: AsyncRead + AsyncWrite + Disarm + Unpin + Send + 'static,
     {
         let client = Counted::new(client, Arc::clone(&self.client_writes));
         let session = Arc::clone(&self);
@@ -227,11 +242,15 @@ impl Session {
         })
     }
 
-    /// Record the outcome of the release once hyper has written the response, then close.
-    async fn finish<I: AsyncWrite + Unpin, S>(
+    /// Record the outcome of the release once hyper has written the response, then close, or run
+    /// the relay after a `101`.
+    async fn finish<C, S>(
         &self,
-        served: hyper::Result<hyper::server::conn::http1::Parts<TokioIo<I>, S>>,
-    ) -> Result<()> {
+        served: hyper::Result<hyper::server::conn::http1::Parts<TokioIo<Counted<C>>, S>>,
+    ) -> Result<()>
+    where
+        C: AsyncRead + AsyncWrite + Disarm + Unpin + Send,
+    {
         let pending = self
             .pending
             .lock()
@@ -264,6 +283,15 @@ impl Session {
         }
         match served {
             Ok(parts) => {
+                let relay = self.relay.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(relay) = relay {
+                    // hyper wrote the `101` and handed the stream back with the bytes that it read
+                    // past the head. The relay's idle limit replaces the client idle bound.
+                    let mut client = parts.io.into_inner().inner;
+                    client.disarm();
+                    let client = Replay::new(parts.read_buf.to_vec(), client);
+                    return websocket::run(relay, client, &self.state, self.stop.clone()).await;
+                }
                 // `close_notify`, then the end of the write side.
                 let _ = parts.io.into_inner().shutdown().await;
                 if self.requested.load(Ordering::Relaxed) {
@@ -478,9 +506,9 @@ impl Session {
     ) -> Result<Response<Whole>> {
         let state = &*self.state;
         let writes = WriteCount::new();
-        let (permit, request) =
+        let (permit, request, expected) =
             match off_worker(|| decide(&mut exchange, state, version, Arc::clone(&writes)))? {
-                Decided::Forward(permit, request) => (permit, request),
+                Decided::Forward(permit, request, expected) => (permit, request, expected),
                 Decided::Answer(response) => return Ok(response),
             };
         self.forwarded.store(true, Ordering::Relaxed);
@@ -491,6 +519,7 @@ impl Session {
             request,
             &exchange.method,
             Arc::clone(&writes),
+            expected,
         )
         .await;
         let sent = writes.snapshot();
@@ -517,12 +546,26 @@ impl Session {
                 io::Error::from(sent.error.unwrap_or(io::ErrorKind::Other))
             ))),
         };
-        let response = reply.inspect_err(|error| {
+        let answered = reply.inspect_err(|error| {
             off_worker(|| {
                 exchange.record_upstream_failure(state, error, upstream_timed_out(error));
             });
         })?;
-        off_worker(|| self.release(&mut exchange, response, version))
+        off_worker(|| match answered {
+            Answered::Whole(response) => self.release(&mut exchange, response, version),
+            Answered::Switched(head, upstream) => self.switch(&mut exchange, head, upstream),
+            // F5: the workload gets no `101` before the gateway accepted the upstream's.
+            Answered::Refused(reason) => {
+                let refusal = Refusal {
+                    reason: format!("websocket: {reason}"),
+                    reply: Reply::Diagnostic {
+                        status: 502,
+                        body: b"WebSocket upgrade response refused",
+                    },
+                };
+                Ok(refuse(&exchange, refusal, state, version))
+            }
+        })
     }
 
     /// Run the response phases, build the governed response, and claim its release.
@@ -554,12 +597,42 @@ impl Session {
         });
         Ok(governed)
     }
+
+    /// Run the response phases on the head of an accepted `101`, build the `101` to the workload,
+    /// and claim its release. The release admits the messages of the session, which the connection
+    /// task relays once hyper has written the `101`.
+    fn switch(
+        &self,
+        exchange: &mut Exchange<'_>,
+        mut head: InterceptedResponse,
+        upstream: Box<dyn websocket::Duplex>,
+    ) -> Result<Response<Whole>> {
+        let state = &*self.state;
+        for phase in RESPONSE_PHASES {
+            if let Err(refusal) = phase(exchange, &mut head, state) {
+                return Ok(refuse(exchange, refusal, state, Version::HTTP_11));
+            }
+        }
+        let governed = convert::switching_out(&head.headers)
+            .inspect_err(|error| exchange.record_upstream_failure(state, error, false))?;
+        let permit = match claim_release(exchange, 101, 0, state) {
+            Ok(permit) => permit,
+            Err(refusal) => return Ok(refuse(exchange, refusal, state, Version::HTTP_11)),
+        };
+        audit_release(exchange, state);
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingRelease {
+            permit,
+            start: self.client_writes.snapshot().accepted,
+        });
+        *self.relay.lock().unwrap_or_else(|e| e.into_inner()) = Some(exchange.relay(upstream));
+        Ok(governed)
+    }
 }
 
 /// What the request phases and the decision leave.
 enum Decided {
-    /// The permit, and the request to send.
-    Forward(ClaimedEffectPermit, UpstreamRequest),
+    /// The permit, the request to send, and what a `101` must answer when it is a handshake.
+    Forward(ClaimedEffectPermit, UpstreamRequest, Option<Expected>),
     /// A refusal, already recorded, and its reply.
     Answer(Response<Whole>),
 }
@@ -593,8 +666,12 @@ fn decide(
             return Ok(Decided::Answer(refuse(exchange, refusal, state, version)));
         }
     };
+    // A `101` must answer the handshake as forwarded, after the credential fold.
+    let expected = exchange
+        .websocket_key()
+        .map(|key| Expected::new(key, request.headers()));
     Ok(match decide_request(exchange, state) {
-        Ok(permit) => Decided::Forward(permit, request),
+        Ok(permit) => Decided::Forward(permit, request, expected),
         Err(reply) => Decided::Answer(reply_response(
             &exchange.method,
             version,
@@ -647,8 +724,10 @@ fn server_builder(state: &SharedState) -> hyper::server::conn::http1::Builder {
         // Without a timer, hyper drops its header timeout with no message.
         .timer(TokioTimer::new())
         .header_read_timeout(state.client_limits.first_head)
-        // One exchange per connection, and every reply carries `Connection: close`.
-        .keep_alive(false)
+        // One exchange per connection: every reply but a `101` carries `Connection: close`, which
+        // ends the connection after it. Keep-alive stays on, because with it off hyper writes
+        // `Connection: close` on a `101` too, and the client refuses the handshake.
+        .keep_alive(true)
         // A client that closes its write side after its request still gets the reply.
         .half_close(true)
         .title_case_headers(true)
@@ -680,8 +759,18 @@ enum Hop {
 struct Trip {
     /// The status of the reply head, once one arrived.
     status: Option<u16>,
-    /// The whole reply, or why it did not arrive.
-    reply: Result<InterceptedResponse>,
+    /// The reply, or why it did not arrive.
+    reply: Result<Answered>,
+}
+
+/// What the upstream answered.
+enum Answered {
+    /// The whole reply.
+    Whole(InterceptedResponse),
+    /// A `101` that answers the forwarded handshake: its head, and the upstream after it.
+    Switched(InterceptedResponse, Box<dyn websocket::Duplex>),
+    /// A `101` that does not answer the handshake, or an upgrade that failed, and why.
+    Refused(&'static str),
 }
 
 /// Send `request` over the pinned socket and read the whole reply.
@@ -696,6 +785,7 @@ async fn round_trip(
     request: UpstreamRequest,
     method: &str,
     writes: Arc<WriteCount>,
+    expected: Option<Expected>,
 ) -> Trip {
     let upstream = Idle::new(
         upstream,
@@ -707,7 +797,7 @@ async fn round_trip(
         Hop::Tls(name) => {
             let connector = TlsConnector::from(Arc::clone(&state.upstream_config));
             match connector.connect(name, upstream).await {
-                Ok(tls) => send(tls, request, method, max, writes).await,
+                Ok(tls) => send(tls, request, method, max, writes, expected).await,
                 Err(error) => {
                     writes.failed(error.kind(), false);
                     Trip {
@@ -720,20 +810,23 @@ async fn round_trip(
                 }
             }
         }
-        Hop::Plain => send(upstream, request, method, max, writes).await,
+        Hop::Plain => send(upstream, request, method, max, writes, expected).await,
     }
 }
 
-/// Send `request` on `stream` with the hyper client, and read the whole reply.
+/// Send `request` on `stream` with the hyper client, and read the whole reply. A `101` goes to the
+/// upgrade only when it answers the handshake that `expected` describes; any other `101` is refused
+/// (F6).
 async fn send<S>(
     stream: S,
     request: UpstreamRequest,
     method: &str,
     max: usize,
     writes: Arc<WriteCount>,
+    expected: Option<Expected>,
 ) -> Trip
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Disarm + Unpin + Send + 'static,
 {
     let io = TokioIo::new(Counted::new(stream, Arc::clone(&writes)));
     let (mut sender, connection) = match client_builder().handshake(io).await {
@@ -746,14 +839,21 @@ where
         }
     };
     // The connection runs on its own task, so it keeps writing while this task waits in a seam
-    // call, and it ends with the exchange.
-    let mut connection = AbortOnDrop(tokio::spawn(connection));
+    // call, and it ends with the exchange. After a `101` it hands the stream to the upgrade.
+    let mut connection = AbortOnDrop(tokio::spawn(connection.with_upgrades()));
     let sent = sender.send_request(request.into_inner()).await;
     drop(sender);
     let trip = match sent {
         Ok(response) => Trip {
             status: Some(response.status().as_u16()),
-            reply: convert::response_in(response, method, max).await,
+            reply: match &expected {
+                Some(expected) if response.status() == StatusCode::SWITCHING_PROTOCOLS => {
+                    switched::<S>(response, expected).await
+                }
+                _ => convert::response_in(response, method, max)
+                    .await
+                    .map(Answered::Whole),
+            },
         },
         Err(error) => Trip {
             status: None,
@@ -767,6 +867,29 @@ where
         _ = &mut connection.0 => {}
     }
     trip
+}
+
+/// Check an upstream `101` against the forwarded handshake, then take the upgraded upstream. The
+/// upstream bound gives way to the relay's idle limit.
+async fn switched<S>(mut response: Response<Incoming>, expected: &Expected) -> Result<Answered>
+where
+    S: AsyncRead + AsyncWrite + Disarm + Unpin + Send + 'static,
+{
+    const FAILED: &str = "the upstream upgrade failed";
+    if let Err(reason) = websocket::check_switching_protocols(response.headers(), expected) {
+        return Ok(Answered::Refused(reason));
+    }
+    let head = convert::switching_in(response.headers())?;
+    let Ok(upgraded) = hyper::upgrade::on(&mut response).await else {
+        return Ok(Answered::Refused(FAILED));
+    };
+    let Ok(parts) = upgraded.downcast::<TokioIo<Counted<S>>>() else {
+        return Ok(Answered::Refused(FAILED));
+    };
+    let mut upstream = parts.io.into_inner().inner;
+    upstream.disarm();
+    let upstream = Replay::new(parts.read_buf.to_vec(), upstream);
+    Ok(Answered::Switched(head, Box::new(upstream)))
 }
 
 /// The error of a failed upstream exchange: a reply that the gateway refuses, an upstream that
@@ -795,8 +918,8 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// A client stream that yields the first head, which the front already read, before its next
-/// bytes.
+/// A stream that yields bytes that were read already, before its next bytes: the first head that
+/// the front read, or what hyper read past the head of a `101`.
 struct Replay<S> {
     head: Vec<u8>,
     replayed: usize,
@@ -810,6 +933,12 @@ impl<S> Replay<S> {
             replayed: 0,
             inner,
         }
+    }
+}
+
+impl<S: Disarm> Disarm for Replay<S> {
+    fn disarm(&mut self) {
+        self.inner.disarm();
     }
 }
 

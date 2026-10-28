@@ -3,9 +3,9 @@
 //! | Direction | Function |
 //! |---|---|
 //! | Workload request to the exchange | [`request_in`] |
-//! | Exchange to the upstream request | [`upstream_request`], in an [`UpstreamRequest`] |
-//! | Upstream reply to the exchange | [`response_in`] |
-//! | Exchange to the workload reply | [`response_out`], [`diagnostic_response`], [`interceptor_response`] |
+//! | Exchange to the upstream request | [`upstream_request`], [`upstream_handshake`], in an [`UpstreamRequest`] |
+//! | Upstream reply to the exchange | [`response_in`], [`switching_in`] |
+//! | Exchange to the workload reply | [`response_out`], [`switching_out`], [`diagnostic_response`], [`interceptor_response`] |
 //!
 //! hyper reads and writes the HTTP/1.1 framing. These functions keep the Box rules around it: the
 //! hop-by-hop strip, a fresh `Content-Length`, `Connection: close`, and Box's reason phrases.
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
 use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version};
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
@@ -204,6 +204,41 @@ where
     ))
 }
 
+/// The head of an upstream `101` that answers the forwarded handshake, without its hop-by-hop
+/// fields and with no body.
+pub(super) fn switching_in(headers: &http::HeaderMap) -> Result<InterceptedResponse> {
+    let mut headers = header_map_from(headers);
+    http1::strip_hop_by_hop_headers(&mut headers)?;
+    headers.remove("content-length");
+    Ok(InterceptedResponse::http(101, headers, BodyRef::Empty))
+}
+
+/// Build the `101` to the workload: every header but the hop-by-hop fields, then `Upgrade:
+/// websocket` and `Connection: Upgrade`. It has no body and no `Connection: close`.
+pub(super) fn switching_out(headers: &HeaderMap) -> Result<Response<Whole>> {
+    let refused = |what: &str| ProxyError::Intercept(format!("the governed response has {what}"));
+    let nominated = http1::connection_nominated_headers(headers)?;
+    let mut relayed = http::HeaderMap::with_capacity(headers.len() + 2);
+    for (name, value) in headers.iter() {
+        if name.eq_ignore_ascii_case("content-length")
+            || http1::is_hop_by_hop_header(name, &nominated)
+        {
+            continue;
+        }
+        let name =
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| refused("an invalid header"))?;
+        let value =
+            HeaderValue::from_bytes(value.as_bytes()).map_err(|_| refused("an invalid header"))?;
+        relayed.append(name, value);
+    }
+    relayed.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    relayed.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    let mut response = Response::new(Whole::none());
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    *response.headers_mut() = relayed;
+    Ok(response)
+}
+
 /// Collect a whole body into one buffer, sized from its declared length, and refuse it when it is
 /// larger than `max`. A trailer section is dropped: the gateway forwards every body under a fresh
 /// `Content-Length`.
@@ -297,6 +332,11 @@ impl UpstreamRequest {
     pub(super) fn into_inner(self) -> Request<Whole> {
         self.0
     }
+
+    /// The headers as forwarded, to read a field that carries no credential. Never format them.
+    pub(super) fn headers(&self) -> &http::HeaderMap {
+        self.0.headers()
+    }
 }
 
 /// Build the upstream request from exactly the re-checked method, target, and headers.
@@ -311,6 +351,44 @@ pub(super) fn upstream_request(
     body: Vec<u8>,
     writes: Arc<WriteCount>,
 ) -> Result<UpstreamRequest> {
+    let (method, uri, mut forwarded) = upstream_head(method, target, headers)?;
+    forwarded.insert(CONNECTION, HeaderValue::from_static("close"));
+    forwarded.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+    let mut request = Request::new(Whole::new(Bytes::from(body)).reported_to(writes));
+    *request.method_mut() = method;
+    *request.uri_mut() = uri;
+    *request.headers_mut() = forwarded;
+    Ok(UpstreamRequest(request))
+}
+
+/// Build the upstream form of a WebSocket handshake from exactly the re-checked target and
+/// headers.
+///
+/// The signer saw none of `Upgrade` and `Connection`: they come after every other header, here. The
+/// handshake has no body and no `Content-Length`, and no `Connection: close`.
+pub(super) fn upstream_handshake(
+    target: &str,
+    headers: &HeaderMap,
+    writes: Arc<WriteCount>,
+) -> Result<UpstreamRequest> {
+    let (method, uri, mut forwarded) = upstream_head("GET", target, headers)?;
+    forwarded.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    forwarded.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    let mut request = Request::new(Whole::none().reported_to(writes));
+    *request.method_mut() = method;
+    *request.uri_mut() = uri;
+    *request.headers_mut() = forwarded;
+    Ok(UpstreamRequest(request))
+}
+
+/// The method, the target, and the end-to-end headers of an upstream request, with no
+/// `Content-Length`. The target and each header value live in wiped buffers, and each header value
+/// is marked sensitive.
+fn upstream_head(
+    method: &str,
+    target: &str,
+    headers: &HeaderMap,
+) -> Result<(Method, Uri, http::HeaderMap)> {
     let refused = |what: &str| ProxyError::Intercept(format!("the upstream request has {what}"));
     let method = Method::from_bytes(method.as_bytes()).map_err(|_| refused("an invalid method"))?;
     let uri = Uri::from_maybe_shared(wiped(target.as_bytes()))
@@ -330,13 +408,7 @@ pub(super) fn upstream_request(
         value.set_sensitive(true);
         forwarded.append(name, value);
     }
-    forwarded.insert(CONNECTION, HeaderValue::from_static("close"));
-    forwarded.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
-    let mut request = Request::new(Whole::new(Bytes::from(body)).reported_to(writes));
-    *request.method_mut() = method;
-    *request.uri_mut() = uri;
-    *request.headers_mut() = forwarded;
-    Ok(UpstreamRequest(request))
+    Ok((method, uri, forwarded))
 }
 
 /// Build the reply to the workload, as the old writer framed it.

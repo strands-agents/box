@@ -121,7 +121,7 @@ fn worker_count() -> usize {
 
 /// The connection cap as a semaphore size: zero means one, as before, and a value above
 /// `u32::MAX` means no practical limit, inside the bounds of `Semaphore` and `acquire_many`.
-fn slot_count(max_connections: usize) -> usize {
+pub(super) fn slot_count(max_connections: usize) -> usize {
     max_connections
         .clamp(1, u32::MAX as usize)
         .min(Semaphore::MAX_PERMITS)

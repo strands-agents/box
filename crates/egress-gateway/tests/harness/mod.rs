@@ -612,7 +612,7 @@ fn parse_status(response: &str) -> u16 {
 
 /// A permissive rustls client config that accepts any server cert — a test-only stand-in for the
 /// workload trusting the ephemeral CA the supervisor installed. Never used outside tests.
-fn permissive_client_config() -> rustls::ClientConfig {
+pub fn permissive_client_config() -> rustls::ClientConfig {
     rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAny))

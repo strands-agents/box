@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::ClientConfig;
+use tokio::sync::Semaphore;
 
 use self::ca::EphemeralCa;
 use self::handle::{BoundTransport, CredentialEnv};
@@ -41,7 +42,8 @@ pub use handle::MitmHandle;
 /// Response size/content limits enforced on the response leg.
 #[derive(Debug, Clone)]
 pub struct ResponseLimits {
-    /// Maximum response body bytes buffered before a `ResponseLimit` error.
+    /// Maximum response body bytes buffered before a `ResponseLimit` error. It is also the largest
+    /// WebSocket message, in each direction.
     pub max_body_bytes: usize,
 }
 
@@ -91,12 +93,15 @@ pub struct MitmConfig {
     /// The longest an upstream socket waits with no byte in either direction: a byte that leaves or
     /// arrives restarts the wait of every read and write. There is no total bound, so a request or
     /// a reply that keeps moving goes through, and the wait for a reply counts from the last byte of
-    /// the request. Defaults to 300 seconds.
+    /// the request. An open WebSocket closes with 1001 when no byte moves in either direction for
+    /// this long. Defaults to 300 seconds.
     pub upstream_read_deadline: std::time::Duration,
     /// The maximum number of connections handled concurrently. Each connection holds one slot from
     /// its accept to its end, so excess connections wait for a slot rather than being served without
     /// bound. The workload is contained but *untrusted* (it is the very thing this crate exists to
-    /// contain), so the cap is a hard backpressure limit, not an optimization. Defaults to 256.
+    /// contain), so the cap is a hard backpressure limit, not an optimization. An open WebSocket holds
+    /// its slot until it closes, and open WebSockets hold at most three quarters of the slots.
+    /// Defaults to 256.
     pub max_connections: usize,
     /// Remote MCP servers, as `(host, name)` pairs. A request whose destination host matches an entry
     /// is treated as an MCP stream for the server `name`: the L7 leg parses the JSON-RPC frame and
@@ -165,6 +170,8 @@ pub(crate) struct SharedState {
     expected_token: Option<String>,
     /// The bounds on each client socket.
     client_limits: ClientLimits,
+    /// The session slots: one for each open WebSocket, three quarters of the connection slots.
+    sessions: Arc<Semaphore>,
 }
 
 impl SharedState {
@@ -290,6 +297,7 @@ impl MitmInterceptor {
             })
             .collect();
         let expected_token = config.expected_token.clone();
+        let sessions = websocket::session_slots(runtime::slot_count(config.max_connections));
 
         let state = Arc::new(SharedState {
             controls,
@@ -301,6 +309,7 @@ impl MitmInterceptor {
             effect_interceptor,
             expected_token,
             client_limits: ClientLimits::default(),
+            sessions: Arc::new(Semaphore::new(sessions)),
         });
 
         // Bind exactly one transport. `unix_socket_path: Some(path)` binds ONLY an AF_UNIX

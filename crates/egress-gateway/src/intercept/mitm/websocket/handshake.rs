@@ -10,6 +10,9 @@ use super::super::http1::trim_ows;
 /// The `Upgrade` token of a WebSocket handshake.
 const PROTOCOL: &str = "websocket";
 
+/// The GUID that RFC 6455 appends to the handshake key to derive `Sec-WebSocket-Accept`.
+const ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
 /// What a request asks for in its `Upgrade` field.
 #[derive(Debug, PartialEq, Eq)]
 pub(in super::super) enum Handshake {
@@ -79,12 +82,85 @@ fn tokens<'a>(headers: &'a HeaderMap, name: &'a str) -> impl Iterator<Item = &'a
         .filter(|token| !token.is_empty())
 }
 
+/// How many `name` fields a head carries.
+enum Field<'a> {
+    Absent,
+    One(&'a str),
+    Repeated,
+}
+
+impl<'a> Field<'a> {
+    fn of(headers: &'a HeaderMap, name: &'a str) -> Self {
+        let mut found = values(headers, name);
+        match (found.next(), found.next()) {
+            (None, _) => Self::Absent,
+            (Some(value), None) => Self::One(value),
+            (Some(_), Some(_)) => Self::Repeated,
+        }
+    }
+}
+
 /// The value of the one `name` field, or `None` when it is absent or repeated.
 fn single<'a>(headers: &'a HeaderMap, name: &'a str) -> Option<&'a str> {
-    let mut found = values(headers, name);
-    match (found.next(), found.next()) {
-        (Some(value), None) => Some(value),
-        _ => None,
+    match Field::of(headers, name) {
+        Field::One(value) => Some(value),
+        Field::Absent | Field::Repeated => None,
+    }
+}
+
+/// What a `101` must carry to answer one forwarded handshake.
+pub(in super::super) struct Expected {
+    accept: String,
+    protocols: Vec<String>,
+}
+
+impl Expected {
+    /// The answer to the handshake with `key`, whose head as forwarded is `headers`: after the
+    /// credential fold, so a subprotocol is one that the upstream was offered.
+    pub(in super::super) fn new(key: &str, headers: &HeaderMap) -> Self {
+        Self {
+            accept: accept_value(key),
+            protocols: tokens(headers, "sec-websocket-protocol")
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+}
+
+/// The `Sec-WebSocket-Accept` value for `key`.
+fn accept_value(key: &str) -> String {
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    digest.update(key.as_bytes());
+    digest.update(ACCEPT_GUID.as_bytes());
+    STANDARD.encode(digest.finish())
+}
+
+/// Check a `101` head against the handshake that it answers, before its hop-by-hop fields are
+/// removed. hyper's client takes every `101` as an upgrade, so the gateway checks it.
+pub(in super::super) fn check_switching_protocols(
+    headers: &HeaderMap,
+    expected: &Expected,
+) -> std::result::Result<(), &'static str> {
+    if !single(headers, "upgrade").is_some_and(|value| value.eq_ignore_ascii_case(PROTOCOL)) {
+        return Err("101 does not name Upgrade: websocket");
+    }
+    if !tokens(headers, "connection").any(|token| token.eq_ignore_ascii_case("upgrade")) {
+        return Err("101 lacks Connection: upgrade");
+    }
+    if single(headers, "sec-websocket-accept") != Some(expected.accept.as_str()) {
+        return Err("101 carries a wrong Sec-WebSocket-Accept");
+    }
+    if headers.contains_key("sec-websocket-extensions") {
+        return Err("101 negotiates an extension");
+    }
+    match Field::of(headers, "sec-websocket-protocol") {
+        Field::Absent => Ok(()),
+        Field::One(protocol) if expected.protocols.iter().any(|offered| offered == protocol) => {
+            Ok(())
+        }
+        Field::One(_) | Field::Repeated => {
+            Err("101 selects a subprotocol the request did not offer")
+        }
     }
 }
 
@@ -123,6 +199,11 @@ mod tests {
         Handshake::WebSocket {
             key: KEY.to_string(),
         }
+    }
+
+    #[test]
+    fn the_accept_value_matches_the_rfc_6455_example() {
+        assert_eq!(accept_value(KEY), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
@@ -252,5 +333,75 @@ mod tests {
                 "{reason}"
             );
         }
+    }
+
+    fn switching(extra: &[(&str, &str)]) -> HeaderMap {
+        let mut pairs = vec![
+            ("Upgrade", "websocket"),
+            ("Connection", "Upgrade"),
+            ("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+        ];
+        pairs.extend_from_slice(extra);
+        headers(&pairs)
+    }
+
+    #[test]
+    fn a_101_that_answers_the_handshake_is_accepted() {
+        let expected = Expected::new(KEY, &handshake(&[]));
+        assert_eq!(
+            check_switching_protocols(&switching(&[]), &expected),
+            Ok(())
+        );
+
+        let offered = Expected::new(KEY, &handshake(&[("Sec-WebSocket-Protocol", "chat, v2")]));
+        assert_eq!(
+            check_switching_protocols(&switching(&[("Sec-WebSocket-Protocol", "v2")]), &offered),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_101_that_does_not_answer_the_handshake_is_refused() {
+        let expected = Expected::new(KEY, &handshake(&[("Sec-WebSocket-Protocol", "chat")]));
+        let mut wrong_upgrade = switching(&[]);
+        wrong_upgrade.insert("upgrade", HeaderValue::from_static("h2c"));
+        let mut no_connection = switching(&[]);
+        no_connection.remove("connection");
+        let mut wrong_accept = switching(&[]);
+        wrong_accept.insert(
+            "sec-websocket-accept",
+            HeaderValue::from_str(&accept_value("AAAAAAAAAAAAAAAAAAAAAA==")).unwrap(),
+        );
+        for (headers, reason) in [
+            (wrong_upgrade, "101 does not name Upgrade: websocket"),
+            (no_connection, "101 lacks Connection: upgrade"),
+            (wrong_accept, "101 carries a wrong Sec-WebSocket-Accept"),
+            (
+                switching(&[("Sec-WebSocket-Extensions", "permessage-deflate")]),
+                "101 negotiates an extension",
+            ),
+            (
+                switching(&[("Sec-WebSocket-Protocol", "superchat")]),
+                "101 selects a subprotocol the request did not offer",
+            ),
+            (
+                switching(&[("Sec-WebSocket-Protocol", "chat, chat")]),
+                "101 selects a subprotocol the request did not offer",
+            ),
+        ] {
+            assert_eq!(
+                check_switching_protocols(&headers, &expected),
+                Err(reason),
+                "{reason}"
+            );
+        }
+        let none_offered = Expected::new(KEY, &handshake(&[]));
+        assert!(
+            check_switching_protocols(
+                &switching(&[("Sec-WebSocket-Protocol", "chat")]),
+                &none_offered
+            )
+            .is_err()
+        );
     }
 }
