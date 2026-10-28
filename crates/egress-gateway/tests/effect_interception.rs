@@ -1155,6 +1155,85 @@ fn attempts_carry_the_pre_mutation_path_for_a_path_spliced_credential() {
     );
 }
 
+/// A credential mutation can leave a request that HTTP cannot carry: here a secret with a space,
+/// spliced into the path, which `http::Uri` refuses. The gateway refuses the request with a marked
+/// 502 and one `Deny` record before it claims the request effect, and no byte reaches the upstream.
+/// The old writer sent the space raw in the request line.
+#[test]
+fn a_mutated_request_that_http_cannot_carry_is_refused_with_a_record() {
+    let host = "badsplice.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(host, port),
+            env_locator("tok en"),
+            InjectMode::url_path("/v1/{}/models").expect("a valid url-path placement"),
+        ),
+    ))
+    .unwrap();
+    let phantom = opened.phantoms()[0].token().to_string();
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            destination(host, port),
+            Arc::new(opened.into_vault()),
+        ))
+        .build();
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with_emitter(
+        config_for(host, &upstream),
+        controls,
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    let workload_path = format!("/v1/{phantom}/models");
+    client.send_request("GET", &workload_path, &[], b"");
+    let reply = client.read_response();
+    assert!(reply.starts_with("HTTP/1.1 502 "), "{reply:?}");
+    assert!(
+        reply
+            .to_ascii_lowercase()
+            .contains("\r\nx-strands-box-egress: refused\r\n"),
+        "the reply carries the refusal marker: {reply:?}"
+    );
+    assert!(
+        reply.ends_with("the request cannot be sent upstream"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        upstream.request_count(),
+        0,
+        "no request reached the upstream"
+    );
+    assert_eq!(
+        event_names(&events.lock().unwrap()),
+        vec!["attempt:resolve", "attempt:connect", "outcome:connect"],
+        "no request effect is claimed"
+    );
+    let records = emitter.records();
+    let denials: Vec<_> = records
+        .iter()
+        .filter(|record| record.decision == AuditDecision::Deny)
+        .collect();
+    assert_eq!(denials.len(), 1, "{records:?}");
+    assert_eq!(denials[0].path, workload_path);
+    assert!(
+        denials[0]
+            .reason
+            .contains("the upstream request has an invalid target"),
+        "{:?}",
+        denials[0].reason
+    );
+    assert!(
+        !format!("{records:?}").contains("tok en"),
+        "no record carries the secret: {records:?}"
+    );
+}
+
 #[test]
 fn attempt_schema_never_carries_body_or_header_content() {
     let attempt = EffectAttempt::HttpRequest {

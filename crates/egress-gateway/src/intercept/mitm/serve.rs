@@ -567,8 +567,23 @@ fn decide(
             return Ok(Decided::Answer(refuse(exchange, refusal, state, version)));
         }
     }
-    // Build the fully mutated request before claiming its effect permit.
-    let request = prepare_request(exchange, state, writes)?;
+    // Build the fully mutated request before claiming its effect permit. A mutation can leave a
+    // target or a header value that HTTP cannot carry, such as a spliced secret with a space: the
+    // request is refused with a record, and no byte of it leaves. The error text holds no peer or
+    // secret byte.
+    let request = match prepare_request(exchange, state, writes) {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal = Refusal {
+                reason: error.to_string(),
+                reply: Reply::Diagnostic {
+                    status: 502,
+                    body: b"the request cannot be sent upstream",
+                },
+            };
+            return Ok(Decided::Answer(refuse(exchange, refusal, state, version)));
+        }
+    };
     Ok(match decide_request(exchange, state) {
         Ok(permit) => Decided::Forward(permit, request),
         Err(reply) => Decided::Answer(reply_response(
