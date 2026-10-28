@@ -867,17 +867,20 @@ fn a_reply_after_an_upload_longer_than_the_deadline_is_released() {
     let host = "sip-answer.test";
     let upstream = TlsUpstream::start_sipping_then_answering(
         host,
-        Duration::from_millis(20),
+        Duration::from_millis(10),
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
     );
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
-    // The 192 sips of 64 KiB take about 3.8 s, nearly two deadlines. The send buffers hold the
-    // last bytes for less than one deadline, so the reply comes inside one deadline of the last
-    // write.
-    let deadline = Duration::from_secs(2);
+    // The 384 sips of 64 KiB take at least 3.84 s, more than the deadline. After the last write,
+    // the loopback send and receive buffers hold at most about 8 MiB (4 MiB each on macOS), which
+    // the sips drain in about 1.3 s, so the reply comes inside one deadline of the last write.
+    let deadline = Duration::from_secs(3);
     let config = MitmConfig {
         upstream_read_deadline: deadline,
+        response_limits: egress_gateway::ResponseLimits {
+            max_body_bytes: 32 << 20,
+        },
         ..config_for(host, &upstream)
     };
     let handle = MitmInterceptor::start(
@@ -888,7 +891,7 @@ fn a_reply_after_an_upload_longer_than_the_deadline_is_released() {
     .unwrap();
 
     let started = Instant::now();
-    let body = vec![b'x'; 12 << 20];
+    let body = vec![b'x'; 24 << 20];
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/sip", &[], &body);
     let reply = client.read_response();
