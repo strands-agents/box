@@ -31,14 +31,25 @@ impl<'p> MontyPep<'p> {
         call: &OsFunctionCall,
         reach: &Reach,
         dst_spelled: &str,
-    ) -> Result<(std::path::PathBuf, std::path::PathBuf, ScriptPermit<'p>), ScriptRefusal> {
-        self.policy.admit_rename(call, |destination| {
-            match reach.approve_mutation(destination, dst_spelled) {
+    ) -> Result<
+        (
+            std::path::PathBuf,
+            std::path::PathBuf,
+            ScriptPermit<'p>,
+            RenameDestination,
+        ),
+        ScriptRefusal,
+    > {
+        let mut judged = RenameDestination::Unbound;
+        let (source, destination, permit) = self.policy.admit_rename(call, |destination| {
+            judged = match reach.approve_mutation(destination, dst_spelled) {
                 Ok(approved) => RenameDestination::bound_at(&approved),
                 // The floor refuses this destination after admission, so nothing is read there.
                 Err(_) => RenameDestination::Unbound,
-            }
-        })
+            };
+            judged
+        })?;
+        Ok((source, destination, permit, judged))
     }
 }
 
@@ -603,7 +614,7 @@ fn perform_rename(
     let capture = ObservationCapture::begin();
     let admitted = interceptor.admit_rename(call, reach, dst_spelled);
     let determined = capture.last();
-    let (source, destination, permit) = match admitted {
+    let (source, destination, permit, judged_destination) = match admitted {
         Ok(admitted) => admitted,
         Err(refusal) => {
             let legs = match call {
@@ -676,20 +687,48 @@ fn perform_rename(
             determined.as_ref(),
         ));
     }
-    let (result, resume_with) = match rename_approved(&approved_src, &approved_dst) {
-        Ok(()) => (
-            FsResult::Completed,
-            ExtFunctionResult::Return(MontyObject::none()),
-        ),
-        Err(error) => (FsResult::Failed, io_exception(&error).into()),
-    };
+    let (result, resume_with) =
+        match rename_approved(&approved_src, &approved_dst, judged_destination) {
+            Ok(()) => (
+                FsResult::Completed,
+                ExtFunctionResult::Return(MontyObject::none()),
+            ),
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && judged_destination == RenameDestination::Unbound =>
+            {
+                interceptor
+                    .recorder
+                    .record(EffectiveDecision::enforcement_deny(
+                        r#"Box::Action::"fs:move""#,
+                        interceptor
+                            .policy
+                            .reported(destination.to_string_lossy().as_ref()),
+                        "admission-window",
+                        STALE_DESTINATION,
+                    ));
+                record(permit, FsResult::Failed);
+                return Err(MontyException::new(
+                    ExcType::PermissionError,
+                    Some(format!("{dst_spelled}: {STALE_DESTINATION}")),
+                ));
+            }
+            Err(error) => (FsResult::Failed, io_exception(&error).into()),
+        };
     record(permit, result);
     Ok(resume_with)
 }
 
-/// Move one approved path to another, following no symbolic link in either.
-fn rename_approved(source: &Path, destination: &Path) -> io::Result<()> {
-    HeldPath::of(source)?.rename_to(&HeldPath::of(destination)?)
+const STALE_DESTINATION: &str = "filesystem identity changed during effect admission";
+
+/// Move one approved path without replacing a destination admission read as unbound.
+fn rename_approved(source: &Path, destination: &Path, judged: RenameDestination) -> io::Result<()> {
+    let source = HeldPath::of(source)?;
+    let destination = HeldPath::of(destination)?;
+    match judged {
+        RenameDestination::Unbound => source.rename_to_new(&destination),
+        RenameDestination::File | RenameDestination::Directory => source.rename_to(&destination),
+    }
 }
 
 #[cfg(test)]
@@ -711,7 +750,7 @@ mod tests {
     use monty_types::{
         GetenvArgs, MkdirCallArgs, PathBytesDataArgs, PathStringDataArgs, RenameCallArgs,
     };
-    use policy::{GovernedBox, Policy, PolicyEngine, Principal};
+    use policy::{Decision, DecisionObserver, GovernedBox, Policy, PolicyEngine, Principal};
 
     use crate::run::telemetry::{EffectiveRule, EffectiveVerdict, PolicyDecisionObserver};
     use crate::test_support::open_policy;
@@ -1573,6 +1612,337 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
         );
     }
 
+    fn rename_history_policy(home: &Path, delete_policy: &str) -> String {
+        let mut rules = format!(
+            r#"
+permit(principal, action == Box::Action::"fs:read", resource);
+permit(principal, action == Box::Action::"fs:write", resource);
+permit(principal, action == Box::Action::"fs:move", resource);
+{delete_policy}
+"#
+        );
+        for (action, name) in [
+            ("fs:read", "payload.txt"),
+            ("fs:move", "protected.txt"),
+            ("fs:delete", "protected.txt"),
+        ] {
+            for event in ["error", "completed", "indeterminate"] {
+                let kind = if event == "error" {
+                    "error"
+                } else {
+                    "response"
+                };
+                let output = if event == "error" {
+                    String::new()
+                } else {
+                    format!(r#", output.result: Box::FsResponseResult::"{event}""#)
+                };
+                rules.push_str(&format!(r#"
+forbid(principal, action == Box::Action::"fs:write", resource)
+when {{ context.input.path == "{probe}" }}
+when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.path: "{path}"{output} }} }};
+"#,
+                    probe = home.join(format!("probe-{action}-{event}")).display(),
+                    path = home.join(name).display(),
+                ));
+            }
+        }
+        rules
+    }
+
+    fn assert_rename_history(
+        policy: &PolicyEngine,
+        home: &Path,
+        outcome: Option<&str>,
+        deleted: bool,
+    ) {
+        for action in ["fs:read", "fs:move", "fs:delete"] {
+            for event in ["error", "completed", "indeterminate"] {
+                let probe = policy::PathResolver::over([home.to_path_buf()])
+                    .expect("fixture root")
+                    .approve_virtual(&home.join(format!("probe-{action}-{event}")))
+                    .expect("fixture probe");
+                let decision = policy.decide(
+                    &GovernedBox::assigned("codex"),
+                    &Principal::agent(),
+                    &policy::Request::Fs {
+                        path: &probe,
+                        operation: policy::FsOperation::WriteContent,
+                    },
+                );
+                let expected = (action != "fs:delete" || deleted)
+                    && (action != "fs:read" || outcome != Some("error"))
+                    && Some(event) == outcome;
+                assert_eq!(
+                    !matches!(decision, Decision::Allow { .. }),
+                    expected,
+                    "unexpected {action} {event} history: {decision:?}"
+                );
+            }
+        }
+    }
+
+    struct RenameDestinationWriter {
+        destination: PathBuf,
+        created: std::sync::atomic::AtomicBool,
+    }
+
+    impl DecisionObserver for RenameDestinationWriter {
+        fn observed(&self, action: &str, resource: &str, decision: &Decision) {
+            if action == r#"Box::Action::"fs:move""#
+                && resource.ends_with("/protected.txt")
+                && matches!(decision, Decision::Allow { .. })
+                && !self.created.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&self.destination)
+                    .expect("the destination was absent during admission");
+                file.write_all(b"keep destination")
+                    .expect("write the destination");
+            }
+        }
+    }
+
+    fn rename_destination_window(delete_policy: &str) {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "keep source").expect("source");
+        let writer = Arc::new(RenameDestinationWriter {
+            destination: home.join("protected.txt"),
+            created: std::sync::atomic::AtomicBool::new(false),
+        });
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<rename-window>"),
+            text: rename_history_policy(&home, delete_policy),
+        }])
+        .observed_by(writer.clone());
+        let (interceptor, recorder) = recording_interceptor(&policy);
+        let outcome = admit_and_perform(
+            &interceptor,
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        );
+        assert!(writer.created.load(std::sync::atomic::Ordering::SeqCst));
+        let destination = std::fs::read_to_string(home.join("protected.txt")).expect("destination");
+        assert_eq!(
+            outcome.as_ref().err().map(MontyException::exc_type),
+            Some(ExcType::PermissionError),
+            "destination created during admission must survive: {outcome:?}, contents {destination:?}"
+        );
+        assert_eq!(destination, "keep destination");
+        assert_eq!(
+            std::fs::read_to_string(home.join("payload.txt")).expect("source survives"),
+            "keep source"
+        );
+        assert_eq!(
+            outcome.unwrap_err().message(),
+            Some("protected.txt: filesystem identity changed during effect admission")
+        );
+        assert_rename_history(&policy, &home, Some("error"), false);
+        let recorded = recorder.recorded();
+        assert!(
+            recorded.iter().any(|entry| {
+                let (action, _, _, verdict, _) = entry.parts();
+                action == r#"Box::Action::"fs:move""# && verdict == EffectiveVerdict::Deny
+            }),
+            "the refused move must record an enforcement denial"
+        );
+    }
+
+    #[test]
+    fn rename_destination_window_without_delete_permit_is_refused() {
+        rename_destination_window("");
+    }
+
+    #[test]
+    fn rename_destination_window_with_delete_forbid_is_refused() {
+        rename_destination_window(
+            r#"
+permit(principal, action == Box::Action::"fs:delete", resource);
+forbid(principal, action == Box::Action::"fs:delete", resource);
+"#,
+        );
+    }
+
+    fn rename_control(preexisting: bool, delete_policy: &str, permitted: bool) {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "source").expect("source");
+        if preexisting {
+            std::fs::write(home.join("protected.txt"), "destination").expect("destination");
+        }
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<rename-control>"),
+            text: rename_history_policy(&home, delete_policy),
+        }]);
+        let result = admit_and_perform(
+            &interceptor(&policy),
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        );
+        if permitted {
+            assert!(matches!(
+                returned(result.expect("rename succeeds")),
+                Ok(MontyNode::None)
+            ));
+            assert!(!home.join("payload.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(home.join("protected.txt")).expect("destination"),
+                "source"
+            );
+            assert_rename_history(&policy, &home, Some("completed"), preexisting);
+        } else {
+            assert_eq!(result.unwrap_err().exc_type(), ExcType::PermissionError);
+            assert_eq!(
+                std::fs::read_to_string(home.join("payload.txt")).expect("source"),
+                "source"
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("protected.txt")).expect("destination"),
+                "destination"
+            );
+            assert_rename_history(&policy, &home, None, false);
+        }
+    }
+
+    #[test]
+    fn rename_to_absent_destination_needs_no_delete_permit() {
+        rename_control(false, "", true);
+    }
+
+    #[test]
+    fn rename_explicitly_authorized_overwrite_records_completion() {
+        rename_control(
+            true,
+            r#"permit(principal, action == Box::Action::"fs:delete", resource);"#,
+            true,
+        );
+    }
+
+    #[test]
+    fn rename_existing_destination_without_delete_permit_is_refused() {
+        rename_control(true, "", false);
+    }
+
+    #[test]
+    fn rename_existing_destination_with_delete_forbid_is_refused() {
+        rename_control(
+            true,
+            r#"
+permit(principal, action == Box::Action::"fs:delete", resource);
+forbid(principal, action == Box::Action::"fs:delete", resource);
+"#,
+            false,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_unsupported_operation_never_falls_back_to_replacement() {
+        const CHILD_ERROR: &str = "BOX_RENAME_TEST_ERRNO";
+        let Ok(error) = std::env::var(CHILD_ERROR) else {
+            for error in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
+                let output = std::process::Command::new(std::env::current_exe().expect("test image"))
+                    .args(["--exact", "run::broker::python::effects::tests::rename_unsupported_operation_never_falls_back_to_replacement", "--nocapture"])
+                    .env(CHILD_ERROR, error.to_string())
+                    .output().expect("child test");
+                assert!(
+                    output.status.success(),
+                    "errno {error}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let error: u32 = error.parse().expect("test errno");
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "source").expect("source");
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<unsupported-rename>"),
+            text: rename_history_policy(&home, ""),
+        }]);
+        let mut filter = [
+            libc::sock_filter {
+                code: 0x20,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: 0x15,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_renameat2 as u32,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | error,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: this disposable child installs an initialized filter on its own test thread.
+        unsafe {
+            libc::alarm(30);
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, 2, &program), 0);
+        }
+        let result = admit_and_perform(
+            &interceptor(&policy),
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        )
+        .expect("the broker returns the operating system error");
+        let ExtFunctionResult::Error(exception) = result else {
+            panic!("unsupported rename succeeded: {result:?}");
+        };
+        assert_eq!(exception.exc_type(), ExcType::OSError);
+        let reported = exception.message().expect("operating system error");
+        let expected = io::Error::from_raw_os_error(error as i32).to_string();
+        let unavailable_flag = io::Error::from_raw_os_error(libc::EINVAL).to_string();
+        assert!(
+            reported == expected || (error == libc::ENOSYS as u32 && reported == unavailable_flag),
+            "unexpected operating system error: {reported}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("payload.txt")).expect("source survives"),
+            "source"
+        );
+        assert!(
+            !home.join("protected.txt").exists(),
+            "no ordinary rename fallback may run"
+        );
+        assert_rename_history(&policy, &home, Some("error"), false);
+        rename_control(
+            true,
+            r#"permit(principal, action == Box::Action::"fs:delete", resource);"#,
+            true,
+        );
+    }
+
     /// `Resolve`/`Absolute` stay refused — they would return a host path.
     #[test]
     fn resolve_and_absolute_stay_refused() {
@@ -1939,7 +2309,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
         let (approved, outside) = swap_for_a_link_after_approval(&root, &reach);
         let source = home(&root).join("dir-moved/f.txt");
 
-        let renamed = rename_approved(&source, &approved.with_file_name("moved.txt"));
+        let renamed = rename_approved(
+            &source,
+            &approved.with_file_name("moved.txt"),
+            RenameDestination::Unbound,
+        );
 
         assert!(renamed.is_err(), "the rename followed the link");
         assert!(
