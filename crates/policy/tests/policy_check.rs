@@ -65,6 +65,10 @@ when temporal {
 
 const SPELLING: &str = "@id(\"slash\") permit (principal, action == Box::Action::\"fs:read\", resource) when { context.input.path == \"/tmp/dir/\" };\n";
 
+const ACROSS_FAMILIES: &str = "@id(\"secrets\") forbid (principal, action in [Box::Action::\"fs:read\", Box::Action::\"http:request\"], resource) when { context.input.path like \"*/secrets.env\" };\n";
+
+const ACROSS_A_TOOL: &str = "@id(\"mixed\") forbid (principal, action in [Box::Action::\"fs:read\", alpha::Action::\"read\"], resource) when { context.input has path };\n";
+
 const TYPED: &str =
     "@id(\"tool\") permit (principal, action == alpha::Action::\"read\", resource);\n";
 
@@ -162,6 +166,7 @@ fn a_check_refuses_exactly_what_open_refuses() {
         RESERVED,
         CAP_AS_PERMIT,
         SPELLING,
+        ACROSS_FAMILIES,
         TYPED,
         "",
     ] {
@@ -184,6 +189,8 @@ fn a_staged_check_refuses_exactly_what_open_staged_refuses() {
         RESERVED,
         CAP_AS_PERMIT,
         SPELLING,
+        ACROSS_FAMILIES,
+        ACROSS_A_TOOL,
         TYPED,
     ] {
         let with_tool = format!("{text}\n{TYPED}");
@@ -281,6 +288,22 @@ fn an_inert_spelling_names_its_rule() {
     );
     let rule = &finding.rules()[0];
     assert_eq!((rule.position(), rule.id()), (2, Some("slash")));
+}
+
+#[test]
+fn a_read_of_the_input_across_families_names_its_rule() {
+    for (check, position) in [
+        (check(&format!("{GOOD}\n{ACROSS_FAMILIES}")), 2),
+        (check_staged(&format!("{GOOD}\n{ACROSS_A_TOOL}")), 2),
+    ] {
+        let finding = &check.errors()[0];
+        assert!(
+            finding.message().contains("more than one family"),
+            "{}",
+            finding.message()
+        );
+        assert_eq!(finding.rules()[0].position(), position);
+    }
 }
 
 #[test]

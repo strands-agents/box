@@ -187,8 +187,9 @@ its own policy text and temporal history. The authored policy cannot discriminat
 box name.
 
 The removed `Filesystem`, `Network`, `Process`, and `Box` entity types fail strict
-validation. Rewrite those scopes as an action or `context.input` guard. For example,
-every `fs:*` action carries `operation`, while network and shell inputs do not.
+validation. Rewrite those scopes as an action constraint. A rule that reads
+`context.input` names actions of one family, such as `fs:read` and `fs:write`, so the
+load refuses an `operation` guard under no action.
 
 ## Requests And Decisions
 

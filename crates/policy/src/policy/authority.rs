@@ -142,6 +142,7 @@ impl Authority {
                 }
                 Err(
                     inert @ (PolicyError::Spelling(_)
+                    | PolicyError::InputAcrossFamilies(_)
                     | PolicyError::SharedRuleId(_)
                     | PolicyError::ReservedAction(_)
                     | PolicyError::InertTemporalPermit(_)),
@@ -772,6 +773,7 @@ fn is_inert(error: &PolicyError) -> bool {
     matches!(
         error,
         PolicyError::Spelling(_)
+            | PolicyError::InputAcrossFamilies(_)
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)

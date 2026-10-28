@@ -113,8 +113,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip`.
-- `context.input.path` also carries a URL path, so guard a filesystem rule with
-  `context.input has operation`.
+- `context.input.path` also carries a URL path, so a rule that reads `context.input` names actions
+  of one family, and the load refuses any other
+  (`spelling::refuse_input_across_families`). Pinned by
+  `tests/path_spelling.rs::a_filesystem_path_rule_stays_off_an_http_request_with_the_same_path`.
+  The check runs before strict validation and in `validate_staged`, so a rule that reads the input
+  across a tool action and another family is refused, not parked; a rule scoped to one tool action
+  loads. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and

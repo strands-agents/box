@@ -21,6 +21,10 @@ pub enum PolicyError {
     #[error("policy compares an inert literal: {0}")]
     Spelling(String),
 
+    /// A rule reads `context.input` and does not name actions of one family.
+    #[error("policy reads the input without one action family: {0}")]
+    InputAcrossFamilies(String),
+
     /// Two rules carry one non-blank `@id`.
     #[error("policy gives one @id to more than one rule: {0}")]
     SharedRuleId(String),

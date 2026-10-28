@@ -536,6 +536,22 @@ pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> 
         .collect())
 }
 
+/// Parse and macro-expand a source bundle, and refuse a read of `context.input` without one
+/// action family, without an MCP action schema.
+pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
+    parse_policy_source(source)?;
+    let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
+        .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+    let parsed = dogwood_language::ParsedPolicySet::parse(source, &service_schema()?)
+        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
+    // A bundle that does not lower before discovery is parked by `open_staged`, which judges it.
+    let Ok(lowered) = parsed.lower(&policy_schema) else {
+        return Ok(());
+    };
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|_| None)
+        .map_err(Refused::into_error)
+}
+
 /// Strict-validate canonical policy statements against an ordered schema set.
 ///
 /// `positions` holds the authored index of each statement, and an empty slice means the statements
@@ -602,6 +618,9 @@ pub(crate) fn check_and_expand(
         .map_err(|error| PolicyError::Schema(format!("dogwood lower: {error}")))?;
     refuse_shared_rule_ids(&lowered, positions)?;
     refuse_reserved_action_rules(&lowered, positions)?;
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
+        rule_ref(&lowered, cedar_policy_id, positions)
+    })?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a

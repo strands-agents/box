@@ -172,18 +172,22 @@ outcome together, so if the process stops between the two, a `::response` count 
 ## What refuses to load
 
 A policy that's wrong stops the box. An inert `forbid` is a fail-open that passes review, so the
-load does two things: it strict-validates every name against the closed action vocabulary ([the
+load strict-validates every name against the closed action vocabulary ([the
 action vocabulary is closed and strict-validated at
 load](decisions.md#the-action-vocabulary-is-closed-and-strict-validated-at-load)), and it refuses
 every rule it can prove will never fire ([a rule that can't fire is refused at
-load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)).
+load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). It also
+refuses a rule that reads `context.input` under actions of more than one family, or under no
+action, because a field means what the action makes it mean ([a rule that reads the input names
+one action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family)).
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the
 later load does, so a policy that passes it loads at the next run.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
-front, `run` checks syntax, macro expansion, and provider use. The per-tool actions don't exist
+front, `run` checks syntax, macro expansion, provider use, and the action family of each rule that
+reads `context.input`. The per-tool actions don't exist
 until a server reports its tools, so `run` stages each server's schema as it arrives and validates
 the whole policy once more when every server has reported. Until then a tool call for that server is
 denied without reaching the engine ([discovery serves the schema-independent

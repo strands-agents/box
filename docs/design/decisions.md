@@ -719,6 +719,30 @@ cannot narrow another permit; beside a conditioned permit for the same action it
 inert only for the requests that permit admits; and alone it loads, because it is then a widening and
 not a cap.
 
+<a id="a-rule-that-reads-the-input-names-one-action-family"></a>
+### A rule that reads `context.input` names actions of one family
+
+An input attribute means what the action makes it mean: `path` is a filesystem path on `fs:*` and a
+URL path on `http:request`, and `host` is a destination on `net:connect` and any argument a
+generated tool action declares. So the load refuses a rule that reads `context.input` and does not
+constrain its action to one family, and names the actions to write. A family is the prefix before
+`:` in a `Box::Action` name (`fs`, `shell`, `net`, `http`, `mcp`), and each generated tool action
+is a family of its own. The check needs no action schema, so it runs before strict validation and
+before a box with an MCP server stages a tool schema: a rule that reads the input across a tool
+action and another family is refused, not parked until discovery, and a rule scoped to one tool
+action loads. This is wider than
+[refusing a rule that cannot fire](#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns):
+it refuses a rule that is ambiguously authored, not one proven inert, so it refuses some rules that
+fire correctly today. Three alternatives lost. Judging the literal under an unconstrained scope
+refused a valid rule that compared a tool argument, and the spelling it suggested changed what the
+rule matched. A warning scrolls past the startup disclosure and does not stop the run, and no
+shipped policy has this shape. The schema
+cannot decide it, because it records a type and not a meaning, and `path` is a `String` on both
+`fs:*` and `http:request`. The cost: a rule that reads the input across families must be split into
+one rule per family, even `net:connect` with `http:request` on `host`, where the meaning agrees. The
+rule starts strict because loosening it later loads every policy that loads today, and tightening it
+would refuse some. A blanket `permit` or `forbid` with no condition still loads.
+
 <a id="the-enforced-surface-is-the-whole-vocabulary"></a>
 ### The enforced surface is the whole vocabulary, so there are no harness actions and no risk tags
 
