@@ -82,7 +82,7 @@ hyper = { version = "1", optional = true, features = ["client", "http1", "server
 hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
-# The body limit (`Limited`) and the body collection on both legs.
+# Body frames (`BodyExt::frame`), for the body collection on both legs.
 http-body-util = { version = "0.1", optional = true }
 # The owners of the forwarded header values and target, which are wiped on drop.
 bytes = { version = "1", optional = true }

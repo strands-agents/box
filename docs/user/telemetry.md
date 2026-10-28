@@ -162,12 +162,12 @@ reason is one of these fixed texts, so it carries no byte that the workload or t
 | Reason | What ended the exchange |
 |---|---|
 | `response blocked by egress control: <kind>` | The credential scrub refused the reply. `<kind>` is `credential denied` when the scrub cannot read the reply, such as a reply in a `Content-Encoding` that it cannot decode, or `mutation collision` when two scrub edits change the same header. |
-| `the request was refused: the gateway does not accept its head or framing` | The request inside the tunnel is malformed, or it states both `Content-Length` and `Transfer-Encoding`. |
+| `the request was refused: the gateway does not accept its head or framing` | The request inside the tunnel has a head or framing that the gateway does not accept, such as a `Transfer-Encoding` that does not end in `chunked` (the workload gets a 400 with no `x-strands-box-egress` header), or it is a nested `CONNECT` (the gateway closes the connection). |
 | `the request was refused: its body is larger than the limit` | The request body inside the tunnel is larger than 16 MiB. |
 | `no permitted address accepted the connection` | Every address that policy permitted refused the connection. |
 | `the upstream socket could not be prepared` | The gateway could not set up the connected socket. |
 | `the outcome of the permitted effect was not recorded` | The policy history did not take the outcome of a permit. |
-| `the exchange passed the upstream deadline` | The upstream did not finish the exchange within 300 seconds. |
+| `the exchange passed the upstream deadline` | The upstream connection moved no byte in either direction for 300 seconds. An exchange that keeps moving has no total limit. |
 | `the reply was refused: the gateway does not accept its head, framing, or upgrade` | The reply is malformed, or it asks to switch protocols. |
 | `the reply was refused: its body is larger than the limit` | The reply body is larger than 16 MiB. |
 
