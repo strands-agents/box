@@ -254,9 +254,11 @@ impl ClaimedEffectPermit {
 
 #[cfg(feature = "tls-intercept")]
 impl Drop for ClaimedEffectPermit {
+    /// A claim can drop on a gateway worker, so the mark goes through [`off_worker`], as each
+    /// `record_outcome` call does.
     fn drop(&mut self) {
         if let Some(permit) = self.permit.take() {
-            permit.mark_indeterminate();
+            off_worker(|| permit.mark_indeterminate());
         }
     }
 }
@@ -315,6 +317,52 @@ mod tests {
 
         assert_eq!(recorded.load(Ordering::SeqCst), 0);
         assert_eq!(indeterminate.load(Ordering::SeqCst), 1);
+    }
+
+    /// A permit whose mark blocks until another task of the runtime has run.
+    struct WaitingPermit {
+        handle: tokio::runtime::Handle,
+        other_ran: Arc<AtomicUsize>,
+    }
+
+    impl EffectPermit for WaitingPermit {
+        fn record_outcome(self: Box<Self>, _outcome: EffectOutcome) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn mark_indeterminate(self: Box<Self>) {
+            let (ran, ran_after) = std::sync::mpsc::channel();
+            self.handle.spawn(async move { ran.send(()).unwrap() });
+            if ran_after
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok()
+            {
+                self.other_ran.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// On a one-worker runtime, a claim that drops on the worker marks its permit in `off_worker`,
+    /// so another task runs while the mark blocks.
+    #[test]
+    fn dropping_a_claim_on_a_worker_keeps_other_tasks_running() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let other_ran = Arc::new(AtomicUsize::new(0));
+        let claim = ClaimedEffectPermit::new(Box::new(WaitingPermit {
+            handle: runtime.handle().clone(),
+            other_ran: other_ran.clone(),
+        }));
+        runtime
+            .block_on(runtime.spawn(async move { drop(claim) }))
+            .unwrap();
+        assert_eq!(
+            other_ran.load(Ordering::SeqCst),
+            1,
+            "another task ran while the mark blocked"
+        );
     }
 
     /// The thread that `work` ran on, and the thread that called `off_worker`.
