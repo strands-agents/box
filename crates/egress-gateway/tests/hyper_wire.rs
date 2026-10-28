@@ -151,7 +151,7 @@ fn relayed_header_names_are_title_case_and_grouped() {
     assert_eq!(
         response,
         "HTTP/1.1 200 OK\r\nX-Lower: a\r\nSet-Cookie: 1\r\nSet-Cookie: 2\r\nX-Mid: m\r\n\
-         Connection: close\r\nContent-Length: 2\r\n\r\nok"
+         Content-Length: 2\r\n\r\nok"
     );
     let seen = seen.expect("the upstream saw the request");
     assert!(
@@ -173,10 +173,7 @@ fn a_304_to_the_workload_has_no_content_length() {
         "GET /w3 HTTP/1.1\r\nHost: wire.test:{port}\r\n\r\n",
         4,
     );
-    assert_eq!(
-        response,
-        "HTTP/1.1 304 Redirect\r\nEtag: \"e\"\r\nConnection: close\r\n\r\n"
-    );
+    assert_eq!(response, "HTTP/1.1 304 Redirect\r\nEtag: \"e\"\r\n\r\n");
 }
 
 /// **W4: an HTTP/1.0 request gets an `HTTP/1.0` reply, and one exchange.** A `Connection:
@@ -233,10 +230,7 @@ fn expect_100_continue_gets_an_interim_reply() {
     assert_eq!(client.read_response(), "HTTP/1.1 100 Continue\r\n\r\n");
     client.send_raw(b"hello");
     let reply = client.read_response();
-    assert_eq!(
-        reply,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-    );
+    assert_eq!(reply, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     assert!(upstream.last_request().raw.ends_with("\r\n\r\nhello"));
     assert!(
         log.wait_for(4)
@@ -278,10 +272,7 @@ fn chunk_extensions_follow_hyper_in_both_directions() {
          2;name=\"open\r\nhi\r\n0\r\n\r\n",
         4,
     );
-    assert_eq!(
-        response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-    );
+    assert_eq!(response, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     let seen = seen.expect("the upstream saw the request");
     assert!(seen.contains("\r\nContent-Length: 2\r\n\r\nhi"), "{seen}");
     assert!(
@@ -301,10 +292,7 @@ fn trailers_are_dropped_in_both_directions() {
          Trailer: X-Down\r\n\r\n2\r\nhi\r\n0\r\nX-Down: t\r\n\r\n",
         4,
     );
-    assert_eq!(
-        response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-    );
+    assert_eq!(response, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     let seen = seen.expect("the upstream saw the request");
     assert!(seen.ends_with("\r\nContent-Length: 2\r\n\r\nhi"), "{seen}");
     assert!(!seen.contains("X-Down"), "{seen}");
@@ -327,10 +315,7 @@ fn informational_replies_are_skipped_with_no_count() {
         "GET /1xx HTTP/1.1\r\nHost: wire.test:{port}\r\n\r\n",
         4,
     );
-    assert_eq!(
-        response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-    );
+    assert_eq!(response, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     assert!(
         seen.iter().any(|seen| matches!(
             seen,
@@ -354,10 +339,7 @@ fn a_reply_with_two_lengths_is_decoded_and_reframed() {
             "GET /two HTTP/1.1\r\nHost: wire.test:{port}\r\n\r\n",
             4,
         );
-        assert_eq!(
-            response,
-            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-        );
+        assert_eq!(response, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     }
 }
 
@@ -411,10 +393,7 @@ fn a_client_half_close_still_gets_the_reply() {
     client.send_raw(format!("GET /half HTTP/1.1\r\nHost: {HOST}:{port}\r\n\r\n").as_bytes());
     client.close_write();
     let reply = client.read_response();
-    assert_eq!(
-        reply,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
-    );
+    assert_eq!(reply, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     let seen = log.wait_for(4);
     assert!(
         seen.contains(&Seen::ReleaseOutcome(EffectOutcome::Completed(reply.len()))),
@@ -639,7 +618,10 @@ fn an_upper_case_scheme_on_plain_http_is_served() {
     let (handle, log) = plain_gateway();
     let reply = plain_exchange(
         &handle,
-        &format!("GET HTTP://127.0.0.1:{port}/upper HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        &format!(
+            "GET HTTP://127.0.0.1:{port}/upper HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+             Connection: close\r\n\r\n"
+        ),
     );
     assert_eq!(
         reply,

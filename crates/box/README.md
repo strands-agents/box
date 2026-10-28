@@ -214,9 +214,10 @@ forbid(principal, action == Box::Action::"shell:exec", resource)
 when temporal { /* … count >= 20 … */ };
 ```
 
-One HTTPS call is **two** decisions: the L4 connect and the L7 request. The connect leg runs
-before TLS, so it sees a host and a port and no more; the request leg runs after the gateway
-terminates TLS, so it reads the method and the path.
+One HTTPS call is **two** decisions: the L4 connect and the L7 request. The connect leg sees a host
+and a port and no more, before TLS for the first request on a connection and after TLS for a later
+request on a kept-alive one; the request leg runs after the gateway terminates TLS, so it reads the
+method and the path.
 
 ```cedar
 permit(principal, action == Box::Action::"net:connect", resource)

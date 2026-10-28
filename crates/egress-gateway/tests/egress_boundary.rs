@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use egress_gateway::{
     AuditDecision, CapabilitySet, EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit,
-    MitmConfig, MitmHandle, MitmInterceptor,
+    MitmConfig, MitmHandle, MitmInterceptor, PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -98,6 +98,11 @@ impl RecordingPolicy {
             .filter(|s| matches!(s, Seen::Request { .. }))
             .cloned()
             .collect()
+    }
+
+    /// Every attempt it saw, in order.
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
     }
 
     fn clear(&self) {
@@ -1528,46 +1533,105 @@ fn ambiguous_framing_that_hyper_decodes_is_reframed_before_the_upstream() {
     }
 }
 
-/// A second request riding a complete first one, in the same TLS connection, is never forwarded:
-/// the gateway forwards exactly one request per connection, re-framed with its own Content-Length.
+/// A second request riding a complete first one, in the same TLS connection, is decided on its
+/// own: the first request ends at its own `Content-Length`, so the riding request never reaches the
+/// upstream inside it. The riding request opens its own governed upstream socket after the first
+/// reply, with its own `Connect` and `Request` decisions. When the connect rule refuses that second
+/// socket, the riding request gets the marked `403`, the connection closes, and the upstream never
+/// sees it.
 #[test]
-fn a_second_request_riding_a_complete_first_one_is_not_forwarded() {
+fn a_second_request_riding_a_complete_first_one_is_decided_on_its_own() {
     let host = "pipeline.test";
-    let upstream = TlsUpstream::start(host);
-    let (handle, policy) = gateway_for(host, &upstream);
-    let port = upstream.port();
-
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
-    client.send_raw(
+    let riding = |port: u16| {
         format!(
             "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 5\r\n\r\nhello\
              GET /admin HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
         )
-        .as_bytes(),
-    );
-    assert_eq!(client.read_status(), 200, "the first request is served");
+    };
+    let request = |method: &str, path: &str| Seen::Request {
+        method: method.to_string(),
+        path: path.to_string(),
+    };
 
-    let seen = upstream.last_request();
-    assert!(seen.raw.starts_with("POST /legit "), "{}", seen.raw);
-    assert_eq!(seen.header("content-length").as_deref(), Some("5"));
-    assert!(seen.raw.ends_with("hello"), "{}", seen.raw);
-    assert!(
-        !seen.raw.contains("/admin"),
-        "the riding request must not reach the upstream: {}",
-        seen.raw
-    );
+    let upstream = TlsUpstream::start(host);
+    let (handle, policy) = gateway_for(host, &upstream);
+    let port = upstream.port();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_raw(riding(port).as_bytes());
+    assert_eq!(client.read_status(), 200, "the first request is served");
     assert_eq!(
-        upstream.request_count(),
-        1,
-        "exactly one request was forwarded"
+        client.read_status(),
+        200,
+        "the riding request is served after it"
     );
+
+    let seen = upstream.requests();
+    assert_eq!(
+        seen.len(),
+        2,
+        "one request on each upstream socket: {seen:?}"
+    );
+    assert!(seen[0].raw.starts_with("POST /legit "), "{}", seen[0].raw);
+    assert_eq!(seen[0].header("content-length").as_deref(), Some("5"));
+    assert!(seen[0].raw.ends_with("hello"), "{}", seen[0].raw);
+    assert!(
+        !seen[0].raw.contains("/admin"),
+        "the riding request must not reach the upstream inside the first: {}",
+        seen[0].raw
+    );
+    assert!(seen[1].raw.starts_with("GET /admin "), "{}", seen[1].raw);
+    let connect = Seen::Connect {
+        host: host.to_string(),
+        port,
+        address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        permitted: true,
+    };
+    assert_eq!(
+        policy.seen(),
+        vec![
+            connect.clone(),
+            request("POST", "/legit"),
+            connect,
+            request("GET", "/admin"),
+        ],
+        "each request is decided on its own, in order"
+    );
+
+    // Only the first upstream socket is permitted.
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let opened = AtomicUsize::new(0);
+    let policy = RecordingPolicy::with_rule(move |_, _| opened.fetch_add(1, Ordering::SeqCst) == 0);
+    let handle = start(
+        MitmConfig {
+            upstream_ca_pems: vec![upstream.ca_pem()],
+            dns_overrides: vec![(host.to_string(), IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            ..MitmConfig::default()
+        },
+        policy.clone(),
+    );
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_raw(riding(port).as_bytes());
+    assert_eq!(client.read_status(), 200, "the first request is served");
+    let refusal = client.read_response().to_ascii_lowercase();
+    assert!(refusal.starts_with("http/1.1 403 "), "{refusal}");
+    assert!(
+        refusal.contains(&format!(
+            "{}: {}",
+            PROXY_ORIGIN_HEADER.to_ascii_lowercase(),
+            PROXY_ORIGIN_VALUE
+        )),
+        "the refusal is marked: {refusal}"
+    );
+    assert!(refusal.contains("\r\nconnection: close\r\n"), "{refusal}");
+    assert_eq!(client.read_response(), "", "the connection closes");
+    let seen = upstream.requests();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].raw.starts_with("POST /legit "), "{}", seen[0].raw);
     assert_eq!(
         policy.requests(),
-        vec![Seen::Request {
-            method: "POST".to_string(),
-            path: "/legit".to_string(),
-        }],
-        "exactly one request effect was raised"
+        vec![request("POST", "/legit")],
+        "the refused socket raises no request effect"
     );
 }
 

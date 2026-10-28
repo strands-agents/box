@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use http::Response;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::watch;
 
 use crate::audit::RequestId;
 
@@ -18,6 +18,7 @@ use super::convert::{self, Whole};
 use super::exchange::{Subject, Unfinished, emit_decision, record_refusal, record_unfinished};
 use super::resolve::PinnedDestination;
 use super::serve::{PlainSession, TlsSession, serve_plain, serve_tls};
+use super::slots::{Slot, Slots};
 use crate::audit::{Decision as AuditDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, off_worker};
 use crate::error::ProxyError;
@@ -69,23 +70,19 @@ enum Accepted {
     Unix(tokio::net::UnixStream),
 }
 
-/// One held connection slot. The slot frees when this value drops: at the end of the connection,
-/// on any error, or in a panic unwind.
-struct Slot {
-    _permit: OwnedSemaphorePermit,
-}
-
 /// Run the accept loop until `stopping` turns `true` or its sender drops. Each connection holds one
 /// of the `slots`, which `config.max_connections` sizes: the loop accepts, then waits for a free
 /// slot before it accepts more, so an untrusted workload cannot make the gateway serve without bound
-/// (backpressure, not an optimization). Both waits watch the stop, so a full slot set cannot hold
-/// the stop back.
+/// (backpressure, not an optimization). While it waits, the oldest connection that waits between
+/// two requests gives its slot back. Both waits watch the stop, so a full slot set cannot hold the
+/// stop back.
 pub(super) async fn accept_loop(
     listener: Listening,
     state: Arc<SharedState>,
-    slots: Arc<Semaphore>,
+    slots: Arc<Slots>,
     mut stopping: watch::Receiver<bool>,
 ) {
+    let stop = stopping.clone();
     loop {
         let accepted = tokio::select! {
             biased;
@@ -96,9 +93,9 @@ pub(super) async fn accept_loop(
         let slot = tokio::select! {
             biased;
             _ = stopping.wait_for(|stop| *stop) => break,
-            permit = Arc::clone(&slots).acquire_owned() => match permit {
-                Ok(permit) => Slot { _permit: permit },
-                Err(_) => break,
+            slot = slots.acquire(&stop) => match slot {
+                Some(slot) => slot,
+                None => break,
             },
         };
         // The first head must be complete a fixed time after the connection takes its slot.
@@ -108,7 +105,6 @@ pub(super) async fn accept_loop(
             Arc::clone(&state),
             slot,
             head_deadline,
-            stopping.clone(),
         ));
     }
     // The listener and the state drop before the caller reports the end of the loop.
@@ -117,21 +113,20 @@ pub(super) async fn accept_loop(
 }
 
 /// Serve one connection: read its first head, then route it. The task holds the slot until the
-/// connection ends, also while it relays a WebSocket. `stop` ends a relay.
+/// connection ends, also while it relays a WebSocket. The stop that the slot carries ends a relay.
 async fn serve_connection(
     client: Accepted,
     state: Arc<SharedState>,
     slot: Slot,
     head_deadline: Instant,
-    stop: watch::Receiver<bool>,
 ) {
     let handled = match client {
         Accepted::Tcp(stream) => {
             // Small writes, such as a WebSocket frame, leave at once.
             let _ = stream.set_nodelay(true);
-            route(stream, &state, slot, head_deadline, stop).await
+            route(stream, &state, slot, head_deadline).await
         }
-        Accepted::Unix(stream) => route(stream, &state, slot, head_deadline, stop).await,
+        Accepted::Unix(stream) => route(stream, &state, slot, head_deadline).await,
     };
     if let Err(err) = handled {
         // Never silently swallow a handler failure — record it (secret-free) so a broken
@@ -175,7 +170,6 @@ async fn route<C: Client>(
     state: &Arc<SharedState>,
     slot: Slot,
     head_deadline: Instant,
-    stop: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
     let idle = state.client_limits.idle;
     let head = match read_until_headers_end(&mut client, idle, head_deadline).await {
@@ -184,14 +178,12 @@ async fn route<C: Client>(
     };
     match connect::parse_connect(&head) {
         // HTTPS via CONNECT: terminate TLS and inspect.
-        Some(connect) => tls_path(client, connect, state, slot, stop).await,
+        Some(connect) => tls_path(client, connect, state, slot).await,
         None if C::PLAIN_HTTP => {
-            let _slot = slot;
             let session = PlainSession {
                 client,
-                proxy_authorization: connect::proxy_authorization_from_head(&head),
                 head: head.into_bytes(),
-                stop,
+                slot,
             };
             serve_plain(Arc::clone(state), session).await
         }
@@ -217,7 +209,6 @@ async fn tls_path<C: Client>(
     connect: ConnectRequest,
     state: &Arc<SharedState>,
     slot: Slot,
-    stop: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
     let idle = state.client_limits.idle;
     let correlation = RequestId::unique();
@@ -267,14 +258,13 @@ async fn tls_path<C: Client>(
     // withholds the bytes. The shipped interceptor never issues one.
     //
     // A handshake or pin failure hard-fails (drop), never a downgrade; the connection task
-    // audits the error. This task holds the slot until the exchange ends.
-    let _slot = slot;
+    // audits the error. The session holds the slot until the connection ends.
     let session = TlsSession {
         client,
         upstream,
         connect,
         correlation,
-        stop,
+        slot,
     };
     serve_tls(Arc::clone(state), session).await
 }
@@ -772,7 +762,7 @@ mod tests {
             effect_interceptor: policy,
             expected_token: None,
             client_limits: ClientLimits::default(),
-            sessions: Arc::new(Semaphore::new(0)),
+            sessions: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 
@@ -1747,7 +1737,8 @@ mod tests {
     /// **A slow upstream reply outlasts the client idle bound.** The workload waits in silence for
     /// longer than its idle bound while the upstream prepares its reply, and still gets the reply:
     /// with half-close on, hyper reads no client byte while the exchange waits, so no client read
-    /// waits the bound.
+    /// waits the bound. The reply keeps the connection open, which closes at the idle bound after
+    /// it.
     #[test]
     fn a_slow_upstream_reply_outlasts_the_client_idle_bound() {
         const IDLE: Duration = Duration::from_millis(300);
@@ -1767,9 +1758,151 @@ mod tests {
         stream.flush().unwrap();
         let reply = String::from_utf8(read_until_closed(&mut stream)).unwrap();
         replied.join().unwrap();
+        assert_eq!(reply, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nyy");
+    }
+
+    /// Assert that no audit event and no record of `audit` and `emitter` is a denial.
+    fn assert_no_denial(emitter: &StubEmitter, audit: &SharedAuditLog, case: &str) {
+        let denials: Vec<String> = audit
+            .drain()
+            .into_iter()
+            .filter(|event| event.decision == AuditDecision::Deny)
+            .map(|event| event.reason)
+            .collect();
+        assert!(denials.is_empty(), "{case}: {denials:?}");
+        assert!(
+            emitter
+                .records()
+                .iter()
+                .all(|record| record.decision != AuditDecision::Deny),
+            "{case}: no Deny record"
+        );
+    }
+
+    /// **A kept-alive tunnel that waits past the idle bound for its next request closes with
+    /// `close_notify`, frees its slot, and leaves no denial**: the end of a wait between requests is
+    /// not a failure.
+    #[test]
+    fn an_idle_kept_alive_tunnel_closes_at_the_idle_bound_with_close_notify() {
+        const IDLE: Duration = Duration::from_millis(300);
+        let tunnel = Tunnel::new(AddressPolicy::permit_all(), IDLE);
+        let (workload, emitter, audit) = (tunnel.workload, tunnel.emitter, tunnel.audit);
+        let (origin, replied) = tls_origin(tunnel.origin, 2);
+        let gateway = Gateway::serve(tunnel.state);
+        let mut client = gateway.connect();
+        open_tunnel(&mut client, origin.port());
+        let mut tls = workload_tls(&workload);
+        let mut stream = rustls::Stream::new(&mut tls, &mut client);
+        write!(
+            stream,
+            "GET /idle HTTP/1.1\r\nHost: {TUNNEL_HOST}:{}\r\n\r\n",
+            origin.port()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let expected = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nyy";
+        let mut reply = vec![0u8; expected.len()];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(reply, expected);
+        replied.join().unwrap();
+        let started = Instant::now();
+        let mut rest = Vec::new();
+        stream
+            .read_to_end(&mut rest)
+            .expect("the tunnel ends with close_notify");
+        let waited = started.elapsed();
+        assert!(rest.is_empty());
+        assert!(
+            waited >= IDLE * 4 / 5 && waited < IDLE * 3,
+            "the idle bound ended the wait: {waited:?}"
+        );
+        assert!(gateway.serves_another_client(), "the slot is free");
+        assert_no_denial(&emitter, &audit, "tunnel");
+    }
+
+    /// **A kept-alive plain connection that waits past the idle bound closes, frees its slot, and
+    /// leaves no denial.**
+    #[test]
+    fn an_idle_kept_alive_plain_connection_closes_at_the_idle_bound() {
+        const IDLE: Duration = Duration::from_millis(300);
+        let (origin, replied) = plain_origin(|_| b"pp".to_vec());
+        let emitter = StubEmitter::new();
+        let mut shared = state(AddressPolicy::permit_all());
+        shared.client_limits = limits(300, 60_000);
+        shared.emitter = Box::new(emitter.clone());
+        let audit = shared.audit.clone();
+        let gateway = Gateway::serve(shared);
+        let mut client = gateway.connect();
+        write!(
+            client,
+            "GET http://{origin}/idle HTTP/1.1\r\nHost: {origin}\r\n\r\n"
+        )
+        .unwrap();
+        replied.join().unwrap();
+        let started = Instant::now();
+        let reply = read_until_closed(&mut client);
+        let waited = started.elapsed();
+        assert_eq!(reply, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\npp");
+        assert!(
+            waited >= IDLE * 4 / 5 && waited < IDLE * 3,
+            "the idle bound ended the wait: {waited:?}"
+        );
+        assert!(gateway.serves_another_client(), "the slot is free");
+        assert_no_denial(&emitter, &audit, "plain");
+    }
+
+    /// **The wait for the next head and that head share one bound.** A kept-alive tunnel whose
+    /// next head drips, each byte under the idle bound, is cut when the head bound passes since the
+    /// first reply, and the dripped request raises no decision.
+    #[test]
+    fn a_next_head_that_drips_is_cut_at_the_head_bound() {
+        let policy = AddressPolicy::permit_all();
+        let mut tunnel = Tunnel::new(policy.clone(), Duration::from_secs(60));
+        tunnel.state.client_limits.first_head = Duration::from_millis(500);
+        let (origin, replied) = tls_origin(tunnel.origin, 2);
+        let gateway = Gateway::serve(tunnel.state);
+        let mut client = gateway.connect();
+        open_tunnel(&mut client, origin.port());
+        let mut tls = workload_tls(&tunnel.workload);
+        let mut stream = rustls::Stream::new(&mut tls, &mut client);
+        let head = format!(
+            "GET /drip HTTP/1.1\r\nHost: {TUNNEL_HOST}:{}\r\n\r\n",
+            origin.port()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut reply = vec![0u8; b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nyy".len()];
+        stream.read_exact(&mut reply).unwrap();
+        replied.join().unwrap();
+        let started = Instant::now();
+        let mut cut = false;
+        for byte in head.as_bytes() {
+            if stream
+                .write_all(std::slice::from_ref(byte))
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                cut = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let rest = if cut {
+            Vec::new()
+        } else {
+            read_until_closed(&mut stream)
+        };
+        let waited = started.elapsed();
+        assert!(rest.is_empty(), "{}", String::from_utf8_lossy(&rest));
+        assert!(
+            cut && waited < Duration::from_millis(50) * head.len() as u32,
+            "the head bound cut the drip before its end: {waited:?}"
+        );
         assert_eq!(
-            reply,
-            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nyy"
+            policy.seen().len(),
+            1,
+            "only the first request was decided: {:?}",
+            policy.seen()
         );
     }
 

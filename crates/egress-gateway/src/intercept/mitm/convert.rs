@@ -78,7 +78,7 @@ impl Whole {
 
     /// Tell `writes` when hyper takes the body. hyper never asks for an empty body under
     /// `Content-Length: 0`, so the head alone is the message, and the body counts as taken at once.
-    fn reported_to(mut self, writes: Arc<WriteCount>) -> Self {
+    pub(super) fn reported_to(mut self, writes: Arc<WriteCount>) -> Self {
         if self.length == 0 {
             writes.body_taken();
         } else {
@@ -416,7 +416,8 @@ fn upstream_head(
 ///
 /// Every header but `Content-Length` and the hop-by-hop fields, then `Connection: close`, then the
 /// `Content-Length` that the body mode allows. The status line carries Box's reason phrase, and the
-/// version of the request, so an HTTP/1.0 client gets one exchange.
+/// version of the request, so an HTTP/1.0 client gets one exchange. The service removes
+/// `Connection: close` from a released reply that keeps its connection open.
 pub(super) fn response_out(
     request_method: &str,
     version: Version,

@@ -127,7 +127,14 @@ encoded, removes `.` and `..` segments, and leaves out the query.
 
 **The gateway opens TLS to the server last.** Only after `http:request` permits does it connect TLS
 to the server, verify the server's certificate against a compiled-in set of public root
-certificates, and forward the request. Each connection carries one request.
+certificates, and forward the request. Each request opens its own connection to the server, which
+carries that request only.
+
+**A client connection carries many requests in turn.** The gateway keeps it open after a reply that
+it released. It closes it after a reply that it wrote itself, after an HTTP/1.0 request, after a
+request with `Connection: close`, and after a request that names `Upgrade`. Pipelined requests run
+one at a time, and each one is decided on its own. A connection that waits for its next request
+closes after 60 seconds, or when a new connection finds no free slot and this one waited longest.
 
 **A stalled client loses its connection.** The gateway closes a connection when a read from the
 client gets no byte for 60 seconds. When the client stops reading a reply, the gateway closes the

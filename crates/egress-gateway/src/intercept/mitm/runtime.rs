@@ -13,6 +13,7 @@ use tokio::sync::{Semaphore, watch};
 
 use super::SharedState;
 use super::listener::{self, BoundListener};
+use super::slots::Slots;
 use crate::error::{ProxyError, Result};
 
 /// The thread that runs the gateway, and the two signals that `MitmHandle` uses to stop it.
@@ -101,13 +102,14 @@ fn serve(
                 return;
             }
         };
-        let semaphore = Arc::new(Semaphore::new(slots));
+        let slots = Slots::new(slots);
         let _ = ready.send(Ok(()));
-        listener::accept_loop(listener, state, Arc::clone(&semaphore), stopping).await;
+        listener::accept_loop(listener, state, Arc::clone(&slots), stopping).await;
         let _ = ended.send(());
         // Every connection holds one slot until it ends, so all slots back means no connection
-        // is open, and the runtime can drop with no task in flight.
-        let _ = semaphore.acquire_many(slots as u32).await;
+        // is open, and the runtime can drop with no task in flight. The stop asked each kept-alive
+        // connection to close: an idle one closes at once, and a busy one after its reply.
+        slots.all_free().await;
     });
     // The runtime drops here, on its own thread, outside any async context.
 }

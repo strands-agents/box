@@ -38,8 +38,8 @@ pub(super) fn parse_connect(head: &str) -> Option<ConnectRequest> {
 }
 
 /// Extract a `Proxy-Authorization` value from a raw HTTP head (request line + headers, up to the
-/// blank line). The plain-HTTP path must read it from the RAW head, because the request intake
-/// strips `Proxy-Authorization` as a hop-by-hop header before the exchange sees the request.
+/// blank line), as the front reads a `CONNECT` head. The plain-HTTP path reads each request's own
+/// value before the request intake strips it as a hop-by-hop header.
 pub(super) fn proxy_authorization_from_head(head: &str) -> Option<String> {
     head.split("\r\n")
         .skip(1) // the request line

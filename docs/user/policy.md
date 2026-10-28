@@ -22,8 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection that it opens to a server, as `net:connect`,
+  and it opens one for each HTTP request. It asks once per HTTP request, as `http:request`, and once
+  per MCP request over HTTP, as `mcp:call`.
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -113,8 +114,9 @@ discovers. [The action vocabulary](policy/actions.md) lists the fields of each o
 - **[Filesystem](policy/actions.md#filesystem)**: a file operation in Strands Shell or Monty.
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
 - **[Network](policy/actions.md#network)**: an outbound call through the egress gateway. Each call
-  is two decisions: `net:connect` for the connection, before TLS, and `http:request` for each
-  request inside it, after TLS on an HTTPS connection.
+  is two decisions: `net:connect` for the connection to the server, and `http:request` for the
+  request, after TLS on an HTTPS connection. For the first request on a connection from the agent,
+  `net:connect` comes before TLS; for a later request on a kept-alive connection, after TLS.
 - **[Shell](policy/actions.md#shell)**: a command line in Strands Shell, judged once after the
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
@@ -404,6 +406,11 @@ A connection to another host is refused before TLS:
 ```text
 policy denied this operation on 'example.com:443' [default-deny]: No permit policy matched this request.
 ```
+
+A request to another host always needs a new connection. On a kept-alive HTTPS connection, the
+second request and each later one opens its own connection to the server, and the gateway decides
+its `net:connect` after TLS. A denial then reaches the agent as a `403` inside the connection, and
+the connection closes.
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.

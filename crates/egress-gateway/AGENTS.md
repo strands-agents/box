@@ -142,8 +142,10 @@ Conventions: `docs/conventions.md`.
   hangs (#180).
 - Keep `MAX_CACHED_LEAVES = 64` and clear the cache on reaching it; each entry holds a leaf key for
   the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
-- Refuse an unframed message on a reusable connection when keep-alive lands. The upstream client
-  reads a reply with no length to EOF, correct only while the close delimits.
+- Each request opens its own upstream socket, which carries one exchange, so the upstream client
+  may read a reply with no length to EOF. The client leg is kept alive, and every reply to it has an
+  exact length. Before stage 5 reuses an upstream socket, mark a socket that ended an unframed reply
+  as not reusable.
 
 ## Change Checklist
 

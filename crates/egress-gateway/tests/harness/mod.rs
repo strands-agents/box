@@ -320,6 +320,13 @@ impl TlsUpstream {
         panic!("upstream received no request");
     }
 
+    /// Every request the upstream received, in the order it recorded them, one for each socket.
+    pub fn requests(&self) -> Vec<SeenRequest> {
+        // Small settle delay so a (possibly in-flight) forward would have landed.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.seen.lock().unwrap().clone()
+    }
+
     /// How many requests the upstream has received (0 proves a request was blocked before it).
     pub fn request_count(&self) -> usize {
         // Small settle delay so a (possibly in-flight) forward would have landed.
@@ -495,6 +502,28 @@ impl WorkloadClient {
     pub fn read_response(&mut self) -> String {
         let tls = self.tls.as_mut().expect("connect (TLS) first");
         read_http_head_and_body(tls)
+    }
+
+    /// Read one response head from the proxy, and no body, as a client reads the reply to `HEAD`.
+    pub fn read_head_only(&mut self) -> String {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        read_head(tls)
+    }
+
+    /// Whether the proxy ends the tunnel within `wait`, with no byte before its end.
+    pub fn reads_end_within(&mut self, wait: Duration) -> bool {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        tls.sock.set_read_timeout(Some(wait)).unwrap();
+        let mut byte = [0u8; 1];
+        let ended = match tls.read(&mut byte) {
+            Ok(n) => n == 0,
+            Err(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ),
+        };
+        tls.sock.set_read_timeout(None).unwrap();
+        ended
     }
 
     /// Read the response status code the proxy returned over the TLS tunnel.

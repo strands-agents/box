@@ -61,7 +61,7 @@ kinds, and the proxy presents each one immediately before its effect:
 
 | Attempt | Fields | Reported when |
 |---|---|---|
-| `EffectAttempt::Resolve` | `host`, `port` | before the host is resolved, once per connection |
+| `EffectAttempt::Resolve` | `host`, `port` | before the host is resolved, once per upstream socket, which is one for each request |
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `intercepted`, `mcp` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
@@ -269,14 +269,23 @@ bound, so a slow reply reaches a client that waits for it. A plain-HTTP request 
 60 s gets a `400` before any decision. No `MitmConfig` field and no `box.toml` key sets these
 bounds.
 
+A client connection carries its requests one at a time, and each request opens its own governed
+upstream socket. The connection stays open after a released reply, and closes after a reply that
+the gateway wrote itself, after an HTTP/1.0 request, after a client `Connection: close`, and after a
+request that names `Upgrade`. The wait for the next head and that head share one 60 s bound. A
+connection holds its slot while it waits. When a new connection finds no free slot, the connection
+that has waited longest closes at once, one for each waiting connection; a connection inside an
+exchange keeps its slot.
+
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `shutdown()` and `Drop` stop the
 accept loop with no connection to the listener. `Drop` returns when the loop has
-closed the listener, also when every connection slot is held. Open connections
-run to their end on the gateway thread.
+closed the listener, also when every connection slot is held. A connection that
+waits for its next request then closes at once; a connection inside an exchange
+runs to the end of its reply on the gateway thread.
 
 ## Errors
 

@@ -48,7 +48,8 @@ Ten actions in four categories, and one generated action per MCP tool:
   - `fs:move`: renaming or moving a path, once per path.
   - `fs:other`: reserved. No operation raises it.
 - **[Network](#network)**, raised by the egress gateway.
-  - `net:connect`: each connection, before TLS.
+  - `net:connect`: each upstream socket, which is one for each request. On a kept-alive tunnel,
+    request 2 and later are decided after TLS.
   - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection.
 - **[Shell](#shell)**, raised by Strands Shell.
   - `shell:exec`: a command line that runs a program the shell implements, such as `cat` or `grep`.
@@ -98,7 +99,8 @@ names only `fs:other` refuses to load.
 
 Each outbound call is two decisions, both of which must permit.
 
-**`net:connect`**, once per connection, before TLS:
+**`net:connect`**, once per upstream socket, which the gateway opens for each request: before TLS
+for the first request on a connection, and after TLS for a later request on a kept-alive tunnel:
 
 | Field | Type | Meaning |
 |---|---|---|

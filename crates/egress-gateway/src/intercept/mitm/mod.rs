@@ -15,6 +15,7 @@ mod resolve;
 mod response_leg;
 mod runtime;
 mod serve;
+mod slots;
 mod tls;
 mod websocket;
 
@@ -98,9 +99,11 @@ pub struct MitmConfig {
     pub upstream_read_deadline: std::time::Duration,
     /// The maximum number of connections handled concurrently. Each connection holds one slot from
     /// its accept to its end, so excess connections wait for a slot rather than being served without
-    /// bound. The workload is contained but *untrusted* (it is the very thing this crate exists to
-    /// contain), so the cap is a hard backpressure limit, not an optimization. An open WebSocket holds
-    /// its slot until it closes, and open WebSockets hold at most three quarters of the slots.
+    /// bound. A kept-alive connection that waits for its next request gives its slot back when a new
+    /// connection finds none free. The workload is contained but *untrusted* (it is the very thing
+    /// this crate exists to contain), so the cap is a hard backpressure limit, not an optimization.
+    /// An open WebSocket holds its slot until it closes, and open WebSockets hold at most three
+    /// quarters of the slots.
     /// Defaults to 256.
     pub max_connections: usize,
     /// Remote MCP servers, as `(host, name)` pairs. A request whose destination host matches an entry

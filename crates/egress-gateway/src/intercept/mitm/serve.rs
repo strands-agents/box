@@ -3,12 +3,18 @@
 //!
 //! | Part | Does |
 //! |---|---|
-//! | [`serve_tls`] | Accept the workload's TLS with the minted leaf, then serve one exchange on hyper |
-//! | [`serve_plain`] | Serve one plain-HTTP exchange on hyper, after the first head that the front read |
+//! | [`serve_tls`] | Accept the workload's TLS with the minted leaf, then serve its requests on hyper |
+//! | [`serve_plain`] | Serve plain-HTTP requests on hyper, after the first head that the front read |
 //! | `Session` | Run one request: intake, the request phases and the decision, the round trip, the release |
+//! | `after_reply` | The close rule: whether the connection carries another request after a reply |
 //! | `round_trip` | Send the decided request over the pinned socket, and read the whole reply or take the upgrade |
 //! | `Session::switch` | Release the `101` of a WebSocket handshake; the connection task then runs the relay |
 //! | [`WriteCount`], `Counted` | Count the bytes that a stream accepted, for the outcome of each permit |
+//! | `Watched` | Tell the session when a kept-alive connection starts and ends its wait between requests |
+//!
+//! One client connection carries its requests one at a time. Each request opens its own governed
+//! upstream socket, with its own `Resolve` and `Connect` decisions, so a request on a kept-alive
+//! connection records the same attempts as the same request on a connection of its own.
 //!
 //! Each block of synchronous phases runs in one [`off_worker`] call with no `.await` inside it, so
 //! a slow decision, credential fetch, or record stalls only its own exchange, and a decision and the
@@ -22,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
+use http::header::{CONNECTION, PROXY_AUTHORIZATION, UPGRADE};
 use http::{Request, Response, StatusCode, Version};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -41,6 +48,7 @@ use super::exchange::{
 };
 use super::l7::{split_target, validate_request_binding};
 use super::listener::{PROXY_AUTHENTICATION_REQUIRED, open_governed_upstream};
+use super::slots::Slot;
 use super::websocket::{self, Expected};
 use super::{SharedState, http1, tls};
 use crate::audit::RequestId;
@@ -63,14 +71,13 @@ pub(super) struct TlsSession<C> {
     pub(super) upstream: std::net::TcpStream,
     pub(super) connect: ConnectRequest,
     pub(super) correlation: RequestId,
-    /// The gateway's stop signal, which ends a relay.
-    pub(super) stop: watch::Receiver<bool>,
+    /// The slot of the connection, which the session holds to its end.
+    pub(super) slot: Slot,
 }
 
-/// Terminate the workload's TLS with the leaf minted for the CONNECT host, and serve one exchange.
+/// Terminate the workload's TLS with the leaf minted for the CONNECT host, and serve its requests.
 ///
-/// The client idle bound wraps the raw stream under TLS, so it bounds the handshake too. The
-/// connection task holds the slot.
+/// The client idle bound wraps the raw stream under TLS, so it bounds the handshake too.
 pub(super) async fn serve_tls<C>(state: Arc<SharedState>, session: TlsSession<C>) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -94,7 +101,7 @@ where
             correlation: session.correlation,
             upstream: Mutex::new(Some(upstream)),
         },
-        session.stop,
+        session.slot,
     );
     session.serve(client).await
 }
@@ -105,63 +112,71 @@ pub(super) struct PlainSession<C> {
     pub(super) client: C,
     /// The first head, as the front read it, which hyper reads again before the next bytes.
     pub(super) head: Vec<u8>,
-    /// The `Proxy-Authorization` of the raw head. The hop-by-hop strip removes it from the request,
-    /// so reading it there would always see nothing and the token check would accept every request.
-    pub(super) proxy_authorization: Option<String>,
-    /// The gateway's stop signal.
-    pub(super) stop: watch::Receiver<bool>,
+    /// The slot of the connection, which the session holds to its end.
+    pub(super) slot: Slot,
 }
 
-/// Serve one plain-HTTP (absolute-form) exchange: the same controls as the CONNECT path —
+/// Serve plain-HTTP (absolute-form) requests: the same controls as the CONNECT path —
 /// `net:connect`, then the request and response phases — over plaintext, with no CONNECT ack.
 ///
-/// The request is read whole before any decision, so a refused or broken request opens no
-/// upstream socket. The connection task holds the slot.
+/// Each request is read whole before any decision, so a refused or broken request opens no
+/// upstream socket. One connection can carry requests to different hosts, and each one is
+/// resolved, pinned, and decided for its own host.
 pub(super) async fn serve_plain<C>(state: Arc<SharedState>, session: PlainSession<C>) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let client = Idle::new(session.client, state.client_limits.idle, CLIENT_IDLE_PASSED);
     let client = Replay::new(session.head, client);
-    let session = Session::new(
-        state,
-        Route::Plain {
-            proxy_authorization: session.proxy_authorization,
-        },
-        session.stop,
-    );
+    let session = Session::new(state, Route::Plain, session.slot);
     session.serve(client).await
 }
 
 /// What a connection carries.
 enum Route {
-    /// A CONNECT tunnel: its admitted authority, and the upstream socket that its one request uses.
+    /// A CONNECT tunnel: its admitted authority, the correlation of its connect decisions, and the
+    /// upstream socket that the gateway opened before the `200`, which the first request uses.
     Tunnel {
         connect: ConnectRequest,
         correlation: RequestId,
         upstream: Mutex<Option<TcpStream>>,
     },
-    /// A plain-HTTP request, whose absolute target names its destination.
-    Plain { proxy_authorization: Option<String> },
+    /// Plain-HTTP requests, whose absolute targets name their destinations.
+    Plain,
+}
+
+/// Where a client connection stands between its requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// A request is in progress, from the first byte of its head to the end of its reply.
+    Exchange,
+    /// The reply keeps the connection open, and it has not left whole yet.
+    Replying,
+    /// The last reply left, and no byte of the next head has arrived. The slot is in the idle
+    /// queue.
+    Waiting,
 }
 
 /// One served connection, and the state that its service shares with its end.
 struct Session {
     state: Arc<SharedState>,
     route: Route,
+    /// The slot of the connection, and its place in the idle queue.
+    slot: Slot,
     /// What the client stream accepted.
     client_writes: Arc<WriteCount>,
-    /// The release that waits until hyper has written the governed response.
+    /// Where the connection stands between its requests.
+    phase: Mutex<Phase>,
+    /// The release that waits until hyper has written the governed response whole: until the
+    /// connection waits for its next request, the next request starts, or the connection ends.
     pending: Mutex<Option<PendingRelease>>,
     /// The WebSocket that waits until hyper has written its `101`.
     relay: Mutex<Option<websocket::Pending>>,
-    /// The gateway's stop signal, which ends a relay.
-    stop: watch::Receiver<bool>,
     /// Why the service ended the exchange, for the audit line.
     failure: Mutex<Option<ProxyError>>,
     /// Whether a request head arrived.
     requested: AtomicBool,
-    /// Whether the request was decided and sent toward the upstream.
+    /// Whether the request in progress was decided and sent toward the upstream.
     forwarded: AtomicBool,
 }
 
@@ -187,37 +202,65 @@ impl std::error::Error for Ended {}
 type Answer = Pin<Box<dyn Future<Output = std::result::Result<Response<Whole>, Ended>> + Send>>;
 
 impl Session {
-    fn new(state: Arc<SharedState>, route: Route, stop: watch::Receiver<bool>) -> Arc<Self> {
+    fn new(state: Arc<SharedState>, route: Route, slot: Slot) -> Arc<Self> {
         Arc::new(Self {
             state,
             route,
+            slot,
             client_writes: WriteCount::new(),
+            phase: Mutex::new(Phase::Exchange),
             pending: Mutex::new(None),
             relay: Mutex::new(None),
-            stop,
             failure: Mutex::new(None),
             requested: AtomicBool::new(false),
             forwarded: AtomicBool::new(false),
         })
     }
 
-    /// Serve the connection on hyper, then record the outcome of the release, and relay a WebSocket
-    /// whose `101` hyper wrote.
+    /// Serve the connection's requests on hyper, then record the outcome of the last release, and
+    /// relay a WebSocket whose `101` hyper wrote.
+    ///
+    /// The gateway stop, or a new connection that needs the slot while this one waits between
+    /// requests, asks hyper to close: at once when no request is in progress, else after its reply.
+    /// When a reply has left whole and the connection waits, its release is recorded then, not at
+    /// the end of the wait.
     async fn serve<C>(self: Arc<Self>, client: C) -> Result<()>
     where
         C: AsyncRead + AsyncWrite + Disarm + Unpin + Send + 'static,
     {
         let client = Counted::new(client, Arc::clone(&self.client_writes));
+        let client = Watched {
+            inner: client,
+            session: Arc::clone(&self),
+        };
         let session = Arc::clone(&self);
         let service = hyper::service::service_fn(move |request| -> Answer {
             let session = Arc::clone(&session);
             Box::pin(async move { session.answer(request).await })
         });
-        let served = server_builder(&self.state)
-            .serve_connection(TokioIo::new(client), service)
-            .without_shutdown()
-            .await;
-        self.finish(served).await
+        let mut connection =
+            server_builder(&self.state).serve_connection(TokioIo::new(client), service);
+        let mut released = std::pin::pin!(self.slot.released());
+        let mut closing = false;
+        let served = std::future::poll_fn(|cx| {
+            if !closing && released.as_mut().poll(cx).is_ready() {
+                closing = true;
+                Pin::new(&mut connection).graceful_shutdown();
+            }
+            let served = connection.poll_without_shutdown(cx);
+            if served.is_pending()
+                && *self.phase() == Phase::Waiting
+                && let Err(error) = self.record_release(true)
+            {
+                *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+                closing = true;
+                Pin::new(&mut connection).graceful_shutdown();
+                cx.waker().wake_by_ref();
+            }
+            served
+        })
+        .await;
+        self.finish(served, connection.into_parts()).await
     }
 
     /// Answer one request, and keep the reason when the exchange ends without a reply.
@@ -225,46 +268,113 @@ impl Session {
         &self,
         request: Request<Incoming>,
     ) -> std::result::Result<Response<Whole>, Ended> {
-        self.requested.store(true, Ordering::Relaxed);
-        let answered = match &self.route {
-            Route::Tunnel {
-                connect,
-                correlation,
-                upstream,
-            } => self.tunnel(request, connect, correlation, upstream).await,
-            Route::Plain {
-                proxy_authorization,
-            } => self.plain(request, proxy_authorization.as_deref()).await,
-        };
-        answered.map_err(|error| {
+        self.request_entered();
+        let reusable = reusable(&request);
+        let result = async {
+            self.settle_release().await?;
+            self.requested.store(true, Ordering::Relaxed);
+            match &self.route {
+                Route::Tunnel {
+                    connect,
+                    correlation,
+                    upstream,
+                } => self.tunnel(request, connect, correlation, upstream).await,
+                Route::Plain => self.plain(request).await,
+            }
+        }
+        .await;
+        let mut response = result.map_err(|error| {
             *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
             Ended
+        })?;
+        let answered = if self.pending().is_some() {
+            ReplyKind::Released
+        } else {
+            ReplyKind::ByGateway
+        };
+        // Every reply carries `Connection: close` until the close rule keeps the connection open.
+        if after_reply(answered, reusable) == AfterReply::KeepOpen {
+            response.headers_mut().remove(CONNECTION);
+            *self.phase() = Phase::Replying;
+        }
+        Ok(response)
+    }
+
+    fn phase(&self) -> std::sync::MutexGuard<'_, Phase> {
+        self.phase.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<PendingRelease>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A byte of the next head arrived: a connection that waited leaves the idle queue.
+    fn byte_arrived(&self) {
+        let mut phase = self.phase();
+        if *phase == Phase::Waiting {
+            self.slot.busy();
+            *phase = Phase::Exchange;
+        }
+    }
+
+    /// hyper handed a request to the service, also from bytes that it read before the wait.
+    fn request_entered(&self) {
+        let mut phase = self.phase();
+        if *phase == Phase::Waiting {
+            self.slot.busy();
+        }
+        *phase = Phase::Exchange;
+    }
+
+    /// A flush of the client stream succeeded. When it ends a reply that keeps the connection
+    /// open, the connection waits for its next request, and its slot joins the idle queue.
+    fn flushed(&self) {
+        let mut phase = self.phase();
+        if *phase == Phase::Replying && self.client_writes.snapshot().flushed {
+            *phase = Phase::Waiting;
+            self.forwarded.store(false, Ordering::Relaxed);
+            self.slot.idle();
+        }
+    }
+
+    /// Record the outcome of the release of the reply before this request, once that reply has
+    /// left. hyper reads the next head only after the reply before it has left, so the wait ends at
+    /// once; it keeps the record right if that order changes.
+    async fn settle_release(&self) -> Result<()> {
+        if self.pending().is_none() {
+            return Ok(());
+        }
+        self.client_writes.settled().await;
+        let written = self.client_writes.snapshot();
+        self.record_release(written.flushed)
+    }
+
+    /// Record the outcome of the claimed release, if one waits: `delivered` says that the reply
+    /// left whole.
+    fn record_release(&self, delivered: bool) -> Result<()> {
+        let Some(release) = self.pending().take() else {
+            return Ok(());
+        };
+        let outcome = release_outcome(self.client_writes.snapshot(), release.start, delivered);
+        off_worker(|| release.permit.record_outcome(outcome)).map_err(|error| {
+            ProxyError::Io(format!(
+                "recording governed response outcome after I/O: {error}"
+            ))
         })
     }
 
-    /// Record the outcome of the release once hyper has written the response, then close, or run
-    /// the relay after a `101`.
+    /// Record the outcome of the last release once hyper has written the response, then close, or
+    /// run the relay after a `101`.
     async fn finish<C, S>(
         &self,
-        served: hyper::Result<hyper::server::conn::http1::Parts<TokioIo<Counted<C>>, S>>,
+        served: hyper::Result<()>,
+        parts: hyper::server::conn::http1::Parts<TokioIo<Watched<Counted<C>>>, S>,
     ) -> Result<()>
     where
         C: AsyncRead + AsyncWrite + Disarm + Unpin + Send,
     {
-        let pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(release) = pending {
-            let outcome =
-                release_outcome(self.client_writes.snapshot(), release.start, served.is_ok());
-            off_worker(|| release.permit.record_outcome(outcome)).map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording governed response outcome after I/O: {error}"
-                ))
-            })?;
-        }
+        let delivered = served.is_ok() || self.client_writes.snapshot().flushed;
+        self.record_release(delivered)?;
         let failure = self
             .failure
             .lock()
@@ -273,28 +383,38 @@ impl Session {
         if let Some(failure) = failure {
             return Err(failure);
         }
+        // A connection that waited for its next request ends there: the client closed it, it
+        // waited past the idle bound, or the stop or a new connection asked for its slot. No
+        // request was in progress, so the end leaves no audit line.
+        if *self.phase() == Phase::Waiting {
+            // `close_notify`, then the end of the write side.
+            let _ = parts.io.into_inner().shutdown().await;
+            return Ok(());
+        }
         // A plain-HTTP request that never reached the upstream was answered, by hyper or with the
         // gateway's static reply, and an end there leaves no audit line.
         if served.is_err()
-            && matches!(self.route, Route::Plain { .. })
+            && matches!(self.route, Route::Plain)
             && !self.forwarded.load(Ordering::Relaxed)
         {
             return Ok(());
         }
+        let requested = self.requested.load(Ordering::Relaxed);
         match served {
-            Ok(parts) => {
+            Ok(()) => {
                 let relay = self.relay.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(relay) = relay {
                     // hyper wrote the `101` and handed the stream back with the bytes that it read
-                    // past the head. The relay's idle limit replaces the client idle bound.
-                    let mut client = parts.io.into_inner().inner;
+                    // past the head. The relay's idle limit replaces the client idle bound, and the
+                    // connection is never used for HTTP again.
+                    let mut client = parts.io.into_inner().inner.inner;
                     client.disarm();
                     let client = Replay::new(parts.read_buf.to_vec(), client);
-                    return websocket::run(relay, client, &self.state, self.stop.clone()).await;
+                    return websocket::run(relay, client, &self.state, self.slot.stopping()).await;
                 }
                 // `close_notify`, then the end of the write side.
                 let _ = parts.io.into_inner().shutdown().await;
-                if self.requested.load(Ordering::Relaxed) {
+                if requested {
                     Ok(())
                 } else {
                     Err(ProxyError::Intercept(format!(
@@ -304,8 +424,9 @@ impl Session {
                 }
             }
             Err(error) if error.is_parse() => {
-                // hyper answered the head itself. The request never reached a decision, so the
-                // record names the connection.
+                // hyper answered the head itself. The request never reached a decision. On a
+                // tunnel that served no request, the record names the connection that the gateway
+                // decided and opened; a later head opened no upstream socket, so it records nothing.
                 let error =
                     ProxyError::Intercept(format!("parsing request: {}", error_text(&error)));
                 match &self.route {
@@ -313,14 +434,14 @@ impl Session {
                         connect,
                         correlation,
                         ..
-                    } => off_worker(|| {
+                    } if !requested => off_worker(|| {
                         record_request_failure(
                             &self.state,
                             &Subject::connection(connect, correlation),
                             &error,
                         );
                     }),
-                    Route::Plain { .. } => {}
+                    Route::Tunnel { .. } | Route::Plain => {}
                 }
                 Err(error)
             }
@@ -331,7 +452,12 @@ impl Session {
         }
     }
 
-    /// Run the one request of a CONNECT tunnel.
+    /// Run one request of a CONNECT tunnel.
+    ///
+    /// The first request uses the socket that the gateway opened before the `200`. Each later
+    /// request opens its own governed socket before its body is read, with a new correlation, as a
+    /// new tunnel opens one at its `CONNECT`: so the request records the same attempts, and a
+    /// connect rule that refuses now refuses it on an open tunnel too.
     async fn tunnel(
         &self,
         request: Request<Incoming>,
@@ -340,13 +466,30 @@ impl Session {
         upstream: &Mutex<Option<TcpStream>>,
     ) -> Result<Response<Whole>> {
         let state = &*self.state;
+        let first = upstream.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let (upstream, correlation) = match first {
+            Some(upstream) => (upstream, correlation.clone()),
+            None => {
+                let correlation = RequestId::unique();
+                let opened = off_worker(|| open_governed_upstream(state, connect, &correlation));
+                let upstream = match opened {
+                    Ok(upstream) => upstream,
+                    Err(error) => {
+                        return Ok(error.response(request.method().as_str(), request.version()));
+                    }
+                };
+                let upstream = TcpStream::from_std(upstream)
+                    .map_err(|e| ProxyError::Io(format!("registering the upstream socket: {e}")))?;
+                (upstream, correlation)
+            }
+        };
         let inbound = convert::request_in(request, state.config.response_limits.max_body_bytes)
             .await
             .inspect_err(|error| {
                 off_worker(|| {
                     record_request_failure(
                         state,
-                        &Subject::connection(connect, correlation),
+                        &Subject::connection(connect, &correlation),
                         error,
                     );
                 });
@@ -356,7 +499,7 @@ impl Session {
         let name = ServerName::try_from(connect.host.clone()).map_err(|_| {
             ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
         })?;
-        let correlation = correlation.clone().with_headers(&inbound.headers);
+        let correlation = correlation.with_headers(&inbound.headers);
         // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
         if let Err(error) =
             validate_request_binding(connect, &inbound.method, &inbound.target, &inbound.headers)
@@ -395,23 +538,20 @@ impl Session {
             inbound.handshake,
             state,
         );
-        let upstream = upstream
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .ok_or_else(|| ProxyError::Intercept("a tunnel carries one request".to_string()))?;
         self.forward(exchange, version, upstream, Hop::Tls(name))
             .await
     }
 
-    /// Run the one request of a plain-HTTP connection.
-    async fn plain(
-        &self,
-        request: Request<Incoming>,
-        proxy_authorization: Option<&str>,
-    ) -> Result<Response<Whole>> {
+    /// Run one request of a plain-HTTP connection.
+    async fn plain(&self, request: Request<Incoming>) -> Result<Response<Whole>> {
         let state = &*self.state;
         let version = request.version();
+        // The hop-by-hop strip removes `Proxy-Authorization` from the request, so the token check
+        // reads this request's own value before the intake.
+        let proxy_authorization = request
+            .headers()
+            .get(PROXY_AUTHORIZATION)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).trim().to_string());
         let bad_request = || convert::status_response(version, 400, "bad request");
         let Ok(inbound) =
             convert::request_in(request, state.config.response_limits.max_body_bytes).await
@@ -429,7 +569,7 @@ impl Session {
         let connect = ConnectRequest {
             host,
             port,
-            proxy_authorization: proxy_authorization.map(str::to_string),
+            proxy_authorization,
         };
         let correlation = RequestId::unique().with_headers(&inbound.headers);
         // Best-effort token check — never the primary defense.
@@ -596,11 +736,14 @@ impl Session {
             Err(refusal) => return Ok(refuse(exchange, refusal, state, version)),
         };
         audit_release(exchange, state);
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingRelease {
+        // The reply is the next message on the client stream: it has left when a flush follows
+        // the moment hyper took its body.
+        self.client_writes.begin_message();
+        *self.pending() = Some(PendingRelease {
             permit,
             start: self.client_writes.snapshot().accepted,
         });
-        Ok(governed)
+        Ok(governed.map(|body| body.reported_to(Arc::clone(&self.client_writes))))
     }
 
     /// Run the response phases on the head of an accepted `101`, build the `101` to the workload,
@@ -625,14 +768,57 @@ impl Session {
             Err(refusal) => return Ok(refuse(exchange, refusal, state, Version::HTTP_11)),
         };
         audit_release(exchange, state);
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingRelease {
+        // The `101` is the next message on the client stream, also after earlier requests on a
+        // kept-alive connection.
+        self.client_writes.begin_message();
+        *self.pending() = Some(PendingRelease {
             permit,
             start: self.client_writes.snapshot().accepted,
         });
         *self.relay.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(exchange.relay(upstream, state));
-        Ok(governed)
+        Ok(governed.map(|body| body.reported_to(Arc::clone(&self.client_writes))))
     }
+}
+
+/// Who wrote the reply to a request, as the close rule reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplyKind {
+    /// The gateway released a governed upstream reply.
+    Released,
+    /// The gateway wrote the reply itself: a refusal, a diagnostic, or an interceptor error.
+    ByGateway,
+}
+
+/// Whether the client connection carries another request after a reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterReply {
+    KeepOpen,
+    Close,
+}
+
+/// The close rule. Only a released reply to a `reusable` request keeps the connection open. Every
+/// reply that the gateway wrote closes it, because some refusals come before the request body is
+/// read, and one rule for every refusal is simpler to review than a rule for each.
+fn after_reply(answered: ReplyKind, reusable: bool) -> AfterReply {
+    match answered {
+        ReplyKind::Released if reusable => AfterReply::KeepOpen,
+        ReplyKind::Released | ReplyKind::ByGateway => AfterReply::Close,
+    }
+}
+
+/// Whether a request can have another request after it on its connection: it is HTTP/1.1, the
+/// client did not ask to close, and it names no `Upgrade`, so its next bytes are an HTTP head. An
+/// HTTP/1.0 request closes after its reply, which carries the version of the request.
+fn reusable<B>(request: &Request<B>) -> bool {
+    let headers = request.headers();
+    let asks_to_close = headers.get_all(CONNECTION).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .any(|option| option.trim_ascii().eq_ignore_ascii_case(b"close"))
+    });
+    request.version() == Version::HTTP_11 && !asks_to_close && !headers.contains_key(UPGRADE)
 }
 
 /// What the request phases and the decision leave.
@@ -723,16 +909,18 @@ fn reply_response(
     }
 }
 
-/// The hyper server toward the workload: one exchange, the heads bounded as before.
+/// The hyper server toward the workload: requests in turn, each head bounded as before.
 fn server_builder(state: &SharedState) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
-        // Without a timer, hyper drops its header timeout with no message.
+        // Without a timer, hyper drops its header timeout with no message. On a kept-alive
+        // connection the timer starts again when the connection goes idle, so one bound covers the
+        // wait for the next head and that head together.
         .timer(TokioTimer::new())
         .header_read_timeout(state.client_limits.first_head)
-        // One exchange per connection: every reply but a `101` carries `Connection: close`, which
-        // ends the connection after it. Keep-alive stays on, because with it off hyper writes
-        // `Connection: close` on a `101` too, and the client refuses the handshake.
+        // hyper serves the next request after a reply that does not say `Connection: close`, one
+        // service call at a time, so pipelined requests run in order. With keep-alive off, hyper
+        // would also write `Connection: close` on a `101`, and the client would refuse the handshake.
         .keep_alive(true)
         // A client that closes its write side after its request still gets the reply.
         .half_close(true)
@@ -996,6 +1184,65 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
     }
 }
 
+/// A client stream that tells its session where a kept-alive connection stands: a byte that
+/// arrives starts the next request, and a flush that ends a reply that keeps the connection open
+/// starts the wait for the next head.
+struct Watched<S> {
+    inner: S,
+    session: Arc<Session>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Watched<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let read = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(read, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.session.byte_arrived();
+        }
+        read
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Watched<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let flushed = ready!(Pin::new(&mut this.inner).poll_flush(cx));
+        if flushed.is_ok() {
+            this.session.flushed();
+        }
+        Poll::Ready(flushed)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 /// The outcome of the request permit, from what the upstream stream accepted.
 fn request_outcome(sent: Writes, status: Option<u16>) -> EffectOutcome {
     let accepted_bytes = sent.accepted;
@@ -1055,6 +1302,8 @@ pub(super) struct Writes {
     pub(super) error: Option<io::ErrorKind>,
     /// Whether that error came from a flush, after every byte was accepted.
     pub(super) flush_error: bool,
+    /// The bytes that the stream had accepted when its current message started.
+    pub(super) message_start: usize,
 }
 
 /// The write count of one stream, shared by the stream and the exchange.
@@ -1075,6 +1324,16 @@ impl WriteCount {
         self.0.send_modify(|writes| writes.body_taken = true);
     }
 
+    /// The next message starts on the stream, as on a kept-alive client connection: its body is
+    /// not taken, and it has not left.
+    fn begin_message(&self) {
+        self.0.send_modify(|writes| {
+            writes.body_taken = false;
+            writes.flushed = false;
+            writes.message_start = writes.accepted;
+        });
+    }
+
     fn accepted(&self, bytes: usize) {
         self.0.send_modify(|writes| writes.accepted += bytes);
     }
@@ -1083,7 +1342,8 @@ impl WriteCount {
     /// the whole message left.
     fn flushed(&self) {
         self.0.send_if_modified(|writes| {
-            let left = writes.body_taken && writes.accepted > 0 && !writes.flushed;
+            let left =
+                writes.body_taken && writes.accepted > writes.message_start && !writes.flushed;
             writes.flushed |= left;
             left
         });
@@ -1282,6 +1542,45 @@ mod tests {
         );
     }
 
+    /// **The close rule**: only a released reply to a request that can have another after it keeps
+    /// the connection open. Every reply that the gateway wrote closes it, and so does a reply to an
+    /// HTTP/1.0 request, to a client `Connection: close`, and to a request that names `Upgrade`.
+    #[test]
+    fn after_reply_closes_every_gateway_answer_and_every_request_that_ends_its_connection() {
+        assert_eq!(after_reply(ReplyKind::Released, true), AfterReply::KeepOpen);
+        for (answered, reusable) in [
+            (ReplyKind::Released, false),
+            (ReplyKind::ByGateway, true),
+            (ReplyKind::ByGateway, false),
+        ] {
+            assert_eq!(after_reply(answered, reusable), AfterReply::Close);
+        }
+        let request = |version: Version, headers: &[(&str, &str)]| {
+            let mut request = Request::builder().version(version);
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.body(()).unwrap()
+        };
+        assert!(reusable(&request(Version::HTTP_11, &[])));
+        assert!(reusable(&request(
+            Version::HTTP_11,
+            &[("connection", "keep-alive")]
+        )));
+        assert!(!reusable(&request(
+            Version::HTTP_10,
+            &[("connection", "keep-alive")]
+        )));
+        assert!(!reusable(&request(
+            Version::HTTP_11,
+            &[("connection", "keep-alive"), ("connection", "x, Close ")]
+        )));
+        assert!(!reusable(&request(
+            Version::HTTP_11,
+            &[("connection", "upgrade"), ("upgrade", "websocket")]
+        )));
+    }
+
     /// **A flush counts as the end of a message only after hyper took its body.** hyper flushes an
     /// empty buffer before it has a message too.
     #[test]
@@ -1296,5 +1595,22 @@ mod tests {
         count.flushed();
         assert!(count.snapshot().flushed);
         assert_eq!(count.snapshot().accepted, 50);
+
+        // The next message on a kept-alive stream has left only after its own body and a flush.
+        count.begin_message();
+        count.flushed();
+        assert!(
+            !count.snapshot().flushed,
+            "nothing of the next message left"
+        );
+        count.body_taken();
+        count.flushed();
+        assert!(
+            !count.snapshot().flushed,
+            "no byte of the next message left"
+        );
+        count.accepted(7);
+        count.flushed();
+        assert!(count.snapshot().flushed);
     }
 }
