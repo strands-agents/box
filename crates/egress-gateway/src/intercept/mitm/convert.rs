@@ -131,7 +131,9 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let (parts, body) = request.into_parts();
-    if parts.method == Method::CONNECT {
+    // `Method` compares case-sensitively, and `connect` is an extension method to hyper. The front
+    // and the body modes read the method case-insensitively, so this check does too.
+    if parts.method.as_str().eq_ignore_ascii_case("CONNECT") {
         return Err(ProxyError::Intercept(
             "nested CONNECT tunneling is not supported".to_string(),
         ));

@@ -516,17 +516,20 @@ fn a_head_over_the_limit_gets_hyper_431() {
 }
 
 /// **A nested `CONNECT` inside a tunnel is refused**: the connection closes with no reply and no
-/// request effect.
+/// request effect. The method is read case-insensitively, as the front reads it, so a lower-case
+/// `connect` is refused too and is not forwarded as an extension method.
 #[test]
 fn a_nested_connect_is_refused() {
-    let (response, seen, log) = exchange(
-        OK_REPLY,
-        "CONNECT other.test:443 HTTP/1.1\r\nHost: other.test:443\r\n\r\n",
-        0,
-    );
-    assert_eq!(response, "");
-    assert_eq!(seen, None);
-    assert!(log.is_empty(), "{log:?}");
+    for method in ["CONNECT", "connect"] {
+        let (response, seen, log) = exchange(
+            OK_REPLY,
+            &format!("{method} other.test:443 HTTP/1.1\r\nHost: other.test:443\r\n\r\n"),
+            0,
+        );
+        assert_eq!(response, "", "{method}");
+        assert_eq!(seen, None, "{method}");
+        assert!(log.is_empty(), "{method}: {log:?}");
+    }
 }
 
 /// A plain-HTTP origin on loopback that reads one request head and answers `reply`, then closes.
@@ -623,6 +626,34 @@ fn a_target_byte_that_http_uri_refuses_gets_hyper_400_on_plain_http() {
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
         "no upstream socket opened"
+    );
+}
+
+/// **On plain HTTP, an upper-case scheme is served.** `http::Uri` reads the scheme
+/// case-insensitively and spells it in lower case, so `HTTP://` names the same destination as
+/// `http://`: the host is judged, and the request is decided and forwarded. The old reader
+/// compared the raw target with `http://` and answered 400.
+#[test]
+fn an_upper_case_scheme_on_plain_http_is_served() {
+    let (port, origin) = plain_origin(OK_REPLY);
+    let (handle, log) = plain_gateway();
+    let reply = plain_exchange(
+        &handle,
+        &format!("GET HTTP://127.0.0.1:{port}/upper HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert_eq!(
+        reply,
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
+    );
+    let head = origin.join().unwrap();
+    assert!(head.starts_with("GET /upper HTTP/1.1\r\n"), "{head}");
+    assert!(
+        log.wait_for(4).contains(&Seen::Request {
+            method: "GET".to_string(),
+            path: "/upper".to_string(),
+        }),
+        "{:?}",
+        log.seen()
     );
 }
 
