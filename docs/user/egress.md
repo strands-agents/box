@@ -133,6 +133,13 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 
+The gateway closes a connection when the client sends nothing for 60 seconds while the gateway
+reads from it. When the client stops reading a reply, the gateway closes the connection 60 to 120
+seconds later. The gateway also closes a connection when the client takes longer than 60 seconds to
+send the request line and headers of its first request, the `CONNECT` or a plain `http://` request.
+A plain `http://` request whose body stops for 60 seconds gets a 400 with no `x-strands-box-egress`
+header.
+
 ## See also
 
 - [How Box controls outbound traffic](../design/egress.md): routing, the connect and request

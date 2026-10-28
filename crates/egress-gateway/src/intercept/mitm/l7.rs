@@ -43,7 +43,7 @@ pub(super) fn intercept_tls<C: Read + Write>(
         .map_err(|e| ProxyError::Intercept(format!("server TLS init: {e}")))?;
     // Wrap the client TLS stream in a BufReader so the HTTP head is read line-buffered (not one
     // syscall per byte). Writes go through `get_mut()` to the underlying stream.
-    let mut client_tls = BufReader::new(StreamOwned::new(server_conn, client));
+    let mut client_tls = BufReader::new(StreamOwned::new(server_conn, IdleBounded::new(client)));
 
     // --- Request leg: read plaintext, then run the shared legs ---
     let parsed = http1::read_request(&mut client_tls, state.config.response_limits.max_body_bytes)
@@ -291,6 +291,7 @@ pub(super) fn forward_plain(
 ) -> Result<()> {
     let upstream_deadline = Instant::now() + state.config.upstream_read_deadline;
     let mut upstream_buf = BufReader::new(Bounded::until(upstream, upstream_deadline));
+    let mut client_writer = IdleBounded::new(client_writer);
 
     let mut target = Target::new(connect.host.clone(), connect.port);
     let (path, query) = split_target(&origin_target);
@@ -331,7 +332,7 @@ pub(super) fn forward_plain(
         upstream_deadline,
         state,
     );
-    run_l7_legs(exchange, &mut upstream_buf, client_writer, state)
+    run_l7_legs(exchange, &mut upstream_buf, &mut client_writer, state)
 }
 
 /// Wrap the already-open pinned upstream socket in the additive TLS trust bundle.
@@ -390,6 +391,55 @@ impl<S: Write> Write for Bounded<S> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// A client stream whose reads and writes fail once one of them has waited the client idle bound.
+struct IdleBounded<S> {
+    inner: S,
+    passed: bool,
+}
+
+impl<S> IdleBounded<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            passed: false,
+        }
+    }
+
+    fn check<T>(&mut self, call: impl FnOnce(&mut S) -> io::Result<T>) -> io::Result<T> {
+        if !self.passed {
+            match call(&mut self.inner) {
+                // A Unix socket timeout reads as `WouldBlock`.
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.passed = true,
+                result => return result,
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "client idle bound passed",
+        ))
+    }
+}
+
+impl<S: Read> Read for IdleBounded<S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.check(|inner| inner.read(buf))
+    }
+}
+
+impl<S: Write> Write for IdleBounded<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.check(|inner| inner.write(buf))
+    }
+
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        self.check(|inner| inner.write_vectored(bufs))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check(|inner| inner.flush())
     }
 }
 

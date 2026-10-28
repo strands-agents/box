@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::ClientConfig;
 
@@ -120,6 +120,24 @@ impl Default for MitmConfig {
     }
 }
 
+/// The bounds on each client socket.
+#[derive(Debug, Clone, Copy)]
+struct ClientLimits {
+    /// The longest wait for one read or one write.
+    idle: Duration,
+    /// The longest time from the slot of a connection to the end of its first head.
+    first_head: Duration,
+}
+
+impl Default for ClientLimits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            first_head: Duration::from_secs(60),
+        }
+    }
+}
+
 /// The shared, read-only state every connection handler borrows (behind an `Arc`).
 pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
@@ -138,6 +156,8 @@ pub(crate) struct SharedState {
     effect_interceptor: Arc<dyn EffectInterceptor>,
     /// The best-effort proxy session token.
     expected_token: Option<String>,
+    /// The bounds on each client socket.
+    client_limits: ClientLimits,
 }
 
 impl SharedState {
@@ -273,6 +293,7 @@ impl MitmInterceptor {
             emitter,
             effect_interceptor,
             expected_token,
+            client_limits: ClientLimits::default(),
         });
 
         let stop = Arc::new(AtomicBool::new(false));

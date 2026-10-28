@@ -674,7 +674,7 @@ mod tests {
     use crate::boundary::{BodyRef, HeaderMap, Target};
     use crate::capability::{CapabilityOutcome, CapabilitySet, EgressCapability};
     use crate::effect::{EffectInterceptor, EffectPermit};
-    use crate::intercept::mitm::{MitmConfig, tls};
+    use crate::intercept::mitm::{ClientLimits, MitmConfig, tls};
     use crate::seams::StubEmitter;
 
     /// A credential on `api.example.com` that refuses each request, as a phantom mismatch does.
@@ -717,6 +717,7 @@ mod tests {
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: Arc::new(Unconsulted),
             expected_token: None,
+            client_limits: ClientLimits::default(),
         }
     }
 

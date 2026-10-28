@@ -172,10 +172,12 @@ reason is one of these fixed texts, so it carries no byte that the workload or t
 | `the reply was refused: its body is larger than the limit` | The reply body is larger than 16 MiB. |
 
 An exchange that the workload or the upstream ends adds no record, for example a reset, a close, or
-a failed TLS handshake with the workload. A failed TLS setup adds no record either, also when the
-gateway itself refuses it: a failed TLS handshake with the upstream, which includes an upstream
-certificate that the gateway does not trust, or a certificate for the host that the gateway cannot
-make. In each of these cases the last record stays the permit.
+a failed TLS handshake with the workload. The gateway treats a workload that stops sending or
+reading the same way: when it closes that connection at its
+[idle limit](egress.md#errors-and-exit-codes), it adds no record. A failed TLS setup adds no record
+either, also when the gateway itself refuses it: a failed TLS handshake with the upstream, which
+includes an upstream certificate that the gateway does not trust, or a certificate for the host that
+the gateway cannot make. In each of these cases the last record stays the permit.
 
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
 `Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it.

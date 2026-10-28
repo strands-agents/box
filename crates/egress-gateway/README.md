@@ -250,6 +250,18 @@ exchange with one `http:request::response` that has no `output`. The same bound 
 exchange whose request and reply together take longer than the deadline, with no reply to the
 workload; `box.toml` exposes no key for it.
 
+Each read and each write on a client socket waits at most 60 s, and the gateway closes the
+connection at the first read or write that moves no byte in that time. One write can copy a part of
+the reply and then wait, so a client that stops reading its reply frees its slot in at most 120 s.
+The first head of a connection, which is the `CONNECT` head or the head of a plain-HTTP request,
+must be complete 60 s after the connection takes its slot. The gateway checks this time at the end
+of each read of the head, and closes a late connection with no reply. So a client that sends nothing
+frees its slot in 60 s, and a client that sends its head slowly frees it in at most 120 s. A request
+body, the TLS handshake with the client, the request inside a tunnel, and the reply to the client
+have no total bound, so a slow upload that keeps sending bytes goes through. A plain-HTTP request
+whose body stops for 60 s gets a `400` before any decision. No `MitmConfig` field and no `box.toml`
+key sets these bounds.
+
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP

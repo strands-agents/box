@@ -129,6 +129,15 @@ encoded, removes `.` and `..` segments, and leaves out the query.
 to the server, verify the server's certificate against a compiled-in set of public root
 certificates, and forward the request. Each connection carries one request.
 
+**A stalled client loses its connection.** The gateway closes a connection when a read from the
+client gets no byte for 60 seconds. When the client stops reading a reply, the gateway closes the
+connection 60 to 120 seconds later, because one write can send a part of the reply before it waits.
+The first head, the `CONNECT` or a plain `http://` request, must also be complete 60 seconds after
+the gateway starts to serve the connection. So a client can't hold a connection by sending nothing,
+or by sending its first head slowly. A request body has no total limit, so a slow upload that keeps
+sending goes through. The gateway reads the whole body of a plain `http://` request before it
+decides, so a client that keeps sending that body slowly keeps its connection with no decision.
+
 **A refusal is marked.** A request the gateway refuses gets a 403 with the header
 `x-strands-box-egress: refused`, and a body that says why. A `net:connect` refusal of a `CONNECT`
 arrives before the `200`, so the client never starts TLS. A policy refusal of a request to an http
