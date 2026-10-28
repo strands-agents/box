@@ -8,11 +8,11 @@ use super::{PackRefusal, Place};
 use crate::schema::cedar_identifier;
 
 /// The name of one `[shell.<action>]` table of a checked pack.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ActionName(String);
 
 /// The name of one `[effects]` entry of a checked pack.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct EffectName(String);
 
 impl ActionName {
