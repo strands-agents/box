@@ -205,9 +205,25 @@ impl Mediated {
         }
     }
 
-    /// Report an answered probe, whether the answer is yes or no, as completed.
-    async fn report_probe(permit: KernelPermit) {
-        if let Err(error) = permit.record(EffectResult::Completed).await {
+    /// Report a metadata answer, yes or no, as completed, and a refusal as failed.
+    async fn report_answer<T>(permit: KernelPermit, answer: &io::Result<T>) {
+        let result = match answer {
+            Ok(_) => EffectResult::Completed,
+            Err(error) => EffectResult::Failed(error.kind()),
+        };
+        if let Err(error) = permit.record(result).await {
+            eprintln!("strands-shell: recording a metadata outcome failed: {error}");
+        }
+    }
+
+    /// Report a probe, which cannot surface a recording failure to its caller.
+    async fn report_probe(permit: KernelPermit, found: bool) {
+        let result = if found {
+            EffectResult::Completed
+        } else {
+            EffectResult::Failed(io::ErrorKind::NotFound)
+        };
+        if let Err(error) = permit.record(result).await {
             eprintln!("strands-shell: recording a metadata outcome failed: {error}");
         }
     }
@@ -288,9 +304,9 @@ impl Mediated {
     pub(crate) async fn stat_if_admitted(&self, proc: &Process, path: &str) -> Option<FileStat> {
         let operation = Self::metadata(Follow::Yes);
         let (resolved, permit) = self.admit_probe(proc, path, Follow::Yes, operation).await?;
-        let stat = self.kernel.stat(proc, resolved).await;
-        Self::report_probe(permit).await;
-        Some(stat)
+        let stat = self.kernel.stat_answer(proc, resolved).await;
+        Self::report_answer(permit, &stat).await;
+        Some(stat.unwrap_or_default())
     }
 
     /// Stat a path without following a final symlink.
@@ -303,9 +319,9 @@ impl Mediated {
         else {
             return FileStat::default();
         };
-        let stat = self.kernel.lstat(proc, resolved).await;
-        Self::report_probe(permit).await;
-        stat
+        let stat = self.kernel.lstat_answer(proc, resolved).await;
+        Self::report_answer(permit, &stat).await;
+        stat.unwrap_or_default()
     }
 
     /// Test access permissions. Denial yields `false` — the same answer as "no access".
@@ -315,9 +331,9 @@ impl Mediated {
         else {
             return false;
         };
-        let allowed = self.kernel.access(proc, resolved, mode).await;
-        Self::report_probe(permit).await;
-        allowed
+        let allowed = self.kernel.access_answer(proc, resolved, mode).await;
+        Self::report_answer(permit, &allowed).await;
+        allowed.unwrap_or(false)
     }
 
     /// Canonicalize a path.
@@ -336,7 +352,7 @@ impl Mediated {
             return false;
         };
         let executable = self.kernel.is_executable(proc, resolved).await;
-        Self::report_probe(permit).await;
+        Self::report_probe(permit, executable).await;
         executable
     }
 
@@ -357,7 +373,7 @@ impl Mediated {
                 continue;
             };
             let executable = self.kernel.is_executable(proc, resolved).await;
-            Self::report_probe(permit).await;
+            Self::report_probe(permit, executable).await;
             if executable && self.is_executable(proc, &full).await {
                 return Some(full);
             }
@@ -395,7 +411,7 @@ impl Mediated {
             return Vec::new();
         };
         let candidates = self.kernel.glob(proc, pattern).await;
-        Self::report_probe(permit).await;
+        Self::report_probe(permit, !candidates.is_empty()).await;
 
         let operation = Self::metadata(Follow::Yes);
         let mut matches = Vec::with_capacity(candidates.len());
@@ -421,7 +437,7 @@ impl Mediated {
                             .await
                         {
                             Some((_, permit)) => {
-                                Self::report_probe(permit).await;
+                                Self::report_probe(permit, true).await;
                                 true
                             }
                             None => false,
@@ -442,7 +458,7 @@ impl Mediated {
                 .admit_probe(proc, &candidate, Follow::Yes, operation)
                 .await
             {
-                Self::report_probe(permit).await;
+                Self::report_probe(permit, true).await;
                 matches.push(candidate);
             }
         }

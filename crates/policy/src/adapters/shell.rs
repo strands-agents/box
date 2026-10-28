@@ -918,10 +918,9 @@ mod tests {
         );
     }
 
-    /// **A metadata read that the kernel answers "no" charges a `::response` budget**, and a
-    /// failed content read does not.
+    /// **A failed metadata read records an error**, so it charges no `::response` rule.
     #[tokio::test]
-    async fn a_failed_metadata_read_records_a_response() {
+    async fn a_failed_metadata_read_records_an_error() {
         let interceptor = interceptor(
             r#"permit(principal, action == Box::Action::"fs:read", resource);
                @id("after_a_metadata_answer")
@@ -929,45 +928,32 @@ mod tests {
                when { context.input.path == "/work/gated" }
                when temporal {
                    formerly within 60s
-                   Box::Action::"fs:read"::response{ input.path: "/work/absent" }
+                   Box::Action::"fs:read"::response{ input.path: "/work/refused" }
                };"#,
         );
-        let gated = EffectAttempt::Filesystem {
-            path: "/work/gated",
-            operation: KernelFsOperation::ReadContent,
-        };
-        let failed = EffectOutcome::Kernel(EffectResult::Failed(io::ErrorKind::NotFound));
-
-        interceptor
-            .intercept(&EffectAttempt::Filesystem {
-                path: "/work/absent",
-                operation: KernelFsOperation::ReadContent,
-            })
-            .await
-            .expect("the content read is admitted")
-            .record_outcome(failed)
-            .await
-            .expect("outcome reporting is best effort");
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied] {
+            interceptor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: "/work/refused",
+                    operation: KernelFsOperation::ReadMetadata {
+                        follow_symlinks: true,
+                    },
+                })
+                .await
+                .expect("the metadata read is admitted")
+                .record_outcome(EffectOutcome::Kernel(EffectResult::Failed(kind)))
+                .await
+                .expect("outcome reporting is best effort");
+        }
         assert!(
-            interceptor.intercept(&gated).await.is_ok(),
-            "a failed content read records an error"
-        );
-
-        interceptor
-            .intercept(&EffectAttempt::Filesystem {
-                path: "/work/absent",
-                operation: KernelFsOperation::ReadMetadata {
-                    follow_symlinks: true,
-                },
-            })
-            .await
-            .expect("the metadata read is admitted")
-            .record_outcome(failed)
-            .await
-            .expect("outcome reporting is best effort");
-        assert!(
-            interceptor.intercept(&gated).await.is_err(),
-            "a metadata read answered no records a response"
+            interceptor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: "/work/gated",
+                    operation: KernelFsOperation::ReadContent,
+                })
+                .await
+                .is_ok(),
+            "a failed metadata read is not a response"
         );
     }
 

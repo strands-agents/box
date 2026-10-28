@@ -497,9 +497,7 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
                 FsResult::Completed,
                 ExtFunctionResult::Return(normalized_stat(&metadata)),
             ),
-            // A missing path is still an answer
-            // (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
-            Err(error) => (FsResult::Completed, io_exception(&error).into()),
+            Err(error) => (FsResult::Failed, io_exception(&error).into()),
         },
         _ => (
             FsResult::Failed,
@@ -2106,26 +2104,6 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
             &missing,
         );
         assert_eq!(result, FsResult::Failed);
-    }
-
-    /// A stat of a missing path raises and records `Completed`.
-    #[test]
-    fn a_stat_of_a_missing_path_records_completed() {
-        let dir = tempfile::tempdir().expect("a scratch dir");
-        let missing = dir
-            .path()
-            .canonicalize()
-            .expect("the scratch dir resolves")
-            .join("absent.bin");
-        let (result, returned) = perform(
-            &OsFunctionCall::Stat(MontyPath::new(missing.to_string_lossy().into_owned())),
-            &missing,
-        );
-        assert_eq!(result, FsResult::Completed);
-        assert!(
-            !matches!(returned, ExtFunctionResult::Return(_)),
-            "the script sees the missing path: {returned:?}"
-        );
     }
 
     /// A write whose I/O fails records `Indeterminate` — a partial write leaves an unknown state.

@@ -124,9 +124,11 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
-A metadata read is an operation that happened once the workload has its answer, so a `stat` or a
-`test -e` of a missing path is a `::response`, not a `::error`. A budget on
-`fs:read::response{read_metadata}` therefore counts every probe the box answered.
+In the Shell, a metadata read is an operation that happened once the workload has its answer, so a
+`test -e`, `test -L`, or `test -r` of a missing path is a `::response`, not a `::error`. A Shell check that Box
+itself refuses, at the reach floor or because the filesystem changed between the decision and the
+check, stays a `::error`, so it can't satisfy a precondition keyed on `::response`. A cap on
+attempts counts `::request` instead, because that counts denied attempts too.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
