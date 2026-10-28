@@ -212,7 +212,7 @@ fn many(argv: &[String], from: usize) -> Option<(Vec<String>, usize)> {
     let values: Vec<String> = argv
         .iter()
         .skip(from)
-        .take_while(|word| !(word.starts_with('-') && word.len() > 1))
+        .take_while(|word| !is_option_word(word) && *word != "--")
         .cloned()
         .collect();
     let next = from + values.len();
