@@ -87,33 +87,47 @@ impl TlsUpstream {
 
     /// Start a TLS upstream that returns the supplied static HTTP response.
     pub fn start_with_response(host: &str, response: &'static [u8]) -> Self {
-        Self::start_serving(host, Reply::Whole(Arc::from(response)))
+        Self::start_serving(host, Reply::Whole(Arc::from(response)), None)
     }
 
     /// Start a TLS upstream that reads each request and never replies, holding the connection
     /// open until the peer closes it.
     pub fn start_silent(host: &str) -> Self {
-        Self::start_serving(host, Reply::Silent)
+        Self::start_serving(host, Reply::Silent, None)
     }
 
     /// Start a TLS upstream that writes its response one byte per `interval`.
     pub fn start_dripping(host: &str, response: &'static [u8], interval: Duration) -> Self {
-        Self::start_serving(host, Reply::Drip(Arc::from(response), interval))
+        Self::start_serving(host, Reply::Drip(Arc::from(response), interval), None)
     }
 
     /// Start a TLS upstream that completes the handshake and then never reads, so the peer's
     /// send buffers fill and its writes block.
     pub fn start_deaf(host: &str) -> Self {
-        Self::start_serving(host, Reply::Deaf)
+        Self::start_serving(host, Reply::Deaf, None)
     }
 
     /// Start a TLS upstream that reads 64 KiB per `interval` and never replies, so every write
     /// the peer makes progresses while the whole request outlasts a deadline.
     pub fn start_sipping(host: &str, interval: Duration) -> Self {
-        Self::start_serving(host, Reply::Sip(interval))
+        Self::start_serving(host, Reply::Sip(interval), None)
     }
 
-    fn start_serving(host: &str, reply: Reply) -> Self {
+    /// Start a TLS upstream that returns the supplied static HTTP response, and calls `arrived` when
+    /// the first byte of a connection arrives, before the upstream answers the TLS handshake.
+    pub fn start_observed(
+        host: &str,
+        response: &'static [u8],
+        arrived: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self::start_serving(host, Reply::Whole(Arc::from(response)), Some(arrived))
+    }
+
+    fn start_serving(
+        host: &str,
+        reply: Reply,
+        arrived: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         // Self-signed cert valid for the requested host + localhost (the proxy connects by SNI host).
         let sans = vec![host.to_string(), "localhost".to_string()];
         let certified = rcgen::generate_simple_self_signed(sans).unwrap();
@@ -141,7 +155,13 @@ impl TlsUpstream {
                 let config = server_config.clone();
                 let seen = seen_bg.clone();
                 let reply = reply.clone();
+                let arrived = arrived.clone();
                 std::thread::spawn(move || {
+                    if let Some(arrived) = &arrived
+                        && matches!(tcp.peek(&mut [0u8; 1]), Ok(n) if n > 0)
+                    {
+                        arrived();
+                    }
                     let Ok(conn) = ServerConnection::new(config) else {
                         return;
                     };
