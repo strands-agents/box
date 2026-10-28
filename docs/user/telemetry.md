@@ -153,6 +153,30 @@ values: `permitted`, `forbidden`, `no_match`, `policy_pending`, `internal_fault`
 A record whose cause is `internal_fault` also carries the key `error.type`, with the value
 `strands.box.policy.evaluation_error`.
 
+The egress gateway also writes a `deny` record with cause `enforcement` when it ends an exchange
+that policy permitted: when the credential scrub refuses the reply, when the gateway refuses the head
+or framing of a request or a reply, when one of its own limits stops the exchange, or when it cannot
+complete a permitted step. The record carries the `strands.box.request.id` of that exchange, and its
+reason is one of these fixed texts, so it carries no byte that the workload or the upstream sent:
+
+| Reason | What ended the exchange |
+|---|---|
+| `response blocked by egress control: <kind>` | The credential scrub refused the reply. `<kind>` is `credential denied` when the scrub cannot read the reply, such as a reply in a `Content-Encoding` that it cannot decode, or `mutation collision` when two scrub edits change the same header. |
+| `the request was refused: the gateway does not accept its head or framing` | The request inside the tunnel is malformed, or it states both `Content-Length` and `Transfer-Encoding`. |
+| `the request was refused: its body is larger than the limit` | The request body inside the tunnel is larger than 16 MiB. |
+| `no permitted address accepted the connection` | Every address that policy permitted refused the connection. |
+| `the upstream socket could not be prepared` | The gateway could not set up the connected socket. |
+| `the outcome of the permitted effect was not recorded` | The policy history did not take the outcome of a permit. |
+| `the exchange passed the upstream deadline` | The upstream did not finish the exchange within 300 seconds. |
+| `the reply was refused: the gateway does not accept its head, framing, or upgrade` | The reply is malformed, or it asks to switch protocols. |
+| `the reply was refused: its body is larger than the limit` | The reply body is larger than 16 MiB. |
+
+An exchange that the workload or the upstream ends adds no record, for example a reset, a close, or
+a failed TLS handshake with the workload. A failed TLS setup adds no record either, also when the
+gateway itself refuses it: a failed TLS handshake with the upstream, which includes an upstream
+certificate that the gateway does not trust, or a certificate for the host that the gateway cannot
+make. In each of these cases the last record stays the permit.
+
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
 `Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it.
 

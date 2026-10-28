@@ -1358,6 +1358,104 @@ mod tests {
         assert_eq!(decision.cause(), DecisionCause::Enforcement);
     }
 
+    /// **A gateway bound after a permit records an enforcement denial with its fixed reason.** The
+    /// emit of the permit took the held verdict, so the denial that follows it on the same leg names
+    /// the gateway's label and the request of that exchange, never the rule that permitted it.
+    #[test]
+    fn a_gateway_bound_after_a_permit_records_an_enforcement_denial() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("gateway-bound.cedar"),
+                text: r#"@id("reach-anything") permit(principal, action, resource);"#.to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver));
+        let interceptor = EgressDecisionInterceptor::over(EgressPolicyInterceptor::into_handle(
+            Arc::new(policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+        ));
+        let recorder = DecisionRecorder::discarding();
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+        let decision = |method: &str, path: &str, verdict, reason: &str| EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: method.to_string(),
+            path: path.to_string(),
+            decision: verdict,
+            reason: reason.to_string(),
+            correlation: RequestId::new("bounded-exchange"),
+        };
+
+        interceptor
+            .intercept(&EgressEffectAttempt::Connect {
+                host: "api.example.com",
+                port: 443,
+                address: "192.0.2.1:443".parse().expect("a peer address"),
+                http_visibility: true,
+            })
+            .expect("the permit admits the connection")
+            .mark_indeterminate();
+        emitter.emit(decision("", "/", AuditDecision::Allow, ""));
+        emitter.emit(decision(
+            "",
+            "/",
+            AuditDecision::Deny,
+            "no permitted address accepted the connection",
+        ));
+        interceptor
+            .intercept(&request_to("/exit"))
+            .expect("the permit admits the request")
+            .mark_indeterminate();
+        emitter.emit(decision("GET", "/exit", AuditDecision::Allow, ""));
+        emitter.emit(decision(
+            "GET",
+            "/exit",
+            AuditDecision::Deny,
+            "the reply was refused: its body is larger than the limit",
+        ));
+
+        let recorded = recorder.recorded();
+        assert_eq!(recorded.len(), 4, "{recorded:?}");
+        for (pair, (action, resource, reason)) in recorded.chunks(2).zip([
+            (
+                r#"Box::Action::"net:connect""#,
+                "api.example.com:443",
+                "no permitted address accepted the connection",
+            ),
+            (
+                r#"Box::Action::"http:request""#,
+                "api.example.com:443/exit",
+                "the reply was refused: its body is larger than the limit",
+            ),
+        ]) {
+            let [permit, denial] = pair else {
+                panic!("a permit and its denial: {pair:?}");
+            };
+            assert!(
+                matches!(permit.parts().2, EffectiveRule::Policy(_)),
+                "the permit keeps the rule that decided it: {permit:?}"
+            );
+            assert_eq!(
+                denial.parts(),
+                (
+                    action,
+                    resource,
+                    &EffectiveRule::Enforcement("egress"),
+                    EffectiveVerdict::Deny,
+                    Some(reason),
+                )
+            );
+            assert_eq!(denial.cause(), DecisionCause::Enforcement);
+            assert!(denial.attribution().is_empty());
+            assert_eq!(denial.correlation(), permit.correlation());
+            assert_ne!(denial.correlation(), &telemetry::Correlation::default());
+        }
+    }
+
     /// A gate whose own result disagrees with the policy verdict beneath it keeps the gate's label:
     /// a floor may refuse what policy permitted, and it is not that permit that decided.
     #[test]

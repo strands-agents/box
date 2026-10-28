@@ -381,11 +381,11 @@ fn every_decided_attempt_is_followed_at_once_by_its_decision() {
     );
 }
 
-/// **A reply that the gateway refuses after the request permit adds no decision.** The response fold
-/// blocks an encoded reply, or the authority refuses the release of a plain one. The workload gets a
-/// 403, the audit log gets one denial, and the request permit stays the last decision.
+/// **A reply that the gateway refuses after the request permit ends with one denial.** The response
+/// fold blocks an encoded reply, or the authority refuses the release of a plain one. The workload
+/// gets a 403, the audit log gets one denial, and a denial of the request follows its permit.
 #[test]
-fn a_reply_refused_after_the_request_permit_adds_no_decision() {
+fn a_reply_refused_after_the_request_permit_ends_with_one_denial() {
     for (host, reply, deny) in [
         ("response-blocked.refusal.test", ENCODED_REPLY, None),
         (
@@ -425,6 +425,7 @@ fn a_reply_refused_after_the_request_permit_adds_no_decision() {
             [
                 ("", "/", AuditDecision::Allow),
                 ("GET", "/refused", AuditDecision::Allow),
+                ("GET", "/refused", AuditDecision::Deny),
             ],
             "{host}: {calls:#?}"
         );

@@ -7,9 +7,11 @@
 //! | [`RESPONSE_PHASES`] | Scrub and judge the reply; a phase can refuse it |
 //! | [`prepare_response`], [`claim_release`], [`audit_release`] | Serialize, release, and audit the governed response |
 //! | [`record_refusal`], [`Reply`] | Record a refusal with no I/O, and say what the workload gets |
+//! | [`Unfinished`], [`record_unfinished`] | Record the gateway bound that ended a permitted exchange |
 
 use std::borrow::Cow;
 use std::io;
+use std::time::Instant;
 
 use zeroize::Zeroizing;
 
@@ -20,10 +22,10 @@ use super::response_leg::{self, ResponseDecision};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent, RequestId};
-use crate::boundary::{InterceptedRequest, InterceptedResponse};
+use crate::boundary::{DenyReason, InterceptedRequest, InterceptedResponse};
 use crate::capability::CapabilityContext;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
-use crate::error::Result;
+use crate::error::{ProxyError, Result};
 use crate::mcp::{McpTarget, McpTargetIdentity, canonicalize_mcp_frame};
 
 /// One request and the state that its phases share.
@@ -42,6 +44,8 @@ pub(super) struct Exchange<'a> {
     mcp: Option<(String, McpTarget)>,
     forwarded_bytes: usize,
     redirect: Option<String>,
+    /// When each upstream read and write starts to fail.
+    upstream_deadline: Instant,
 }
 
 /// What the request must still name after the credential mutation.
@@ -59,6 +63,19 @@ pub(super) struct Subject<'a> {
     pub(super) method: &'a str,
     pub(super) path: &'a str,
     pub(super) correlation: &'a RequestId,
+}
+
+/// A gateway bound that ended a permitted exchange before the workload got the governed response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unfinished {
+    RequestRefused,
+    RequestTooLarge,
+    NoAddressConnected,
+    SocketUnprepared,
+    OutcomeUnrecorded,
+    DeadlinePassed,
+    ReplyRefused,
+    ReplyTooLarge,
 }
 
 /// A refusal: the reason that the records carry, and the reply that the workload gets.
@@ -110,6 +127,7 @@ impl<'a> Exchange<'a> {
         intercepted: bool,
         correlation: RequestId,
         request: InterceptedRequest,
+        upstream_deadline: Instant,
         state: &SharedState,
     ) -> Self {
         let correlation = correlation.with_headers(&request.headers);
@@ -132,6 +150,7 @@ impl<'a> Exchange<'a> {
             mcp: None,
             forwarded_bytes: 0,
             redirect: None,
+            upstream_deadline,
         }
     }
 
@@ -143,6 +162,69 @@ impl<'a> Exchange<'a> {
             method: &self.method,
             path: &self.workload_path,
             correlation: &self.correlation,
+        }
+    }
+
+    /// Record the gateway bound that ended this exchange at a failed upstream step, if a bound did.
+    pub(super) fn record_upstream_failure(&self, state: &SharedState, error: &ProxyError) {
+        if let Some(why) = Unfinished::of_upstream(error, self.upstream_deadline) {
+            record_unfinished(state, &self.subject(), why);
+        }
+    }
+}
+
+impl<'a> Subject<'a> {
+    /// The identity of the connection leg, which has no method and no path.
+    pub(super) fn connection(connect: &'a ConnectRequest, correlation: &'a RequestId) -> Self {
+        Self {
+            host: &connect.host,
+            port: connect.port,
+            method: "",
+            path: "/",
+            correlation,
+        }
+    }
+}
+
+impl Unfinished {
+    /// The gateway bound that ended a failed read of the inner request, or `None` when the workload
+    /// ended it.
+    pub(super) fn of_request(error: &ProxyError) -> Option<Self> {
+        match error {
+            ProxyError::ResponseLimit(_) => Some(Self::RequestTooLarge),
+            ProxyError::Intercept(_) if !http1::closed_early(error) => Some(Self::RequestRefused),
+            _ => None,
+        }
+    }
+
+    /// The gateway bound that ended a failed upstream step (the request write, the reply read, or the
+    /// reply serialization), or `None` when the upstream ended it.
+    pub(super) fn of_upstream(error: &ProxyError, upstream_deadline: Instant) -> Option<Self> {
+        if Instant::now() >= upstream_deadline {
+            return Some(Self::DeadlinePassed);
+        }
+        match error {
+            ProxyError::ResponseLimit(_) => Some(Self::ReplyTooLarge),
+            ProxyError::Intercept(_) if !http1::closed_early(error) => Some(Self::ReplyRefused),
+            _ => None,
+        }
+    }
+
+    /// The fixed reason that the records carry, which holds no peer byte.
+    pub(super) fn reason(self) -> &'static str {
+        match self {
+            Self::RequestRefused => {
+                "the request was refused: the gateway does not accept its head or framing"
+            }
+            Self::RequestTooLarge => "the request was refused: its body is larger than the limit",
+            Self::NoAddressConnected => "no permitted address accepted the connection",
+            Self::SocketUnprepared => "the upstream socket could not be prepared",
+            Self::OutcomeUnrecorded => "the outcome of the permitted effect was not recorded",
+            Self::DeadlinePassed => "the exchange passed the upstream deadline",
+            Self::ReplyRefused => {
+                "the reply was refused: the gateway does not accept its head, framing, or upgrade"
+            }
+            Self::ReplyTooLarge => "the reply was refused: its body is larger than the limit",
         }
     }
 }
@@ -402,7 +484,10 @@ fn apply_response_capabilities(
         .expect("the request fold builds the capability context");
     match response_leg::evaluate_and_apply(&state.controls, response, context) {
         ResponseDecision::Block(reason) => Err(Refusal {
-            reason: reason.to_string(),
+            reason: format!(
+                "response blocked by egress control: {}",
+                refusal_kind(&reason)
+            ),
             reply: Reply::Diagnostic {
                 status: 403,
                 body: b"response blocked by egress control",
@@ -413,6 +498,19 @@ fn apply_response_capabilities(
             Ok(())
         }
         ResponseDecision::Return => Ok(()),
+    }
+}
+
+/// The kind of a response-fold refusal, without its payload.
+fn refusal_kind(reason: &DenyReason) -> &'static str {
+    match reason {
+        DenyReason::HostDenied(_) => "host denied",
+        DenyReason::IpDenied(_) => "ip denied",
+        DenyReason::MutationCollision(_) => "mutation collision",
+        DenyReason::Credential(_) => "credential denied",
+        DenyReason::ControlDenied(_) => "control denied",
+        DenyReason::ResponseLimit(_) => "response limit",
+        DenyReason::NotAuthorized => "not authorized",
     }
 }
 
@@ -511,8 +609,24 @@ pub(super) fn record_refusal(state: &SharedState, subject: &Subject<'_>, reason:
     emit_decision(state, subject, AuditDecision::Deny, reason);
 }
 
+/// Record the gateway bound that ended a permitted exchange, in telemetry only.
+pub(super) fn record_unfinished(state: &SharedState, subject: &Subject<'_>, why: Unfinished) {
+    emit_decision(state, subject, AuditDecision::Deny, why.reason());
+}
+
+/// Record the gateway bound that ended a failed read of the request in a tunnel, if a bound did.
+pub(super) fn record_request_failure(
+    state: &SharedState,
+    subject: &Subject<'_>,
+    error: &ProxyError,
+) {
+    if let Some(why) = Unfinished::of_request(error) {
+        record_unfinished(state, subject, why);
+    }
+}
+
 /// Emit one final egress decision.
-fn emit_decision(
+pub(super) fn emit_decision(
     state: &SharedState,
     subject: &Subject<'_>,
     decision: AuditDecision,
@@ -630,6 +744,7 @@ mod tests {
             intercepted,
             RequestId::new("phases"),
             request,
+            Instant::now(),
             &state,
         );
         REQUEST_PHASES
@@ -667,6 +782,103 @@ mod tests {
                 b"not json"
             )
             .ends_with("intercepted HTTP/1 request is missing Host")
+        );
+    }
+
+    /// **A failure after a permit is classified by its variant, and only a bound records.** An early
+    /// close by a peer, and every I/O failure, is an end that the peer caused.
+    #[test]
+    fn a_failure_after_a_permit_is_classified_by_variant() {
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        let intercept = |message: &str| ProxyError::Intercept(message.to_string());
+        // Once the upstream deadline passes, the deadline ended the exchange, whatever failed.
+        let assert_deadline_passed = |error: &ProxyError| {
+            assert_eq!(
+                Unfinished::of_upstream(error, Instant::now()),
+                Some(Unfinished::DeadlinePassed),
+                "{error}"
+            );
+        };
+        // A read of the request in a tunnel and an upstream step can each fail in these ways.
+        let shared = [
+            (
+                ProxyError::ResponseLimit("body length 9 exceeds limit 8".to_string()),
+                Some(Unfinished::RequestTooLarge),
+                Some(Unfinished::ReplyTooLarge),
+            ),
+            (
+                intercept("message contains both Content-Length and Transfer-Encoding"),
+                Some(Unfinished::RequestRefused),
+                Some(Unfinished::ReplyRefused),
+            ),
+            (intercept("connection closed before HTTP head"), None, None),
+            (
+                intercept("connection closed while reading chunk-size line"),
+                None,
+                None,
+            ),
+            (
+                ProxyError::Io("reading body: unexpected end of file".to_string()),
+                None,
+                None,
+            ),
+        ];
+        for (error, request, upstream) in shared {
+            assert_eq!(Unfinished::of_request(&error), request, "{error}");
+            assert_eq!(Unfinished::of_upstream(&error, later), upstream, "{error}");
+            assert_deadline_passed(&error);
+        }
+        // Only an upstream step fails in these ways: a reply that asks to switch protocols, and a
+        // request write that fails, also on an upstream certificate that the gateway does not trust.
+        let upstream_only = [
+            (
+                intercept("HTTP protocol upgrades are not supported"),
+                Some(Unfinished::ReplyRefused),
+            ),
+            (
+                ProxyError::Io("delivering upstream request: reset".to_string()),
+                None,
+            ),
+            (
+                ProxyError::Io(
+                    "delivering upstream request: invalid peer certificate: UnknownIssuer"
+                        .to_string(),
+                ),
+                None,
+            ),
+        ];
+        for (error, upstream) in upstream_only {
+            assert_eq!(Unfinished::of_upstream(&error, later), upstream, "{error}");
+            assert_deadline_passed(&error);
+        }
+        let early_closes = [
+            http1::read_request(&mut &b"GET / HTTP/1.1\r\n"[..], 64).err(),
+            http1::read_request(
+                &mut &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4"[..],
+                64,
+            )
+            .err(),
+        ];
+        for error in early_closes {
+            let error = error.expect("a request that ends early is not read");
+            assert!(http1::closed_early(&error), "{error}");
+        }
+    }
+
+    /// **The response-block reason names the kind of refusal, never its payload.** A payload can
+    /// carry upstream bytes: an encoding name, or the name of a header that the scrub edits.
+    #[test]
+    fn the_response_block_reason_names_only_the_kind_of_refusal() {
+        let reason = DenyReason::Credential(
+            "the response to a credentialed request arrived with Content-Encoding marker-1234"
+                .to_string(),
+        );
+        assert_eq!(refusal_kind(&reason), "credential denied");
+        assert_eq!(
+            refusal_kind(&DenyReason::MutationCollision(
+                "Header(\"x-upstream\")".to_string()
+            )),
+            "mutation collision"
         );
     }
 }

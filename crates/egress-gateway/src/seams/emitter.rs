@@ -6,7 +6,8 @@ use crate::audit::EgressDecision;
 
 /// The producer seam a final outbound decision is emitted through.
 pub trait Emitter: Send + Sync {
-    /// Emit one connection or outbound request decision before the effect or refusal.
+    /// Emit one connection or outbound request decision before the effect or refusal, or a denial
+    /// after a permit when the gateway ends that permitted exchange.
     fn emit(&self, record: EgressDecision);
 }
 

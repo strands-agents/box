@@ -10,8 +10,9 @@ use crate::audit::RequestId;
 
 use super::SharedState;
 use super::connect::{self, ConnectRequest};
+use super::exchange::{Subject, Unfinished, emit_decision, record_refusal, record_unfinished};
 use super::resolve::PinnedDestination;
-use crate::audit::{Decision as AuditDecision, EgressDecision, NetworkAuditEvent};
+use crate::audit::{Decision as AuditDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
 use crate::error::ProxyError;
 
@@ -128,16 +129,16 @@ fn handle_tls_connect(
     connect: ConnectRequest,
     state: &SharedState,
 ) -> Result<(), ProxyError> {
+    let correlation = RequestId::unique();
+
     // Best-effort token check — never the primary defense.
     if !connect::token_ok(
         state.expected_token.as_deref(),
         connect.proxy_authorization.as_deref(),
     ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
+        refuse_proxy_token(state, &connect, &correlation, &mut client);
         return Ok(());
     }
-
-    let correlation = RequestId::unique();
 
     // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
     // `net:connect` effect. Claimed and opened BEFORE the CONNECT ack, so a denial returns 403 without
@@ -225,6 +226,7 @@ fn handle_plain_http(
         port,
         proxy_authorization,
     };
+    let correlation = RequestId::unique().with_headers(&parsed.headers);
     // Best-effort token check — never the primary defense. Run here so the
     // plain-HTTP path matches `handle_tls_connect` and `handle_connection_unix` rather than skipping
     // the defense-in-depth layer silently.
@@ -232,10 +234,9 @@ fn handle_plain_http(
         state.expected_token.as_deref(),
         connect.proxy_authorization.as_deref(),
     ) {
-        let _ = write_status(&mut writer, 407, "proxy authentication required");
+        refuse_proxy_token(state, &connect, &correlation, &mut writer);
         return Ok(());
     }
-    let correlation = RequestId::unique().with_headers(&parsed.headers);
 
     // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
     // `net:connect` effect — identical to the CONNECT path. No CONNECT ack for a plain-HTTP request.
@@ -315,16 +316,16 @@ fn handle_connection_unix(mut client: UnixStream, state: &SharedState) -> Result
         }
     };
 
+    let correlation = RequestId::unique();
+
     // 2. Best-effort token check — never the primary defense.
     if !connect::token_ok(
         state.expected_token.as_deref(),
         connect.proxy_authorization.as_deref(),
     ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
+        refuse_proxy_token(state, &connect, &correlation, &mut client);
         return Ok(());
     }
-
-    let correlation = RequestId::unique();
 
     // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
     // `net:connect` effect — transport-agnostic, so the AF_UNIX path reuses it unchanged. Opened
@@ -398,12 +399,11 @@ fn open_governed_upstream(
     match state.effect_interceptor.intercept(&resolve) {
         Ok(_decided) => {}
         Err(error) => {
-            emit_connect_decision(
+            emit_decision(
                 state,
-                connect,
+                &Subject::connection(connect, correlation),
                 AuditDecision::Deny,
                 &error.to_string(),
-                correlation.clone(),
             );
             let refusal = if error.kind() == io::ErrorKind::PermissionDenied {
                 OpenUpstreamError::Denied(error)
@@ -427,12 +427,10 @@ fn open_governed_upstream(
         match PinnedDestination::resolve_with_override(&connect.host, connect.port, override_ip) {
             Ok(pinned) => pinned,
             Err(error) => {
-                emit_connect_decision(
+                record_refusal(
                     state,
-                    connect,
-                    AuditDecision::Deny,
+                    &Subject::connection(connect, correlation),
                     &error.to_string(),
-                    correlation.clone(),
                 );
                 return Err(OpenUpstreamError::Failed);
             }
@@ -463,6 +461,11 @@ fn open_upstream(
     pinned: &PinnedDestination,
     correlation: &RequestId,
 ) -> std::result::Result<TcpStream, OpenUpstreamError> {
+    let subject = Subject::connection(connect, correlation);
+    let unfinished = |why| {
+        record_unfinished(state, &subject, why);
+        OpenUpstreamError::Failed
+    };
     for address in pinned.pinned_addrs() {
         // Each pinned address is its own authorization: the address authorized is the address
         // dialed, so a fallback cannot ride the first address's permit.
@@ -486,76 +489,55 @@ fn open_upstream(
         let permit = match state.effect_interceptor.intercept(&attempt) {
             Ok(permit) => ClaimedEffectPermit::new(permit),
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                emit_connect_decision(
-                    state,
-                    connect,
-                    AuditDecision::Deny,
-                    &error.to_string(),
-                    correlation.clone(),
-                );
+                emit_decision(state, &subject, AuditDecision::Deny, &error.to_string());
                 return Err(OpenUpstreamError::Denied(error));
             }
             Err(error) => {
-                emit_connect_decision(
-                    state,
-                    connect,
-                    AuditDecision::Deny,
-                    &error.to_string(),
-                    correlation.clone(),
-                );
+                emit_decision(state, &subject, AuditDecision::Deny, &error.to_string());
                 return Err(OpenUpstreamError::Failed);
             }
         };
-        emit_connect_decision(
-            state,
-            connect,
-            AuditDecision::Allow,
-            "",
-            correlation.clone(),
-        );
+        emit_decision(state, &subject, AuditDecision::Allow, "");
 
         let upstream = match TcpStream::connect(address) {
             Ok(upstream) => upstream,
             Err(error) => {
                 permit
                     .record_outcome(EffectOutcome::ConnectFailed(error.kind()))
-                    .map_err(|_| OpenUpstreamError::Failed)?;
+                    .map_err(|_| unfinished(Unfinished::OutcomeUnrecorded))?;
                 continue;
             }
         };
 
         let peer = upstream
             .peer_addr()
-            .map_err(|_| OpenUpstreamError::Failed)?;
+            .map_err(|_| unfinished(Unfinished::SocketUnprepared))?;
         permit
             .record_outcome(EffectOutcome::Connected(peer))
-            .map_err(|_| OpenUpstreamError::Failed)?;
+            .map_err(|_| unfinished(Unfinished::OutcomeUnrecorded))?;
         upstream
             .set_read_timeout(Some(state.config.upstream_read_deadline))
             .and_then(|()| upstream.set_write_timeout(Some(state.config.upstream_read_deadline)))
-            .map_err(|_| OpenUpstreamError::Failed)?;
+            .map_err(|_| unfinished(Unfinished::SocketUnprepared))?;
         return Ok(upstream);
     }
 
-    Err(OpenUpstreamError::Failed)
+    Err(unfinished(Unfinished::NoAddressConnected))
 }
 
-fn emit_connect_decision(
+/// Record a refused proxy token, then answer `407`.
+fn refuse_proxy_token(
     state: &SharedState,
     connect: &ConnectRequest,
-    decision: AuditDecision,
-    reason: &str,
-    correlation: RequestId,
+    correlation: &RequestId,
+    client: &mut impl Write,
 ) {
-    state.emitter.emit(EgressDecision {
-        host: connect.host.clone(),
-        port: connect.port,
-        method: String::new(),
-        path: "/".to_string(),
-        decision,
-        reason: reason.to_string(),
-        correlation,
-    });
+    record_refusal(
+        state,
+        &Subject::connection(connect, correlation),
+        "proxy authentication required",
+    );
+    let _ = write_status(client, 407, "proxy authentication required");
 }
 
 /// Read the CONNECT head from `stream` up to the `\r\n\r\n` terminator (bounded), as a string.

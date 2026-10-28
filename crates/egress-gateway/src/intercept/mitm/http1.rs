@@ -48,6 +48,14 @@ const MAX_CHUNK_METADATA_BYTES: usize = 64 * 1024;
 /// Maximum interim responses accepted before the final upstream response.
 const MAX_INFORMATIONAL_RESPONSES: usize = 16;
 
+/// The start of each refusal of a message that its peer closed before its end.
+const CLOSED_EARLY: &str = "connection closed";
+
+/// Whether `error` says that the peer closed before the message ended, not that its framing is bad.
+pub(super) fn closed_early(error: &ProxyError) -> bool {
+    matches!(error, ProxyError::Intercept(message) if message.starts_with(CLOSED_EARLY))
+}
+
 /// Read the HTTP head (everything up to and including the `\r\n\r\n` terminator) from a **buffered**
 /// stream, bounded by [`MAX_HEAD_BYTES`] as it goes.
 ///
@@ -73,9 +81,9 @@ fn read_head<R: BufRead>(stream: &mut R) -> Result<Vec<u8>> {
             .map_err(|e| ProxyError::Io(format!("reading head: {e}")))?;
         if available.is_empty() {
             // EOF before the terminator.
-            return Err(ProxyError::Intercept(
-                "connection closed before HTTP head".to_string(),
-            ));
+            return Err(ProxyError::Intercept(format!(
+                "{CLOSED_EARLY} before HTTP head"
+            )));
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |position| position + 1);
@@ -390,7 +398,7 @@ fn read_chunk_line<R: BufRead>(stream: &mut R, what: &str) -> Result<Vec<u8>> {
             .map_err(|e| ProxyError::Io(format!("reading {what}: {e}")))?;
         if available.is_empty() {
             return Err(ProxyError::Intercept(format!(
-                "connection closed while reading {what}"
+                "{CLOSED_EARLY} while reading {what}"
             )));
         }
         let newline = available.iter().position(|byte| *byte == b'\n');

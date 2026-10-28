@@ -196,7 +196,8 @@ impl NetworkAuditEvent {
     }
 }
 
-/// One final connection or outbound request decision emitted before its result is applied.
+/// One final connection or outbound request decision, emitted before its result is applied, or a
+/// denial emitted after a permit when the gateway ends that permitted exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressDecision {
     /// The destination host.

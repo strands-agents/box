@@ -3,18 +3,18 @@
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::audit::RequestId;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
 use super::exchange::{
-    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, audit_release,
-    claim_release, decide_request, prepare_request, prepare_response, record_refusal,
+    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, Unfinished,
+    audit_release, claim_release, decide_request, prepare_request, prepare_response,
+    record_refusal, record_request_failure, record_unfinished,
 };
 use super::{SharedState, http1, tls};
-use crate::audit::NetworkAuditEvent;
 use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
 use crate::effect::{ClaimedEffectPermit, EffectOutcome};
 use crate::error::{ProxyError, Result};
@@ -46,14 +46,18 @@ pub(super) fn intercept_tls<C: Read + Write>(
     let mut client_tls = BufReader::new(StreamOwned::new(server_conn, client));
 
     // --- Request leg: read plaintext, then run the shared legs ---
-    let parsed = http1::read_request(&mut client_tls, state.config.response_limits.max_body_bytes)?;
+    let parsed = http1::read_request(&mut client_tls, state.config.response_limits.max_body_bytes)
+        .inspect_err(|error| {
+            record_request_failure(state, &Subject::connection(connect, &correlation), error);
+        })?;
 
     // --- Client side: connect to the pinned upstream over the additive trust bundle ---
     // The listener already opened this exact pinned socket under the Connect lifecycle. A TLS
     // handshake failure here is a hard-fail drop, never a second socket attempt.
+    let upstream_deadline = Instant::now() + state.config.upstream_read_deadline;
     let mut upstream_tls = BufReader::new(start_upstream_tls(
         &connect.host,
-        Bounded::new(upstream, state.config.upstream_read_deadline),
+        Bounded::until(upstream, upstream_deadline),
         state,
     )?);
     let correlation = correlation.with_headers(&parsed.headers);
@@ -99,6 +103,7 @@ pub(super) fn intercept_tls<C: Read + Write>(
         true,
         correlation,
         req,
+        upstream_deadline,
         state,
     );
     run_l7_legs(exchange, &mut upstream_tls, client_tls.get_mut(), state)
@@ -146,45 +151,27 @@ where
         &prepared_request,
         request_permit,
         "upstream request",
-    )?;
+    )
+    .inspect_err(|error| exchange.record_upstream_failure(state, error))?;
     drop(prepared_request);
 
     // --- Response leg: read, evaluate+apply, return ---
-    let mut response = read_reply(
-        upstream,
-        &exchange.method,
-        request_permit,
-        request_bytes,
-        state,
-    )?;
+    let mut response = read_reply(upstream, &exchange, request_permit, request_bytes, state)?;
     for phase in RESPONSE_PHASES {
         if let Err(refusal) = phase(&mut exchange, &mut response, state) {
-            let subject = exchange.subject();
-            state.audit.push(NetworkAuditEvent::deny(
-                subject.host,
-                subject.port,
-                refusal.reason,
-                subject.correlation.clone(),
-            ));
-            write_reply(client_writer, subject.method, refusal.reply, None);
+            refuse(&exchange, refusal, state, client_writer);
             return Ok(());
         }
     }
 
     // Serialize only after response controls and leakback scrubbing have finished, then claim the
     // release immediately before the governed bytes are delivered to the workload.
-    let prepared_response = prepare_response(&exchange, &response)?;
+    let prepared_response = prepare_response(&exchange, &response)
+        .inspect_err(|error| exchange.record_upstream_failure(state, error))?;
     let response_permit = match claim_release(&exchange, &response, state) {
         Ok(permit) => permit,
         Err(refusal) => {
-            let subject = exchange.subject();
-            state.audit.push(NetworkAuditEvent::deny(
-                subject.host,
-                subject.port,
-                refusal.reason,
-                subject.correlation.clone(),
-            ));
-            write_reply(client_writer, subject.method, refusal.reply, None);
+            refuse(&exchange, refusal, state, client_writer);
             return Ok(());
         }
     };
@@ -200,14 +187,16 @@ where
 /// Read the upstream reply, and record the request outcome that it shows.
 fn read_reply<S: Read>(
     upstream: &mut BufReader<S>,
-    request_method: &str,
+    exchange: &Exchange<'_>,
     request_permit: ClaimedEffectPermit,
     request_bytes: usize,
     state: &SharedState,
 ) -> Result<InterceptedResponse> {
+    let unrecorded =
+        || record_unfinished(state, &exchange.subject(), Unfinished::OutcomeUnrecorded);
     let parsed_res = match http1::read_response(
         upstream,
-        request_method,
+        &exchange.method,
         state.config.response_limits.max_body_bytes,
     ) {
         Ok(parsed_res) => parsed_res,
@@ -220,10 +209,12 @@ fn read_reply<S: Read>(
                 None => EffectOutcome::Completed(request_bytes),
             };
             request_permit.record_outcome(outcome).map_err(|error| {
+                unrecorded();
                 ProxyError::Io(format!(
                     "recording upstream request outcome after a failed reply: {error}"
                 ))
             })?;
+            exchange.record_upstream_failure(state, &failure.error);
             return Err(failure.error);
         }
     };
@@ -233,6 +224,7 @@ fn read_reply<S: Read>(
             status: parsed_res.status,
         })
         .map_err(|error| {
+            unrecorded();
             ProxyError::Io(format!(
                 "recording upstream request outcome after the reply: {error}"
             ))
@@ -297,8 +289,8 @@ pub(super) fn forward_plain(
     state: &SharedState,
     correlation: RequestId,
 ) -> Result<()> {
-    let mut upstream_buf =
-        BufReader::new(Bounded::new(upstream, state.config.upstream_read_deadline));
+    let upstream_deadline = Instant::now() + state.config.upstream_read_deadline;
+    let mut upstream_buf = BufReader::new(Bounded::until(upstream, upstream_deadline));
 
     let mut target = Target::new(connect.host.clone(), connect.port);
     let (path, query) = split_target(&origin_target);
@@ -330,7 +322,15 @@ pub(super) fn forward_plain(
     req.headers.set("Host", host_value);
 
     // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
-    let exchange = Exchange::new(connect, Binding::None, false, correlation, req, state);
+    let exchange = Exchange::new(
+        connect,
+        Binding::None,
+        false,
+        correlation,
+        req,
+        upstream_deadline,
+        state,
+    );
     run_l7_legs(exchange, &mut upstream_buf, client_writer, state)
 }
 
@@ -356,11 +356,8 @@ struct Bounded<S> {
 }
 
 impl<S> Bounded<S> {
-    fn new(inner: S, within: Duration) -> Self {
-        Self {
-            inner,
-            deadline: Instant::now() + within,
-        }
+    fn until(inner: S, deadline: Instant) -> Self {
+        Self { inner, deadline }
     }
 
     fn check(&self, direction: &'static str) -> io::Result<()> {
