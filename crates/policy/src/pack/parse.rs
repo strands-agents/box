@@ -333,7 +333,7 @@ fn apply(
     }
 }
 
-/// Whether `value` is like `pattern`, as Cedar's `like` reads it: `*` matches any run, `\*` a `*`.
+/// Whether `value` is like `pattern`: `*` matches any run, `\*` a `*`, and each other character itself.
 fn like(pattern: &str, value: &str) -> bool {
     let mut elements = Vec::new();
     let mut characters = pattern.chars().peekable();
@@ -385,6 +385,9 @@ mod tests {
         assert!(!like("+*", "main"));
         assert!(like("\\*", "*"));
         assert!(!like("\\*", "x"));
+        assert!(like("a\\b", "a\\b"));
+        assert!(like("\\\\", "\\\\"));
+        assert!(!like("\\\\", "\\"));
         assert!(like("", ""));
         assert!(!like("", "x"));
     }
