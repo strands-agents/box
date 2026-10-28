@@ -47,6 +47,7 @@ enum Reply {
     Sip(Duration),
     SipThenAnswer(Duration, Arc<[u8]>),
     Early(Arc<[u8]>),
+    EarlyThenDeaf(Arc<[u8]>),
 }
 
 pub struct TlsUpstream {
@@ -135,6 +136,12 @@ impl TlsUpstream {
     /// early does.
     pub fn start_answering_early(host: &str, response: &'static [u8]) -> Self {
         Self::start_serving(host, Reply::Early(Arc::from(response)), None)
+    }
+
+    /// Start a TLS upstream that answers with `response` as soon as it has read a request head, and
+    /// then never reads again, so the rest of the request body never leaves the peer.
+    pub fn start_answering_early_then_deaf(host: &str, response: &'static [u8]) -> Self {
+        Self::start_serving(host, Reply::EarlyThenDeaf(Arc::from(response)), None)
     }
 
     /// Start a TLS upstream that returns the supplied static HTTP response, and calls `arrived` when
@@ -231,6 +238,16 @@ impl TlsUpstream {
                         let _ = tls.flush();
                         return;
                     }
+                    if let Reply::EarlyThenDeaf(response) = &reply {
+                        let _ = read_head(&mut tls);
+                        let _ = tls.write_all(response);
+                        let _ = tls.flush();
+                        let mut probe = [0u8; 1];
+                        while matches!(tls.sock.peek(&mut probe), Ok(n) if n > 0) {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        return;
+                    }
                     if let Reply::Early(response) = &reply {
                         let head = read_head(&mut tls);
                         let _ = tls.write_all(response);
@@ -270,7 +287,8 @@ impl TlsUpstream {
                             Reply::Deaf
                             | Reply::Sip(_)
                             | Reply::SipThenAnswer(..)
-                            | Reply::Early(_) => {}
+                            | Reply::Early(_)
+                            | Reply::EarlyThenDeaf(_) => {}
                         }
                     }
                 });

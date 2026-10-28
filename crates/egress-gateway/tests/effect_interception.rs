@@ -1001,6 +1001,259 @@ fn an_upstream_that_sips_a_plain_request_is_not_cut_while_bytes_move() {
     );
 }
 
+/// An upstream that answers early and then stops reading: the reply arrives whole before the
+/// request has left. The request outcome says that the request did not leave whole, and the reply
+/// is never released to the workload.
+#[test]
+fn a_reply_to_an_incomplete_request_is_not_released() {
+    let host = "early-deaf.test";
+    let upstream = TlsUpstream::start_answering_early_then_deaf(
+        host,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+    );
+    let port = upstream.port();
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let config = MitmConfig {
+        upstream_read_deadline: Duration::from_millis(500),
+        ..config_for(host, &upstream)
+    };
+    let handle = MitmInterceptor::start(
+        config,
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(shared.clone())),
+    )
+    .unwrap();
+
+    let body = vec![b'x'; 12 << 20];
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request("POST", "/early", &[], &body);
+    assert_eq!(
+        client.read_response(),
+        "",
+        "a reply to an incomplete request gets no release"
+    );
+
+    let events = wait_for_event_count(&shared, 5);
+    assert!(
+        matches!(
+            &events[4],
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Partial { .. } | EffectOutcome::Indeterminate { .. }
+            )
+        ),
+        "{:?}",
+        events[4]
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        event_names(&shared.lock().unwrap()),
+        vec![
+            "attempt:resolve",
+            "attempt:connect",
+            "outcome:connect",
+            "attempt:request",
+            "outcome:request",
+        ],
+        "no release follows an incomplete request"
+    );
+}
+
+/// How long a seam call of the slow tests below blocks. The tests send more slow exchanges than the
+/// gateway has workers (two to four).
+const SLOW_SEAM: Duration = Duration::from_secs(3);
+
+/// The slow exchanges that each slow test below holds open at once.
+const SLOW_EXCHANGES: u32 = 8;
+
+/// A credsd answer with session credentials, newline-terminated as protocol v1 frames it.
+const CREDSD_ANSWER: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credential\":\"login\",\
+\"material\":{\"type\":\"session_credentials\",\"access_key_id\":\"ASIASLOWCREDSD\",\
+\"secret_access_key\":\"slowSecretKeyMaterialExample\",\"session_token\":\"slowSessionToken\"},\
+\"expires_at\":\"2027-01-01T00:00:00Z\",\"provenance\":\"minted_for_request\"}}\n";
+
+/// A fake credsd daemon that answers each `credential/get` after `SLOW_SEAM`, one thread for each
+/// connection. Returns its socket path and the count of the requests that arrived.
+fn slow_credsd() -> (std::path::PathBuf, Arc<AtomicU32>) {
+    use std::io::{BufRead as _, Write as _};
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "gw-slow-credsd-{}-{}.sock",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let arrived = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&arrived);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let counted = Arc::clone(&counted);
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut request = Vec::new();
+                if reader.read_until(b'\n', &mut request).is_err() {
+                    return;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(SLOW_SEAM);
+                let _ = stream.write_all(CREDSD_ANSWER);
+            });
+        }
+    });
+    (path, arrived)
+}
+
+/// Send `SLOW_EXCHANGES` requests to `host`, each on its own thread, and wait until `arrived` counts
+/// all of them in their slow seam call, or 1 s passes. Then time a `CONNECT` to `fast_host`, and
+/// return that time with the status of each slow request.
+fn time_a_connect_beside_slow_exchanges(
+    proxy: u16,
+    (host, port): (&'static str, u16),
+    (fast_host, fast_port): (&str, u16),
+    arrived: &AtomicU32,
+) -> (Duration, Vec<u16>) {
+    let slow: Vec<_> = (0..SLOW_EXCHANGES)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut client = WorkloadClient::connect_to_ip(proxy, host, port);
+                client.send_request("POST", "/model/m/invoke", &[], b"{}");
+                client.read_status()
+            })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while arrived.load(Ordering::SeqCst) < SLOW_EXCHANGES && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let started = Instant::now();
+    let mut fast = WorkloadClient::connect_raw(proxy);
+    let ack = fast.raw_connect(fast_host, fast_port);
+    let waited = started.elapsed();
+    assert!(ack.contains("200 Connection Established"), "{ack:?}");
+    let statuses = slow.into_iter().map(|slow| slow.join().unwrap()).collect();
+    (waited, statuses)
+}
+
+/// **A slow credential source stalls only its own exchanges.** A fake credsd daemon holds each
+/// `credential/get` for 3 s, so each signed request waits in the credential fold, inside the
+/// request decision block. Eight such requests, more than the workers, are in that block at once,
+/// and a `CONNECT` to a host with no credential still gets its `200` in less than 1 s.
+#[test]
+fn a_slow_credential_source_does_not_stall_another_connection() {
+    let host = "bedrock-runtime.us-west-2.amazonaws.com";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let fast = TcpListener::bind("127.0.0.1:0").unwrap();
+    let fast_port = fast.local_addr().unwrap().port();
+    let (socket, arrived) = slow_credsd();
+    let vault = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant")
+            .credsd_socket(socket.clone())
+            .route(RouteSpec::signed_aws(
+                destination(host, port),
+                Locator::parse_uri("credsd://prod-inference").unwrap(),
+            )),
+    )
+    .unwrap()
+    .into_vault();
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            destination(host, port),
+            Arc::new(vault),
+        ))
+        .build();
+    let mut config = config_for(host, &upstream);
+    config
+        .dns_overrides
+        .push(("fast.test".to_string(), "127.0.0.1".parse().unwrap()));
+    let handle = MitmInterceptor::start(
+        config,
+        controls,
+        Arc::new(RecordingInterceptor::allowing(Arc::default())),
+    )
+    .unwrap();
+
+    let (waited, statuses) = time_a_connect_beside_slow_exchanges(
+        proxy_port(&handle),
+        (host, port),
+        ("fast.test", fast_port),
+        &arrived,
+    );
+    assert_eq!(arrived.load(Ordering::SeqCst), SLOW_EXCHANGES);
+    assert!(
+        waited < Duration::from_secs(1),
+        "{SLOW_EXCHANGES} slow credential fetches stalled another connection for {waited:?}"
+    );
+    assert_eq!(statuses, vec![200; SLOW_EXCHANGES as usize]);
+    let signed = upstream.last_request();
+    assert!(
+        signed
+            .header("authorization")
+            .is_some_and(|value| value.contains("ASIASLOWCREDSD")),
+        "the request was signed with the vended credentials"
+    );
+    drop(fast);
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// An authority that permits every effect, and holds each `ResponseRelease` decision for
+/// `SLOW_SEAM`. It counts the release decisions that started.
+struct SlowRelease(Arc<AtomicU32>);
+
+impl EffectInterceptor for SlowRelease {
+    fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        if matches!(attempt, EffectAttempt::ResponseRelease { .. }) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(SLOW_SEAM);
+        }
+        Ok(Box::new(RecordingPermit {
+            events: Arc::default(),
+            kind: AttemptSnapshot::capture(attempt).kind(),
+            fail_recording: false,
+        }))
+    }
+}
+
+/// **A slow release decision stalls only its own exchanges.** The authority holds each
+/// `ResponseRelease` decision for 3 s, inside the release block. Eight such replies, more than the
+/// workers, wait at once, and a `CONNECT` to another host still gets its `200` in less than 1 s.
+#[test]
+fn a_slow_release_decision_does_not_stall_another_connection() {
+    let host = "slow-release.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let fast = TcpListener::bind("127.0.0.1:0").unwrap();
+    let fast_port = fast.local_addr().unwrap().port();
+    let arrived = Arc::new(AtomicU32::new(0));
+    let mut config = config_for(host, &upstream);
+    config
+        .dns_overrides
+        .push(("fast.test".to_string(), "127.0.0.1".parse().unwrap()));
+    let handle = MitmInterceptor::start(
+        config,
+        no_injection(),
+        Arc::new(SlowRelease(Arc::clone(&arrived))),
+    )
+    .unwrap();
+
+    let (waited, statuses) = time_a_connect_beside_slow_exchanges(
+        proxy_port(&handle),
+        (host, port),
+        ("fast.test", fast_port),
+        &arrived,
+    );
+    assert_eq!(arrived.load(Ordering::SeqCst), SLOW_EXCHANGES);
+    assert!(
+        waited < Duration::from_secs(1),
+        "{SLOW_EXCHANGES} slow release decisions stalled another connection for {waited:?}"
+    );
+    assert_eq!(statuses, vec![200; SLOW_EXCHANGES as usize]);
+    drop(fast);
+}
+
 #[test]
 fn connect_outcome_sink_failure_returns_502_after_opening_once() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
