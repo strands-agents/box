@@ -965,15 +965,6 @@ version of the pack's content, and the pack author owns it. Box refuses a file w
 a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
 file must state `format = 1`.
 
-<a id="a-shortened-long-option-is-unmodeled"></a>
-### A shortened long option is unmodeled
-
-The shell grammar matches a long option only by its full spelling. When the agent shortens one, as in
-`git push --forc` for `--force`, the command line is `unmodeled`. Accepting a unique prefix, as git and
-`getopt_long` do, was rejected, because a pack would then match spellings its author never wrote. The
-cost is that a spelling nobody foresaw bypasses the pack only toward `unmodeled`, which is
-default-deny, and that a legitimate shortened spelling is refused unless a permit covers `unmodeled`.
-
 ## Containment
 
 <a id="box-owns-its-containment-code"></a>
