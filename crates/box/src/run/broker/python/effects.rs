@@ -679,14 +679,6 @@ fn perform_rename(
         }
     };
 
-    if let Some(subject) = subject {
-        interceptor.recorder.record(EffectiveDecision::gate_permit(
-            subject.action,
-            subject.resource,
-            "monty-policy",
-            determined.as_ref(),
-        ));
-    }
     let (result, resume_with) =
         match rename_approved(&approved_src, &approved_dst, judged_destination) {
             Ok(()) => (
@@ -715,6 +707,14 @@ fn perform_rename(
             }
             Err(error) => (FsResult::Failed, io_exception(&error).into()),
         };
+    if let Some(subject) = subject {
+        interceptor.recorder.record(EffectiveDecision::gate_permit(
+            subject.action,
+            subject.resource,
+            "monty-policy",
+            determined.as_ref(),
+        ));
+    }
     record(permit, result);
     Ok(resume_with)
 }
@@ -1670,9 +1670,10 @@ when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.pa
                         operation: policy::FsOperation::WriteContent,
                     },
                 );
-                let expected = (action != "fs:delete" || deleted)
-                    && (action != "fs:read" || outcome != Some("error"))
-                    && Some(event) == outcome;
+                let delete_recorded = action != "fs:delete" || deleted;
+                let read_recorded = action != "fs:read" || outcome != Some("error");
+                let event_matches = Some(event) == outcome;
+                let expected = delete_recorded && read_recorded && event_matches;
                 assert_eq!(
                     !matches!(decision, Decision::Allow { .. }),
                     expected,
@@ -1745,12 +1746,17 @@ when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.pa
         );
         assert_rename_history(&policy, &home, Some("error"), false);
         let recorded = recorder.recorded();
-        assert!(
-            recorded.iter().any(|entry| {
+        let verdicts: Vec<_> = recorded
+            .iter()
+            .filter_map(|entry| {
                 let (action, _, _, verdict, _) = entry.parts();
-                action == r#"Box::Action::"fs:move""# && verdict == EffectiveVerdict::Deny
-            }),
-            "the refused move must record an enforcement denial"
+                (action == r#"Box::Action::"fs:move""#).then_some(verdict)
+            })
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![EffectiveVerdict::Deny],
+            "the refused move must record one denial and no permit"
         );
     }
 
@@ -1780,8 +1786,9 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
             origin: PathBuf::from("<rename-control>"),
             text: rename_history_policy(&home, delete_policy),
         }]);
+        let (interceptor, recorder) = recording_interceptor(&policy);
         let result = admit_and_perform(
-            &interceptor(&policy),
+            &interceptor,
             OsFunctionCall::Rename(RenameCallArgs {
                 src: MontyPath::new("payload.txt".to_string()),
                 dst: MontyPath::new("protected.txt".to_string()),
@@ -1811,6 +1818,16 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
             );
             assert_rename_history(&policy, &home, None, false);
         }
+        let recorded = recorder.recorded();
+        assert_eq!(recorded.len(), 1, "one effective rename decision");
+        assert_eq!(
+            recorded[0].parts().3,
+            if permitted {
+                EffectiveVerdict::Permit
+            } else {
+                EffectiveVerdict::Deny
+            }
+        );
     }
 
     #[test]
