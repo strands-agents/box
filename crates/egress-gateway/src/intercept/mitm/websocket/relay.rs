@@ -874,6 +874,72 @@ mod tests {
         );
     }
 
+    /// **Each peer gets one Close.** The workload's Close goes on to the server. A fault that the
+    /// server makes after it closes the workload with 1014, and the server gets no second Close.
+    #[test]
+    fn each_peer_gets_one_close_when_a_fault_follows_a_close() {
+        let emitter = StubEmitter::new();
+        let state = state(&emitter);
+        let (client, mut workload) = tokio::io::duplex(64 * 1024);
+        let (upstream, mut server) = tokio::io::duplex(64 * 1024);
+        let pending = Pending {
+            host: "ws.example.com".to_string(),
+            port: 443,
+            path: "/chat".to_string(),
+            correlation: RequestId::new("relay"),
+            scrub: None,
+            upstream: Box::new(upstream),
+            slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+        };
+        let (_stop, stop) = watch::channel(false);
+        let normal = 1000u16.to_be_bytes();
+        let mut close = Vec::new();
+        frame::encode(&mut close, frame::CLOSE, true, &normal, Some([1, 2, 3, 4]));
+        let mut unknown = Vec::new();
+        frame::encode(&mut unknown, 0x3, true, b"", None);
+        let (ended, to_workload, to_server) = block_on(async {
+            let peers = async move {
+                workload.write_all(&close).await.unwrap();
+                // The server reads the masked Close (8 bytes) before it makes its fault.
+                let mut to_server = vec![0u8; 8];
+                server.read_exact(&mut to_server).await.unwrap();
+                server.write_all(&unknown).await.unwrap();
+                let mut to_workload = Vec::new();
+                workload.read_to_end(&mut to_workload).await.unwrap();
+                server.read_to_end(&mut to_server).await.unwrap();
+                (to_workload, to_server)
+            };
+            let (ended, (to_workload, to_server)) =
+                tokio::join!(run(pending, client, &state, stop), peers);
+            (ended, to_workload, to_server)
+        });
+        assert!(ended.is_ok(), "a refusal ends the session cleanly");
+
+        let sent = |wire: &[u8]| -> Vec<(u8, Vec<u8>)> {
+            frames(wire)
+                .into_iter()
+                .map(|(opcode, _, _, payload)| (opcode, payload))
+                .collect()
+        };
+        assert_eq!(
+            sent(&to_server),
+            [(frame::CLOSE, normal.to_vec())],
+            "the server gets the workload's Close only"
+        );
+        assert_eq!(
+            sent(&to_workload),
+            [(frame::CLOSE, frame::BAD_GATEWAY.to_be_bytes().to_vec())],
+            "the workload gets one Close, 1014"
+        );
+        let audit: Vec<String> = state
+            .audit
+            .drain()
+            .into_iter()
+            .map(|event| event.reason)
+            .collect();
+        assert_eq!(audit, ["websocket: server frame has an unknown opcode"]);
+    }
+
     /// **The idle wait restarts on activity**: a byte that moves before the limit moves the end
     /// of the wait.
     #[test]
