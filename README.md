@@ -165,7 +165,7 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-Keep the downloaded binaries together in `./box-core`.
+Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
 
@@ -205,6 +205,9 @@ binaries in the same directory.
 Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
 credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+
+The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
+automated signing, package verification, and release gates.
 
 Common tasks run through [`just`](https://github.com/casey/just):
 

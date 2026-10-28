@@ -43,6 +43,9 @@ dogwood-local-engine = "=1.0.0"
 # Fail-closed, typed error model shared by the workspace crates (house style).
 thiserror = "2"
 serde_json = "1"
+# Reads tool pack files.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 # The host-spelling rule the load-time judge shares with the gateway, and the
 # `egress-adapter` target. `default-features = false` drops egress-gateway's TLS
 # stack; neither the rule nor the adapter contract needs a socket.

@@ -7,7 +7,9 @@ from pathlib import Path
 import re
 
 
+# Keep this text aligned with crates/credentials/tests/end_to_end.rs.
 MISSING_DAEMON = "no credsd daemon at /run/credsd/credsd.sock"
+# Keep this text aligned with crates/box/tests/box_shell.rs.
 ALIAS_READ = (
     "the namespace launcher cannot subtract read from an exec grant, so the alias-read "
     "assertion did not run. The write assertions did."
@@ -17,14 +19,15 @@ EXPECTED_SKIPS = {
     ALIAS_READ: "The alias test retains its write assertions; its read assertion remains omitted.",
 }
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+SKIP_DIAGNOSTIC = re.compile(r"^\s*(?:test \S+ \.\.\.\s+)?skipping:\s*(.*)$")
 
 
 def check_output(text):
     text = ANSI_ESCAPE.sub("", text)
     skips = Counter(
-        line.split("skipping:", 1)[1].strip()
+        match.group(1).strip()
         for line in text.splitlines()
-        if "skipping:" in line
+        if (match := SKIP_DIAGNOSTIC.match(line))
     )
     errors = []
     if "test result:" not in text:

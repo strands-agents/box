@@ -1704,3 +1704,22 @@ Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and
 so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
 `is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
 each canonicalize the bind root again for one path.
+
+## 2026-10-27 — a multibyte character at `max_output` inside `$(…)` panicked
+
+`run_capturing_status` cut the output of a command substitution with
+`output.truncate(proc.max_output)`. `String::truncate` panics when the index is not a character
+boundary, so `X=$(printf abc; printf é)` with `max_output = 4` stopped the shell. The
+captured-output path did not have this problem, because `append_limited` already moves the cut to
+a character boundary. This is an upstream bug.
+
+This port applies the command-substitution half of
+[strands-agents/shell#176](https://github.com/strands-agents/shell/pull/176)
+from upstream commit `fccc2750dd276a1ffa763207c86e0572e463299c`. The cut now goes to
+`os::floor_char_boundary`, which returns the largest character boundary at or below the limit. The
+limit, the `output size limit exceeded` message, and the exit status do not change.
+`append_limited` stays in place for the captured-output path.
+
+The two upstream tests are copied unchanged. `subst_max_output_truncate_multibyte` panics without
+the change. `stdout_max_output_truncate_multibyte` passes before and after the change, and pins
+that the captured-output path agrees with upstream.

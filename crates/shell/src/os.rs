@@ -892,6 +892,18 @@ pub(crate) fn append_limited(target: &mut String, value: &str, limit: usize) -> 
     false
 }
 
+/// Return the largest char boundary in `s` at or below `index`.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Read from an async reader into a String, enforcing an optional size limit.
 /// Returns Err if the limit is exceeded.
 pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(

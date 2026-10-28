@@ -80,17 +80,7 @@ jobs:
 
       - name: Free disk (Linux only)
         if: runner.os == 'Linux'
-        # ubuntu-latest starts with about 1 GB free after the checkout. A debug
-        # `--all-targets` link of the workspace (many test binaries that each
-        # statically link pyo3, napi, mlua, rustls, and now opentelemetry) fills
-        # the disk, and the link dies: rustc reports `No space left on device`,
-        # or lld faults on its mmap-ed output with `ld terminated with signal 7
-        # [Bus error]`. debuginfo is already off (see RUSTFLAGS above), so the
-        # remaining lever is disk. Deleting the preinstalled Android and .NET
-        # SDKs, which this suite never uses, reclaims about 17 GB. A measured run
-        # kept about 17.5 GB free at the low point and passed at full build
-        # parallelism. The runner is a single-use VM, so the delete is local to
-        # this job.
+        # Free space for the all-targets build on the disposable Ubuntu ARM64 runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
 
       - name: Require Linux namespace support

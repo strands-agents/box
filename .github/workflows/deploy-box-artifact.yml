@@ -19,14 +19,10 @@ name: Release Box
 # release): scan -> test-lint / build -> inspect -> approve ->
 #           tag + release -> verify.
 #
-# Dry-Run (the default) runs scan/build/inspect so you can review the
-# bundle on the run page, and skips approve/tag/release/verify. Everything runs
-# on a fork too, and a fork run publishes to the fork's own releases, so a
-# fork release goes end-to-end.
+# Dry runs build and inspect without credentials by default. An upstream main
+# dry run can opt into signing and native tests. Protected premerge tests use a separate environment.
 #
-# One-time setup before the first non-dry run: a GitHub environment named
-# `release-gate` with the reviewers who approve a release. A fork has no
-# reviewer config there, so approve just passes on a fork.
+# Configure macos-signing and release-gate before a signed run.
 
 on:
   workflow_dispatch:
@@ -44,6 +40,16 @@ on:
         description: 'Dry-Run: build/inspect still run so you can review the bundle on the run page; skip approve + tag + release + verify.'
         required: true
         default: true
+        type: boolean
+      sign_macos:
+        description: 'Also sign and test macOS in a dry run. Requires the protected signing environment. Real releases always sign.'
+        required: true
+        default: false
+        type: boolean
+      premerge_signing_test:
+        description: 'Protected PR signing test only. Requires dry_run=true, sign_macos=true, and macos-signing-test approval.'
+        required: true
+        default: false
         type: boolean
       skip_tests:
         description: 'Fork testing only: skip the test + lint job entirely so the release pipeline runs without waiting on it. Inert on the upstream repo.'
@@ -185,6 +191,28 @@ jobs:
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Validate signing mode and source
+        env:
+          PREMERGE_TEST: ${{ inputs.premerge_signing_test }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+          WORKFLOW_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$PREMERGE_TEST" = true ]; then
+            test "$DRY_RUN" = true
+            test "$SIGN_MACOS" = true
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-signing
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          elif [ "$DRY_RUN" != true ] || [ "$SIGN_MACOS" = true ]; then
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/main
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          fi
+
   # ── Build + lint + unit-test gate ──────────────────────────────────────
   test:
     name: Test and lint
@@ -215,7 +243,7 @@ jobs:
           - triple: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
-            runner: macos-latest
+            runner: xcode-27
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -250,17 +278,30 @@ jobs:
           set -euo pipefail
           cargo set-version -p strands-box -p strands-box-containment "$VERSION"
 
-      # Standard releases exclude native interception and test-support features.
+      - name: Require the native macOS SDK
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          test "${sdk%%.*}" -ge 27
+
       - name: Build strands-box (release)
         # box, sock-alias, and contain-trampoline must ship together; the box
         # resolves the trampoline from beside its own executable and refuses
         # to start without it.
         if: matrix.target.triple != 'aarch64-unknown-linux-gnu'
+        env:
+          TRIPLE: ${{ matrix.target.triple }}
         run: |
+          set -euo pipefail
+          features=()
+          if [ "$TRIPLE" = aarch64-apple-darwin ]; then
+            features=(--features native-filesystem-policy)
+          fi
           cargo build --release --locked \
-            --target ${{ matrix.target.triple }} \
+            --target "$TRIPLE" \
             -p strands-box \
-            -p strands-box-containment
+            -p strands-box-containment "${features[@]}"
 
       - name: Build ARM64 Linux against glibc 2.34
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
@@ -351,12 +392,155 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sign-macos:
+    name: Sign the macOS application
+    cache-mode: none
+    needs: [scan, test, build]
+    if: >-
+      github.repository == 'strands-agents/box' &&
+      (github.ref == 'refs/heads/main' ||
+       (inputs.premerge_signing_test == true && inputs.dry_run == true &&
+        github.ref == 'refs/heads/feature/macos-release-signing')) &&
+      (inputs.dry_run != true || inputs.sign_macos == true)
+    runs-on: xcode-27
+    timeout-minutes: 40
+    environment: ${{ inputs.premerge_signing_test == true && 'macos-signing-test' || 'macos-signing' }}
+    outputs:
+      team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
+      profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CD_SIGNER_ENDPOINT: ${{ vars.CD_SIGNER_ENDPOINT }}
+      CD_SIGNER_BUCKET: ${{ vars.CD_SIGNER_BUCKET }}
+      CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
+      CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
+      CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+    steps:
+      - name: Check approved test commits
+        if: inputs.premerge_signing_test == true
+        env:
+          APPROVED_WORKFLOW_SHA: ${{ vars.SIGNING_TEST_WORKFLOW_SHA }}
+          APPROVED_SOURCE_SHA: ${{ vars.SIGNING_TEST_SOURCE_SHA }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPROVED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$WORKFLOW_SHA" = "$APPROVED_WORKFLOW_SHA"
+          test "$SOURCE_SHA" = "$APPROVED_SOURCE_SHA"
+      - name: Checkout trusted workflow tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download this run's macOS build
+        uses: actions/download-artifact@v8
+        with:
+          name: box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
+          path: unsigned
+      - name: Install signing tools
+        run: |
+          brew install gnu-tar
+          python3 -m venv "$RUNNER_TEMP/signing-venv"
+          "$RUNNER_TEMP/signing-venv/bin/pip" install boto3==1.42.61 requests==2.32.5
+      - name: Obtain temporary signing credentials
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.CD_SIGNER_CALLER_ROLE }}
+          aws-region: ${{ vars.CD_SIGNER_REGION }}
+          role-session-name: box-release-${{ github.run_id }}
+          role-duration-seconds: 3600
+      - name: Sign helpers and the Endpoint Security application
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release.py sign \
+            --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA"
+      - name: Retain signing evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signing-evidence
+          path: ${{ runner.temp }}/signing/**/*.json
+          if-no-files-found: warn
+      - name: Upload the verified signed package
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signed-package
+          path: signed/*.tar.gz
+          if-no-files-found: error
+
+  verify-macos:
+    name: Test the signed macOS package
+    cache-mode: none
+    needs: [scan, sign-macos]
+    runs-on: xcode-27
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CD_SIGNER_TEAM_ID: ${{ needs.sign-macos.outputs.team_id }}
+      CD_SIGNER_PROFILE_NAME: ${{ needs.sign-macos.outputs.profile_name }}
+    steps:
+      - name: Checkout trusted verification source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download the signed package
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-signed-package
+          path: signed
+      - name: Verify installation and signed native enforcement
+        env:
+          VERSION: ${{ inputs.version }}
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+          VERIFICATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 27
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          test "${sdk%%.*}" -ge 27
+          package="$RUNNER_TEMP/installed-box"
+          mkdir "$package"
+          tar -C "$package" -xzf "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          python3 scripts/macos-release.py verify \
+            --app "$package/Box.app" --evidence "$RUNNER_TEMP/package-verification"
+          printf '{"source_sha":"%s","verification_sha":"%s"}\n' \
+            "$SOURCE_SHA" "$VERIFICATION_SHA" > "$RUNNER_TEMP/package-verification/source.json"
+          "$package/box" --version | grep -F "$VERSION"
+          export STRANDS_BOX_SIGNED_TEST_BINARY="$package/box"
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked \
+            -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-tests.log"
+      - name: Retain package verification
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-package-verification
+          path: |
+            ${{ runner.temp }}/package-verification/*.json
+            ${{ runner.temp }}/native-tests.log
+          if-no-files-found: warn
+
   # ── Inspect the built tarballs, then re-upload the verified bundle ──────
   # The release job publishes only from this bundle, so the bytes on the run
   # page are the bytes attached to the release.
   inspect:
     name: Inspect release tarballs
-    needs: [scan, build]
+    needs: [scan, build, sign-macos, verify-macos]
+    if: >-
+      always() && needs.scan.result == 'success' && needs.build.result == 'success' &&
+      ((inputs.dry_run == true && inputs.sign_macos != true) ||
+       (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -365,6 +549,14 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: assets
+          pattern: box-*
+
+      - name: Download qualified macOS package
+        if: needs.verify-macos.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-signed-package
+          path: assets/box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
 
       - name: Collect tarballs and compute SHA256SUMS.txt
         # Every target lands in built/. Only qualified architectures enter release/.
@@ -389,7 +581,7 @@ jobs:
           if [ "$LINUX_PREVIEW" = "true" ]; then
             cp "$linux" release/
           fi
-          (cd release && sha256sum *.tar.gz | sort -k 2 > SHA256SUMS.txt)
+          (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
           echo
@@ -457,6 +649,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       (needs.test.result == 'success' ||
         (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
@@ -490,6 +683,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
@@ -557,7 +751,7 @@ jobs:
           cat >> body.md <<EOF
           ## Assets
 
-          Each tarball contains \`box\` beside its helper binaries. Keep all three files together. \`SHA256SUMS.txt\` contains the checksum for each published archive.
+          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. \`SHA256SUMS.txt\` contains each archive's checksum.
           EOF
 
       - name: Tag the pinned SHA
@@ -611,6 +805,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:

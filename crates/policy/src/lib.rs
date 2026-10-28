@@ -12,6 +12,8 @@ mod error;
 mod mcp_schema;
 mod observe;
 mod outcome;
+#[expect(dead_code, reason = "no caller loads a tool pack yet")]
+mod pack;
 mod path;
 mod policy;
 mod request;

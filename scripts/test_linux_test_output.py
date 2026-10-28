@@ -18,13 +18,24 @@ class LinuxTestOutputTests(unittest.TestCase):
         self.assertIn("No test emitted", report)
 
     def test_prerequisite_skip_cannot_hide_in_a_passing_result(self):
-        for prefix in ["", "test a_mount_test ... "]:
+        for prefix in ["", "test a_mount_test ... ", "  ", "  test a_mount_test ... "]:
             with self.subTest(prefix=prefix):
                 accepted, report = REPORTER.check_output(
                     prefix + "skipping: namespace permission denied\n" + PASSED
                 )
                 self.assertFalse(accepted)
                 self.assertIn("namespace permission denied", report)
+
+    def test_incidental_skip_text_does_not_fail_a_passing_suite(self):
+        for line in [
+            "log line: skipping: cache warm-up ...",
+            "test fixture ... log line: skipping: cache warm-up ...",
+            'fixture text contains "skipping: namespace permission denied"',
+        ]:
+            with self.subTest(line=line):
+                accepted, report = REPORTER.check_output(line + "\n" + PASSED)
+                self.assertTrue(accepted)
+                self.assertIn("No test emitted", report)
 
     def test_one_missing_daemon_is_reported_as_untested(self):
         accepted, report = REPORTER.check_output(

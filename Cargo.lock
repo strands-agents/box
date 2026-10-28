@@ -4013,12 +4013,14 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "strands-box-egress-gateway",
  "strands-shell",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
 ]
 
 [[package]]
