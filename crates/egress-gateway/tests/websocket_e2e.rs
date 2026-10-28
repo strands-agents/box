@@ -913,18 +913,18 @@ fn a_plaintext_websocket_handshake_is_refused() {
 #[test]
 fn extensions_are_removed_from_the_handshake() {
     let host = "extensions.ws.test";
-    let upstream = WsUpstream::start(host, Answer::Fixed(NOT_FOUND));
+    let upstream = WsUpstream::start(host, Answer::Echo(None));
     let policy = PathPolicy::permitting(host);
     let handle = start_gateway(host, &upstream, policy.clone(), MitmConfig::default());
 
-    let (_client, reply) = WsClient::open(
+    let (mut client, reply) = WsClient::open(
         &handle,
         host,
         upstream.port,
         "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\
          Sec-WebSocket-Extensions: x-other\r\n",
     );
-    assert_eq!(status(&reply), 404, "{reply:?}");
+    assert_eq!(status(&reply), 101, "{reply:?}");
     let handshake = &upstream.handshakes()[0];
     assert_eq!(header(handshake, "sec-websocket-extensions"), None);
     assert_eq!(header(handshake, "sec-websocket-key").as_deref(), Some(KEY));
@@ -933,6 +933,8 @@ fn extensions_are_removed_from_the_handshake() {
         Some("13")
     );
     assert_eq!(policy.requests(), ["request GET /chat"]);
+    client.send(TEXT, b"uncompressed");
+    assert_eq!(client.recv().payload, b"uncompressed");
 }
 
 /// A normal request that asks for `h2c` still loses its upgrade fields and is forwarded as before.
