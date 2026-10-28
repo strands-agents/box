@@ -147,7 +147,7 @@ enum Route {
 
 /// Where a client connection stands between its requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
+enum Standing {
     /// A request is in progress, from the first byte of its head to the end of its reply.
     Exchange,
     /// The reply keeps the connection open, and it has not left whole yet.
@@ -166,7 +166,7 @@ struct Session {
     /// What the client stream accepted.
     client_writes: Arc<WriteCount>,
     /// Where the connection stands between its requests.
-    phase: Mutex<Phase>,
+    standing: Mutex<Standing>,
     /// The release that waits until hyper has written the governed response whole: until the
     /// connection waits for its next request, the next request starts, or the connection ends.
     pending: Mutex<Option<PendingRelease>>,
@@ -208,7 +208,7 @@ impl Session {
             route,
             slot,
             client_writes: WriteCount::new(),
-            phase: Mutex::new(Phase::Exchange),
+            standing: Mutex::new(Standing::Exchange),
             pending: Mutex::new(None),
             relay: Mutex::new(None),
             failure: Mutex::new(None),
@@ -249,7 +249,7 @@ impl Session {
             }
             let served = connection.poll_without_shutdown(cx);
             if served.is_pending()
-                && *self.phase() == Phase::Waiting
+                && *self.standing() == Standing::Waiting
                 && let Err(error) = self.record_release(true)
             {
                 *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
@@ -295,13 +295,13 @@ impl Session {
         // Every reply carries `Connection: close` until the close rule keeps the connection open.
         if after_reply(answered, reusable) == AfterReply::KeepOpen {
             response.headers_mut().remove(CONNECTION);
-            *self.phase() = Phase::Replying;
+            *self.standing() = Standing::Replying;
         }
         Ok(response)
     }
 
-    fn phase(&self) -> std::sync::MutexGuard<'_, Phase> {
-        self.phase.lock().unwrap_or_else(|e| e.into_inner())
+    fn standing(&self) -> std::sync::MutexGuard<'_, Standing> {
+        self.standing.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, Option<PendingRelease>> {
@@ -310,28 +310,28 @@ impl Session {
 
     /// A byte of the next head arrived: a connection that waited leaves the idle queue.
     fn byte_arrived(&self) {
-        let mut phase = self.phase();
-        if *phase == Phase::Waiting {
+        let mut standing = self.standing();
+        if *standing == Standing::Waiting {
             self.slot.busy();
-            *phase = Phase::Exchange;
+            *standing = Standing::Exchange;
         }
     }
 
     /// hyper handed a request to the service, also from bytes that it read before the wait.
     fn request_entered(&self) {
-        let mut phase = self.phase();
-        if *phase == Phase::Waiting {
+        let mut standing = self.standing();
+        if *standing == Standing::Waiting {
             self.slot.busy();
         }
-        *phase = Phase::Exchange;
+        *standing = Standing::Exchange;
     }
 
     /// A flush of the client stream succeeded. When it ends a reply that keeps the connection
     /// open, the connection waits for its next request, and its slot joins the idle queue.
     fn flushed(&self) {
-        let mut phase = self.phase();
-        if *phase == Phase::Replying && self.client_writes.snapshot().flushed {
-            *phase = Phase::Waiting;
+        let mut standing = self.standing();
+        if *standing == Standing::Replying && self.client_writes.snapshot().flushed {
+            *standing = Standing::Waiting;
             self.forwarded.store(false, Ordering::Relaxed);
             self.slot.idle();
         }
@@ -386,7 +386,7 @@ impl Session {
         // A connection that waited for its next request ends there: the client closed it, it
         // waited past the idle bound, or the stop or a new connection asked for its slot. No
         // request was in progress, so the end leaves no audit line.
-        if *self.phase() == Phase::Waiting {
+        if *self.standing() == Standing::Waiting {
             // `close_notify`, then the end of the write side.
             let _ = parts.io.into_inner().shutdown().await;
             return Ok(());
@@ -1194,6 +1194,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
 /// A client stream that tells its session where a kept-alive connection stands: a byte that
 /// arrives starts the next request, and a flush that ends a reply that keeps the connection open
 /// starts the wait for the next head.
+///
+/// It is a second wrapper over [`Counted`] because `Counted` also counts each upstream stream,
+/// which has no session. It sits outside `Counted`, so a flush that it reports has already updated
+/// the write count that [`Session::flushed`] reads.
 struct Watched<S> {
     inner: S,
     session: Arc<Session>,
