@@ -3,6 +3,7 @@
 mod ca;
 mod connect;
 mod diagnostic;
+mod exchange;
 mod handle;
 mod http1;
 mod l7;

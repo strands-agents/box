@@ -105,7 +105,7 @@ Conventions: `docs/conventions.md`.
   always need a `ResponseRelease` permit.
 - Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
   `ProxyOnly` kernel pin, the real anti-hijack defence.
-- Report the pre-mutation `workload_path`, which `emit_decision` reads from `DecisionSubject`. Never
+- Report the pre-mutation `workload_path`, which `emit_decision` reads from `Subject`. Never
   read `req.target.path`; a `UrlPath` credential makes it the secret.
 - Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
   `POST /v1/messages` by 6 bytes in 500 of 500 runs.

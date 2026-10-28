@@ -1,6 +1,5 @@
 //! The L7 interception path: terminate TLS, run the request/response legs, forward.
 
-use std::borrow::Cow;
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -8,21 +7,18 @@ use std::time::{Duration, Instant};
 
 use crate::audit::RequestId;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
-use zeroize::Zeroizing;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
-use super::request_leg::{self, RequestDecision};
-use super::response_leg::{self, ResponseDecision};
-use super::{SharedState, http1, tls};
-use crate::audit::Decision as AuditDecision;
-use crate::audit::{EgressDecision, NetworkAuditEvent};
-use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
-use crate::capability::CapabilityContext;
-use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, McpFrame, McpListReply};
-use crate::error::{ProxyError, Result};
-use crate::mcp::{
-    McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
+use super::exchange::{
+    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, audit_release,
+    claim_release, decide_request, prepare_request, prepare_response, record_refusal,
 };
+use super::{SharedState, http1, tls};
+use crate::audit::NetworkAuditEvent;
+use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
+use crate::effect::{ClaimedEffectPermit, EffectOutcome};
+use crate::error::{ProxyError, Result};
+use crate::mcp::{mcp_denial_response, normalize_path};
 
 /// Terminate the client's TLS, run the L7 legs, and forward to the pinned upstream.
 ///
@@ -65,25 +61,14 @@ pub(super) fn intercept_tls<C: Read + Write>(
     if let Err(error) =
         validate_request_binding(connect, &parsed.method, &parsed.target, &parsed.headers)
     {
-        let reason = error.to_string();
-        emit_decision(
-            state,
-            DecisionSubject {
-                host: &connect.host,
-                port: connect.port,
-                method: &parsed.method,
-                path: &parsed.target,
-            },
-            AuditDecision::Deny,
-            &reason,
-            correlation.clone(),
-        );
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason,
-            correlation,
-        ));
+        let subject = Subject {
+            host: &connect.host,
+            port: connect.port,
+            method: &parsed.method,
+            path: &parsed.target,
+            correlation: &correlation,
+        };
+        record_refusal(state, &subject, &error.to_string());
         write_trusted_diagnostic(
             client_tls.get_mut(),
             &parsed.method,
@@ -107,309 +92,54 @@ pub(super) fn intercept_tls<C: Read + Write>(
         advisory_note: None,
     };
 
-    // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
-    // flag inside the shared core.
-    run_l7_legs(
+    // TLS was terminated to see this request, so it stays bound to the CONNECT authority.
+    let exchange = Exchange::new(
         connect,
-        req,
-        &mut upstream_tls,
-        client_tls.get_mut(),
-        state,
+        Binding::ConnectAuthority,
+        true,
         correlation,
-        true, // TLS was terminated to see this request
-        |method, target, headers| validate_request_binding(connect, method, target, headers),
-    )
+        req,
+        state,
+    );
+    run_l7_legs(exchange, &mut upstream_tls, client_tls.get_mut(), state)
 }
 
-/// Run the shared L7 request/response legs over an already-open client writer and upstream stream.
+/// Run the phases of one exchange over an already-open client writer and upstream stream.
 ///
 /// Both the TLS ([`intercept_tls`]) and plain-HTTP ([`forward_plain`]) paths converge here after
-/// their transport-specific setup: `req` is the parsed request, `upstream` the buffered upstream,
-/// and `client_writer` the sink for diagnostics and the governed response. `revalidate` runs after
-/// the credential mutation — the TLS path re-checks the CONNECT binding there; plain HTTP has no
-/// authority to bind, so it passes a no-op. Every control (request/response legs, effect lifecycle,
-/// audit) fires identically for both.
-#[allow(clippy::too_many_arguments)]
+/// their transport-specific setup: `upstream` is the buffered upstream, and `client_writer` the sink
+/// for diagnostics and the governed response. Every control (request/response legs, effect
+/// lifecycle, audit) fires identically for both.
 fn run_l7_legs<S, CW>(
-    connect: &ConnectRequest,
-    mut req: InterceptedRequest,
+    mut exchange: Exchange<'_>,
     upstream: &mut BufReader<S>,
     client_writer: &mut CW,
     state: &SharedState,
-    correlation: RequestId,
-    intercepted: bool,
-    revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<()>
 where
     S: Read + Write,
     CW: Write,
 {
-    let correlation = correlation.with_headers(&req.headers);
-    let correlation = if state.mcp_server_for(&connect.host).is_some() {
-        correlation.with_mcp(req.body.as_bytes())
-    } else {
-        correlation
-    };
-    // Canonicalize the request path ONCE, before it is judged (`workload_path`), matched for
-    // credentials (`cx`), or forwarded (`reconstruct_target`) — so the box judges, matches, and
-    // forwards the SAME bytes the origin will resolve. Percent-decodes only unreserved octets (never
-    // `%2F`, which would change segment structure) and removes dot-segments, closing the "judge one
-    // spelling, forward another" gap where `/%61dmin` or `/x/../admin` dodges a path `forbid` yet the
-    // origin routes to `/admin`. The query is left untouched — a `UrlPath` credential can live there,
-    // and it is deliberately kept out of the judged path.
-    req.target.path = match canonicalize_request_path(&req.target.path) {
-        Ok(path) => path,
-        Err(reason) => {
-            refuse_request(
-                state,
-                connect,
-                client_writer,
-                RefusedRequest {
-                    method: req.method.as_deref(),
-                    path: &req.target.path,
-                    reason: &reason,
-                    diagnostic: b"request path is not a valid address",
-                },
-                correlation,
-            );
+    for phase in REQUEST_PHASES {
+        if let Err(refusal) = phase(&mut exchange, state) {
+            refuse(&exchange, refusal, state, client_writer);
             return Ok(());
         }
-    };
-
-    // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
-    if !intercepted && state.controls.matches_any(&req.target.as_destination()) {
-        refuse_request(
-            state,
-            connect,
-            client_writer,
-            RefusedRequest {
-                method: req.method.as_deref(),
-                path: &req.target.path,
-                reason: "credential would attach on a plaintext request; refused — a secret must ride TLS",
-                diagnostic: b"credential not permitted on a plaintext request",
-            },
-            correlation,
-        );
-        return Ok(());
     }
-
-    let cx = CapabilityContext::new(
-        correlation.clone(),
-        state.now_unix_secs(),
-        req.target.clone(),
-    );
-
-    // The path as the workload sent it, captured BEFORE any credential mutation is applied.
-    //
-    // A `UrlPath` credential splices the secret into the path, so after `evaluate_and_apply`
-    // `req.target.path` *is* the secret. Every authorization and audit input below reads this value
-    // instead, so an attempt or a durable record never carries credential material.
-    let workload_path = req.target.path.clone();
-
-    match request_leg::evaluate_and_apply(&state.controls, &mut req, &cx) {
-        RequestDecision::Block(reason) => {
-            let reason = reason.to_string(); // format once, use for both audit sinks
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            emit_decision(
-                state,
-                DecisionSubject {
-                    host: &connect.host,
-                    port: connect.port,
-                    method: req.method.as_deref().unwrap_or_default(),
-                    path: &workload_path,
-                },
-                AuditDecision::Deny,
-                &reason,
-                correlation,
-            );
-            write_trusted_diagnostic(
-                client_writer,
-                req.method.as_deref().unwrap_or("GET"),
-                403,
-                b"blocked by egress control",
-            );
-            return Ok(());
-        }
-        RequestDecision::Forward => {}
-    }
-
-    // A capability may annotate this allow — an advisory credential injection records that a secret
-    // was attached against an absent or unrecognised placeholder. Journalled on the allow decision
-    // below, so the injection is reconstructable (destination, reason, and requester correlation).
-    let allow_reason = req.advisory_note.clone().unwrap_or_default();
-
     // Serialize the fully mutated request before claiming its effect permit.
-    let fwd_target = reconstruct_target(&req.target);
-    let request_method = req.method.clone().unwrap_or_else(|| "GET".to_string());
-    if let Err(error) = revalidate(&request_method, &fwd_target, &req.headers) {
-        let reason = error.to_string();
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason.clone(),
-            correlation.clone(),
-        ));
-        emit_decision(
-            state,
-            DecisionSubject {
-                host: &connect.host,
-                port: connect.port,
-                method: req.method.as_deref().unwrap_or_default(),
-                path: &workload_path,
-            },
-            AuditDecision::Deny,
-            &reason,
-            correlation,
-        );
-        write_trusted_diagnostic(
-            client_writer,
-            &request_method,
-            error.http_status(),
-            b"request authority rejected",
-        );
-        return Ok(());
-    }
-    // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
-    // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
-    // matched host's name), never read from the body, so an agent cannot borrow another server's
-    // identity. A frame the classifier refuses — unparseable, a batch, a client-sent response, or an
-    // act frame naming no item — is fail-closed here, before the request is authorized or forwarded.
-    // A protocol-floor frame (`ping`, `server/discover`) yields no target and stays a plain
-    // `http:request`.
-    let mcp_target: Option<(&str, McpTarget)> = match state.mcp_server_for(&connect.host) {
-        Some(server) => match McpTarget::of_http_request(req.body.as_bytes()) {
-            Ok(Some(target)) => Some((server, target)),
-            Ok(None) => None,
-            Err(error) => {
-                let reason = format!("MCP frame refused: {error}");
-                state.audit.push(NetworkAuditEvent::deny(
-                    &connect.host,
-                    connect.port,
-                    reason.clone(),
-                    correlation.clone(),
-                ));
-                emit_decision(
-                    state,
-                    DecisionSubject {
-                        host: &connect.host,
-                        port: connect.port,
-                        method: &request_method,
-                        path: &workload_path,
-                    },
-                    AuditDecision::Deny,
-                    &reason,
-                    correlation,
-                );
-                write_trusted_diagnostic(client_writer, &request_method, 403, b"MCP frame refused");
-                return Ok(());
-            }
-        },
-        None => None,
-    };
-
-    // The serialized request carries the credential the request leg just attached, so the buffer is
-    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
-    // not `Zeroize`-aware, a known residual).
-    // Forward the CANONICAL frame, not the raw one. The local door rewrites a
-    // `resources/read` uri at ingress so it judges and forwards ONE identity; the remote door must do
-    // the same, or a respelling this classifier judged as one identity would be FETCHED as another by
-    // the upstream server. Only `resources/read` whose canonical form differs is rewritten; every
-    // other frame (and an unparseable body) forwards byte-identical.
-    let forwarded_body: Cow<[u8]> = match &mcp_target {
-        Some((_, target)) if matches!(target.identity, McpTargetIdentity::Resource(_)) => {
-            canonicalize_mcp_frame(req.body.as_bytes())
-                .map_or_else(|| Cow::Borrowed(req.body.as_bytes()), Cow::Owned)
-        }
-        _ => Cow::Borrowed(req.body.as_bytes()),
-    };
-    let mut prepared_request = Zeroizing::new(Vec::new());
-    http1::write_request(
-        &mut *prepared_request,
-        &request_method,
-        &fwd_target,
-        &req.headers,
-        &forwarded_body,
-    )?;
-    let request_attempt = EffectAttempt::HttpRequest {
-        host: &connect.host,
-        port: connect.port,
-        method: &request_method,
-        path: &workload_path,
-        body_bytes: forwarded_body.len(),
-        intercepted,
-        mcp: mcp_target.as_ref().map(|(server, target)| {
-            let server = *server;
-            match &target.identity {
-                McpTargetIdentity::Tool(tool) => McpFrame::ToolCall {
-                    server,
-                    tool: tool.as_str(),
-                    arguments: target.arguments.as_str(),
-                },
-                McpTargetIdentity::Prompt(prompt) => McpFrame::PromptGet {
-                    server,
-                    prompt: prompt.as_str(),
-                },
-                McpTargetIdentity::Resource(uri) => McpFrame::ResourceRead {
-                    server,
-                    uri: uri.as_str(),
-                },
-                McpTargetIdentity::Method(method) => McpFrame::List {
-                    server,
-                    method: method.as_str(),
-                },
-            }
-        }),
-    };
-    let request_permit = match claim_effect(state, &request_attempt) {
+    let prepared_request = prepare_request(&mut exchange)?;
+    let request_permit = match decide_request(&exchange, state) {
         Ok(permit) => permit,
-        Err(error) => {
-            let reason = format!("request effect interception failed: {error}");
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            emit_decision(
-                state,
-                DecisionSubject {
-                    host: &connect.host,
-                    port: connect.port,
-                    method: req.method.as_deref().unwrap_or_default(),
-                    path: &workload_path,
-                },
-                AuditDecision::Deny,
-                &reason,
-                correlation.clone(),
-            );
-            write_interceptor_error(
+        Err(reply) => {
+            write_reply(
                 client_writer,
-                &request_method,
-                &error,
-                state
-                    .mcp_server_for(&connect.host)
-                    .map(|_| req.body.as_bytes()),
+                &exchange.method,
+                reply,
+                Some(exchange.request.body.as_bytes()),
             );
             return Ok(());
         }
     };
-    emit_decision(
-        state,
-        DecisionSubject {
-            host: &connect.host,
-            port: connect.port,
-            method: &request_method,
-            path: &workload_path,
-        },
-        AuditDecision::Allow,
-        &allow_reason,
-        correlation.clone(),
-    );
     // The request permit is consumed at reply time, or when no reply comes.
     let (request_permit, request_bytes) = deliver_or_record_failure(
         upstream.get_mut(),
@@ -417,11 +147,67 @@ where
         request_permit,
         "upstream request",
     )?;
+    drop(prepared_request);
 
     // --- Response leg: read, evaluate+apply, return ---
+    let mut response = read_reply(
+        upstream,
+        &exchange.method,
+        request_permit,
+        request_bytes,
+        state,
+    )?;
+    for phase in RESPONSE_PHASES {
+        if let Err(refusal) = phase(&mut exchange, &mut response, state) {
+            let subject = exchange.subject();
+            state.audit.push(NetworkAuditEvent::deny(
+                subject.host,
+                subject.port,
+                refusal.reason,
+                subject.correlation.clone(),
+            ));
+            write_reply(client_writer, subject.method, refusal.reply, None);
+            return Ok(());
+        }
+    }
+
+    // Serialize only after response controls and leakback scrubbing have finished, then claim the
+    // release immediately before the governed bytes are delivered to the workload.
+    let prepared_response = prepare_response(&exchange, &response)?;
+    let response_permit = match claim_release(&exchange, &response, state) {
+        Ok(permit) => permit,
+        Err(refusal) => {
+            let subject = exchange.subject();
+            state.audit.push(NetworkAuditEvent::deny(
+                subject.host,
+                subject.port,
+                refusal.reason,
+                subject.correlation.clone(),
+            ));
+            write_reply(client_writer, subject.method, refusal.reply, None);
+            return Ok(());
+        }
+    };
+    audit_release(&exchange, state);
+    deliver_effect(
+        client_writer,
+        &prepared_response,
+        response_permit,
+        "governed response",
+    )
+}
+
+/// Read the upstream reply, and record the request outcome that it shows.
+fn read_reply<S: Read>(
+    upstream: &mut BufReader<S>,
+    request_method: &str,
+    request_permit: ClaimedEffectPermit,
+    request_bytes: usize,
+    state: &SharedState,
+) -> Result<InterceptedResponse> {
     let parsed_res = match http1::read_response(
-        &mut *upstream,
-        &request_method,
+        upstream,
+        request_method,
         state.config.response_limits.max_body_bytes,
     ) {
         Ok(parsed_res) => parsed_res,
@@ -452,114 +238,47 @@ where
             ))
         })?;
     // Move, don't clone — `parsed_res` is dead after this; the body can be large.
-    let mut res = InterceptedResponse::http(
+    Ok(InterceptedResponse::http(
         parsed_res.status,
         parsed_res.headers,
         BodyRef::Bytes(parsed_res.body),
-    );
-    // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
-    // that set it would otherwise make a permitted answer read as a denial, with its own first body
-    // line as the reason.
-    res.headers.remove(crate::PROXY_ORIGIN_HEADER);
+    ))
+}
 
-    let redirect_location = match response_leg::evaluate_and_apply(&state.controls, &mut res, &cx) {
-        ResponseDecision::Block(reason) => {
-            let reason = reason.to_string(); // format once, use for both audit sinks
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            write_trusted_diagnostic(
-                client_writer,
-                &request_method,
-                403,
-                b"response blocked by egress control",
-            );
-            return Ok(());
-        }
-        ResponseDecision::RedirectReentry(location) => Some(location),
-        ResponseDecision::Return => None,
-    };
-
-    // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
-    // the response catalog into the authority so the server's per-tool actions reach runtime
-    // (docs/design/decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory).
-    // Best-effort: a staging failure warns and the catalog still returns.
-    if let Some((server, target)) = &mcp_target
-        && target.method() == "tools/list"
-        && let Err(error) = state.effect_interceptor.stage_mcp_catalog(
-            server,
-            McpListReply {
-                session: req.headers.get("mcp-session-id"),
-                cursor: list_cursor(req.body.as_bytes()).as_deref(),
-                body: res.body.as_bytes(),
-            },
-        )
-    {
-        eprintln!(
-            "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
-        );
-    }
-
-    // Serialize only after response controls and leakback scrubbing have finished, then claim the
-    // release immediately before the governed bytes are delivered to the workload.
-    let mut prepared_response = Vec::new();
-    http1::write_response(
-        &mut prepared_response,
-        &request_method,
-        res.status,
-        &res.headers,
-        res.body.as_bytes(),
-    )?;
-    let response_attempt = EffectAttempt::ResponseRelease {
-        host: &connect.host,
-        port: connect.port,
-        method: &request_method,
-        path: &workload_path,
-        status: res.status,
-        body_bytes: res.body.as_bytes().len(),
-    };
-    let response_permit = match claim_effect(state, &response_attempt) {
-        Ok(permit) => permit,
-        Err(error) => {
-            let reason = format!("response release interception failed: {error}");
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            write_interceptor_error(client_writer, &request_method, &error, None);
-            return Ok(());
-        }
-    };
-
-    if let Some(location) = redirect_location {
-        // The client, not the proxy, follows this redirect and therefore re-enters all connection
-        // checks. The already-scrubbed redirect response still crosses the governed release boundary.
-        let reason = format!("cross-host redirect not followed: {location}");
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason.clone(),
-            correlation.clone(),
-        ));
-    } else {
-        state.audit.push(NetworkAuditEvent::allow(
-            &connect.host,
-            connect.port,
-            correlation.clone(),
-        ));
-    }
-
-    deliver_effect(
+/// Record a refusal of the request, then answer the workload.
+fn refuse<W: Write>(
+    exchange: &Exchange<'_>,
+    refusal: Refusal,
+    state: &SharedState,
+    client_writer: &mut W,
+) {
+    record_refusal(state, &exchange.subject(), &refusal.reason);
+    write_reply(
         client_writer,
-        &prepared_response,
-        response_permit,
-        "governed response",
-    )
+        &exchange.method,
+        refusal.reply,
+        Some(exchange.request.body.as_bytes()),
+    );
+}
+
+/// Answer the workload with the reply of a refusal.
+fn write_reply<W: Write>(
+    client_writer: &mut W,
+    request_method: &str,
+    reply: Reply,
+    mcp_request: Option<&[u8]>,
+) {
+    match reply {
+        Reply::Diagnostic { status, body } => {
+            write_trusted_diagnostic(client_writer, request_method, status, body);
+        }
+        Reply::Interceptor { error, mcp } => write_interceptor_error(
+            client_writer,
+            request_method,
+            &error,
+            mcp_request.filter(|_| mcp),
+        ),
+    }
 }
 
 /// Forward a plain-HTTP (non-TLS) exchange to an already-open plaintext upstream.
@@ -568,7 +287,7 @@ where
 /// read (`parsed`) and `origin_target` is its origin-form target (`/path?query`) from the absolute
 /// URL. It builds the boundary request and hands the shared legs to [`run_l7_legs`], which
 /// canonicalizes the path and refuses a credential on it. Plain HTTP has no CONNECT authority to bind
-/// against, so the post-mutation re-check is a no-op.
+/// against, so the post-mutation re-check does nothing.
 pub(super) fn forward_plain(
     client_writer: &mut TcpStream,
     upstream: TcpStream,
@@ -610,16 +329,9 @@ pub(super) fn forward_plain(
     };
     req.headers.set("Host", host_value);
 
-    run_l7_legs(
-        connect,
-        req,
-        &mut upstream_buf,
-        client_writer,
-        state,
-        correlation,
-        false, // plain HTTP was never encrypted — not TLS-intercepted
-        |_method, _target, _headers| Ok(()),
-    )
+    // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
+    let exchange = Exchange::new(connect, Binding::None, false, correlation, req, state);
+    run_l7_legs(exchange, &mut upstream_buf, client_writer, state)
 }
 
 /// Wrap the already-open pinned upstream socket in the additive TLS trust bundle.
@@ -682,17 +394,6 @@ impl<S: Write> Write for Bounded<S> {
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
-}
-
-/// Claim one effect from the authorization authority.
-fn claim_effect(
-    state: &SharedState,
-    attempt: &EffectAttempt<'_>,
-) -> io::Result<ClaimedEffectPermit> {
-    state
-        .effect_interceptor
-        .intercept(attempt)
-        .map(ClaimedEffectPermit::new)
 }
 
 /// Write an effect refusal or a static interceptor failure.
@@ -807,93 +508,14 @@ fn deliver_or_record_failure<W: Write>(
     }
 }
 
-/// What an egress decision is *about* — the non-secret identity of one exchange.
-struct DecisionSubject<'a> {
-    host: &'a str,
-    port: u16,
-    method: &'a str,
-    path: &'a str,
-}
-
-/// Emit one final egress decision.
-fn emit_decision(
-    state: &SharedState,
-    subject: DecisionSubject<'_>,
-    decision: AuditDecision,
-    reason: &str,
-    correlation: RequestId,
-) {
-    state.emitter.emit(EgressDecision {
-        host: subject.host.to_string(),
-        port: subject.port,
-        method: subject.method.to_string(),
-        path: subject.path.to_string(),
-        decision,
-        reason: reason.to_string(),
-        correlation,
-    });
-}
-
 /// The RFC 3986 normal form of an origin-form request path, `/` when it is empty, or why it is refused.
-fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> {
+pub(super) fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> {
     let normal = normalize_path(path)?;
     Ok(if normal.is_empty() {
         "/".to_string()
     } else {
         normal
     })
-}
-
-/// A request the gateway refuses before any request leg runs.
-struct RefusedRequest<'a> {
-    method: Option<&'a str>,
-    path: &'a str,
-    reason: &'a str,
-    diagnostic: &'a [u8],
-}
-
-/// Record a refused request and answer the client 403.
-fn refuse_request(
-    state: &SharedState,
-    connect: &ConnectRequest,
-    client_writer: &mut impl Write,
-    refused: RefusedRequest<'_>,
-    correlation: RequestId,
-) {
-    state.audit.push(NetworkAuditEvent::deny(
-        &connect.host,
-        connect.port,
-        refused.reason.to_string(),
-        correlation.clone(),
-    ));
-    emit_decision(
-        state,
-        DecisionSubject {
-            host: &connect.host,
-            port: connect.port,
-            method: refused.method.unwrap_or_default(),
-            path: refused.path,
-        },
-        AuditDecision::Deny,
-        refused.reason,
-        correlation,
-    );
-    write_trusted_diagnostic(
-        client_writer,
-        refused.method.unwrap_or("GET"),
-        403,
-        refused.diagnostic,
-    );
-}
-
-/// The `params.cursor` a `tools/list` request names.
-fn list_cursor(body: &[u8]) -> Option<String> {
-    let request: serde_json::Value = serde_json::from_slice(body).ok()?;
-    request
-        .get("params")?
-        .get("cursor")?
-        .as_str()
-        .map(str::to_string)
 }
 
 /// Split an origin-form request target into `(path, query)`.
@@ -905,7 +527,7 @@ fn split_target(target: &str) -> (String, String) {
 }
 
 /// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
-fn reconstruct_target(target: &Target) -> String {
+pub(super) fn reconstruct_target(target: &Target) -> String {
     if target.query.is_empty() {
         target.path.clone()
     } else {
@@ -914,7 +536,7 @@ fn reconstruct_target(target: &Target) -> String {
 }
 
 /// Require the inner HTTP request to name the authority admitted by CONNECT.
-fn validate_request_binding(
+pub(super) fn validate_request_binding(
     connect: &ConnectRequest,
     method: &str,
     target: &str,

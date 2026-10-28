@@ -1281,6 +1281,83 @@ mod tests {
         assert_eq!(last.cause(), DecisionCause::Permitted);
     }
 
+    /// **A decision paired on one thread keeps its own rule** while other threads pair theirs at
+    /// the same time, because each thread holds its own verdict between `intercept` and `emit`.
+    #[test]
+    fn paired_decisions_on_concurrent_threads_keep_their_own_rule() {
+        let history = tempfile::tempdir().expect("history directory");
+        let (interceptor, recorder, emitter) = per_path_rules(history.path());
+
+        let threads: Vec<_> = (0..8)
+            .map(|thread| {
+                let interceptor = Arc::clone(&interceptor);
+                let emitter = Arc::clone(&emitter);
+                std::thread::spawn(move || {
+                    let path = if thread % 2 == 0 { "/a" } else { "/b" };
+                    for _ in 0..100 {
+                        interceptor
+                            .intercept(&request_to(path))
+                            .expect("the rule for the path permits it")
+                            .mark_indeterminate();
+                        emitter.emit(permit_of(path));
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("a pairing thread finishes");
+        }
+
+        let recorded = recorder.recorded();
+        assert_eq!(recorded.len(), 800);
+        for decision in &recorded {
+            let (_, resource, rule, verdict, _) = decision.parts();
+            assert!(matches!(rule, EffectiveRule::Policy(_)), "{decision:?}");
+            assert_eq!(verdict, EffectiveVerdict::Permit);
+            let [attribution] = decision.attribution() else {
+                panic!("one determining policy: {decision:?}");
+            };
+            let own = resource
+                .strip_prefix("api.example.com:443/")
+                .expect("the request resource");
+            assert_eq!(
+                attribution.annotation_id.as_deref(),
+                Some(own),
+                "a record names the rule of its own path: {decision:?}"
+            );
+        }
+    }
+
+    /// **A pair split across threads records the gate's label, never a rule.** The held verdict
+    /// stays on the thread that intercepted, so an emit on another thread finds nothing to take.
+    #[test]
+    fn a_pair_split_across_threads_records_the_gate_label() {
+        let history = tempfile::tempdir().expect("history directory");
+        let (interceptor, recorder, emitter) = per_path_rules(history.path());
+
+        std::thread::spawn(move || {
+            interceptor
+                .intercept(&request_to("/a"))
+                .expect("rule `a` permits it")
+                .mark_indeterminate();
+        })
+        .join()
+        .expect("the intercepting thread finishes");
+        std::thread::spawn(move || emitter.emit(permit_of("/a")))
+            .join()
+            .expect("the emitting thread finishes");
+
+        let recorded = recorder.recorded();
+        let [decision] = recorded.as_slice() else {
+            panic!("one record: {recorded:?}");
+        };
+        let (_, _, rule, verdict, _) = decision.parts();
+        assert_eq!(*rule, EffectiveRule::Enforcement("egress"));
+        assert_eq!(verdict, EffectiveVerdict::Permit);
+        assert!(decision.attribution().is_empty());
+        assert_eq!(decision.cause(), DecisionCause::Enforcement);
+    }
+
     /// A gate whose own result disagrees with the policy verdict beneath it keeps the gate's label:
     /// a floor may refuse what policy permitted, and it is not that permit that decided.
     #[test]
@@ -1445,6 +1522,106 @@ mod tests {
             decision,
             reason: reason.to_string(),
             correlation: RequestId::new("remote-tool"),
+        }
+    }
+
+    /// The decorator over [`PerPathVerdicts`] for a policy that permits `/a` by rule `a` and `/b`
+    /// by rule `b`, with its recorder and emitter.
+    fn per_path_rules(
+        history: &std::path::Path,
+    ) -> (
+        Arc<dyn EgressEffectInterceptor>,
+        Arc<DecisionRecorder>,
+        Arc<EgressDecisionRecorder>,
+    ) {
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("per-path-rules.cedar"),
+                text: r#"
+                    @id("a") permit(principal, action == Box::Action::"http:request", resource)
+                    when { context.input.path == "/a" };
+                    @id("b") permit(principal, action == Box::Action::"http:request", resource)
+                    when { context.input.path == "/b" };
+                "#
+                .to_string(),
+            }],
+            &history.join("dogwood.redb"),
+        )
+        .expect("policy opens");
+        let verdicts = ["/a", "/b"]
+            .into_iter()
+            .map(|path| {
+                let decision = policy.decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &policy::Request::Http {
+                        host: "api.example.com",
+                        port: 443,
+                        method: "GET",
+                        path,
+                        body_bytes: 0,
+                        intercepted: true,
+                    },
+                );
+                assert!(decision.is_allow(), "a rule permits {path}");
+                (path, decision)
+            })
+            .collect();
+        let interceptor = EgressDecisionInterceptor::over(Arc::new(PerPathVerdicts { verdicts }));
+        let recorder = DecisionRecorder::discarding();
+        let emitter = Arc::new(EgressDecisionRecorder::over(Arc::clone(&recorder)));
+        (interceptor, recorder, emitter)
+    }
+
+    /// A policy adapter that reports the engine's verdict for each path to the observer, as the
+    /// engine does, and writes no history.
+    struct PerPathVerdicts {
+        verdicts: Vec<(&'static str, Decision)>,
+    }
+
+    impl EgressEffectInterceptor for PerPathVerdicts {
+        fn intercept(
+            &self,
+            effect: &EgressEffectAttempt<'_>,
+        ) -> io::Result<Box<dyn EgressEffectPermit>> {
+            let EgressEffectAttempt::HttpRequest { path, .. } = effect else {
+                panic!("only requests reach this adapter");
+            };
+            let (_, decision) = self
+                .verdicts
+                .iter()
+                .find(|(own, _)| own == path)
+                .expect("a verdict for the path");
+            PolicyDecisionObserver.observed(
+                r#"Box::Action::"http:request""#,
+                &format!("api.example.com:443{path}"),
+                decision,
+            );
+            Ok(Box::new(DiscardPermit))
+        }
+    }
+
+    fn request_to(path: &'static str) -> EgressEffectAttempt<'static> {
+        EgressEffectAttempt::HttpRequest {
+            host: "api.example.com",
+            port: 443,
+            method: "GET",
+            path,
+            body_bytes: 0,
+            intercepted: true,
+            mcp: None,
+        }
+    }
+
+    fn permit_of(path: &str) -> EgressDecision {
+        EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: "GET".to_string(),
+            path: path.to_string(),
+            decision: AuditDecision::Allow,
+            reason: String::new(),
+            correlation: RequestId::new(path),
         }
     }
 }
