@@ -337,6 +337,9 @@ enum Answer {
     FrameLimit(usize),
     /// Accept, send this many text messages `tick <n>`, one each interval, and never read.
     Talk(u32, Duration),
+    /// Answer a request with no `Sec-WebSocket-Key` with a `200` and the body `ok`; accept and echo
+    /// a handshake.
+    OkOrEcho,
 }
 
 /// What reached the upstream.
@@ -454,6 +457,11 @@ fn serve(
             }
         }
         Answer::FrameLimit(_) => reply.extend(switching(&accept_value(&key), "")),
+        Answer::OkOrEcho if key.is_empty() => {
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")?;
+            return tls.flush();
+        }
+        Answer::OkOrEcho => reply.extend(switching(&accept_value(&key), "")),
         Answer::Reflect => {
             reply.extend(switching(&accept_value(&key), ""));
             let authorization = header(&head, "authorization").unwrap_or_default();
@@ -2273,4 +2281,81 @@ fn a_clean_close_emits_no_deny_decision() {
     upstream.frames(1);
 
     assert_eq!(emitted_denials(&emitter), Vec::new());
+}
+
+// ============================================================================================
+// A WebSocket on a kept-alive connection
+// ============================================================================================
+
+/// **A WebSocket opens as a later request on a kept-alive tunnel, and the upgraded connection
+/// never carries HTTP again.** Request 1 is an ordinary `GET` whose reply keeps the tunnel open.
+/// Request 2 on the same tunnel is a handshake: it opens its own governed upstream socket, with its
+/// own `Resolve` and `Connect`, and gets the `101`. Messages then cross the relay. An HTTP head
+/// that the workload sends after the `101` is a frame to the relay, which breaks RFC 6455: the
+/// workload gets 1002 and the end of the tunnel, and no upstream sees a third request.
+#[test]
+fn a_websocket_opens_on_a_kept_alive_tunnel_and_the_connection_never_carries_http_again() {
+    let host = "kept.ws.test";
+    let upstream = WsUpstream::start(host, Answer::OkOrEcho);
+    let policy = PathPolicy::permitting(host);
+    let handle = start_gateway(host, &upstream, policy.clone(), MitmConfig::default());
+    let mut client = WsClient::connect(&handle, host, upstream.port);
+
+    let first = format!(
+        "GET /first HTTP/1.1\r\nHost: {host}:{}\r\n\r\n",
+        upstream.port
+    );
+    let reply = client.request(&first);
+    assert_eq!(status(&reply), 200, "{reply:?}");
+    assert!(reply.ends_with("ok"), "{reply:?}");
+    assert_eq!(
+        header(&reply, "connection"),
+        None,
+        "the first reply keeps the tunnel open"
+    );
+
+    let switching = client.request(&handshake_head(host, upstream.port, ""));
+    assert!(
+        switching.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+        "{switching:?}"
+    );
+    client.send(TEXT, b"hello");
+    assert_eq!(client.recv().payload, b"hello");
+
+    client.send_raw(first.as_bytes());
+    assert_eq!(client.recv().close_code(), 1002);
+    assert_eq!(client.read_end().unwrap(), 0, "the tunnel ends");
+
+    let heads = upstream.handshakes();
+    assert_eq!(heads.len(), 2, "{heads:?}");
+    assert!(heads[0].starts_with("GET /first "), "{heads:?}");
+    assert!(heads[1].starts_with("GET /chat "), "{heads:?}");
+    assert_eq!(
+        policy.kinds(),
+        vec![
+            "Resolve",
+            "Connect",
+            "HttpRequest",
+            "ResponseRelease",
+            "Resolve",
+            "Connect",
+            "HttpRequest",
+            "ResponseRelease",
+        ],
+        "each request opens its own governed socket"
+    );
+    assert_eq!(
+        policy.requests(),
+        vec!["request GET /first", "request GET /chat"]
+    );
+    let log = policy.log();
+    let release = log
+        .iter()
+        .position(|entry| entry == "release status=101")
+        .expect("the 101 is released");
+    assert_eq!(
+        log[release + 1],
+        format!("outcome Completed({})", switching.len()),
+        "the release of the 101 counts the bytes of the 101 only: {log:?}"
+    );
 }
