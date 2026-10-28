@@ -93,8 +93,8 @@ mod tests {
 
     #[test]
     fn empty_scope_allows() {
-        // No control matched. Cedar already authorized this request at the effect seam; an empty
-        // mutator scope has nothing to add and nothing to deny.
+        // No control matched. The authored policy decides this request at the effect seam; an
+        // empty mutator scope has nothing to add and nothing to deny.
         assert_eq!(
             decide_request(std::iter::empty()),
             Verdict::Allow { mutations: vec![] }

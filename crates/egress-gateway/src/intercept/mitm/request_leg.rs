@@ -19,11 +19,8 @@ pub(super) fn evaluate_and_apply(
     req: &mut InterceptedRequest,
     cx: &CapabilityContext,
 ) -> RequestDecision {
-    // The Request scope runs HTTP guards and credential controls deny-overrides;
-    // the Connection gate (DNS/IP) already authorized the connection on the pinned IPs at the
-    // Connection phase and is not re-run here. The adapter has already AND-ed the Connection
-    // verdict (a Deny there blocked before this leg), so a Request-scope Allow here is the final
-    // Allow for a TLS-terminated route.
+    // The `http:request` decision at the effect seam comes after this fold, so an allow here is not
+    // final.
     match controls.evaluate_request(req, cx) {
         Verdict::Allow { mutations } => {
             apply_all(mutations, req);

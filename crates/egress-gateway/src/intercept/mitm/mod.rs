@@ -61,11 +61,11 @@ pub struct MitmConfig {
     /// today's TCP-only behavior unchanged. The socket file is created
     /// mode `0600`; `bind_ports`/DNS-rebind concerns do not apply to a filesystem-scoped socket.
     pub unix_socket_path: Option<PathBuf>,
-    /// An optional upstream proxy to forward through (chained egress); `None` connects directly.
+    /// Not supported: start refuses `Some(..)` with [`ProxyError::Config`].
     pub external_proxy: Option<SocketAddr>,
     /// Where to write the public ephemeral CA cert; `None` keeps it in memory only.
     pub intercept_ca_dir: Option<PathBuf>,
-    /// Whether to offer HTTP/2 on intercepted TLS (h1 + h2 share one evaluate path).
+    /// Not supported: start refuses `true` with [`ProxyError::Config`].
     pub enable_h2: bool,
     /// Response size/content limits.
     pub response_limits: ResponseLimits,
@@ -180,9 +180,9 @@ pub struct MitmInterceptor {
 }
 
 impl MitmInterceptor {
-    /// Start the adapter: validate the credential injection against the adapter's max visibility,
-    /// build the ephemeral CA and upstream trust bundle, bind `127.0.0.1:0`, spawn the accept loop,
-    /// and return a [`MitmHandle`].
+    /// Start the adapter: validate the credential injection, refuse the two unsupported config
+    /// values, build the ephemeral CA and upstream trust bundle, bind one transport, spawn the
+    /// accept loop, and return a [`MitmHandle`].
     pub fn start(
         config: MitmConfig,
         credentials: CapabilitySet,
@@ -231,9 +231,18 @@ impl MitmInterceptor {
         effect_interceptor: Arc<dyn EffectInterceptor>,
         ca_file: Option<&std::fs::File>,
     ) -> Result<MitmHandle> {
-        // The MITM adapter's max visibility is `Http` when tls-intercept is on (this compile), so a
-        // Control needing Http is satisfiable. Validate the set fail-closed.
         controls.validate()?;
+        if config.enable_h2 {
+            return Err(ProxyError::Config(
+                "enable_h2 is not supported: the gateway serves HTTP/1.1 only".to_string(),
+            ));
+        }
+        if config.external_proxy.is_some() {
+            return Err(ProxyError::Config(
+                "external_proxy is not supported: the gateway connects only to the pinned address"
+                    .to_string(),
+            ));
+        }
 
         // Ephemeral CA. Its public cert path (if a dir was configured) is the SSL_CERT_FILE.
         let ca = EphemeralCa::generate(config.intercept_ca_dir.as_deref(), ca_file)?;

@@ -10,11 +10,11 @@ name = "egress_gateway"
 path = "src/lib.rs"
 
 [features]
-# TLS interception (the MITM adapter's selective-terminate machinery) is a
-# DEFAULT-ON cargo feature scoped to Part A only (never Part B). With it off the
-# crate still builds as a tunnel-only MITM and any Control needing `Http` visibility
-# is a config-load error. The feature pulls in the TLS stack
-# (rustls + ring for the ephemeral CA); the socket-free Part B never touches them.
+# TLS interception (the MITM adapter: `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
+# `ResponseLimits`) is a DEFAULT-ON cargo feature scoped to Part A only (never
+# Part B). With it off the crate builds with no adapter. The feature pulls in the
+# TLS stack (rustls + ring for the ephemeral CA); the socket-free Part B never
+# touches them.
 default = ["tls-intercept"]
 tls-intercept = [
     "dep:rustls",

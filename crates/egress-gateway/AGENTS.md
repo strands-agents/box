@@ -32,10 +32,12 @@ can equal. A 45th name needs a named external caller.
 
 The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and returning a
 `Box<dyn EffectPermit>` (`src/effect.rs`). It speaks `io::Result`, never `ProxyError`, and a denial is
-`io::ErrorKind::PermissionDenied`. There are exactly three attempt kinds — `Connect`, `HttpRequest`,
-`ResponseRelease` — each admitted before its effect and each reporting a terminal `EffectOutcome`.
+`io::ErrorKind::PermissionDenied`. There are exactly four attempt kinds — `Resolve`, `Connect`,
+`HttpRequest`, `ResponseRelease` — each admitted before its effect. Each kind but `Resolve`, which is
+a decision only, reports a terminal `EffectOutcome`.
 `record_outcome` and `mark_indeterminate` consume `self: Box<Self>`, and `ClaimedEffectPermit`'s
-`Drop` calls `mark_indeterminate`, so one permit makes one terminal transition even on a panic.
+`Drop` calls `mark_indeterminate`, so a permit of the other three kinds makes one terminal transition
+even on a panic.
 
 ### One thing here is deliberately not authorization
 

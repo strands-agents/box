@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 33 names, 29 unconditional and 4
+The crate root is the complete public API — 44 names, 40 unconditional and 4
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -23,13 +23,17 @@ behind the `tls-intercept` feature:
 | Audit values | `AuditDecision`, `EgressDecision`, `NetworkAuditEvent`, `RequestId`, `SharedAuditLog` |
 | Boundary values | `BodyRef`, `DenyReason`, `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target`, `Verdict` |
 | Credential mutators | `CapabilityContext`, `CapabilityFault`, `CapabilityOutcome`, `CapabilitySet`, `CapabilitySetBuilder`, `CredentialCapability` |
+| Host spelling | `is_bindable_host`, `normalize_host` |
 | Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit` |
+| Remote MCP | `McpFrame`, `McpListReply`, `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Interception port | `Interceptor` |
 | Audit seam | `Emitter`, `StubEmitter` |
-| Errors | `ProxyError`, `Result` |
+| Errors | `ProxyError`, `Result`, `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE` |
 | Default adapter | `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.
+`SharedAuditLog` keeps the newest 1,024 events. A push to a full log drops the
+oldest event.
 
 The default adapter items are available with the default-on `tls-intercept`
 feature.
@@ -41,6 +45,9 @@ Domain authorization is supplied as an `EffectInterceptor`:
 ```rust
 pub trait EffectInterceptor: Send + Sync {
     fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>>;
+    fn stage_mcp_catalog(&self, _server: &str, _reply: McpListReply<'_>) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub trait EffectPermit: Send {
@@ -49,27 +56,35 @@ pub trait EffectPermit: Send {
 }
 ```
 
-The seam speaks `std::io::Result`, not `ProxyError`. There are three attempt
+The seam speaks `std::io::Result`, not `ProxyError`. There are four attempt
 kinds, and the proxy presents each one immediately before its effect:
 
 | Attempt | Fields | Reported when |
 |---|---|---|
+| `EffectAttempt::Resolve` | `host`, `port` | before the host is resolved, once per connection |
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `intercepted`, `mcp` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
 
-No attempt carries a header, a body, or credential material. `path` excludes the
-query string and is the path the workload sent, captured before any credential
-edit. `body_bytes` is a length.
+No attempt carries a header or credential material. The only body content in an
+attempt is `mcp`, the MCP frame of a request to a configured remote MCP server.
+`path` excludes the query string and is the path the workload sent, captured
+before any credential edit. `body_bytes` is a length. `intercepted` is `true`
+when the request came through TLS interception.
 
-Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
-exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
-`ConnectFailed`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
-permit becomes `mark_indeterminate`, so an early return or a panic still reports.
+A `Resolve` permit is a decision only, and it receives no outcome. Both
+`EffectPermit` methods consume `self: Box<Self>`, so a permit of the other three
+kinds reaches exactly one terminal transition. The proxy reports
+`EffectOutcome::Connected`, `ConnectFailed`, `Completed`, `Replied`, `Failed`,
+`Partial`, or `Indeterminate`. A dropped permit of those kinds becomes
+`mark_indeterminate`, so an early return or a panic still reports.
+
+`stage_mcp_catalog` receives each `tools/list` reply from a remote MCP server
+before the workload receives it. Its default does nothing.
 
 An `io::ErrorKind::PermissionDenied` from `intercept` blocks the effect. For a
-connect, that happens before any upstream socket opens. Both adapter constructors
-take an `Arc<dyn EffectInterceptor>`, so an adapter with no authorization is
+connect, that happens before any upstream socket opens. Each adapter constructor
+takes an `Arc<dyn EffectInterceptor>`, so an adapter with no authorization is
 unconstructible.
 
 ## Destination Decisions
@@ -134,7 +149,7 @@ port that is not a `u16`.
 
 ## Default Adapter
 
-Two constructors start the adapter, and both require the authorization seam:
+Three constructors start the adapter, and each requires the authorization seam:
 
 ```text
 MitmInterceptor::start(MitmConfig, CapabilitySet, Arc<dyn EffectInterceptor>)
@@ -143,11 +158,19 @@ MitmInterceptor::start(MitmConfig, CapabilitySet, Arc<dyn EffectInterceptor>)
 MitmInterceptor::start_with_emitter(MitmConfig, CapabilitySet,
                                     Arc<dyn EffectInterceptor>, Box<dyn Emitter>)
     -> Result<MitmHandle>
+
+MitmInterceptor::start_with_emitter_and_opened_ca(MitmConfig, CapabilitySet,
+                                                  Arc<dyn EffectInterceptor>,
+                                                  Box<dyn Emitter>, &File)
+    -> Result<MitmHandle>
 ```
 
 `start` installs a `StubEmitter`, which buffers the durable records in memory.
-Both validate the `CapabilitySet`, generate the ephemeral CA, build the additive
-upstream trust bundle, bind exactly one transport, and spawn the accept loop:
+When `intercept_ca_dir` is set, `start_with_emitter_and_opened_ca` writes the
+public CA certificate to a file that the caller opened. Each validates the
+`CapabilitySet`, refuses the two unsupported `MitmConfig` values below,
+generates the ephemeral CA, builds the additive upstream trust bundle, binds
+exactly one transport, and spawns the accept loop:
 
 ```rust
 use std::io;
@@ -194,7 +217,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has eleven fields:
+`MitmConfig` has thirteen fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -210,6 +233,11 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `dns_overrides` | `Vec<(String, IpAddr)>` | empty |
 | `upstream_read_deadline` | `Duration` | 300 s |
 | `max_connections` | `usize` | `256` |
+| `mcp_servers` | `Vec<(String, String)>` | empty |
+
+Start refuses `enable_h2 = true` and `external_proxy = Some(..)` with
+`ProxyError::Config`, before it makes the CA or binds a transport. The gateway
+serves only HTTP/1.1, and it connects only to the pinned address.
 
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and

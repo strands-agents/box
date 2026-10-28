@@ -4,10 +4,9 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProxyError {
-    /// A config-load failure, fail closed: a malformed route, a `Control` needing more visibility
-    /// than the interceptor can ever provide, or a route requiring interception while
-    /// `tls-intercept` is off. Wraps the vault's [`CredentialError`](credentials::CredentialError)
-    /// when a credential route cannot be built.
+    /// A config-load failure, fail closed: a malformed route, two capabilities on one pattern, or a
+    /// `MitmConfig` value that start refuses. Wraps the vault's
+    /// [`CredentialError`](credentials::CredentialError) when a credential route cannot be built.
     #[error("invalid proxy config: {0}")]
     Config(String),
 

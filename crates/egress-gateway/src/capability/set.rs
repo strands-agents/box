@@ -48,8 +48,8 @@ impl CapabilitySet {
 
     /// Evaluate the **request leg** to a [`Verdict`] — deny-overrides. Runs every control
     /// whose pattern matches against the terminated request. An all-abstain leg (the normal
-    /// credential-injection path) allows and carries the accumulated mutations — safe because Cedar
-    /// already authorized this request at the effect seam.
+    /// credential-injection path) allows and carries the accumulated mutations; the `http:request`
+    /// decision at the effect seam comes after this leg.
     pub fn evaluate_request(
         &self,
         req: &mut InterceptedRequest,
@@ -187,7 +187,7 @@ mod tests {
     // --- the set holds no authorization authority ----------------------------
 
     /// An empty set allows: it means "inject no credentials", not "deny everything". Authorization is
-    /// Cedar's at the effect seam, not this type's job.
+    /// the authored policy's at the effect seam, not this type's job.
     #[test]
     fn empty_set_allows_with_no_mutations() {
         let s = CapabilitySet::default();

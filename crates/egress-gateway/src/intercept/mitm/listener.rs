@@ -436,10 +436,10 @@ fn open_governed_upstream(
             }
         };
 
-    // Authorization is Cedar's, enforced inside `open_upstream` through the `EffectInterceptor` seam
-    // (`EffectAttempt::Connect`) before the socket opens — there is no allow/deny authority in this
-    // crate. Every connection is terminated and inspected; see `open_upstream`'s `http_visibility` for
-    // why no route is an opaque tunnel.
+    // Authorization is the authored policy's, enforced inside `open_upstream` through the
+    // `EffectInterceptor` seam (`EffectAttempt::Connect`) before the socket opens — there is no
+    // allow/deny authority in this crate. Every connection is terminated and inspected; see
+    // `open_upstream`'s `http_visibility` for why no route is an opaque tunnel.
     match open_upstream(state, connect, &pinned, correlation) {
         Ok(upstream) => Ok(upstream),
         Err(error) => {

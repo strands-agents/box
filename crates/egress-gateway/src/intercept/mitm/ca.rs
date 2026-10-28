@@ -392,4 +392,23 @@ mod tests {
         assert_eq!(ca.ca_path(), Some(directory.join("cert.pem").as_path()));
         let _ = std::fs::remove_dir_all(parent);
     }
+
+    #[test]
+    fn an_opened_ca_file_receives_nothing_without_a_directory() {
+        let parent =
+            std::env::temp_dir().join(format!("box-ca-opened-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir(&parent).expect("CA parent");
+        let path = parent.join("cert.pem");
+        let file = std::fs::File::create(&path).expect("CA descriptor");
+
+        let ca = EphemeralCa::generate(None, Some(&file)).expect("CA stays in memory");
+
+        assert_eq!(ca.ca_path(), None);
+        assert!(
+            std::fs::read(&path).expect("opened CA reads").is_empty(),
+            "with no directory, the opened file must receive no certificate"
+        );
+        let _ = std::fs::remove_dir_all(parent);
+    }
 }

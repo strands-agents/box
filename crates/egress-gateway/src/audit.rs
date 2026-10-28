@@ -1,5 +1,6 @@
 //! Audit records and the fast in-memory log.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// A request correlation id, tying every record about one exchange together.
@@ -216,10 +217,13 @@ pub struct EgressDecision {
     pub correlation: RequestId,
 }
 
-/// A fast, in-memory, **not** tamper-evident audit log.
+/// The most events that [`SharedAuditLog`] holds.
+const AUDIT_LOG_CAPACITY: usize = 1024;
+
+/// A fast, in-memory, **not** tamper-evident audit log that keeps the newest 1,024 events.
 #[derive(Debug, Clone, Default)]
 pub struct SharedAuditLog {
-    events: Arc<Mutex<Vec<NetworkAuditEvent>>>,
+    events: Arc<Mutex<VecDeque<NetworkAuditEvent>>>,
 }
 
 impl SharedAuditLog {
@@ -228,18 +232,21 @@ impl SharedAuditLog {
         Self::default()
     }
 
-    /// Append an event (fire-and-forget; a poisoned lock is ignored so the audit can never block or
-    /// fail the request path).
+    /// Append an event, and drop the oldest event when the log is full (fire-and-forget; a poisoned
+    /// lock is ignored so the audit can never block or fail the request path).
     pub fn push(&self, event: NetworkAuditEvent) {
         if let Ok(mut events) = self.events.lock() {
-            events.push(event);
+            if events.len() == AUDIT_LOG_CAPACITY {
+                events.pop_front();
+            }
+            events.push_back(event);
         }
     }
 
-    /// Drain and return every buffered event, leaving the log empty.
+    /// Drain and return every buffered event, oldest first, leaving the log empty.
     pub fn drain(&self) -> Vec<NetworkAuditEvent> {
         match self.events.lock() {
-            Ok(mut events) => std::mem::take(&mut *events),
+            Ok(mut events) => Vec::from(std::mem::take(&mut *events)),
             Err(_) => Vec::new(),
         }
     }
@@ -278,6 +285,35 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert!(log.is_empty(), "drain leaves the log empty");
         assert_eq!(drained[1].decision, Decision::Deny);
+    }
+
+    #[test]
+    fn the_audit_log_keeps_only_the_newest_events() {
+        let log = SharedAuditLog::new();
+        for n in 0..AUDIT_LOG_CAPACITY + 10 {
+            log.push(NetworkAuditEvent::deny(
+                "api.example.com",
+                443,
+                n.to_string(),
+                corr(),
+            ));
+        }
+        assert_eq!(
+            log.len(),
+            AUDIT_LOG_CAPACITY,
+            "a full log drops one event per push"
+        );
+        let drained = log.drain();
+        let reasons: Vec<usize> = drained.iter().map(|e| e.reason.parse().unwrap()).collect();
+        let newest: Vec<usize> = (10..AUDIT_LOG_CAPACITY + 10).collect();
+        assert_eq!(
+            reasons, newest,
+            "the log keeps the newest events, oldest first"
+        );
+        assert!(log.is_empty(), "drain leaves the log empty");
+
+        log.push(NetworkAuditEvent::allow("api.example.com", 443, corr()));
+        assert_eq!(log.len(), 1, "a drained log takes new events");
     }
 
     #[test]

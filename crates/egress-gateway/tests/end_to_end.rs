@@ -11,7 +11,7 @@
 //! **The authorization authority is mandatory**, so these tests supply
 //! [`PermitEverything`] — a stand-in that allows every effect — or [`RefuseLinkLocal`], which refuses
 //! a connect to an IPv4 link-local address. What they exercise is the transport: listener, CONNECT
-//! handling, resolve-once/pin, the per-address decision, handle surface, audit. The Cedar-governed authorization paths are proven
+//! handling, resolve-once/pin, the per-address decision, handle surface, audit. The policy-governed authorization paths are proven
 //! in `interception_e2e.rs`, whose `FixedPolicy` allows only named hosts.
 //!
 //! `tls-intercept` is default-on, so these run against the full adapter.
@@ -386,4 +386,53 @@ fn af_unix_socket_mode_is_0600() {
 
     handle.shutdown();
     let _ = std::fs::remove_file(&sock);
+}
+
+// ============================================================================================
+// Start refuses a config value that the adapter does not support.
+// ============================================================================================
+
+/// The adapter has no HTTP/2 code, so start refuses `enable_h2 = true`.
+#[test]
+fn enabling_h2_is_refused_at_start() {
+    let config = MitmConfig {
+        enable_h2: true,
+        ..MitmConfig::default()
+    };
+    assert_refused_at_start(config, "enable_h2");
+}
+
+/// The adapter dials only the pinned address, so start refuses `external_proxy = Some(..)`.
+#[test]
+fn an_external_proxy_is_refused_at_start() {
+    let config = MitmConfig {
+        external_proxy: Some("127.0.0.1:3128".parse().unwrap()),
+        ..MitmConfig::default()
+    };
+    assert_refused_at_start(config, "external_proxy");
+}
+
+/// Start `config` on AF_UNIX with a CA directory, and expect a `ProxyError::Config` that names
+/// `field`, with no CA directory and no socket file made.
+fn assert_refused_at_start(config: MitmConfig, field: &str) {
+    let sock = unique_sock_path();
+    let _ = std::fs::remove_file(&sock);
+    let ca_dir = sock.with_extension("ca");
+    let _ = std::fs::remove_dir_all(&ca_dir);
+    let config = MitmConfig {
+        unix_socket_path: Some(sock.clone()),
+        intercept_ca_dir: Some(ca_dir.clone()),
+        ..config
+    };
+    // `MitmHandle` is not `Debug`, so match on the outcome.
+    match MitmInterceptor::start(config, CapabilitySet::default(), permit_everything()) {
+        Err(egress_gateway::ProxyError::Config(message)) => assert!(
+            message.contains(field),
+            "the error names the field: {message:?}"
+        ),
+        Err(other) => panic!("expected ProxyError::Config, got a different error: {other:?}"),
+        Ok(_) => panic!("start must refuse {field}"),
+    }
+    assert!(!sock.exists(), "a refused start binds no socket");
+    assert!(!ca_dir.exists(), "a refused start writes no CA");
 }

@@ -38,7 +38,7 @@ pub(super) fn intercept_tls<C: Read + Write>(
         .ok_or_else(|| ProxyError::Intercept("no ephemeral CA (tls-intercept off)".to_string()))?;
 
     // --- Server side: present a per-host leaf to the workload ---
-    let server_config = tls::server_config_for_host(ca, &connect.host, state.config.enable_h2)?;
+    let server_config = tls::server_config_for_host(ca, &connect.host)?;
     let server_conn = ServerConnection::new(Arc::new(server_config))
         .map_err(|e| ProxyError::Intercept(format!("server TLS init: {e}")))?;
     // Wrap the client TLS stream in a BufReader so the HTTP head is read line-buffered (not one

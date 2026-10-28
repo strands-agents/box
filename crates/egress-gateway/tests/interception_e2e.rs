@@ -4,8 +4,8 @@
 //! 1. **creates credentials** — a real `credentials::Vault` with an opaque phantom→real
 //!    route and/or an AWS SigV4 route;
 //! 2. **spins up the egress gateway** — a real `MitmInterceptor` bound to a localhost port, driving a
-//!    `CapabilitySet` set and (where authorization matters) a `FixedPolicy` stand-in for the Cedar
-//!    PDP wired through the `EffectInterceptor` seam, configured to trust a local TLS upstream's CA (the
+//!    `CapabilitySet` set and (where authorization matters) a `FixedPolicy` stand-in for the policy
+//!    wired through the `EffectInterceptor` seam, configured to trust a local TLS upstream's CA (the
 //!    additive trust bundle);
 //! 3. **sends a network request** — a real TLS workload client `CONNECT`s through the proxy, completes
 //!    the TLS handshake against the proxy's ephemeral leaf, and sends an HTTPS request;
@@ -46,7 +46,7 @@ use harness::{TlsUpstream, WorkloadClient};
 // The PDP stand-in: authorization arrives ONLY through the EffectInterceptor seam
 // ============================================================================================
 
-/// A test stand-in for the Cedar PDP, reached through the one seam this crate uses for authorization.
+/// A test stand-in for the policy, reached through the one seam this crate uses for authorization.
 ///
 /// `allowed_hosts` is the whole policy: a `Connect` attempt to a listed host is permitted, anything else
 /// is `PermissionDenied` — which the adapter turns into a 403 without opening a socket. Request/response
