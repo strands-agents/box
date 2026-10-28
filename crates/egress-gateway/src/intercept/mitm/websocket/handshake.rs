@@ -4,6 +4,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http::{HeaderMap, Version};
+use zeroize::Zeroizing;
 
 use super::super::http1::trim_ows;
 
@@ -111,7 +112,9 @@ fn single<'a>(headers: &'a HeaderMap, name: &'a str) -> Option<&'a str> {
 /// What a `101` must carry to answer one forwarded handshake.
 pub(in super::super) struct Expected {
     accept: String,
-    protocols: Vec<String>,
+    /// The offered subprotocols, in wiped owners: a credential route may inject its secret into
+    /// `Sec-WebSocket-Protocol`.
+    protocols: Vec<Zeroizing<String>>,
 }
 
 impl Expected {
@@ -121,7 +124,7 @@ impl Expected {
         Self {
             accept: accept_value(key),
             protocols: tokens(headers, "sec-websocket-protocol")
-                .map(str::to_string)
+                .map(|token| Zeroizing::new(token.to_string()))
                 .collect(),
         }
     }
@@ -155,7 +158,12 @@ pub(in super::super) fn check_switching_protocols(
     }
     match Field::of(headers, "sec-websocket-protocol") {
         Field::Absent => Ok(()),
-        Field::One(protocol) if expected.protocols.iter().any(|offered| offered == protocol) => {
+        Field::One(protocol)
+            if expected
+                .protocols
+                .iter()
+                .any(|offered| offered.as_str() == protocol) =>
+        {
             Ok(())
         }
         Field::One(_) | Field::Repeated => {

@@ -675,7 +675,7 @@ fn decide(
     // A `101` must answer the handshake as forwarded, after the credential fold.
     let expected = exchange
         .websocket_key()
-        .map(|key| Expected::new(key, request.headers()));
+        .map(|key| request.expected_answer(key));
     Ok(match decide_request(exchange, state) {
         Ok(permit) => Decided::Forward(permit, request, expected),
         Err(reply) => Decided::Answer(reply_response(

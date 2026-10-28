@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 
 use super::http1::{self, ResponseBodyMode};
 use super::serve::WriteCount;
-use super::websocket::{self, Handshake};
+use super::websocket::{self, Expected, Handshake};
 use crate::boundary::{BodyRef, HeaderMap, InterceptedResponse};
 use crate::error::{ProxyError, Result};
 use crate::mcp::mcp_denial_response;
@@ -333,9 +333,10 @@ impl UpstreamRequest {
         self.0
     }
 
-    /// The headers as forwarded, to read a field that carries no credential. Never format them.
-    pub(super) fn headers(&self) -> &http::HeaderMap {
-        self.0.headers()
+    /// What a `101` must carry to answer this request, the WebSocket handshake with `key`, as
+    /// forwarded.
+    pub(super) fn expected_answer(&self, key: &str) -> Expected {
+        Expected::new(key, self.0.headers())
     }
 }
 
