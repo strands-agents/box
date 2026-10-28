@@ -246,10 +246,8 @@ interception is not selective. The adapter runs on its own tokio runtime, on a
 thread that it starts, and `max_connections` bounds the connections that it
 serves at once. `upstream_read_deadline` bounds each read and each
 write on an upstream socket by the time with no byte, so an upstream that never drains the request
-or never replies ends the exchange with one `http:request::response` that has no `output`. Inside a
-tunnel there is no total bound: a request or a reply that keeps moving goes through, whatever its
-length. On plain HTTP the same value also bounds one exchange's upstream reads and writes as a
-whole, so an upstream that sips the request or drips its reply ends the exchange there too;
+or never replies ends the exchange with one `http:request::response` that has no `output`. There
+is no total bound: a request or a reply that keeps moving goes through, whatever its length;
 `box.toml` exposes no key for it.
 
 Each read and each write on a client socket waits at most 60 s, and the gateway closes the

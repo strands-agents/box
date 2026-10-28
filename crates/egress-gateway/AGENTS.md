@@ -109,13 +109,11 @@ Conventions: `docs/conventions.md`.
   `ProxyOnly` kernel pin, the real anti-hijack defence.
 - Report the pre-mutation `workload_path`, which `emit_decision` reads from `Subject`. Never
   read `req.target.path`; a `UrlPath` credential makes it the secret.
-- Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
-  `POST /v1/messages` by 6 bytes in 500 of 500 runs.
-- Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300
-  runs. Treat head-buffer guards as security tests, because one added header line leaks a credential
-  into freed heap silently.
-- Keep `the_status_line_budget_covers_every_reason_phrase`; `STATUS_LINE_BYTES = 64` is a constant
-  that a longer `reason()` phrase overruns.
+- hyper's head write buffer leaves one plain copy of each upstream head, not wiped, in freed heap
+  after each exchange, the same class as the rustls residual. Keep header values and the target in
+  `WipedBytes` owners, and treat `forwarded_header_values_share_a_wiped_owner` and
+  `the_forwarded_target_shares_a_wiped_owner` as security tests. Check again before stage 5 pools
+  upstream connections.
 - Never derive `Debug` on `HeaderMap` or `InterceptedRequest`, never format an upstream
   `http::Request`, `http::Uri`, `http::HeaderMap`, or `http::Response`, and never unwrap a value out
   of `Zeroizing`; one `eprintln!` then prints live credentials. Keep `set_sensitive(true)` on each
@@ -143,8 +141,8 @@ Conventions: `docs/conventions.md`.
   hangs (#180).
 - Keep `MAX_CACHED_LEAVES = 64` and clear the cache on reaching it; each entry holds a leaf key for
   the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
-- Refuse an unframed message on a reusable connection when keep-alive lands. `read_body_to_close`
-  reads to EOF, correct only while the close delimits.
+- Refuse an unframed message on a reusable connection when keep-alive lands. The upstream client
+  reads a reply with no length to EOF, correct only while the close delimits.
 
 ## Change Checklist
 

@@ -1,10 +1,11 @@
 //! The accept loop and per-connection handler.
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::TcpStream;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use http::Response;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -13,9 +14,10 @@ use crate::audit::RequestId;
 
 use super::SharedState;
 use super::connect::{self, ConnectRequest};
+use super::convert::{self, Whole};
 use super::exchange::{Subject, Unfinished, emit_decision, record_refusal, record_unfinished};
 use super::resolve::PinnedDestination;
-use super::serve::{TlsSession, serve_tls};
+use super::serve::{PlainSession, TlsSession, serve_plain, serve_tls};
 use crate::audit::{Decision as AuditDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, off_worker};
 use crate::error::ProxyError;
@@ -138,69 +140,30 @@ async fn serve_connection(
     }
 }
 
-/// A client socket of one transport, as the async front reads it and as a blocking handler takes it.
+/// A client socket of one transport, as the async front reads it.
 trait Client: AsyncRead + AsyncWrite + Unpin + Send + 'static {
-    /// The same socket as a blocking std stream.
-    type Blocking: Read + Write + Send + 'static;
-
-    /// Return the socket to blocking mode, with each read and write bounded by `idle`.
-    fn into_blocking(self, idle: Duration) -> io::Result<Self::Blocking>;
-
-    /// Serve a first head that is not a `CONNECT`, on a blocking thread.
-    fn serve_other(
-        client: Self::Blocking,
-        head: String,
-        state: &SharedState,
-    ) -> Result<(), ProxyError>;
+    /// Whether a first head that is not a `CONNECT` is served as a plain-HTTP absolute-form
+    /// request. The AF_UNIX transport stays CONNECT-only: the AF_UNIX pin has no plain-HTTP client,
+    /// so such a head gets a 400.
+    const PLAIN_HTTP: bool;
 }
 
 impl Client for tokio::net::TcpStream {
-    type Blocking = TcpStream;
-
-    fn into_blocking(self, idle: Duration) -> io::Result<TcpStream> {
-        let stream = self.into_std()?;
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(idle))?;
-        stream.set_write_timeout(Some(idle))?;
-        Ok(stream)
-    }
-
     /// Not a CONNECT. Treat it as a plain-HTTP absolute-form request — the same controls apply
     /// (net:connect and the L7 legs), over plaintext with no CONNECT ack. The CONNECT-only
     /// v1 used to 400 here.
-    fn serve_other(client: TcpStream, head: String, state: &SharedState) -> Result<(), ProxyError> {
-        handle_plain_http(client, head, state)
-    }
+    const PLAIN_HTTP: bool = true;
 }
 
 impl Client for tokio::net::UnixStream {
-    type Blocking = UnixStream;
-
-    fn into_blocking(self, idle: Duration) -> io::Result<UnixStream> {
-        let stream = self.into_std()?;
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(idle))?;
-        stream.set_write_timeout(Some(idle))?;
-        Ok(stream)
-    }
-
-    /// The AF_UNIX transport stays CONNECT-only: a non-CONNECT head is a 400, because the AF_UNIX
-    /// pin has no plain-HTTP client.
-    fn serve_other(
-        mut client: UnixStream,
-        _head: String,
-        _state: &SharedState,
-    ) -> Result<(), ProxyError> {
-        let _ = write_status(&mut client, 400, "bad request");
-        Ok(())
-    }
+    const PLAIN_HTTP: bool = false;
 }
 
 /// Route one client connection by request shape, after reading its head.
 ///
-/// A CONNECT opens the TLS interception path ([`tls_path`]); anything else goes to the transport's
-/// blocking handler ([`Client::serve_other`]). Reading the head is the only work shared before the
-/// split. A failed or late read of the head is a silent drop.
+/// A CONNECT opens the TLS interception path ([`tls_path`]); anything else is a plain-HTTP request
+/// on TCP ([`serve_plain`]) and a 400 on AF_UNIX. Reading the head is the only work shared before
+/// the split. A failed or late read of the head is a silent drop.
 async fn route<C: Client>(
     mut client: C,
     state: &Arc<SharedState>,
@@ -215,12 +178,23 @@ async fn route<C: Client>(
     match connect::parse_connect(&head) {
         // HTTPS via CONNECT: terminate TLS and inspect.
         Some(connect) => tls_path(client, connect, state, slot).await,
-        None => {
-            let Ok(client) = client.into_blocking(idle) else {
-                return Ok(());
+        None if C::PLAIN_HTTP => {
+            let _slot = slot;
+            let session = PlainSession {
+                client,
+                proxy_authorization: connect::proxy_authorization_from_head(&head),
+                head: head.into_bytes(),
             };
-            let state = Arc::clone(state);
-            run_blocking(slot, move || C::serve_other(client, head, &state)).await
+            serve_plain(Arc::clone(state), session).await
+        }
+        None => {
+            let _ = write_client(
+                &mut client,
+                status_reply(400, "bad request").as_bytes(),
+                idle,
+            )
+            .await;
+            Ok(())
         }
     }
 }
@@ -295,120 +269,8 @@ async fn tls_path<C: Client>(
     serve_tls(Arc::clone(state), session).await
 }
 
-/// Run a blocking handler on the blocking pool, holding `slot` until it returns.
-///
-/// A panic stays inside its connection, as a panic on a connection thread did.
-async fn run_blocking(
-    slot: Slot,
-    work: impl FnOnce() -> Result<(), ProxyError> + Send + 'static,
-) -> Result<(), ProxyError> {
-    let handled = tokio::task::spawn_blocking(move || {
-        let _slot = slot;
-        work()
-    })
-    .await;
-    handled.unwrap_or(Ok(()))
-}
-
-/// Handle one plain-HTTP (non-CONNECT, absolute-form) client request end-to-end.
-///
-/// A workload dialing an `http://` URL through the proxy sends an absolute-form request rather than a
-/// CONNECT. This runs the identical controls as the CONNECT path — `net:connect`, and
-/// then the L7 request/response legs over plaintext (`http:request` + credential injection) — reusing
-/// [`open_governed_upstream`] and [`super::l7::forward_plain`]. There is no TLS termination and no
-/// CONNECT ack.
-fn handle_plain_http(
-    client: TcpStream,
-    head: String,
-    state: &SharedState,
-) -> Result<(), ProxyError> {
-    // A second handle on the same socket for writing responses; the original is consumed by the reader.
-    let mut writer = match client.try_clone() {
-        Ok(writer) => writer,
-        Err(_) => return Ok(()),
-    };
-    // Read the proxy token from the RAW head now: `read_request` below strips `Proxy-Authorization`
-    // (a hop-by-hop header), so reading it from the parsed request would always see nothing and the
-    // token check would silently accept every request.
-    let proxy_authorization = connect::proxy_authorization_from_head(&head);
-    // Re-feed the already-read head, so the hardened `read_request` parses head+body from one stream
-    // rather than a second HTTP parser.
-    let reader = std::io::Cursor::new(head.into_bytes()).chain(client);
-    let mut client_buf = std::io::BufReader::new(reader);
-    let parsed = match super::http1::read_request(
-        &mut client_buf,
-        state.config.response_limits.max_body_bytes,
-    ) {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            let _ = write_status(&mut writer, 400, "bad request");
-            return Ok(());
-        }
-    };
-    // Absolute-form only: a plain-HTTP proxy request names the full URL. An origin-form target with no
-    // CONNECT has no destination and is refused.
-    let Some((host, port, origin_target)) = connect::parse_absolute_target(&parsed.target) else {
-        let _ = write_status(&mut writer, 400, "bad request");
-        return Ok(());
-    };
-    // A plain-HTTP proxy request may carry `Proxy-Authorization` too (RFC 7235), so the token check
-    // runs on this transport as well — using the value read from the raw head above.
-    let connect = ConnectRequest {
-        host,
-        port,
-        proxy_authorization,
-    };
-    let correlation = RequestId::unique().with_headers(&parsed.headers);
-    // Best-effort token check — never the primary defense. Run here so the
-    // plain-HTTP path matches `handle_tls_connect` and `handle_connection_unix` rather than skipping
-    // the defense-in-depth layer silently.
-    if !connect::token_ok(
-        state.expected_token.as_deref(),
-        connect.proxy_authorization.as_deref(),
-    ) {
-        let _ = writer.write_all(refuse_proxy_token(state, &connect, &correlation).as_bytes());
-        return Ok(());
-    }
-
-    // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-    // `net:connect` effect — identical to the CONNECT path. No CONNECT ack for a plain-HTTP request.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            error.write_response(&mut writer, &parsed.method);
-            return Ok(());
-        }
-    };
-    // The blocking plain path bounds each upstream read and write by a socket timeout.
-    let deadline = Some(state.config.upstream_read_deadline);
-    if upstream
-        .set_nonblocking(false)
-        .and_then(|()| upstream.set_read_timeout(deadline))
-        .and_then(|()| upstream.set_write_timeout(deadline))
-        .is_err()
-    {
-        record_unfinished(
-            state,
-            &Subject::connection(&connect, &correlation),
-            Unfinished::SocketUnprepared,
-        );
-        let _ = write_status(&mut writer, 502, "bad gateway");
-        return Ok(());
-    }
-    // Run the L7 legs over plaintext, reusing request_leg/response_leg/effects.
-    super::l7::forward_plain(
-        &mut writer,
-        upstream,
-        &connect,
-        parsed,
-        origin_target,
-        state,
-        correlation,
-    )
-}
-
 /// A failure before CONNECT can be acknowledged.
-enum OpenUpstreamError {
+pub(super) enum OpenUpstreamError {
     /// The effect interceptor explicitly denied the socket open.
     Denied(io::Error),
     /// The interceptor, socket open, peer lookup, or outcome sink failed.
@@ -416,20 +278,24 @@ enum OpenUpstreamError {
 }
 
 impl OpenUpstreamError {
-    fn write_response(&self, stream: &mut impl Write, method: &str) {
+    /// The refusal that the gateway writes on the raw socket before the CONNECT acknowledgement.
+    fn response_bytes(&self, method: &str) -> Vec<u8> {
         match self {
-            Self::Denied(error) => super::l7::write_interceptor_error(stream, method, error, None),
-            Self::Failed => {
-                let _ = write_status(stream, 502, "bad gateway");
+            Self::Denied(error) => {
+                let mut bytes = Vec::new();
+                super::l7::write_interceptor_error(&mut bytes, method, error, None);
+                bytes
             }
+            Self::Failed => status_reply(502, "bad gateway").into_bytes(),
         }
     }
 
-    /// The bytes that [`write_response`](Self::write_response) writes, for an async client stream.
-    fn response_bytes(&self, method: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.write_response(&mut bytes, method);
-        bytes
+    /// The same refusal as a hyper reply, for a plain-HTTP request of `version`.
+    pub(super) fn response(&self, method: &str, version: http::Version) -> Response<Whole> {
+        match self {
+            Self::Denied(error) => convert::interceptor_response(method, version, error, None),
+            Self::Failed => convert::status_response(version, 502, "bad gateway"),
+        }
     }
 
     fn audit_reason(&self) -> &'static str {
@@ -448,7 +314,7 @@ impl OpenUpstreamError {
 /// event and returns the refusal the caller writes to its own client stream; on success
 /// it returns the open upstream socket. The caller owns acknowledging CONNECT (or not) and running
 /// the L7 legs.
-fn open_governed_upstream(
+pub(super) fn open_governed_upstream(
     state: &SharedState,
     connect: &ConnectRequest,
     correlation: &RequestId,
@@ -589,6 +455,9 @@ fn open_upstream(
     Err(unfinished(Unfinished::NoAddressConnected))
 }
 
+/// The reason and the status message of a refused proxy token.
+pub(super) const PROXY_AUTHENTICATION_REQUIRED: &str = "proxy authentication required";
+
 /// Record a refused proxy token, and return the `407` to write.
 fn refuse_proxy_token(
     state: &SharedState,
@@ -598,9 +467,9 @@ fn refuse_proxy_token(
     record_refusal(
         state,
         &Subject::connection(connect, correlation),
-        "proxy authentication required",
+        PROXY_AUTHENTICATION_REQUIRED,
     );
-    status_reply(407, "proxy authentication required")
+    status_reply(407, PROXY_AUTHENTICATION_REQUIRED)
 }
 
 /// Read the first head from `stream` up to the `\r\n\r\n` terminator (bounded), as a string. Each
@@ -656,14 +525,12 @@ fn status_reply(status: u16, msg: &str) -> String {
     format!("HTTP/1.1 {status} {msg}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 }
 
-/// Write [`status_reply`] to a blocking client stream.
-fn write_status<S: Write>(stream: &mut S, status: u16, msg: &str) -> std::io::Result<()> {
-    stream.write_all(status_reply(status, msg).as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
     use std::os::unix::net::UnixListener;

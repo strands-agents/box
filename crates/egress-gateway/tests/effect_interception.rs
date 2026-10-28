@@ -813,11 +813,12 @@ fn an_upstream_that_never_drains_the_request_is_bounded_by_the_write_deadline() 
 #[test]
 fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     let host = "sip.test";
-    let upstream = TlsUpstream::start_sipping(host, Duration::from_millis(10));
+    let upstream = TlsUpstream::start_sipping(host, Duration::from_millis(20));
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
-    // The 192 sips of 64 KiB take about 1.9 s, longer than the deadline.
-    let deadline = Duration::from_millis(1_500);
+    // The 192 sips of 64 KiB take about 3.8 s: the request alone takes longer than the deadline,
+    // and then the wait for the reply takes the deadline.
+    let deadline = Duration::from_secs(1);
     let config = MitmConfig {
         upstream_read_deadline: deadline,
         ..config_for(host, &upstream)
@@ -842,8 +843,8 @@ fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
 
     let events = wait_for_event_count(&shared, 5);
     assert!(
-        took > deadline,
-        "the exchange took longer than the deadline: {took:?}, {:?}",
+        took > 2 * deadline,
+        "the exchange took longer than two deadlines: {took:?}, {:?}",
         events[4]
     );
     assert!(
@@ -857,10 +858,11 @@ fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     );
 }
 
-/// The plain-HTTP twin of the sipping case. No TLS layer reads during a write here, so only the
-/// exchange-wide write check ends the exchange.
+/// The plain-HTTP twin of the sipping case. The deadline counts only the time with no byte, so the
+/// whole request leaves although it outlasts the deadline, and the wait for the reply that never
+/// comes ends at the deadline with no status.
 #[test]
-fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
+fn an_upstream_that_sips_a_plain_request_is_not_cut_while_bytes_move() {
     use std::io::{Read as _, Write as _};
 
     let host = "plain-sip.test";
@@ -879,15 +881,17 @@ fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
                             _ => return,
                         }
                     }
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             });
         }
     });
     let shared = Arc::new(Mutex::new(Vec::new()));
-    // Larger than any loopback buffer autotuning, so the write is still in progress at the deadline.
+    // The 192 sips of 64 KiB take about 3.8 s: the request alone takes longer than the deadline,
+    // and then the wait for the reply takes the deadline.
+    let deadline = Duration::from_secs(1);
     let config = MitmConfig {
-        upstream_read_deadline: Duration::from_millis(700),
+        upstream_read_deadline: deadline,
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         response_limits: egress_gateway::ResponseLimits {
             max_body_bytes: 64 << 20,
@@ -902,7 +906,7 @@ fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
     .unwrap();
 
     let started = Instant::now();
-    let body = vec![b'x'; 48 << 20];
+    let body = vec![b'x'; 12 << 20];
     let mut proxy =
         std::net::TcpStream::connect(("127.0.0.1", proxy_port(&handle))).expect("the proxy");
     proxy
@@ -917,21 +921,20 @@ fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
     proxy.write_all(&body).unwrap();
     let mut reply = Vec::new();
     let _ = proxy.read_to_end(&mut reply);
-    assert!(reply.is_empty(), "an undelivered request gets no reply");
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "the deadline bounds the writes as a whole: {:?}",
-        started.elapsed()
-    );
+    assert!(reply.is_empty(), "an unanswered request gets no reply");
+    let took = started.elapsed();
 
     let events = wait_for_event_count(&shared, 5);
     assert!(
+        took > 2 * deadline,
+        "the exchange took longer than two deadlines: {took:?}, {:?}",
+        events[4]
+    );
+    assert!(
         matches!(
             &events[4],
-            Event::Outcome(
-                EffectKind::HttpRequest,
-                EffectOutcome::Partial { .. } | EffectOutcome::Indeterminate { .. }
-            )
+            Event::Outcome(EffectKind::HttpRequest, EffectOutcome::Completed(bytes))
+                if *bytes > body.len()
         ),
         "{:?}",
         events[4]

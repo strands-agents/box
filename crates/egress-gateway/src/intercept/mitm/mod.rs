@@ -87,9 +87,8 @@ pub struct MitmConfig {
     /// mapped IP with no DNS lookup; the DNS-rebind pin still holds since the connect uses only
     /// the pinned address.
     pub dns_overrides: Vec<(String, std::net::IpAddr)>,
-    /// The longest one read or one write on an upstream socket waits with no byte; on plain HTTP,
-    /// also the longest that one exchange's upstream reads and writes take in total. Defaults to 300
-    /// seconds.
+    /// The longest one read or one write on an upstream socket waits with no byte. There is no
+    /// total bound, so a request or a reply that keeps moving goes through. Defaults to 300 seconds.
     pub upstream_read_deadline: std::time::Duration,
     /// The maximum number of connections handled concurrently. Each connection holds one slot from
     /// its accept to its end, so excess connections wait for a slot rather than being served without

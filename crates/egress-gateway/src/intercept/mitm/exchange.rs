@@ -13,7 +13,6 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use zeroize::Zeroizing;
 
 use super::connect::ConnectRequest;
 use super::convert::{UpstreamRequest, Whole, response_out, upstream_request};
@@ -419,28 +418,6 @@ pub(super) fn prepare_request(
     )
 }
 
-/// Serialize the mutated request for the blocking plain-HTTP path, with the canonical frame of a
-/// remote `resources/read`.
-pub(super) fn prepare_request_bytes(exchange: &mut Exchange<'_>) -> Result<Zeroizing<Vec<u8>>> {
-    // The serialized request carries the credential the request leg just attached, so the buffer is
-    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
-    // not `Zeroize`-aware, a known residual).
-    let frame = canonical_frame(exchange);
-    let forwarded_body = frame
-        .as_deref()
-        .unwrap_or_else(|| exchange.request.body.as_bytes());
-    let mut prepared = Zeroizing::new(Vec::new());
-    http1::write_request(
-        &mut *prepared,
-        &exchange.method,
-        &exchange.forward_target,
-        &exchange.request.headers,
-        forwarded_body,
-    )?;
-    exchange.forwarded_bytes = forwarded_body.len();
-    Ok(prepared)
-}
-
 /// Claim the request permit, then record its decision, with no other seam call between the two.
 pub(super) fn decide_request(
     exchange: &Exchange<'_>,
@@ -601,22 +578,6 @@ pub(super) fn prepare_response(
         &response.headers,
         body,
     )
-}
-
-/// Serialize the governed response for the blocking plain-HTTP path, after every response phase.
-pub(super) fn prepare_response_bytes(
-    exchange: &Exchange<'_>,
-    response: &InterceptedResponse,
-) -> Result<Vec<u8>> {
-    let mut prepared = Vec::new();
-    http1::write_response(
-        &mut prepared,
-        &exchange.method,
-        response.status,
-        &response.headers,
-        response.body.as_bytes(),
-    )?;
-    Ok(prepared)
 }
 
 /// Claim the release of the governed response of `status` with `body_bytes` of body.
@@ -911,18 +872,6 @@ mod tests {
         for (error, upstream) in upstream_only {
             assert_eq!(Unfinished::of_upstream(&error, false), upstream, "{error}");
             assert_deadline_passed(&error);
-        }
-        let early_closes = [
-            http1::read_request(&mut &b"GET / HTTP/1.1\r\n"[..], 64).err(),
-            http1::read_request(
-                &mut &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4"[..],
-                64,
-            )
-            .err(),
-        ];
-        for error in early_closes {
-            let error = error.expect("a request that ends early is not read");
-            assert!(http1::closed_early(&error), "{error}");
         }
     }
 

@@ -38,8 +38,8 @@ pub(super) fn parse_connect(head: &str) -> Option<ConnectRequest> {
 }
 
 /// Extract a `Proxy-Authorization` value from a raw HTTP head (request line + headers, up to the
-/// blank line). The plain-HTTP path must read it from the RAW head, because `read_request` strips
-/// `Proxy-Authorization` as a hop-by-hop header before the parsed request is available.
+/// blank line). The plain-HTTP path must read it from the RAW head, because the request intake
+/// strips `Proxy-Authorization` as a hop-by-hop header before the exchange sees the request.
 pub(super) fn proxy_authorization_from_head(head: &str) -> Option<String> {
     head.split("\r\n")
         .skip(1) // the request line
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn proxy_authorization_read_from_a_plain_http_head() {
-        // The plain-HTTP path reads the token from the raw head (before `read_request` strips the
-        // hop-by-hop header), so a non-CONNECT head must still yield the value.
+        // The plain-HTTP path reads the token from the raw head (before the request intake strips
+        // the hop-by-hop header), so a non-CONNECT head must still yield the value.
         let head = "GET http://api.example.com/ HTTP/1.1\r\n\
                     Host: api.example.com\r\n\
                     Proxy-Authorization: Bearer tok123\r\n\

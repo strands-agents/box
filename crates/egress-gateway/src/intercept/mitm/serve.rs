@@ -4,6 +4,7 @@
 //! | Part | Does |
 //! |---|---|
 //! | [`serve_tls`] | Accept the workload's TLS with the minted leaf, then serve one exchange on hyper |
+//! | [`serve_plain`] | Serve one plain-HTTP exchange on hyper, after the first head that the front read |
 //! | `Session` | Run one request: intake, the request phases and the decision, the round trip, the release |
 //! | `round_trip` | Send the decided request over the pinned socket, and read the whole reply |
 //! | [`WriteCount`], `Counted` | Count the bytes that a stream accepted, for the outcome of each permit |
@@ -29,7 +30,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use super::connect::ConnectRequest;
+use super::connect::{self, ConnectRequest};
 use super::convert::{self, UpstreamRequest, Whole, error_text};
 use super::deadline::{CLIENT_IDLE_PASSED, Idle, UPSTREAM_IDLE_PASSED};
 use super::exchange::{
@@ -38,16 +39,18 @@ use super::exchange::{
     record_refusal, record_request_failure, record_unfinished,
 };
 use super::l7::{split_target, validate_request_binding};
+use super::listener::{PROXY_AUTHENTICATION_REQUIRED, open_governed_upstream};
 use super::{SharedState, http1, tls};
 use crate::audit::RequestId;
 use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse, Target};
 use crate::effect::{ClaimedEffectPermit, EffectOutcome, off_worker};
 use crate::error::{ProxyError, Result};
 
-/// The largest read buffer of one hyper connection, which bounds one head as the old reader did.
+/// The largest read buffer of one hyper connection, which bounds one head to 64 KiB as the old
+/// reader did.
 const MAX_BUF_BYTES: usize = 64 * 1024;
 
-/// The most header lines in one head, as the old reader's `httparse` slots.
+/// The most header lines in one head, as the old reader allowed.
 const MAX_HEADERS: usize = 64;
 
 /// One CONNECT tunnel, after its upstream is open and its `200` is written.
@@ -91,6 +94,37 @@ where
     session.serve(client).await
 }
 
+/// One plain-HTTP connection, after the front read its first head.
+pub(super) struct PlainSession<C> {
+    /// The raw client stream, after the first head.
+    pub(super) client: C,
+    /// The first head, as the front read it, which hyper reads again before the next bytes.
+    pub(super) head: Vec<u8>,
+    /// The `Proxy-Authorization` of the raw head. The hop-by-hop strip removes it from the request,
+    /// so reading it there would always see nothing and the token check would accept every request.
+    pub(super) proxy_authorization: Option<String>,
+}
+
+/// Serve one plain-HTTP (absolute-form) exchange: the same controls as the CONNECT path —
+/// `net:connect`, then the request and response phases — over plaintext, with no CONNECT ack.
+///
+/// The request is read whole before any decision, so a refused or broken request opens no
+/// upstream socket. The connection task holds the slot.
+pub(super) async fn serve_plain<C>(state: Arc<SharedState>, session: PlainSession<C>) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let client = Idle::new(session.client, state.client_limits.idle, CLIENT_IDLE_PASSED);
+    let client = Replay::new(session.head, client);
+    let session = Session::new(
+        state,
+        Route::Plain {
+            proxy_authorization: session.proxy_authorization,
+        },
+    );
+    session.serve(client).await
+}
+
 /// What a connection carries.
 enum Route {
     /// A CONNECT tunnel: its admitted authority, and the upstream socket that its one request uses.
@@ -99,6 +133,8 @@ enum Route {
         correlation: RequestId,
         upstream: Mutex<Option<TcpStream>>,
     },
+    /// A plain-HTTP request, whose absolute target names its destination.
+    Plain { proxy_authorization: Option<String> },
 }
 
 /// One served connection, and the state that its service shares with its end.
@@ -113,6 +149,8 @@ struct Session {
     failure: Mutex<Option<ProxyError>>,
     /// Whether a request head arrived.
     requested: AtomicBool,
+    /// Whether the request was decided and sent toward the upstream.
+    forwarded: AtomicBool,
 }
 
 /// A claimed release, and the client write count when it was claimed.
@@ -145,6 +183,7 @@ impl Session {
             pending: Mutex::new(None),
             failure: Mutex::new(None),
             requested: AtomicBool::new(false),
+            forwarded: AtomicBool::new(false),
         })
     }
 
@@ -178,6 +217,9 @@ impl Session {
                 correlation,
                 upstream,
             } => self.tunnel(request, connect, correlation, upstream).await,
+            Route::Plain {
+                proxy_authorization,
+            } => self.plain(request, proxy_authorization.as_deref()).await,
         };
         answered.map_err(|error| {
             *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
@@ -212,6 +254,14 @@ impl Session {
         if let Some(failure) = failure {
             return Err(failure);
         }
+        // A plain-HTTP request that never reached the upstream was answered, by hyper or with the
+        // gateway's static reply, and an end there leaves no audit line.
+        if served.is_err()
+            && matches!(self.route, Route::Plain { .. })
+            && !self.forwarded.load(Ordering::Relaxed)
+        {
+            return Ok(());
+        }
         match served {
             Ok(parts) => {
                 // `close_notify`, then the end of the write side.
@@ -242,6 +292,7 @@ impl Session {
                             &error,
                         );
                     }),
+                    Route::Plain { .. } => {}
                 }
                 Err(error)
             }
@@ -324,6 +375,90 @@ impl Session {
             .await
     }
 
+    /// Run the one request of a plain-HTTP connection.
+    async fn plain(
+        &self,
+        request: Request<Incoming>,
+        proxy_authorization: Option<&str>,
+    ) -> Result<Response<Whole>> {
+        let state = &*self.state;
+        let version = request.version();
+        let bad_request = || convert::status_response(version, 400, "bad request");
+        let Ok(inbound) =
+            convert::request_in(request, state.config.response_limits.max_body_bytes).await
+        else {
+            return Ok(bad_request());
+        };
+        // Absolute-form only: a plain-HTTP proxy request names the full URL. An origin-form target
+        // with no CONNECT has no destination and is refused.
+        let Some((host, port, origin_target)) = connect::parse_absolute_target(&inbound.target)
+        else {
+            return Ok(bad_request());
+        };
+        // A plain-HTTP proxy request may carry `Proxy-Authorization` too (RFC 7235), so the token
+        // check runs on this transport as well, with the value from the raw head.
+        let connect = ConnectRequest {
+            host,
+            port,
+            proxy_authorization: proxy_authorization.map(str::to_string),
+        };
+        let correlation = RequestId::unique().with_headers(&inbound.headers);
+        // Best-effort token check — never the primary defense.
+        if !connect::token_ok(
+            state.expected_token.as_deref(),
+            connect.proxy_authorization.as_deref(),
+        ) {
+            off_worker(|| {
+                record_refusal(
+                    state,
+                    &Subject::connection(&connect, &correlation),
+                    PROXY_AUTHENTICATION_REQUIRED,
+                );
+            });
+            return Ok(convert::status_response(
+                version,
+                407,
+                PROXY_AUTHENTICATION_REQUIRED,
+            ));
+        }
+        // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
+        // `net:connect` effect — identical to the CONNECT path, in one `off_worker` call.
+        let upstream = match off_worker(|| open_governed_upstream(state, &connect, &correlation)) {
+            Ok(upstream) => upstream,
+            Err(error) => return Ok(error.response(&inbound.method, version)),
+        };
+        let upstream = TcpStream::from_std(upstream)
+            .map_err(|e| ProxyError::Io(format!("registering the upstream socket: {e}")))?;
+        let mut target = Target::new(connect.host.clone(), connect.port);
+        (target.path, target.query) = split_target(&origin_target);
+        let mut request = InterceptedRequest {
+            target,
+            method: Some(inbound.method),
+            headers: inbound.headers,
+            body: BodyRef::Bytes(inbound.body),
+            advisory_note: None,
+        };
+        // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request
+        // carries its destination twice — in the absolute-form request line and in `Host` — and the
+        // workload controls both. The TLS path re-checks that they agree
+        // (`validate_request_binding`); the plain path has no CONNECT authority to bind against, so
+        // it normalizes instead: rewrite `Host` to the URL host, so the destination the box
+        // authorized is the one the upstream routes on (no vhost smuggling).
+        //
+        // The port is omitted only for 80 — plain HTTP's sole default. `http://host:443/` keeps
+        // `:443`, because 443 is not the default under the `http` scheme, and a dropped port would
+        // make `Host` name a different authority than the one authorized.
+        let host_value = if connect.port == 80 {
+            connect.host.clone()
+        } else {
+            format!("{}:{}", connect.host, connect.port)
+        };
+        request.headers.set("Host", host_value);
+        // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
+        let exchange = Exchange::new(&connect, Binding::None, false, correlation, request, state);
+        self.forward(exchange, version, upstream, Hop::Plain).await
+    }
+
     /// Decide the request, send it, record its outcome, and release the governed response.
     async fn forward(
         &self,
@@ -339,6 +474,7 @@ impl Session {
                 Decided::Forward(permit, request) => (permit, request),
                 Decided::Answer(response) => return Ok(response),
             };
+        self.forwarded.store(true, Ordering::Relaxed);
         let trip = round_trip(
             state,
             upstream,
@@ -512,6 +648,8 @@ fn client_builder() -> hyper::client::conn::http1::Builder {
 enum Hop {
     /// Over TLS to the CONNECT host, which the upstream certificate must name.
     Tls(ServerName<'static>),
+    /// In plaintext, as the workload sent it.
+    Plain,
 }
 
 /// The end of one upstream round trip.
@@ -558,6 +696,7 @@ async fn round_trip(
                 }
             }
         }
+        Hop::Plain => send(upstream, request, method, max, writes).await,
     }
 }
 
@@ -629,6 +768,72 @@ struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// A client stream that yields the first head, which the front already read, before its next
+/// bytes.
+struct Replay<S> {
+    head: Vec<u8>,
+    replayed: usize,
+    inner: S,
+}
+
+impl<S> Replay<S> {
+    fn new(head: Vec<u8>, inner: S) -> Self {
+        Self {
+            head,
+            replayed: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Replay<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let rest = &this.head[this.replayed..];
+        if rest.is_empty() {
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        }
+        let count = rest.len().min(buf.remaining());
+        buf.put_slice(&rest[..count]);
+        this.replayed += count;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 

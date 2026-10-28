@@ -221,15 +221,25 @@ where
     Ok(collected)
 }
 
-/// The error of a failed body read: a peer that closed early, or a failed read.
+/// The error of a failed body read: a peer that closed before the body ended, or a failed read.
 fn body_error(error: &(dyn std::error::Error + 'static), what: &str) -> ProxyError {
-    match error.downcast_ref::<hyper::Error>() {
-        Some(error) if error.is_incomplete_message() => ProxyError::Intercept(format!(
-            "{} before the {what} body ended",
-            http1::CLOSED_EARLY
-        )),
-        _ => ProxyError::Io(format!("reading the {what} body: {}", error_text(error))),
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        let ended = error
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_incomplete_message)
+            || error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::UnexpectedEof);
+        if ended {
+            return ProxyError::Intercept(format!(
+                "{} before the {what} body ended",
+                http1::CLOSED_EARLY
+            ));
+        }
+        cause = error.source();
     }
+    ProxyError::Io(format!("reading the {what} body: {}", error_text(error)))
 }
 
 /// The text of `error` and of each error under it.
@@ -380,6 +390,26 @@ pub(super) fn response_out(
     Ok(response)
 }
 
+/// A static proxy-level reply with no body and no marker: `HTTP/1.1 <status> <message>`, then
+/// `Content-Length: 0` and `Connection: close`, as the front writes it.
+pub(super) fn status_response(
+    version: Version,
+    status: u16,
+    message: &'static str,
+) -> Response<Whole> {
+    let mut response = Response::new(Whole::new(Bytes::new()));
+    *response.status_mut() =
+        StatusCode::from_u16(status).expect("a static reply has a valid status");
+    *response.version_mut() = version;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+    headers.insert(CONNECTION, HeaderValue::from_static("close"));
+    response
+        .extensions_mut()
+        .insert(hyper::ext::ReasonPhrase::from_static(message.as_bytes()));
+    response
+}
+
 /// A proxy-originated diagnostic: a static, secret-free body under the refusal marker.
 pub(super) fn diagnostic_response(
     request_method: &str,
@@ -513,16 +543,20 @@ mod tests {
         assert_eq!(accepts, ["a", "b"]);
     }
 
-    /// **The forwarded header values and the target share a wiped owner.** `http` keeps the buffer
-    /// that the gateway made, so the wipe on drop reaches the bytes that hyper reads.
+    /// **The forwarded header values share a wiped owner.** `http` keeps the buffer that the
+    /// gateway made, so the wipe on drop reaches the bytes that hyper reads.
     #[test]
     fn forwarded_header_values_share_a_wiped_owner() {
         let owner = wiped(b"Bearer secret");
         let start = owner.as_ptr();
         let value = HeaderValue::from_maybe_shared(owner).unwrap();
         assert_eq!(value.as_bytes().as_ptr(), start);
+    }
 
-        let target = wiped(b"/v1/secret");
+    /// **The forwarded target shares a wiped owner**, as the header values do.
+    #[test]
+    fn the_forwarded_target_shares_a_wiped_owner() {
+        let target = wiped(b"/v1/secret?key=secret");
         let start = target.as_ptr();
         let uri = Uri::from_maybe_shared(target).unwrap();
         assert_eq!(uri.path().as_ptr(), start);
@@ -584,6 +618,90 @@ mod tests {
         assert_eq!(response.status(), 502);
         let body = futures_body(response);
         assert_eq!(body, b"effect interceptor unavailable");
+    }
+
+    /// **The upstream request and the reply drop each hop-by-hop field and each field that
+    /// `Connection` names**, and keep the end-to-end fields, with one `Connection: close`.
+    #[test]
+    fn writers_strip_hop_by_hop_and_connection_nominated_headers() {
+        let headers = HeaderMap::from_pairs([
+            ("Connection".to_string(), "keep-alive, X-Remove".to_string()),
+            ("Keep-Alive".to_string(), "timeout=5".to_string()),
+            ("Proxy-Connection".to_string(), "keep-alive".to_string()),
+            (
+                "Proxy-Authorization".to_string(),
+                "Basic c2VjcmV0".to_string(),
+            ),
+            (
+                "Proxy-Authenticate".to_string(),
+                "Basic realm=\"proxy\"".to_string(),
+            ),
+            ("TE".to_string(), "trailers".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Trailer".to_string(), "Digest".to_string()),
+            ("X-Remove".to_string(), "hop-only".to_string()),
+            ("X-End-To-End".to_string(), "keep".to_string()),
+        ]);
+
+        let request = upstream_request("POST", "/", &headers, b"body".to_vec(), WriteCount::new())
+            .unwrap()
+            .into_inner();
+        let response = response_out(
+            "POST",
+            Version::HTTP_11,
+            200,
+            &headers,
+            Bytes::from_static(b"body"),
+        )
+        .unwrap();
+        for sent in [request.headers(), response.headers()] {
+            let names: Vec<&str> = sent.keys().map(HeaderName::as_str).collect();
+            assert_eq!(names, ["x-end-to-end", "connection", "content-length"]);
+            assert_eq!(sent["connection"], "close");
+            assert_eq!(sent["x-end-to-end"], "keep");
+            assert_eq!(sent["content-length"], "4");
+        }
+    }
+
+    /// **A request that ends before its body is an early close**, not a framing refusal, so it
+    /// records no gateway bound.
+    #[test]
+    fn a_request_that_ends_early_is_an_early_close() {
+        use hyper_util::rt::TokioIo;
+        use tokio::io::AsyncWriteExt;
+
+        for sent in [
+            &b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"[..],
+            &b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4"[..],
+        ] {
+            let error = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let (gateway, mut client) = tokio::io::duplex(1024);
+                    let (read, mut errors) = tokio::sync::mpsc::unbounded_channel();
+                    let service = hyper::service::service_fn(move |request| {
+                        let read = read.clone();
+                        async move {
+                            let _ = read.send(request_in(request, 64).await.err());
+                            Ok::<_, Infallible>(Response::new(Whole::none()))
+                        }
+                    });
+                    let served = tokio::spawn(
+                        hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(gateway), service),
+                    );
+                    client.write_all(sent).await.unwrap();
+                    drop(client);
+                    let error = errors.recv().await.unwrap();
+                    let _ = served.await;
+                    error
+                });
+            let error = error.expect("a request that ends early is not read");
+            assert!(http1::closed_early(&error), "{error}");
+        }
     }
 
     /// The bytes of a whole body.
