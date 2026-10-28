@@ -86,6 +86,18 @@ The signed tests cover detached-child cleanup and durable history across mode ch
 They do not establish enforcement after the trusted Box process crashes or validate every shutdown failure.
 Production use still requires further review and tests for those failures.
 
+## Filesystem operation meanings
+
+Native rename checks `fs:move` on both the source and destination, plus `fs:read` on the source.
+Replacing an existing destination also requires `fs:delete` and `fs:write` on that destination.
+Moving to a new name does not require destination `fs:write`.
+Filesystem grants still restrict every operation independently of these policy checks.
+
+A readable directory open uses `fs:read` with `context.input.operation == Box::FsReadOperation::"enumerate"`.
+A regular-file read uses the same action with `context.input.operation == Box::FsReadOperation::"read_content"`.
+The directory-open check authorizes subsequent listing; it does not confirm that listing occurred.
+Policies that select directory opens by operation must use `enumerate` on both Linux and macOS.
+
 ## Stored configuration and rollback
 
 Configurations without process overrides retain version 21 when disabled and version 22 when enabled.

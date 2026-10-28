@@ -75,5 +75,6 @@ rustls-pki-types = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(box_native_test_faults)"] }
 # A swallowed `Result` on a decision path is a compile error.
 unused_must_use = "deny"

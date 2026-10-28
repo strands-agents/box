@@ -49,6 +49,20 @@ pub(crate) struct ProcessSpec {
     pub(crate) network: Option<NetworkConfig>,
 }
 
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(crate) fn uses_native_filesystem<'a>(
+    processes: impl IntoIterator<Item = &'a ProcessSpec>,
+    default: bool,
+) -> bool {
+    processes
+        .into_iter()
+        .any(|spec| spec.native_filesystem_policy.unwrap_or(default))
+}
+
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

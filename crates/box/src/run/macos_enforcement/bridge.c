@@ -64,11 +64,6 @@ bool box_es_has_children(pid_t process) {
     return proc_listchildpids(process, &child, sizeof(child)) != 0;
 }
 
-#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
-
-/* libproc omits availability metadata for this newer entry point. */
-extern int proc_signal_with_audittoken(audit_token_t *, int) __attribute__((weak_import));
-
 static bool copy_token(char *out, es_string_token_t token) {
     if (!token.data || token.length == 0 || token.length >= BOX_PATH_CAPACITY ||
         memchr(token.data, 0, token.length)) return false;
@@ -110,6 +105,8 @@ static bool decode(const es_message_t *message, box_event *out) {
         case ES_EVENT_TYPE_NOTIFY_OPEN:
             out->kind = BOX_OPEN;
             out->flags = message->event.open.fflag;
+            if (!message->event.open.file) return false;
+            out->mode = message->event.open.file->stat.st_mode;
             return source_file(out, message->event.open.file, BOX_FILE);
         case ES_EVENT_TYPE_AUTH_TRUNCATE:
         case ES_EVENT_TYPE_NOTIFY_TRUNCATE:
@@ -165,6 +162,26 @@ static bool decode(const es_message_t *message, box_event *out) {
             return message->action_type == ES_ACTION_TYPE_NOTIFY;
     }
 }
+
+bool box_es_test_open(uint32_t mode, uint32_t flags, box_event *out) {
+    es_file_t file = {0};
+    file.path.data = "/file";
+    file.path.length = 5;
+    file.stat.st_mode = (mode_t)mode;
+    es_message_t message = {0};
+    message.event_type = ES_EVENT_TYPE_AUTH_OPEN;
+    message.event.open.file = &file;
+    message.event.open.fflag = flags;
+    out->phase = BOX_AUTH;
+    out->valid = decode(&message, out);
+    return out->valid;
+}
+
+
+#if defined(__MAC_27_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_27_0
+
+/* libproc omits availability metadata for this newer entry point. */
+extern int proc_signal_with_audittoken(audit_token_t *, int) __attribute__((weak_import));
 
 static void fail(box_client *owner, const box_event *event) {
     if (!atomic_exchange(&owner->failed, true)) owner->callback(owner->context, event, 4);

@@ -769,17 +769,38 @@ pub(crate) struct SyscallFilters {
 
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
-pub(crate) struct SyscallPolicy;
+pub(crate) struct SyscallPolicy {
+    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    native_filesystem: bool,
+}
 
 impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
-        Self
+        Self {
+            #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+            native_filesystem: false,
+        }
+    }
+
+    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    pub(crate) fn with_native_filesystem(mut self, enabled: bool) -> Self {
+        self.native_filesystem = enabled;
+        self
     }
 
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
         let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        let permit_rules = {
+            let mut rules = permit_rules;
+            if self.native_filesystem {
+                // The notification filter must mediate this path-based call before it can run.
+                rules.insert(libc::SYS_truncate, Vec::new());
+            }
+            rules
+        };
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
