@@ -15,6 +15,7 @@ use super::SharedState;
 use super::connect::{self, ConnectRequest};
 use super::exchange::{Subject, Unfinished, emit_decision, record_refusal, record_unfinished};
 use super::resolve::PinnedDestination;
+use super::serve::{TlsSession, serve_tls};
 use crate::audit::{Decision as AuditDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, off_worker};
 use crate::error::ProxyError;
@@ -228,7 +229,7 @@ async fn route<C: Client>(
 const CONNECT_ACK: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// Handle one CONNECT (HTTPS) connection: run the shared L4 controls, acknowledge, then terminate
-/// TLS and run the L7 legs on a blocking thread.
+/// TLS and serve the exchange on hyper.
 async fn tls_path<C: Client>(
     mut client: C,
     connect: ConnectRequest,
@@ -279,19 +280,19 @@ async fn tls_path<C: Client>(
     // reply reaches history once, on the request permit, as `output.status` of the one
     // `http:request::response` an exchange records.
     //
-    // The gateway would honour a refusal on that leg: `l7::intercept_tls` emits a deny event and
+    // The gateway would honour a refusal on that leg: `serve::serve_tls` emits a deny event and
     // withholds the bytes. The shipped interceptor never issues one.
     //
     // A handshake or pin failure hard-fails (drop), never a downgrade; the connection task
-    // audits the error.
-    let client = client
-        .into_blocking(idle)
-        .map_err(|e| ProxyError::Io(format!("preparing the client socket: {e}")))?;
-    let state = Arc::clone(state);
-    run_blocking(slot, move || {
-        super::l7::intercept_tls(client, upstream, &connect, &state, correlation)
-    })
-    .await
+    // audits the error. This task holds the slot until the exchange ends.
+    let _slot = slot;
+    let session = TlsSession {
+        client,
+        upstream,
+        connect,
+        correlation,
+    };
+    serve_tls(Arc::clone(state), session).await
 }
 
 /// Run a blocking handler on the blocking pool, holding `slot` until it returns.
@@ -378,6 +379,22 @@ fn handle_plain_http(
             return Ok(());
         }
     };
+    // The blocking plain path bounds each upstream read and write by a socket timeout.
+    let deadline = Some(state.config.upstream_read_deadline);
+    if upstream
+        .set_nonblocking(false)
+        .and_then(|()| upstream.set_read_timeout(deadline))
+        .and_then(|()| upstream.set_write_timeout(deadline))
+        .is_err()
+    {
+        record_unfinished(
+            state,
+            &Subject::connection(&connect, &correlation),
+            Unfinished::SocketUnprepared,
+        );
+        let _ = write_status(&mut writer, 502, "bad gateway");
+        return Ok(());
+    }
     // Run the L7 legs over plaintext, reusing request_leg/response_leg/effects.
     super::l7::forward_plain(
         &mut writer,
@@ -562,9 +579,9 @@ fn open_upstream(
         permit
             .record_outcome(EffectOutcome::Connected(peer))
             .map_err(|_| unfinished(Unfinished::OutcomeUnrecorded))?;
+        // The gateway runtime registers the socket, and its idle bound replaces socket timeouts.
         upstream
-            .set_read_timeout(Some(state.config.upstream_read_deadline))
-            .and_then(|()| upstream.set_write_timeout(Some(state.config.upstream_read_deadline)))
+            .set_nonblocking(true)
             .map_err(|_| unfinished(Unfinished::SocketUnprepared))?;
         return Ok(upstream);
     }
@@ -1200,6 +1217,15 @@ mod tests {
         config: Arc<rustls::ServerConfig>,
         length: usize,
     ) -> (SocketAddr, std::thread::JoinHandle<()>) {
+        tls_origin_after(config, length, Duration::ZERO)
+    }
+
+    /// [`tls_origin`], which waits `delay` after the request head before it answers.
+    fn tls_origin_after(
+        config: Arc<rustls::ServerConfig>,
+        length: usize,
+        delay: Duration,
+    ) -> (SocketAddr, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let thread = std::thread::spawn(move || {
@@ -1211,6 +1237,7 @@ mod tests {
                 line.clear();
                 reader.read_line(&mut line).unwrap();
             }
+            std::thread::sleep(delay);
             let stream = reader.get_mut();
             write_reply_paced(stream, &vec![b'y'; length]);
             let _ = stream.flush();
@@ -1816,5 +1843,84 @@ mod tests {
         );
         releases.assert_cut_at_the_idle_bound();
         assert_ended_at_the_idle_bound(&tunnel.emitter, &tunnel.audit, "tunnel");
+    }
+
+    /// **A slow upstream reply outlasts the client idle bound.** The workload waits in silence for
+    /// longer than its idle bound while the upstream prepares its reply, and still gets the reply:
+    /// with half-close on, hyper reads no client byte while the exchange waits, so no client read
+    /// waits the bound.
+    #[test]
+    fn a_slow_upstream_reply_outlasts_the_client_idle_bound() {
+        const IDLE: Duration = Duration::from_millis(300);
+        let tunnel = Tunnel::new(AddressPolicy::permit_all(), IDLE);
+        let (origin, replied) = tls_origin_after(tunnel.origin, 2, IDLE * 3);
+        let gateway = Gateway::serve(tunnel.state);
+        let mut client = gateway.connect();
+        open_tunnel(&mut client, origin.port());
+        let mut tls = workload_tls(&tunnel.workload);
+        let mut stream = rustls::Stream::new(&mut tls, &mut client);
+        write!(
+            stream,
+            "GET /slow HTTP/1.1\r\nHost: {TUNNEL_HOST}:{}\r\n\r\n",
+            origin.port()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let reply = String::from_utf8(read_until_closed(&mut stream)).unwrap();
+        replied.join().unwrap();
+        assert_eq!(
+            reply,
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nyy"
+        );
+    }
+
+    /// **W8: the inner head has one total bound.** A workload that drips its request head inside
+    /// the tunnel, each byte under the idle bound, is cut when the head bound passes, with no reply
+    /// and no request decision.
+    #[test]
+    fn an_inner_head_that_drips_past_its_bound_is_cut() {
+        let policy = AddressPolicy::permit_all();
+        let mut tunnel = Tunnel::new(policy.clone(), Duration::from_secs(60));
+        tunnel.state.client_limits.first_head = Duration::from_millis(500);
+        let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = origin.local_addr().unwrap().port();
+        let gateway = Gateway::serve(tunnel.state);
+        let mut client = gateway.connect();
+        open_tunnel(&mut client, port);
+        let mut tls = workload_tls(&tunnel.workload);
+        let mut stream = rustls::Stream::new(&mut tls, &mut client);
+        let head = format!("GET /drip HTTP/1.1\r\nHost: {TUNNEL_HOST}:{port}\r\n\r\n");
+        let started = Instant::now();
+        let mut cut = false;
+        for byte in head.as_bytes() {
+            if stream
+                .write_all(std::slice::from_ref(byte))
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                cut = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // A write after the cut fails; a drip that ended first reads the close.
+        let reply = if cut {
+            Vec::new()
+        } else {
+            read_until_closed(&mut stream)
+        };
+        let waited = started.elapsed();
+        assert!(reply.is_empty(), "{}", String::from_utf8_lossy(&reply));
+        assert!(
+            cut && waited < Duration::from_millis(50) * head.len() as u32,
+            "the head bound cut the drip before its end: {waited:?}"
+        );
+        assert_eq!(
+            policy.seen().len(),
+            1,
+            "only the connection was decided: {:?}",
+            policy.seen()
+        );
+        assert!(gateway.serves_another_client(), "the slot is free");
     }
 }

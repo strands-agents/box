@@ -245,11 +245,12 @@ never a TCP port. Every admitted connection is terminated and inspected, so TLS
 interception is not selective. The adapter runs on its own tokio runtime, on a
 thread that it starts, and `max_connections` bounds the connections that it
 serves at once. `upstream_read_deadline` bounds each read and each
-write on an upstream socket and one exchange's upstream reads and writes as a whole, so an
-upstream that never drains or sips the request, or never replies or drips its reply, ends the
-exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
-exchange whose request and reply together take longer than the deadline, with no reply to the
-workload; `box.toml` exposes no key for it.
+write on an upstream socket by the time with no byte, so an upstream that never drains the request
+or never replies ends the exchange with one `http:request::response` that has no `output`. Inside a
+tunnel there is no total bound: a request or a reply that keeps moving goes through, whatever its
+length. On plain HTTP the same value also bounds one exchange's upstream reads and writes as a
+whole, so an upstream that sips the request or drips its reply ends the exchange there too;
+`box.toml` exposes no key for it.
 
 Each read and each write on a client socket waits at most 60 s, and the gateway closes the
 connection at the first read or write that moves no byte in that time. One write can copy a part of
@@ -257,11 +258,14 @@ the reply and then wait, so a client that stops reading its reply frees its slot
 The first head of a connection, which is the `CONNECT` head or the head of a plain-HTTP request,
 must be complete 60 s after the connection takes its slot. The gateway checks this time at the end
 of each read of the head, and closes a late connection with no reply. So a client that sends nothing
-frees its slot in 60 s, and a client that sends its head slowly frees it in at most 120 s. A request
-body, the TLS handshake with the client, the request inside a tunnel, and the reply to the client
-have no total bound, so a slow upload that keeps sending bytes goes through. A plain-HTTP request
-whose body stops for 60 s gets a `400` before any decision. No `MitmConfig` field and no `box.toml`
-key sets these bounds.
+frees its slot in 60 s, and a client that sends its head slowly frees it in at most 120 s. The head
+of the request inside a tunnel must be complete 60 s after the gateway starts to read it; a late
+head closes the connection with no reply. A request body, the TLS handshake with the client, and the
+reply to the client have no total bound, so a slow upload that keeps sending bytes goes through.
+While the gateway waits for the upstream reply, the client's silence does not count against the
+bound, so a slow reply reaches a client that waits for it. A plain-HTTP request whose body stops for
+60 s gets a `400` before any decision. No `MitmConfig` field and no `box.toml` key sets these
+bounds.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.

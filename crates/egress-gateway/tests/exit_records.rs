@@ -384,7 +384,7 @@ enum Fixture {
     /// The upstream never replies, and the upstream deadline passes.
     UpstreamDeadline,
     UpgradeReply,
-    /// The workload sends both `Content-Length` and `Transfer-Encoding`.
+    /// The workload sends a `Transfer-Encoding` that does not end in `chunked`.
     AmbiguousRequest,
     RequestOverLimit,
     /// The authority fails to record the outcome of the request.
@@ -474,8 +474,8 @@ impl Fixture {
             ),
             Self::AmbiguousRequest => send(MitmConfig::default(), |port| {
                 format!(
-                    "POST /exit HTTP/1.1\r\nHost: {HOST}:{port}\r\nContent-Length: 5\r\n\
-                     Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+                    "POST /exit HTTP/1.1\r\nHost: {HOST}:{port}\r\n\
+                     Transfer-Encoding: chunked, identity\r\n\r\n0\r\n\r\n"
                 )
             }),
             Self::RequestOverLimit => send(small_limit, |port| {
@@ -593,21 +593,25 @@ fn a_failed_dial_on_every_address_ends_with_one_denial() {
 }
 
 /// **An inner request that the gateway refuses ends the connection with one denial.** The request
-/// never reached a request decision, so the denial names the connection.
+/// never reached a request decision, so the denial names the connection. hyper answers a head that
+/// it refuses with its own `400`, which carries no refusal marker; a body over the limit gets no
+/// reply.
 #[test]
 fn an_intercepted_request_that_the_gateway_refuses_ends_the_connection_with_one_denial() {
-    for (fixture, reason) in [
+    for (fixture, reason, reply) in [
         (
             Fixture::AmbiguousRequest,
             "the request was refused: the gateway does not accept its head or framing",
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
         ),
         (
             Fixture::RequestOverLimit,
             "the request was refused: its body is larger than the limit",
+            "",
         ),
     ] {
         let ended = fixture.run();
-        assert_eq!(ended.reply, "", "{fixture:?}: the workload gets no reply");
+        assert_eq!(ended.reply, reply, "{fixture:?}: the reply to the workload");
         assert_eq!(ended.records.len(), 2, "{fixture:?}: {:#?}", ended.records);
         ended.assert_one_denial("", "/", reason);
         ended.assert_handler_error();

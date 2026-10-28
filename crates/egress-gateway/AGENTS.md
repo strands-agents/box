@@ -116,8 +116,10 @@ Conventions: `docs/conventions.md`.
   into freed heap silently.
 - Keep `the_status_line_budget_covers_every_reason_phrase`; `STATUS_LINE_BYTES = 64` is a constant
   that a longer `reason()` phrase overruns.
-- Never derive `Debug` on `HeaderMap` or `InterceptedRequest`, and never unwrap a value out of
-  `Zeroizing`; one `eprintln!` then prints live credentials.
+- Never derive `Debug` on `HeaderMap` or `InterceptedRequest`, never format an upstream
+  `http::Request`, `http::Uri`, `http::HeaderMap`, or `http::Response`, and never unwrap a value out
+  of `Zeroizing`; one `eprintln!` then prints live credentials. Keep `set_sensitive(true)` on each
+  forwarded header value and keep the request inside `UpstreamRequest`.
 - Residual: `Target::path` and `Target::query` are plain `String`, so a `UrlPath` or `QueryParam`
   credential leaves un-wiped bytes.
 - Residual: the CA private key is not `Zeroizing`, because `rcgen` holds it; the daemon's memory

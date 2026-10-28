@@ -1390,10 +1390,10 @@ fn a_plain_http_upload_aborted_mid_body_opens_no_upstream_socket() {
     );
 }
 
-/// Every framing ambiguity a smuggling attempt rides on is refused before any request effect and
-/// before any upstream request: both lengths present (CL.TE and TE.CL), an obfuscated or repeated
-/// transfer coding, and a repeated Content-Length. Over TLS the gateway drops the connection; the
-/// client sees no 200, and the upstream sees no request.
+/// A transfer coding that does not end in `chunked` is refused before any request effect and before
+/// any upstream request: an obfuscated coding, and a list that ends in another coding. Over TLS,
+/// hyper answers the head with its own `400` with no refusal marker and closes; the client sees no
+/// 200, and the upstream sees no request.
 #[test]
 fn framing_ambiguity_is_refused_before_any_upstream_request() {
     let host = "framing.test";
@@ -1402,18 +1402,6 @@ fn framing_ambiguity_is_refused_before_any_upstream_request() {
     let port = upstream.port();
 
     let cases: &[(&str, String)] = &[
-        (
-            "CL.TE",
-            format!(
-                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG"
-            ),
-        ),
-        (
-            "TE.CL",
-            format!(
-                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n5c\r\nGPOST /smuggled HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n"
-            ),
-        ),
         (
             "TE obfuscated",
             format!(
@@ -1426,26 +1414,17 @@ fn framing_ambiguity_is_refused_before_any_upstream_request() {
                 "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked, identity\r\n\r\n0\r\n\r\n"
             ),
         ),
-        (
-            "TE repeated",
-            format!(
-                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
-            ),
-        ),
-        (
-            "CL repeated",
-            format!(
-                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello"
-            ),
-        ),
     ];
     for (name, request) in cases {
         let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
         client.send_raw(request.as_bytes());
-        let status = client.read_status();
-        assert_ne!(
-            status, 200,
-            "{name}: an ambiguous frame must not be answered 200"
+        let reply = client.read_response();
+        assert!(
+            reply.starts_with("HTTP/1.1 400 ")
+                && !reply
+                    .to_ascii_lowercase()
+                    .contains(egress_gateway::PROXY_ORIGIN_HEADER),
+            "{name}: hyper's own 400, with no refusal marker: {reply:?}"
         );
         assert_eq!(
             upstream.request_count(),
@@ -1464,6 +1443,89 @@ fn framing_ambiguity_is_refused_before_any_upstream_request() {
     }
 
     assert_still_serving(&handle, host, &upstream, "/after-framing");
+}
+
+/// Every other framing ambiguity a smuggling attempt rides on is decoded by hyper's RFC 9112 rules,
+/// and the gateway re-frames the body: both lengths present (CL.TE and TE.CL, decoded as chunked),
+/// a repeated `chunked`, and a repeated equal Content-Length. The upstream sees exactly one request,
+/// under one Content-Length of the decoded body and no Transfer-Encoding, so a smuggled request
+/// arrives only as body bytes, and the riding bytes after the body never arrive.
+#[test]
+fn ambiguous_framing_that_hyper_decodes_is_reframed_before_the_upstream() {
+    let host = "reframing.test";
+    let upstream = TlsUpstream::start(host);
+    let (handle, policy) = gateway_for(host, &upstream);
+    let port = upstream.port();
+    let smuggled =
+        format!("GPOST /smuggled HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 15\r\n\r\nx=1");
+
+    let cases: &[(&str, String, &str)] = &[
+        (
+            "CL.TE",
+            format!(
+                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG"
+            ),
+            "",
+        ),
+        (
+            "TE.CL",
+            format!(
+                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n{:x}\r\n{smuggled}\r\n0\r\n\r\n",
+                smuggled.len()
+            ),
+            &smuggled,
+        ),
+        (
+            "TE repeated",
+            format!(
+                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+            ),
+            "hello",
+        ),
+        (
+            "CL repeated",
+            format!(
+                "POST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello"
+            ),
+            "hello",
+        ),
+    ];
+    for (count, (name, request, body)) in cases.iter().enumerate() {
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+        client.send_raw(request.as_bytes());
+        assert_eq!(
+            client.read_status(),
+            200,
+            "{name}: the decoded request is served"
+        );
+        assert_eq!(
+            upstream.request_count(),
+            count + 1,
+            "{name}: exactly one request reached the upstream"
+        );
+        let seen = upstream.last_request();
+        let (head, forwarded) = seen.raw.split_once("\r\n\r\n").expect("one head, one body");
+        assert!(head.starts_with("POST /legit "), "{name}: {head}");
+        assert!(
+            !head.contains("/smuggled"),
+            "{name}: the head names one request: {head}"
+        );
+        assert_eq!(
+            seen.header("content-length").as_deref(),
+            Some(body.len().to_string().as_str()),
+            "{name}: one Content-Length of the decoded body"
+        );
+        assert_eq!(seen.header("transfer-encoding"), None, "{name}");
+        assert_eq!(
+            forwarded, *body,
+            "{name}: the decoded body, and nothing after it"
+        );
+        assert_eq!(
+            policy.requests().len(),
+            count + 1,
+            "{name}: one request effect"
+        );
+    }
 }
 
 /// A second request riding a complete first one, in the same TLS connection, is never forwarded:

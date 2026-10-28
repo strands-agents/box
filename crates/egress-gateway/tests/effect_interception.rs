@@ -703,19 +703,21 @@ fn an_upstream_that_never_replies_is_bounded_by_the_read_deadline() {
 }
 
 /// An upstream that drips its reply one byte at a time, each under the per-read wait: the
-/// deadline bounds the exchange as a whole, so the request outcome records with no status.
+/// deadline counts only the time with no byte, so the whole reply takes longer than the deadline
+/// and is still released.
 #[test]
-fn an_upstream_that_drips_its_reply_is_bounded_by_the_read_deadline() {
+fn an_upstream_that_drips_its_reply_is_not_cut_while_bytes_move() {
     let host = "drip.test";
     let upstream = TlsUpstream::start_dripping(
         host,
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-        Duration::from_millis(200),
+        Duration::from_millis(20),
     );
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
+    let deadline = Duration::from_millis(400);
     let config = MitmConfig {
-        upstream_read_deadline: Duration::from_millis(700),
+        upstream_read_deadline: deadline,
         ..config_for(host, &upstream)
     };
     let handle = MitmInterceptor::start(
@@ -728,22 +730,22 @@ fn an_upstream_that_drips_its_reply_is_bounded_by_the_read_deadline() {
     let started = Instant::now();
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("GET", "/drip", &[], b"");
-    assert_eq!(
-        client.read_response(),
-        "",
-        "a dripped reply is not released"
-    );
+    let response = client.read_response();
+    assert!(response.ends_with("\r\n\r\nok"), "{response}");
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "the deadline bounds the exchange as a whole: {:?}",
+        started.elapsed() > deadline,
+        "the reply took longer than the deadline: {:?}",
         started.elapsed()
     );
 
-    let events = wait_for_event_count(&shared, 5);
+    let events = wait_for_event_count(&shared, 7);
     assert!(
         matches!(
             &events[4],
-            Event::Outcome(EffectKind::HttpRequest, EffectOutcome::Completed(bytes)) if *bytes > 0
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Replied { status: 200, .. }
+            )
         ),
         "{:?}",
         events[4]
@@ -805,16 +807,19 @@ fn an_upstream_that_never_drains_the_request_is_bounded_by_the_write_deadline() 
 }
 
 /// An upstream that accepts the request 64 KiB at a time, so every write progresses under the
-/// per-write wait while the whole request outlasts the deadline: the exchange-wide check ends it,
-/// and the request outcome records the partial delivery with no status.
+/// per-write wait while the whole request outlasts the deadline: the deadline counts only the time
+/// with no byte, so the whole request leaves. The upstream then never replies, and the wait for the
+/// reply ends at the deadline with no status.
 #[test]
-fn an_upstream_that_sips_the_request_is_bounded_by_the_write_deadline() {
+fn an_upstream_that_sips_the_request_is_not_cut_while_bytes_move() {
     let host = "sip.test";
     let upstream = TlsUpstream::start_sipping(host, Duration::from_millis(10));
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
+    // The 192 sips of 64 KiB take about 1.9 s, longer than the deadline.
+    let deadline = Duration::from_millis(1_500);
     let config = MitmConfig {
-        upstream_read_deadline: Duration::from_millis(700),
+        upstream_read_deadline: deadline,
         ..config_for(host, &upstream)
     };
     let handle = MitmInterceptor::start(
@@ -831,22 +836,21 @@ fn an_upstream_that_sips_the_request_is_bounded_by_the_write_deadline() {
     assert_eq!(
         client.read_response(),
         "",
-        "an undelivered request gets no reply"
+        "an unanswered request gets no reply"
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "the deadline bounds the writes as a whole: {:?}",
-        started.elapsed()
-    );
+    let took = started.elapsed();
 
     let events = wait_for_event_count(&shared, 5);
     assert!(
+        took > deadline,
+        "the exchange took longer than the deadline: {took:?}, {:?}",
+        events[4]
+    );
+    assert!(
         matches!(
             &events[4],
-            Event::Outcome(
-                EffectKind::HttpRequest,
-                EffectOutcome::Partial { .. } | EffectOutcome::Indeterminate { .. }
-            )
+            Event::Outcome(EffectKind::HttpRequest, EffectOutcome::Completed(bytes))
+                if *bytes > body.len()
         ),
         "{:?}",
         events[4]
