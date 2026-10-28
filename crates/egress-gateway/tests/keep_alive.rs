@@ -32,11 +32,12 @@ const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 const END_WAIT: Duration = Duration::from_secs(5);
 
 /// An authority that keeps each attempt and each outcome, in order, and permits each attempt but
-/// the `Connect` attempts after the first `connects`.
+/// the `Connect` attempts after the first `connects`, which fail with `refusal`.
 struct Log {
     attempts: Mutex<Vec<String>>,
     outcomes: Arc<Mutex<Vec<String>>>,
     connects: AtomicUsize,
+    refusal: io::ErrorKind,
 }
 
 impl Log {
@@ -45,10 +46,20 @@ impl Log {
     }
 
     fn permitting_connects(connects: usize) -> Arc<Self> {
+        Self::refusing_after(connects, io::ErrorKind::PermissionDenied)
+    }
+
+    /// Fail each `Connect` attempt after the first `connects` with an error that is not a denial.
+    fn failing_connects_after(connects: usize) -> Arc<Self> {
+        Self::refusing_after(connects, io::ErrorKind::Other)
+    }
+
+    fn refusing_after(connects: usize, refusal: io::ErrorKind) -> Arc<Self> {
         Arc::new(Self {
             attempts: Mutex::new(Vec::new()),
             outcomes: Arc::new(Mutex::new(Vec::new())),
             connects: AtomicUsize::new(connects),
+            refusal,
         })
     }
 
@@ -92,10 +103,11 @@ impl EffectInterceptor for Log {
                 })
                 .is_err()
         {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "denied by test policy",
-            ));
+            let message = match self.refusal {
+                io::ErrorKind::PermissionDenied => "denied by test policy",
+                _ => "failed in the test policy",
+            };
+            return Err(io::Error::new(self.refusal, message));
         }
         Ok(Box::new(LoggedPermit(Arc::clone(&self.outcomes))))
     }
@@ -289,6 +301,28 @@ fn a_request_naming_another_host_on_a_tunnel_is_refused_and_closes() {
     assert!(client.reads_end_within(END_WAIT), "the connection closes");
     let seen = upstream.requests();
     assert_eq!(seen.len(), 1, "{seen:?}");
+}
+
+/// **A later request whose upstream socket does not open gets an unmarked `502` inside the tunnel,
+/// and the connection closes.** The failure is not a denial, so the reply has no egress marker, as
+/// the `502` to a `CONNECT` whose socket does not open has none.
+#[test]
+fn a_later_request_whose_socket_does_not_open_gets_an_unmarked_502_and_closes() {
+    let host = "fails.test";
+    let upstream = TlsUpstream::start_with_response(host, OK);
+    let log = Log::failing_connects_after(1);
+    let (handle, _) = gateway(&[&upstream], &[host], &log, |_| {});
+    let mut client = WorkloadClient::connect(port(&handle), host, upstream.port());
+    client.send_raw(get(host, upstream.port(), "/first").as_bytes());
+    assert_eq!(client.read_status(), 200);
+    client.send_raw(get(host, upstream.port(), "/second").as_bytes());
+    let reply = client.read_response();
+    assert!(
+        reply.starts_with("HTTP/1.1 502 ") && !is_marked(&reply) && says_close(&reply),
+        "{reply}"
+    );
+    assert!(client.reads_end_within(END_WAIT));
+    assert_eq!(log.of_kind("HttpRequest").len(), 1, "{:#?}", log.attempts());
 }
 
 /// **A client `Connection: close` ends the tunnel after its reply**, which says so.
@@ -747,8 +781,15 @@ fn each_plain_request_is_checked_for_its_own_proxy_token() {
             "{token:?}: {reply}"
         );
     }
-    assert!(plain_reads_end(&mut client), "the 407 closes the connection");
-    assert_eq!(origin.heads().len(), 2, "the refused request opened no socket");
+    assert!(
+        plain_reads_end(&mut client),
+        "the 407 closes the connection"
+    );
+    assert_eq!(
+        origin.heads().len(),
+        2,
+        "the refused request opened no socket"
+    );
     assert_eq!(log.of_kind("Resolve").len(), 2, "{:#?}", log.attempts());
 }
 

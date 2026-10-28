@@ -61,7 +61,7 @@ kinds, and the proxy presents each one immediately before its effect:
 
 | Attempt | Fields | Reported when |
 |---|---|---|
-| `EffectAttempt::Resolve` | `host`, `port` | before the host is resolved, once per upstream socket, which is one for each request |
+| `EffectAttempt::Resolve` | `host`, `port` | before the host is resolved, once per upstream socket: one for each request, and a CONNECT opens the first one before its first request |
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `intercepted`, `mcp` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
@@ -275,7 +275,11 @@ the gateway wrote itself, after an HTTP/1.0 request, after a client `Connection:
 request that names `Upgrade`. The wait for the next head and that head share one 60 s bound. A
 connection holds its slot while it waits. When a new connection finds no free slot, the connection
 that has waited longest closes at once, one for each waiting connection; a connection inside an
-exchange keeps its slot.
+exchange keeps its slot. When the new connection asks for the slot just as the next head of the
+waiting connection arrives, the waiting connection closes after the reply to that head. On a
+kept-alive tunnel, a later request whose upstream socket does not open (a failed resolve, connect,
+or outcome record) gets a `502` with no egress marker inside the tunnel, and the connection closes;
+on a new tunnel the same failure is a `502` to the `CONNECT`.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.

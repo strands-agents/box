@@ -22,9 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection that it opens to a server, as `net:connect`,
-  and it opens one for each HTTP request. It asks once per HTTP request, as `http:request`, and once
-  per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection that it opens to a server, as `net:connect`.
+  It opens one for each HTTP request, and a CONNECT opens the first one before its first request. It
+  asks once per HTTP request, as `http:request`, and once per MCP request over HTTP, as `mcp:call`.
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.

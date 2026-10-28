@@ -2,8 +2,10 @@
 //!
 //! A kept-alive connection holds its slot while it waits for its next request. When a new
 //! connection finds no free slot, the oldest waiting connection gives its slot back: one for each
-//! connection that waits. A connection inside an exchange never gives its slot back for pressure, so
-//! a steady load near the cap does not end keep-alive for the busy connections.
+//! connection that waits. A connection inside an exchange keeps its slot, so a steady load near the
+//! cap does not end keep-alive for the busy connections. The one exception is a race: when the
+//! request for a slot comes just as the next head of the waiting connection arrives, that
+//! connection closes after the reply to that head.
 
 use std::collections::VecDeque;
 use std::future::Future;
