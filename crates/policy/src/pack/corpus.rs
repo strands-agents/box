@@ -63,22 +63,33 @@ fn field_values(fields: &toml::Table) -> Result<BTreeMap<String, FieldValue>, St
         .collect()
 }
 
-fn expected(case: &Case) -> Result<Parsed, String> {
+/// A parse result as the corpus writes it: names as strings, and only non-default fields.
+#[derive(Debug, PartialEq, Eq)]
+enum Reading {
+    Action {
+        action: String,
+        fields: BTreeMap<String, FieldValue>,
+        effects: BTreeSet<String>,
+    },
+    Unmodeled,
+}
+
+fn expected(case: &Case) -> Result<Reading, String> {
     if case.action == "unmodeled" {
         if !case.fields.is_empty() || !case.effects.is_empty() {
             return Err("an unmodeled case has fields or effects".to_string());
         }
-        return Ok(Parsed::Unmodeled);
+        return Ok(Reading::Unmodeled);
     }
-    Ok(Parsed::Action {
+    Ok(Reading::Action {
         action: case.action.clone(),
         fields: field_values(&case.fields)?,
         effects: case.effects.clone(),
     })
 }
 
-/// Drop each field that holds its default: `false`, or an empty set.
-fn without_defaults(parsed: Parsed) -> Parsed {
+/// Read `parsed` by name, and drop each field that holds its default: `false`, or an empty set.
+fn reading(parsed: Parsed) -> Reading {
     match parsed {
         Parsed::Action {
             action,
@@ -90,20 +101,36 @@ fn without_defaults(parsed: Parsed) -> Parsed {
                 FieldValue::Set(values) => !values.is_empty(),
                 FieldValue::String(_) => true,
             });
-            Parsed::Action {
-                action,
+            Reading::Action {
+                action: action.as_str().to_string(),
                 fields,
-                effects,
+                effects: effects
+                    .iter()
+                    .map(|effect| effect.as_str().to_string())
+                    .collect(),
             }
         }
-        Parsed::Unmodeled => Parsed::Unmodeled,
+        Parsed::Unmodeled => Reading::Unmodeled,
     }
 }
 
-fn show(parsed: &Parsed) -> String {
+/// Whether the action and each effect of `parsed` are ones that `pack` declares.
+fn declared_by(parsed: &Parsed, pack: &Pack) -> bool {
     match parsed {
-        Parsed::Unmodeled => "unmodeled".to_string(),
         Parsed::Action {
+            action, effects, ..
+        } => {
+            pack.actions.contains_key(action)
+                && effects.iter().all(|effect| pack.effects.contains(effect))
+        }
+        Parsed::Unmodeled => true,
+    }
+}
+
+fn show(reading: &Reading) -> String {
+    match reading {
+        Reading::Unmodeled => "unmodeled".to_string(),
+        Reading::Action {
             action,
             fields,
             effects,
@@ -167,7 +194,11 @@ fn every_corpus_case_parses_to_its_action_fields_and_effects() {
                 failures.push(format!("{at}: does not start with `{}`", pack.program));
                 continue;
             }
-            let parsed = without_defaults(grammar.parse(&case.argv[1..]));
+            let parsed = grammar.parse(&case.argv[1..]);
+            if !declared_by(&parsed, &pack) {
+                failures.push(format!("{at}: gives a name that the pack does not declare"));
+            }
+            let parsed = reading(parsed);
             if parsed != expected {
                 failures.push(format!(
                     "{at}\n  expected: {}\n  but got:  {}",

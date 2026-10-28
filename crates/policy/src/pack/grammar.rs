@@ -2,16 +2,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{EffectChanges, OptionValue, Pack, ShellAction, ShellOption};
+use super::model::{
+    ActionName, EffectChanges, EffectName, OptionValue, Pack, ShellAction, ShellOption,
+};
 use super::usage::{Separator, Usage, UsageFault};
 
 /// What the shell grammar made of one command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Parsed {
     Action {
-        action: String,
+        action: ActionName,
         fields: BTreeMap<String, FieldValue>,
-        effects: BTreeSet<String>,
+        effects: BTreeSet<EffectName>,
     },
     Unmodeled,
 }
@@ -35,11 +37,11 @@ pub(crate) struct ShellGrammar {
 /// The grammar of one shell action.
 #[derive(Debug)]
 pub(super) struct ActionGrammar {
-    pub(super) name: String,
+    pub(super) name: ActionName,
     pub(super) spellings: Vec<Vec<String>>,
     pub(super) globals: bool,
     pub(super) toolchain: Option<String>,
-    pub(super) adds: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
     pub(super) between: OptionTable,
     pub(super) after: OptionTable,
     pub(super) operands: Vec<OperandSlot>,
@@ -111,7 +113,7 @@ impl ShellGrammar {
 
 impl ActionGrammar {
     fn compile(
-        name: &str,
+        name: &ActionName,
         action: &ShellAction,
         pack: &Pack,
         anywhere: &OptionTable,
@@ -159,7 +161,7 @@ impl ActionGrammar {
         let mut action_spellings = vec![usage.words];
         action_spellings.extend(action.aliases.iter().cloned());
         Ok(Self {
-            name: name.to_string(),
+            name: name.clone(),
             spellings: action_spellings,
             globals: usage.globals,
             toolchain: usage.toolchain,

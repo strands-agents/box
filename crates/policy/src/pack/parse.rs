@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::grammar::{
     ActionGrammar, FieldKind, FieldSource, FieldValue, OptionTable, Parsed, ShellGrammar,
 };
-use super::model::{EffectChanges, OptionValue};
+use super::model::{EffectChanges, EffectName, OptionValue};
 use super::usage::Separator;
 
 impl ShellGrammar {
@@ -111,7 +111,7 @@ impl ActionGrammar {
         toolchain: Option<String>,
     ) -> Parsed {
         let mut fields = BTreeMap::new();
-        let mut adds: BTreeSet<String> = self.adds.iter().cloned().collect();
+        let mut adds: BTreeSet<EffectName> = self.adds.iter().cloned().collect();
         let mut removes = BTreeSet::new();
         for field in &self.fields {
             let (values, changes) = match &field.source {
@@ -313,8 +313,8 @@ fn fill(
 fn apply(
     changes: &EffectChanges,
     values: &[String],
-    adds: &mut BTreeSet<String>,
-    removes: &mut BTreeSet<String>,
+    adds: &mut BTreeSet<EffectName>,
+    removes: &mut BTreeSet<EffectName>,
 ) {
     let matches = |patterns: &[String]| {
         values

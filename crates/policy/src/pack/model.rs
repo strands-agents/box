@@ -1,10 +1,37 @@
 //! The checked tool pack that loading builds from the file.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::format::{OperandSpec, OptionSpec, PackFile, ShellActionSpec, ValueSpec, WhenSpec};
 use super::{PackRefusal, Place};
 use crate::schema::cedar_identifier;
+
+/// The name of one `[shell.<action>]` table of a checked pack.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ActionName(String);
+
+/// The name of one `[effects]` entry of a checked pack.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EffectName(String);
+
+impl ActionName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl EffectName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for EffectName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
 
 /// One tool pack, read and checked.
 #[cfg_attr(test, derive(PartialEq))]
@@ -13,9 +40,9 @@ pub(crate) struct Pack {
     pub(super) name: String,
     pub(super) version: u32,
     pub(super) program: String,
-    pub(super) effects: BTreeSet<String>,
+    pub(super) effects: BTreeSet<EffectName>,
     pub(super) global_options: BTreeMap<String, ShellOption>,
-    pub(super) actions: BTreeMap<String, ShellAction>,
+    pub(super) actions: BTreeMap<ActionName, ShellAction>,
 }
 
 /// One `[shell.<action>]` table.
@@ -24,7 +51,7 @@ pub(crate) struct Pack {
 pub(crate) struct ShellAction {
     pub(super) usage: String,
     pub(super) aliases: Vec<Vec<String>>,
-    pub(super) adds: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
     pub(super) options: BTreeMap<String, ShellOption>,
     pub(super) operands: BTreeMap<String, Operand>,
 }
@@ -62,8 +89,8 @@ pub(crate) enum OptionValue {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EffectChanges {
     pub(super) like: Vec<String>,
-    pub(super) adds: Vec<String>,
-    pub(super) removes: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
+    pub(super) removes: Vec<EffectName>,
     pub(super) when: Vec<WhenChanges>,
 }
 
@@ -72,8 +99,8 @@ pub(crate) struct EffectChanges {
 #[derive(Debug, Clone)]
 pub(crate) struct WhenChanges {
     pub(super) like: Vec<String>,
-    pub(super) adds: Vec<String>,
-    pub(super) removes: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
+    pub(super) removes: Vec<EffectName>,
 }
 
 impl Pack {
@@ -96,7 +123,7 @@ impl Pack {
         let mut effects = BTreeSet::new();
         for effect in file.effects.into_keys() {
             identifier(Place::Effect(effect.clone()), &effect)?;
-            effects.insert(effect);
+            effects.insert(EffectName(effect));
         }
         let mut global_options = BTreeMap::new();
         for (name, spec) in file.global.options {
@@ -107,7 +134,7 @@ impl Pack {
         let mut actions = BTreeMap::new();
         for (name, spec) in file.shell {
             let action = ShellAction::read(&name, spec, &file.program, &effects)?;
-            actions.insert(name, action);
+            actions.insert(ActionName(name), action);
         }
         Ok(Self {
             name: file.pack,
@@ -125,7 +152,7 @@ impl ShellAction {
         name: &str,
         spec: ShellActionSpec,
         program: &str,
-        effects: &BTreeSet<String>,
+        effects: &BTreeSet<EffectName>,
     ) -> Result<Self, PackRefusal> {
         let place = Place::Action(name.to_string());
         identifier(place.clone(), name)?;
@@ -175,7 +202,7 @@ impl ShellOption {
     fn read(
         spec: OptionSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeSet<EffectName>,
     ) -> Result<Self, PackRefusal> {
         Ok(Self {
             flags: spec.flag,
@@ -203,7 +230,7 @@ impl Operand {
     fn read(
         spec: OperandSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeSet<EffectName>,
     ) -> Result<Self, PackRefusal> {
         Ok(Self {
             rest: spec.rest,
@@ -226,7 +253,7 @@ impl EffectChanges {
         adds: Vec<String>,
         removes: Vec<String>,
         when: Vec<WhenSpec>,
-        effects: &BTreeSet<String>,
+        effects: &BTreeSet<EffectName>,
     ) -> Result<Self, PackRefusal> {
         let adds = declared(place, adds, effects)?;
         let removes = declared(place, removes, effects)?;
@@ -276,18 +303,22 @@ fn identifier(place: Place, name: &str) -> Result<(), PackRefusal> {
     }
 }
 
+/// The declared effect that each of `names` refers to.
 fn declared(
     place: &Place,
     names: Vec<String>,
-    effects: &BTreeSet<String>,
-) -> Result<Vec<String>, PackRefusal> {
-    match names.iter().find(|name| !effects.contains(*name)) {
-        None => Ok(names),
-        Some(name) => Err(PackRefusal::UndeclaredEffect {
-            place: place.clone(),
-            effect: name.clone(),
-        }),
-    }
+    effects: &BTreeSet<EffectName>,
+) -> Result<Vec<EffectName>, PackRefusal> {
+    names
+        .into_iter()
+        .map(|name| match effects.get(name.as_str()) {
+            Some(effect) => Ok(effect.clone()),
+            None => Err(PackRefusal::UndeclaredEffect {
+                place: place.clone(),
+                effect: name,
+            }),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -298,11 +329,18 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    fn effects(values: &[&str]) -> Vec<EffectName> {
+        values
+            .iter()
+            .map(|value| EffectName(value.to_string()))
+            .collect()
+    }
+
     fn changes(like: &[&str], adds: &[&str], removes: &[&str]) -> EffectChanges {
         EffectChanges {
             like: strings(like),
-            adds: strings(adds),
-            removes: strings(removes),
+            adds: effects(adds),
+            removes: effects(removes),
             when: Vec::new(),
         }
     }
@@ -342,8 +380,8 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
         let lease = EffectChanges {
             when: vec![WhenChanges {
                 like: strings(&["*"]),
-                adds: strings(&["force_push"]),
-                removes: strings(&["network"]),
+                adds: effects(&["force_push"]),
+                removes: effects(&["network"]),
             }],
             ..changes(&["*:*", "*"], &[], &[])
         };
@@ -359,7 +397,7 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             name: "git".to_string(),
             version: 2,
             program: "git".to_string(),
-            effects: BTreeSet::from(["force_push", "network", "override_config"].map(String::from)),
+            effects: BTreeSet::from_iter(effects(&["force_push", "network", "override_config"])),
             global_options: BTreeMap::from([
                 (
                     "config".to_string(),
@@ -383,12 +421,12 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
                 ),
             ]),
             actions: BTreeMap::from([(
-                "push".to_string(),
+                ActionName("push".to_string()),
                 ShellAction {
                     usage: "git [global options] push [options] [<remote> [<refspec>...]]"
                         .to_string(),
                     aliases: vec![strings(&["send"])],
-                    adds: strings(&["network"]),
+                    adds: effects(&["network"]),
                     options: BTreeMap::from([
                         (
                             "dry_run".to_string(),
