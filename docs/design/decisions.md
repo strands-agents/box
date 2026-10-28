@@ -1385,15 +1385,24 @@ path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that
 carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
-### The Shell's outbound HTTP goes through the box's egress gateway
+### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
 
-The Shell builds no HTTP client of its own. It dials the box's egress gateway on loopback and trusts the
-gateway's interception CA. The gateway stays the one authority for `net:connect` and `http:request`, so
-a Shell `curl` becomes one more source of decisions that the gateway already raises. A direct client
-would be a second unaudited route to an effect the gateway governs. The Shell resolves no credential and
-attaches no secret, and it runs its network off-switch before any transport. A build-time check fails
-the build if a network client appears in the Shell sources outside the two sanctioned files, but that
-check is a lint and not a guarantee.
+Box owns the Shell's HTTP step. `CallKernel::http_request` does not hand a request to the vendored
+backend: it refuses every request when the box has no gateway, runs the private-address floor, and
+sends the request with its own client. That client dials the box's egress gateway on loopback, trusts
+only the gateway's interception CA, and follows no redirect, so each `curl -L` hop is a new request
+through the wrapper. It ignores `curl -k`. The backend keeps its own network off, so the vendored
+client can't dial even if a call skips the wrapper. The gateway stays the one authority for
+`net:connect` and `http:request`, and the Shell resolves no credential and attaches no secret.
+
+The alternative was proxy fields on the vendored `VfsKernel`, set through `ShellBuilder::egress_proxy`.
+Upstream Shell doesn't have that feature and Box won't propose it, and the builder calls did nothing
+once Box supplied its own kernel.
+
+The cost: the wrapper governs only what reaches the kernel's HTTP step. A future Shell network command
+that builds its own client would skip it. A test in `shell_egress_client_guard.rs` fails if a client
+is built in the Shell sources outside `vfs_kernel.rs` and `shell.rs`, but that check is a lint and not
+a guarantee.
 
 <a id="a-gateway-refusal-never-reports-success"></a>
 ### A gateway refusal never reaches the workload as a successful response
@@ -1401,11 +1410,11 @@ check is a lint and not a guarantee.
 The gateway forges the origin's leaf certificate when it intercepts a request, so a refusal it writes
 inside its own tunnel would reach the Shell as an ordinary HTTP status, and `curl` exits 0 for any
 status unless the caller passes `-f`. The gateway therefore marks each response it writes itself with a
-header, and the Shell turns such a response into a permission-denied error, so `curl` prints one
-reason line and exits 1. The marker is not authorization: the gateway already refused, and the marker
-only says who wrote the refusal. `a_gateway_refusal_exits_non_zero_and_is_not_rendered` pins it.
+header, and Box's kernel wrapper turns such a response into a permission-denied error, so `curl`
+prints one reason line and exits 1. The marker is not authorization: the gateway already refused, and
+the marker only says who wrote the refusal. `kernel.rs::a_marked_refusal_fails_curl` pins it.
 
-**The conversion is the Shell's alone, and Monty does not have it.** A Monty `fetch` builds its own
+**The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds its own
 client and never reads the marker, so a denied request reaches the script as an ordinary response
 carrying a `403` status. A script that does not check the status reads a refusal as an answer. That is
 an open residual rather than a closed case.
