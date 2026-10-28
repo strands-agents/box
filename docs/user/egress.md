@@ -8,6 +8,10 @@ Audience: an operator with a working box from [getting started](./getting-starte
 the agent a credential for a service. For how the gateway decides and forwards each request, read
 [how Box controls outbound traffic](../design/egress.md).
 
+A tool or local MCP server with `network.contain_egress = false` sends its own connections outside
+gateway policy. On Linux, this includes the surrounding OS's reachable private networks, loopback
+services, and instance metadata endpoints. See [server network settings](./mcp.md#network).
+
 ## Example
 
 A bearer token for GitHub, and an AWS profile for Bedrock:
