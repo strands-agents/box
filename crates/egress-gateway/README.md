@@ -70,7 +70,9 @@ No attempt carries a header or credential material. The only body content in an
 attempt is `mcp`, the MCP frame of a request to a configured remote MCP server.
 `path` excludes the query string and is the path the workload sent, captured
 before any credential edit. `body_bytes` is a length. `intercepted` is `true`
-when the request came through TLS interception.
+when the request came through TLS interception. A WebSocket handshake is an
+ordinary `HttpRequest` with `method` `GET` and `body_bytes` 0, and the messages
+of its session raise no attempt.
 
 A `Resolve` permit is a decision only, and it receives no outcome. Both
 `EffectPermit` methods consume `self: Box<Self>`, so a permit of the other three
@@ -117,7 +119,8 @@ so plaintext is always available to a capability.
 The proxy answers a refusal with a static, secret-free diagnostic. Such a
 diagnostic is trusted boundary output and does not enter `ResponseRelease`, so a
 denied effect needs no authorization to report. Upstream response bytes always
-enter `ResponseRelease` before workload delivery.
+enter `ResponseRelease` before workload delivery. The release of a `101` admits
+the server messages of its WebSocket session, and the gateway scrubs each one.
 
 ## Destination Matching
 

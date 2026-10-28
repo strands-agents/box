@@ -320,6 +320,11 @@ fn status(head: &str) -> u16 {
 enum Answer {
     /// Accept, send the greeting in the same write as the 101 when one is set, then echo.
     Echo(Option<&'static str>),
+    /// Accept, send the handshake's `Authorization` back in a text message and a ping, then echo.
+    Reflect,
+    /// Accept, send the frames that this builds from the handshake head in the same write, then
+    /// echo.
+    Script(fn(&str) -> Vec<u8>),
     /// Accept, send this many binary messages of this many bytes, each led by its index, then echo.
     Burst(u32, usize),
     /// Accept, with one more header line in the 101.
@@ -449,6 +454,17 @@ fn serve(
             }
         }
         Answer::FrameLimit(_) => reply.extend(switching(&accept_value(&key), "")),
+        Answer::Reflect => {
+            reply.extend(switching(&accept_value(&key), ""));
+            let authorization = header(&head, "authorization").unwrap_or_default();
+            let message = format!("you sent {authorization}");
+            encode(&mut reply, true, TEXT, message.as_bytes(), None);
+            encode(&mut reply, true, PING, authorization.as_bytes(), None);
+        }
+        Answer::Script(script) => {
+            reply.extend(switching(&accept_value(&key), ""));
+            reply.extend(script(&head));
+        }
         Answer::Talk(count, interval) => {
             tls.write_all(&switching(&accept_value(&key), ""))?;
             tls.flush()?;
@@ -667,6 +683,32 @@ fn plain_gateway(host: &str, upstream: &WsUpstream) -> MitmHandle {
         PathPolicy::permitting(host),
         MitmConfig::default(),
     )
+}
+
+/// A gateway like [`plain_gateway`] with the credential `controls`.
+fn credential_gateway(host: &str, upstream: &WsUpstream, controls: CapabilitySet) -> MitmHandle {
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem.clone()],
+        dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
+        ..MitmConfig::default()
+    };
+    MitmInterceptor::start(config, controls, PathPolicy::permitting(host)).unwrap()
+}
+
+fn pattern(host: &str, port: u16) -> DestinationPattern {
+    DestinationPattern::parse(&format!("{host}:{port}")).unwrap()
+}
+
+/// Place `secret` in a uniquely-named environment variable and return its `env://` locator.
+fn env_locator(secret: &str) -> Locator {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        "EGRESS_WEBSOCKET_TEST_SECRET_{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    // SAFETY: the name is unique to this call, so no other test reads or writes it.
+    unsafe { std::env::set_var(&name, secret) };
+    Locator::parse_uri(&format!("env://{name}")).unwrap()
 }
 
 /// A gateway like [`plain_gateway`] that keeps each decision it emits.
@@ -1045,60 +1087,6 @@ fn a_handshake_the_policy_denies_is_refused_before_the_upstream() {
     );
 }
 
-/// Until the relay scrubs each server message, a handshake to a destination that a credential
-/// route matches is refused before the credential attaches.
-#[test]
-fn a_handshake_to_a_credential_route_is_refused_until_the_relay_scrubs() {
-    let host = "credentialed.ws.test";
-    let upstream = WsUpstream::start(host, Answer::Echo(None));
-    let pattern = DestinationPattern::parse(&format!("{host}:{}", upstream.port)).unwrap();
-    // SAFETY: the name is unique to this test, so no other test reads or writes it.
-    unsafe { std::env::set_var("EGRESS_WEBSOCKET_TEST_SECRET", "sk_live_REALSECRET") };
-    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
-        RouteSpec::opaque(
-            pattern.clone(),
-            Locator::parse_uri("env://EGRESS_WEBSOCKET_TEST_SECRET").unwrap(),
-            InjectMode::header("Bearer {}".to_string(), None).unwrap(),
-        ),
-    ))
-    .unwrap();
-    let phantom = opened.phantoms()[0].token().to_string();
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            pattern,
-            Arc::new(opened.into_vault()),
-        ))
-        .build();
-    let policy = PathPolicy::permitting(host);
-    let handle = MitmInterceptor::start(
-        MitmConfig {
-            upstream_ca_pems: vec![upstream.ca_pem.clone()],
-            dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
-            ..MitmConfig::default()
-        },
-        controls,
-        policy.clone(),
-    )
-    .unwrap();
-
-    let (_client, reply) = WsClient::open(
-        &handle,
-        host,
-        upstream.port,
-        &format!("Authorization: Bearer {phantom}\r\n"),
-    );
-    assert_eq!(status(&reply), 403, "{reply:?}");
-    assert!(
-        reply.ends_with("WebSocket refused for a credential route"),
-        "{reply:?}"
-    );
-    assert!(upstream.handshakes().is_empty());
-    assert_eq!(policy.requests(), Vec::<String>::new());
-    assert!(denials(&handle).iter().any(|reason| reason
-        == "websocket: a credential route matches the destination, and the relay does not scrub \
-            server messages"));
-}
-
 // ============================================================================================
 // Messages cross the relay
 // ============================================================================================
@@ -1436,6 +1424,334 @@ fn a_websocket_runs_over_the_af_unix_transport() {
 }
 
 // ============================================================================================
+// Credentials on the handshake
+// ============================================================================================
+
+/// The secret a credentialed route attaches to the handshake as `Bearer <secret>`.
+const SECRET: &str = "sk_live_REALSECRET";
+
+/// A WebSocket opened through a route that attaches [`SECRET`] to the handshake.
+struct Credentialed {
+    client: WsClient<TcpStream>,
+    reply: String,
+    handle: MitmHandle,
+    upstream: WsUpstream,
+    phantom: String,
+}
+
+fn open_credentialed(host: &str, answer: Answer) -> Credentialed {
+    let upstream = WsUpstream::start(host, answer);
+    let port = upstream.port;
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            pattern(host, port),
+            env_locator(SECRET),
+            InjectMode::header("Bearer {}".to_string(), None).unwrap(),
+        ),
+    ))
+    .unwrap();
+    let phantom = opened.phantoms()[0].token().to_string();
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            pattern(host, port),
+            Arc::new(opened.into_vault()),
+        ))
+        .build();
+    let handle = credential_gateway(host, &upstream, controls);
+    let (client, reply) = WsClient::open(
+        &handle,
+        host,
+        port,
+        &format!("Authorization: Bearer {phantom}\r\n"),
+    );
+    Credentialed {
+        client,
+        reply,
+        handle,
+        upstream,
+        phantom,
+    }
+}
+
+/// The secret the upstream received on the handshake.
+fn secret_from(head: &str) -> String {
+    header(head, "authorization")
+        .unwrap_or_default()
+        .trim_start_matches("Bearer ")
+        .to_string()
+}
+
+#[test]
+fn a_credential_is_injected_on_the_handshake_and_a_reflected_secret_is_redacted() {
+    let Credentialed {
+        mut client,
+        reply,
+        handle,
+        upstream,
+        phantom,
+    } = open_credentialed("secret.ws.test", Answer::Reflect);
+    assert_eq!(status(&reply), 101, "{reply:?}");
+
+    let handshake = &upstream.handshakes()[0];
+    assert_eq!(
+        header(handshake, "authorization").as_deref(),
+        Some("Bearer sk_live_REALSECRET"),
+        "the upstream sees the real secret on the handshake"
+    );
+    assert!(!handshake.contains(&phantom));
+
+    let message = client.recv();
+    assert_eq!(
+        String::from_utf8(message.payload).unwrap(),
+        "you sent Bearer [REDACTED]",
+        "the reflected secret is redacted in the server message"
+    );
+    let ping = client.recv();
+    assert_eq!(ping.opcode, PING);
+    assert!(
+        ping.payload.is_empty(),
+        "a control frame that carried the secret loses its payload"
+    );
+    client.send(TEXT, b"after");
+    assert_eq!(client.recv().payload, b"after");
+
+    for event in handle.drain_audit_events() {
+        assert!(!format!("{event:?}").contains("sk_live_REALSECRET"));
+    }
+}
+
+#[test]
+fn a_secret_in_a_fragmented_server_message_is_redacted_before_the_message_is_fragmented_again() {
+    let mut opened = open_credentialed(
+        "fragsecret.ws.test",
+        Answer::Script(|head| {
+            let secret = secret_from(head);
+            let (first, second) = secret.split_at(8);
+            let mut out = Vec::new();
+            let lead = format!("{}you sent {first}", "x".repeat(1500));
+            encode(&mut out, false, TEXT, lead.as_bytes(), None);
+            let tail = format!("{second}{}", "y".repeat(1500));
+            encode(&mut out, true, CONTINUATION, tail.as_bytes(), None);
+            out
+        }),
+    );
+    assert_eq!(status(&opened.reply), 101, "{:?}", opened.reply);
+    assert_eq!(secret_from(&opened.upstream.handshakes()[0]), SECRET);
+
+    let mut frames = vec![opened.client.recv()];
+    while !frames.last().unwrap().fin {
+        frames.push(opened.client.recv());
+    }
+    let joined: Vec<u8> = frames
+        .iter()
+        .flat_map(|frame| frame.payload.clone())
+        .collect();
+    let expected = format!(
+        "{}you sent [REDACTED]{}",
+        "x".repeat(1500),
+        "y".repeat(1500)
+    );
+    assert!(
+        String::from_utf8(joined).unwrap() == expected,
+        "the secret is redacted"
+    );
+    let largest = 1500 + "you sent sk_live_".len();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame.opcode, frame.payload.len()))
+            .collect::<Vec<_>>(),
+        vec![(TEXT, largest), (CONTINUATION, expected.len() - largest)],
+        "the message goes on in the server's largest fragment size"
+    );
+}
+
+#[test]
+fn a_secret_in_a_server_close_reason_leaves_only_the_close_code() {
+    let mut opened = open_credentialed(
+        "closesecret.ws.test",
+        Answer::Script(|head| {
+            let reason = format!("bye {}", secret_from(head));
+            let mut out = Vec::new();
+            encode(
+                &mut out,
+                true,
+                CLOSE,
+                &[&b"\x03\xe8"[..], reason.as_bytes()].concat(),
+                None,
+            );
+            out
+        }),
+    );
+    assert_eq!(status(&opened.reply), 101, "{:?}", opened.reply);
+    assert_eq!(opened.client.recv().payload, b"\x03\xe8");
+}
+
+/// LIVE GAP: the scrub reads one server message at a time, so a secret that the server splits
+/// across two messages reaches the workload in two parts.
+#[test]
+fn a_secret_split_across_two_server_messages_is_not_redacted() {
+    let mut opened = open_credentialed(
+        "split.ws.test",
+        Answer::Script(|head| {
+            let secret = secret_from(head);
+            let (first, second) = secret.split_at(8);
+            let mut out = Vec::new();
+            encode(&mut out, true, TEXT, first.as_bytes(), None);
+            encode(&mut out, true, TEXT, second.as_bytes(), None);
+            out
+        }),
+    );
+    assert_eq!(status(&opened.reply), 101, "{:?}", opened.reply);
+    let joined = [opened.client.recv().payload, opened.client.recv().payload].concat();
+    assert_eq!(joined, SECRET.as_bytes());
+}
+
+/// With no credential route on the destination, a server message that holds the secret's text
+/// passes unchanged: the scrub reads only the server messages of a credentialed handshake.
+#[test]
+fn a_server_message_to_a_destination_with_no_route_passes_unchanged() {
+    let host = "noroute.ws.test";
+    let upstream = WsUpstream::start(host, Answer::Echo(Some("sk_live_REALSECRET")));
+    let handle = plain_gateway(host, &upstream);
+    let (mut client, reply) = WsClient::open(&handle, host, upstream.port, "");
+    assert_eq!(status(&reply), 101, "{reply:?}");
+    assert_eq!(client.recv().payload, SECRET.as_bytes());
+    client.close();
+}
+
+/// The SigV4 signature the upstream receives verifies over the headers the upstream receives.
+#[test]
+fn a_sigv4_route_signs_the_handshake_and_the_relay_carries_frames() {
+    let secret_key = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let _env = harness::AwsEnvGuard::set("AKIDEXAMPLE", secret_key, Some("session-EXAMPLE"));
+    let host = "bedrock-agentcore.us-west-2.amazonaws.com";
+    let upstream = WsUpstream::start(host, Answer::Echo(None));
+    let port = upstream.port;
+    let source = Locator::structured(
+        [("source".to_string(), "aws".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
+    let store = Vault::open(
+        VaultConfig::new(Backend::local(), "t")
+            .route(RouteSpec::signed_aws(pattern(host, port), source)),
+    )
+    .unwrap()
+    .into_vault();
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(
+            pattern(host, port),
+            Arc::new(store),
+        ))
+        .build();
+    let handle = credential_gateway(host, &upstream, controls);
+
+    let (mut client, reply) = WsClient::open(
+        &handle,
+        host,
+        port,
+        "Authorization: AWS4-HMAC-SHA256 Credential=DUMMY/x, SignedHeaders=host, Signature=dead\r\n\
+         X-Amz-Date: 19700101T000000Z\r\nSec-WebSocket-Protocol: chat\r\n",
+    );
+    assert_eq!(status(&reply), 101, "{reply:?}");
+
+    let handshake = &upstream.handshakes()[0];
+    let authorization = header(handshake, "authorization").unwrap();
+    assert!(
+        authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+            && authorization.contains("/us-west-2/bedrock-agentcore/aws4_request"),
+        "{authorization}"
+    );
+    let signed = signed_headers(&authorization);
+    for name in [
+        "host",
+        "sec-websocket-key",
+        "sec-websocket-protocol",
+        "sec-websocket-version",
+        "x-amz-date",
+        "x-amz-security-token",
+    ] {
+        assert!(signed.contains(&name), "{name} is signed: {signed:?}");
+    }
+    for name in ["upgrade", "connection", "content-length"] {
+        assert!(!signed.contains(&name), "{name} is not signed: {signed:?}");
+    }
+    assert_eq!(header(handshake, "upgrade").as_deref(), Some("websocket"));
+    assert_eq!(header(handshake, "connection").as_deref(), Some("Upgrade"));
+    assert_eq!(header(handshake, "content-length"), None);
+    assert!(!handshake.contains("Signature=dead") && !handshake.contains(secret_key));
+    assert!(
+        sigv4_verifies(handshake, secret_key, "us-west-2", "bedrock-agentcore"),
+        "the signature covers the handshake as the upstream received it: {handshake}"
+    );
+    assert!(
+        !sigv4_verifies(
+            &handshake.replace(KEY, "AAAAAAAAAAAAAAAAAAAAAA=="),
+            secret_key,
+            "us-west-2",
+            "bedrock-agentcore"
+        ),
+        "the check fails for a handshake the signature does not cover"
+    );
+
+    client.send(TEXT, b"signed");
+    assert_eq!(client.recv().payload, b"signed");
+}
+
+fn signed_headers(authorization: &str) -> Vec<&str> {
+    authorization
+        .split("SignedHeaders=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap()
+        .split(';')
+        .collect()
+}
+
+/// Recompute SigV4 over a received GET head with no body, and compare it with its `Authorization`.
+fn sigv4_verifies(head: &str, secret_key: &str, region: &str, service: &str) -> bool {
+    use ring::{digest, hmac};
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let mac = |key: &[u8], data: &[u8]| {
+        hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), data)
+            .as_ref()
+            .to_vec()
+    };
+    let authorization = header(head, "authorization").unwrap();
+    let signed = signed_headers(&authorization);
+    let signature = authorization.rsplit("Signature=").next().unwrap();
+    let amz_date = header(head, "x-amz-date").unwrap();
+    let path = head.split_whitespace().nth(1).unwrap();
+    let canonical_headers: String = signed
+        .iter()
+        .map(|name| format!("{name}:{}\n", header(head, name).unwrap()))
+        .collect();
+    let canonical_request = format!(
+        "GET\n{path}\n\n{canonical_headers}\n{}\n{}",
+        signed.join(";"),
+        hex(digest::digest(&digest::SHA256, b"").as_ref())
+    );
+    let date = &amz_date[..8];
+    let scope = format!("{date}/{region}/{service}/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        hex(digest::digest(&digest::SHA256, canonical_request.as_bytes()).as_ref())
+    );
+    let key = mac(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
+    let key = mac(&key, region.as_bytes());
+    let key = mac(&key, service.as_bytes());
+    let key = mac(&key, b"aws4_request");
+    hex(&mac(&key, string_to_sign.as_bytes())) == signature
+}
+
+// ============================================================================================
 // The 101 as accepted
 // ============================================================================================
 
@@ -1693,6 +2009,76 @@ fn an_unmasked_client_frame_closes_with_1002() {
     assert!(
         reasons.iter().all(|reason| !reason.contains("plain")),
         "no payload byte reaches the audit"
+    );
+}
+
+#[test]
+fn a_client_text_message_not_utf8_closes_with_1007() {
+    let host = "clientutf8.ws.test";
+    let upstream = WsUpstream::start(host, Answer::Echo(None));
+    let handle = plain_gateway(host, &upstream);
+    let (mut client, _) = WsClient::open(&handle, host, upstream.port, "");
+
+    client.send(TEXT, &[0xFF, 0xFE]);
+    assert_eq!(client.recv().close_code(), 1007);
+
+    let frames = upstream.frames(1);
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].close_code(), 1001, "the upstream gets 1001");
+    assert!(
+        denials(&handle)
+            .iter()
+            .any(|reason| reason == "websocket: client text message not UTF-8")
+    );
+}
+
+/// The server sent a masked frame, which RFC 6455 forbids: the server gets 1002, and the workload
+/// 1014.
+#[test]
+fn a_server_frame_that_breaks_a_rule_closes_the_workload_with_1014() {
+    let host = "servermask.ws.test";
+    let upstream = WsUpstream::start(
+        host,
+        Answer::Script(|_| {
+            let mut out = Vec::new();
+            encode(&mut out, true, TEXT, b"masked", Some([1, 2, 3, 4]));
+            out
+        }),
+    );
+    let handle = plain_gateway(host, &upstream);
+    let (mut client, reply) = WsClient::open(&handle, host, upstream.port, "");
+    assert_eq!(status(&reply), 101, "{reply:?}");
+
+    assert_eq!(client.recv().close_code(), 1014);
+    assert_eq!(upstream.frames(1)[0].close_code(), 1002);
+    assert!(
+        denials(&handle)
+            .iter()
+            .any(|reason| reason == "websocket: server frame masked")
+    );
+}
+
+#[test]
+fn a_server_text_message_not_utf8_closes_the_workload_with_1014() {
+    let host = "serverutf8.ws.test";
+    let upstream = WsUpstream::start(
+        host,
+        Answer::Script(|_| {
+            let mut out = Vec::new();
+            encode(&mut out, true, TEXT, &[0xC3, 0x28], None);
+            out
+        }),
+    );
+    let handle = plain_gateway(host, &upstream);
+    let (mut client, reply) = WsClient::open(&handle, host, upstream.port, "");
+    assert_eq!(status(&reply), 101, "{reply:?}");
+
+    assert_eq!(client.recv().close_code(), 1014);
+    assert_eq!(upstream.frames(1)[0].close_code(), 1007);
+    assert!(
+        denials(&handle)
+            .iter()
+            .any(|reason| reason == "websocket: server text message not UTF-8")
     );
 }
 

@@ -132,7 +132,6 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 | `WebSocket requires TLS` | A WebSocket handshake came on a plain `http://` request. Use `wss://`. |
 | `WebSocket refused for an MCP server` | A WebSocket handshake went to the host of an http MCP server. |
-| `WebSocket refused for a credential route` | A WebSocket handshake went to a route's destination. The gateway does not yet remove a secret from the server's messages. |
 
 A request that names `websocket` in its `Upgrade` header and is not a valid WebSocket handshake
 gets an HTTP 400 with the same header and the body `malformed WebSocket handshake`. A valid
@@ -161,20 +160,45 @@ an ordinary `http:request` `GET` on its path; there is no other action. After th
 reads every frame in both directions, checks it, and frames it again. Ping, pong, and close pass
 from one peer to the other.
 
-- A permit for `GET` to a host and path also admits a WebSocket there. The session then carries
-  any number of messages in both directions with no more decisions, so a permit for `GET` only, or
-  for `body_bytes == 0`, admits an upload channel.
-- History records one `http:request` event for the session, with status 101. A byte budget over
-  `http:request` counts only the bytes of the handshake.
-- A temporal rule that matches after the handshake does not close an open WebSocket. It refuses
-  the next request and the next handshake.
-- To refuse a WebSocket, `forbid http:request` on its path or its host.
+What a policy decides for a WebSocket:
 
-Each message is at most 16 MiB. The gateway closes a session with code 1001
-when no byte moves in either direction for 300 seconds, and when the box stops. It closes a peer
-that breaks a frame rule with 1002, 1007, or 1009, and the other peer with 1001, or with 1014
-when the server broke the rule. Open WebSockets hold at most three quarters of the gateway's
-connections.
+- A `GET` permit now also admits a WebSocket. A permit for `GET` to a host and path admits a
+  handshake there, and the session then carries any number of messages in both directions with no
+  more decisions.
+- A permit for `GET` only, or for `body_bytes == 0`, becomes a two-way channel. The handshake has
+  no body, so it matches such a permit, and the workload can then send any number of messages to
+  the server.
+- A byte budget counts only the handshake. History records one `http:request` event for the
+  session, with status 101 and the bytes of the handshake request. No rule counts the messages.
+- A temporal rule that matches later does not close an open WebSocket. The decisions of the
+  session are made at the handshake. The rule refuses the next request and the next handshake.
+- To refuse a WebSocket, `forbid http:request` on its path or its host. A `forbid` on the path
+  also refuses a plain `GET` there, because the policy cannot tell a handshake from a `GET`.
+
+When a credential route matches the destination, the gateway adds the credential to the handshake,
+as it does to any request. It then removes the secret from each message and control frame that the
+server sends, before the workload gets it. A ping or a pong that held the secret arrives with no
+payload, and a close that held it arrives with its code only. The gateway reads one message at a
+time, so it does not find a secret that the server splits across two messages.
+
+The gateway frames each message again in the largest fragment size that its sender used, and never
+in fragments below 1 KiB. Each message is at most 16 MiB. The gateway closes a session with code
+1001 when no byte moves in either direction for 300 seconds, and when the box stops. When a peer
+breaks a rule, the gateway closes that peer with a code and the other peer as this table shows,
+and records one denial:
+
+| Fault | Code to the peer at fault | Code to the other peer |
+|---|---|---|
+| The workload sent a frame that breaks RFC 6455 | 1002 | 1001 |
+| The workload sent text or a close reason that is not UTF-8 | 1007 | 1001 |
+| The workload sent a message above 16 MiB | 1009 | 1001 |
+| The server sent a frame that breaks RFC 6455 | 1002 | 1014 |
+| The server sent text or a close reason that is not UTF-8 | 1007 | 1014 |
+| The server sent a message above 16 MiB | 1009 | 1014 |
+| The secret removal refused a server message | 1008 | 1014 |
+
+Any other close that a peer sends passes to the other peer with its code and reason. Open
+WebSockets hold at most three quarters of the gateway's connections.
 
 ## See also
 

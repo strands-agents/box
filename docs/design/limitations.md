@@ -44,6 +44,12 @@ Many file reads never do:
 So a history rule can't account for a read that took one of those routes. The
 [policy page](policy.md#durable-history) explains why policy history isn't a complete audit record.
 
+The messages of a WebSocket never reach policy either. The policy decides the handshake as a `GET`,
+so a rule that refuses connections after Strands Shell reads a private file doesn't close a
+WebSocket opened before the read. The WebSocket keeps carrying messages both ways with no more
+decisions, and a byte budget over `http:request` counts only its handshake
+([WebSocket](../user/egress.md#websocket)).
+
 The other direction matters too. Strands Shell and Monty run outside every box, so a broad
 filesystem permit lets them reach paths the agent's own grants never could, including credential
 stores ([no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters)).

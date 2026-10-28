@@ -624,7 +624,8 @@ impl Session {
             permit,
             start: self.client_writes.snapshot().accepted,
         });
-        *self.relay.lock().unwrap_or_else(|e| e.into_inner()) = Some(exchange.relay(upstream));
+        *self.relay.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(exchange.relay(upstream, state));
         Ok(governed)
     }
 }

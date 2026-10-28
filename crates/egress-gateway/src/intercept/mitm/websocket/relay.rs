@@ -1,10 +1,13 @@
 //! The relay of one WebSocket after its `101`.
 //!
 //! One async function runs in the connection task, which holds the connection slot and the
-//! session slot until the relay ends. Two forwarders (read, decode, check, frame again) race in one
-//! `select!` with an idle arm and a stop arm. Two writers drain one outbox each, so a peer that
-//! stops reading stalls only the direction toward it. No frame passes undecoded: the relay never
-//! copies bytes from one stream to the other.
+//! session slot until the relay ends. Two forwarders (read, decode, check, scrub, frame again) race
+//! in one `select!` with an idle arm and a stop arm. Two writers drain one outbox each, so a peer
+//! that stops reading stalls only the direction toward it. No frame passes undecoded: the relay
+//! never copies bytes from one stream to the other.
+//!
+//! When a credential route matches the destination, the response fold scrubs each server message
+//! and control frame for the injected secret, in `off_worker`, before the relay frames it again.
 
 use std::io;
 use std::sync::Arc;
@@ -17,9 +20,12 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::Instant;
 
 use super::super::SharedState;
-use super::super::exchange::{Subject, record_refusal};
+use super::super::exchange::{Subject, record_refusal, refusal_kind};
+use super::super::response_leg::{self, ResponseDecision};
 use super::Pending;
-use super::frame::{self, Decoder, Event, Fault};
+use super::frame::{self, Decoder, Event};
+use crate::boundary::{BodyRef, HeaderMap, InterceptedResponse};
+use crate::capability::{CapabilityContext, CapabilitySet};
 use crate::effect::off_worker;
 use crate::error::{ProxyError, Result};
 
@@ -57,6 +63,7 @@ where
         port,
         path,
         correlation,
+        scrub,
         upstream,
         slot: _slot,
     } = pending;
@@ -71,6 +78,7 @@ where
             path: &path,
             correlation: &correlation,
         },
+        scrub,
         random: SystemRandom::new(),
         closed_by: [AtomicBool::new(false), AtomicBool::new(false)],
         close_sent: [AtomicBool::new(false), AtomicBool::new(false)],
@@ -197,6 +205,8 @@ struct Relay<'a> {
     state: &'a SharedState,
     /// The identity that each record of this session names: the handshake's.
     subject: Subject<'a>,
+    /// The handshake's capability context when the relay scrubs each server message.
+    scrub: Option<CapabilityContext>,
     random: SystemRandom,
     /// A Close frame came from this peer; the relay drops what it sends after it.
     closed_by: [AtomicBool; 2],
@@ -222,13 +232,13 @@ impl Relay<'_> {
             while !self.closed_by[from.index()].load(Ordering::Relaxed) {
                 match decoder.next_event() {
                     Ok(Some(event)) => {
-                        if let Some(end) = self.pass(from, event, other).await {
+                        if let Some(end) = self.pass(from, event, own, other).await {
                             return end;
                         }
                     }
                     Ok(None) => break,
                     Err(fault) => {
-                        self.refuse(from, fault, own, other);
+                        self.refuse(from, fault.code, fault.reason, own, other);
                         return End::Closed;
                     }
                 }
@@ -247,8 +257,23 @@ impl Relay<'_> {
         }
     }
 
-    /// Queue one event from `from` for the other peer; `Some` ends the session.
-    async fn pass(&self, from: Role, event: Event, other: &Outbox) -> Option<End> {
+    /// Scrub one event from `from` when it comes from the server of a credentialed handshake, then
+    /// queue it for the other peer; `Some` ends the session.
+    async fn pass(&self, from: Role, event: Event, own: &Outbox, other: &Outbox) -> Option<End> {
+        let event = match (&self.scrub, from) {
+            // The fold is synchronous seam work, so it runs where it may block.
+            (Some(context), Role::Upstream) => {
+                match off_worker(|| scrub(&self.state.controls, context, event)) {
+                    Ok(event) => event,
+                    Err(kind) => {
+                        let reason = format!("message refused: {kind}");
+                        self.refuse(from, frame::POLICY_VIOLATION, &reason, own, other);
+                        return Some(End::Closed);
+                    }
+                }
+            }
+            _ => event,
+        };
         let to = from.other();
         let mask = self.mask(to);
         let framed = match event {
@@ -285,16 +310,16 @@ impl Relay<'_> {
             .map(|Gone| End::Broken(format!("the {} stopped taking frames", to.name())))
     }
 
-    /// Close `from`, the peer at fault, with the code of `fault`, and the other peer with 1014 when
-    /// the server is at fault or 1001 when the client is; record one `Deny`.
-    fn refuse(&self, from: Role, fault: Fault, own: &Outbox, other: &Outbox) {
+    /// Close `from`, the peer at fault, with `code`, and the other peer with 1014 when the server is
+    /// at fault or 1001 when the client is; record one `Deny` with the secret-free `why`.
+    fn refuse(&self, from: Role, code: u16, why: &str, own: &Outbox, other: &Outbox) {
         let other_code = match from {
             Role::Upstream => frame::BAD_GATEWAY,
             Role::Workload => frame::GOING_AWAY,
         };
-        self.close(from, fault.code, own);
+        self.close(from, code, own);
         self.close(from.other(), other_code, other);
-        let reason = format!("websocket: {} {}", from.name(), fault.reason);
+        let reason = format!("websocket: {} {why}", from.name());
         // The handshake's allow is recorded already, so a close that the gateway makes is its own
         // `Deny`. The reason is static text, with no payload byte.
         off_worker(|| record_refusal(self.state, &self.subject, &reason));
@@ -320,6 +345,64 @@ impl Relay<'_> {
     /// The source of mask keys for frames to `to`: only frames to the upstream are masked.
     fn mask(&self, to: Role) -> Option<&SystemRandom> {
         (to == Role::Upstream).then_some(&self.random)
+    }
+}
+
+/// `event` with each copy of the injected secret redacted by the response fold, or the kind of the
+/// fold's refusal. A control frame that carried the secret keeps only the bytes that hold no secret:
+/// none for a ping or a pong, the two code bytes for a close. A data message keeps its fragment
+/// size, so the relay frames the redacted message as the server framed it.
+fn scrub(
+    controls: &CapabilitySet,
+    context: &CapabilityContext,
+    event: Event,
+) -> std::result::Result<Event, &'static str> {
+    Ok(match event {
+        Event::Message {
+            text,
+            payload,
+            fragment,
+        } => Event::Message {
+            text,
+            payload: redact(controls, context, payload)?,
+            fragment,
+        },
+        Event::Ping(payload) => Event::Ping(redact_control(controls, context, payload, 0)?),
+        Event::Pong(payload) => Event::Pong(redact_control(controls, context, payload, 0)?),
+        Event::Close(payload) => Event::Close(redact_control(controls, context, payload, 2)?),
+    })
+}
+
+/// A control payload, cut to its first `keep` bytes when it carried the secret, so that it stays a
+/// valid control frame.
+fn redact_control(
+    controls: &CapabilitySet,
+    context: &CapabilityContext,
+    payload: Vec<u8>,
+    keep: usize,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let redacted = redact(controls, context, payload.clone())?;
+    Ok(if redacted == payload {
+        payload
+    } else {
+        payload[..keep.min(payload.len())].to_vec()
+    })
+}
+
+/// Run the response fold over `payload` as the body of the `101`, which redacts each copy of the
+/// secret that the server echoes.
+fn redact(
+    controls: &CapabilitySet,
+    context: &CapabilityContext,
+    payload: Vec<u8>,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let mut message = InterceptedResponse::http(101, HeaderMap::new(), BodyRef::Bytes(payload));
+    match response_leg::evaluate_and_apply(controls, &mut message, context) {
+        ResponseDecision::Block(reason) => Err(refusal_kind(&reason)),
+        ResponseDecision::Return | ResponseDecision::RedirectReentry(_) => Ok(match message.body {
+            BodyRef::Bytes(bytes) => bytes,
+            BodyRef::Empty => Vec::new(),
+        }),
     }
 }
 
@@ -482,7 +565,17 @@ async fn drain<R: AsyncRead + Unpin>(reader: &mut R) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
+    use credentials::DestinationPattern;
+
     use super::*;
+    use crate::audit::{Decision as AuditDecision, RequestId, SharedAuditLog};
+    use crate::boundary::{InterceptedRequest, Target};
+    use crate::capability::{CapabilityOutcome, EgressCapability};
+    use crate::effect::{EffectAttempt, EffectInterceptor, EffectPermit};
+    use crate::intercept::mitm::{ClientLimits, MitmConfig, tls};
+    use crate::seams::StubEmitter;
 
     /// One frame on the wire: its opcode, fin bit, mask key, and unmasked payload.
     type Wire = (u8, bool, Option<[u8; 4]>, Vec<u8>);
@@ -621,6 +714,164 @@ mod tests {
                 "a closed room refuses the forwarder"
             );
         });
+    }
+
+    /// A credential control on `ws.example.com` whose response fold redacts `secret` and refuses a
+    /// body that holds `refuse`.
+    struct Fold;
+
+    impl EgressCapability for Fold {
+        fn pattern(&self) -> &DestinationPattern {
+            static PATTERN: OnceLock<DestinationPattern> = OnceLock::new();
+            PATTERN.get_or_init(|| DestinationPattern::parse("ws.example.com").unwrap())
+        }
+
+        fn on_request(
+            &self,
+            _request: &mut InterceptedRequest,
+            _context: &CapabilityContext,
+        ) -> CapabilityOutcome {
+            CapabilityOutcome::none()
+        }
+
+        fn on_response(
+            &self,
+            response: &mut InterceptedResponse,
+            _context: &CapabilityContext,
+        ) -> CapabilityOutcome {
+            let body = String::from_utf8_lossy(response.body.as_bytes()).into_owned();
+            if body.contains("refuse") {
+                return CapabilityOutcome::unavailable("the fold refuses this body");
+            }
+            response.body = BodyRef::Bytes(body.replace("secret", "[REDACTED]").into_bytes());
+            CapabilityOutcome::none()
+        }
+    }
+
+    /// An authority that the relay never consults.
+    struct Unconsulted;
+
+    impl EffectInterceptor for Unconsulted {
+        fn intercept(&self, _attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            panic!("the relay claims no effect")
+        }
+    }
+
+    fn state(emitter: &StubEmitter) -> SharedState {
+        SharedState {
+            controls: CapabilitySet::from_parts(vec![Box::new(Fold)]),
+            config: MitmConfig::default(),
+            ca: None,
+            upstream_config: Arc::new(tls::upstream_client_config(&[]).unwrap()),
+            audit: SharedAuditLog::new(),
+            emitter: Box::new(emitter.clone()),
+            effect_interceptor: Arc::new(Unconsulted),
+            expected_token: None,
+            client_limits: ClientLimits::default(),
+            sessions: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    /// **The fold scrubs each server message and control frame, and a server message that it
+    /// refuses closes the server with 1008 and the workload with 1014.** A redacted message keeps
+    /// its fragment size, a ping that carried the secret loses its payload, the refused message
+    /// never reaches the workload, and one `Deny` names the fault with no payload byte.
+    #[test]
+    fn the_fold_scrubs_server_messages_and_a_refused_one_closes_with_1008_and_1014() {
+        let emitter = StubEmitter::new();
+        let state = state(&emitter);
+        let (client, mut workload) = tokio::io::duplex(64 * 1024);
+        let (upstream, mut server) = tokio::io::duplex(64 * 1024);
+        let correlation = RequestId::new("relay");
+        let pending = Pending {
+            host: "ws.example.com".to_string(),
+            port: 443,
+            path: "/chat".to_string(),
+            correlation: correlation.clone(),
+            scrub: Some(CapabilityContext::new(
+                correlation,
+                0,
+                Target::new("ws.example.com", 443),
+            )),
+            upstream: Box::new(upstream),
+            slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+        };
+        let (_stop, stop) = watch::channel(false);
+        let lead = format!("{}you sent secret", "x".repeat(1500));
+        let mut sent = Vec::new();
+        frame::encode(&mut sent, frame::TEXT, false, lead.as_bytes(), None);
+        frame::encode(&mut sent, frame::CONTINUATION, true, &[b'y'; 1500], None);
+        frame::encode(&mut sent, frame::PING, true, b"secret", None);
+        frame::encode(&mut sent, frame::TEXT, true, b"refuse secret", None);
+        let (ended, to_workload, to_server) = block_on(async {
+            // The peers end their streams when they have read to the end, so the linger ends.
+            let peers = async move {
+                server.write_all(&sent).await.unwrap();
+                let (mut to_workload, mut to_server) = (Vec::new(), Vec::new());
+                workload.read_to_end(&mut to_workload).await.unwrap();
+                server.read_to_end(&mut to_server).await.unwrap();
+                (to_workload, to_server)
+            };
+            let (ended, (to_workload, to_server)) =
+                tokio::join!(run(pending, client, &state, stop), peers);
+            (ended, to_workload, to_server)
+        });
+        assert!(ended.is_ok(), "a refusal ends the session cleanly");
+
+        let expected = format!(
+            "{}you sent [REDACTED]{}",
+            "x".repeat(1500),
+            "y".repeat(1500)
+        );
+        let workload_frames = frames(&to_workload);
+        let shapes: Vec<(u8, bool, usize)> = workload_frames
+            .iter()
+            .map(|(opcode, fin, _, payload)| (*opcode, *fin, payload.len()))
+            .collect();
+        assert_eq!(
+            shapes,
+            [
+                (frame::TEXT, false, lead.len()),
+                (frame::CONTINUATION, true, expected.len() - lead.len()),
+                (frame::PING, true, 0),
+                (frame::CLOSE, true, 2),
+            ],
+            "the message goes on in the server's largest fragment, then an empty ping, then the close"
+        );
+        let joined: Vec<u8> = workload_frames[..2]
+            .iter()
+            .flat_map(|(_, _, _, payload)| payload.clone())
+            .collect();
+        assert_eq!(String::from_utf8(joined).unwrap(), expected);
+        assert_eq!(workload_frames[3].3, frame::BAD_GATEWAY.to_be_bytes());
+
+        let server_frames = frames(&to_server);
+        assert_eq!(server_frames.len(), 1, "only the close goes to the server");
+        assert_eq!(server_frames[0].0, frame::CLOSE);
+        assert!(
+            server_frames[0].2.is_some(),
+            "a frame to the server is masked"
+        );
+        assert_eq!(server_frames[0].3, frame::POLICY_VIOLATION.to_be_bytes());
+
+        let reason = "websocket: server message refused: credential denied";
+        let audit: Vec<String> = state
+            .audit
+            .drain()
+            .into_iter()
+            .map(|event| event.reason)
+            .collect();
+        assert_eq!(audit, [reason]);
+        let denials: Vec<(String, String, String)> = emitter
+            .records()
+            .into_iter()
+            .filter(|record| record.decision == AuditDecision::Deny)
+            .map(|record| (record.method, record.path, record.reason))
+            .collect();
+        assert_eq!(
+            denials,
+            [("GET".to_string(), "/chat".to_string(), reason.to_string())]
+        );
     }
 
     /// **The idle wait restarts on activity**: a byte that moves before the limit moves the end

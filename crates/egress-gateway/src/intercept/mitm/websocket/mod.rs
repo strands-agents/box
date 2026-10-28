@@ -4,10 +4,11 @@
 //! |---|---|
 //! | [`classify`] | Find a WebSocket handshake in a request head, or the reason that it is malformed |
 //! | [`Expected`], [`check_switching_protocols`] | Accept a `101` only when it answers the forwarded handshake |
-//! | [`run`] | Read, check, and frame again every frame in both directions after the `101` |
+//! | [`run`] | Read, check, scrub, and frame again every frame in both directions after the `101` |
 //!
 //! The handshake is an ordinary `http:request` `GET` on its path. There is no other policy action.
-//! The release of the `101` admits the messages of its session.
+//! The release of the `101` admits the server messages of its session, and the relay scrubs each
+//! one when a credential route matches the destination.
 
 mod frame;
 mod handshake;
@@ -17,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::audit::RequestId;
+use crate::capability::CapabilityContext;
 
 pub(super) use handshake::{Expected, Handshake, check_switching_protocols, classify};
 pub(super) use relay::run;
@@ -44,6 +46,10 @@ pub(super) struct Pending {
     /// The path as the workload sent it, before any credential mutation.
     pub(super) path: String,
     pub(super) correlation: RequestId,
+    /// The handshake's capability context when a credential route matches the destination. The
+    /// relay then runs the response fold over each server message and control frame, so that no
+    /// message carries the injected secret back to the workload.
+    pub(super) scrub: Option<CapabilityContext>,
     /// The upstream after its `101`, with the bytes that the server sent after its head first.
     pub(super) upstream: Box<dyn Duplex>,
     /// One of the session slots, held until the relay ends.

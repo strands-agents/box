@@ -105,7 +105,7 @@ Conventions: `docs/conventions.md`.
   and never add `start_without_policy()` or an `Option` form.
 - Use `write_trusted_diagnostic` only for static, secret-free, proxy-originated bytes. Upstream bytes
   always need a `ResponseRelease` permit. The release of a 101 admits the server messages of its
-  session.
+  session, and the gateway scrubs each one.
 - Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
   `ProxyOnly` kernel pin, the real anti-hijack defence.
 - Report the pre-mutation `workload_path`, which `emit_decision` reads from `Subject`. Never

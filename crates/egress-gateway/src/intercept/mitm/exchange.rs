@@ -182,13 +182,22 @@ impl<'a> Exchange<'a> {
     }
 
     /// The relay of this handshake after its `101`, with the upgraded `upstream`. It takes the
-    /// session slot that the screen took.
-    pub(super) fn relay(&mut self, upstream: Box<dyn websocket::Duplex>) -> websocket::Pending {
+    /// session slot that the screen took, and the capability context when a credential route
+    /// matches the destination, so that the relay scrubs each server message.
+    pub(super) fn relay(
+        &mut self,
+        upstream: Box<dyn websocket::Duplex>,
+        state: &SharedState,
+    ) -> websocket::Pending {
         websocket::Pending {
             host: self.connect.host.clone(),
             port: self.connect.port,
             path: self.workload_path.clone(),
             correlation: self.correlation.clone(),
+            scrub: self
+                .context
+                .take()
+                .filter(|context| state.controls.matches_any(&context.target.as_destination())),
             upstream,
             slot: self
                 .session
@@ -319,19 +328,6 @@ fn screen_websocket(
             403,
             b"WebSocket refused for an MCP server",
         ),
-        // Until the relay scrubs each server message, a message could carry the injected secret
-        // back to the workload.
-        Handshake::WebSocket { .. }
-            if state
-                .controls
-                .matches_any(&exchange.request.target.as_destination()) =>
-        {
-            (
-                "a credential route matches the destination, and the relay does not scrub server messages",
-                403,
-                b"WebSocket refused for a credential route",
-            )
-        }
         Handshake::WebSocket { .. } => match Arc::clone(&state.sessions).try_acquire_owned() {
             Ok(slot) => {
                 exchange.session = Some(slot);
@@ -619,7 +615,7 @@ fn apply_response_capabilities(
 }
 
 /// The kind of a response-fold refusal, without its payload.
-fn refusal_kind(reason: &DenyReason) -> &'static str {
+pub(super) fn refusal_kind(reason: &DenyReason) -> &'static str {
     match reason {
         DenyReason::HostDenied(_) => "host denied",
         DenyReason::IpDenied(_) => "ip denied",

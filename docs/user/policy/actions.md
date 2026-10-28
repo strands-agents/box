@@ -124,6 +124,11 @@ with `the types String and ipaddr are not compatible`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
+A WebSocket handshake is an `http:request` with `method` `GET` and `body_bytes` 0, so a permit for
+`GET` also admits a WebSocket. Its messages raise no decision. History records one
+`http:request::response` for the session, with `status` 101.
+[WebSocket](../egress.md#websocket) states what that means for a budget or a temporal rule.
+
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
 
@@ -226,7 +231,7 @@ What each caller records as a response:
 |---|---|---|
 | `fs:*` | When the operation ends | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | At reply time, once per exchange; once for a WebSocket session | `status`: the upstream's reply status, 101 for a WebSocket |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
 

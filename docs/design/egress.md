@@ -143,6 +143,26 @@ decides, so a client that keeps sending that body slowly keeps its connection wi
 arrives before the `200`, so the client never starts TLS. A policy refusal of a request to an http
 MCP server gets a JSON-RPC error body.
 
+### WebSocket
+
+**A WebSocket handshake is an ordinary `http:request`.** The policy decides it as a `GET` on its
+path, with no body. There is no other action and no other input, so a permit for `GET` to a host
+and path also admits a WebSocket there. The gateway refuses, before the policy, a handshake on a
+plain `http://` request, a handshake to an http MCP server's host, and a request that names
+`websocket` in `Upgrade` and is not a valid handshake.
+
+**The release of the `101` admits the session.** After the `101`, the gateway decodes every frame
+in both directions, checks it against RFC 6455, and frames it again; it never copies bytes from one
+peer to the other. The messages raise no decision. History records one `http:request` event for the
+session, with status 101, so a byte budget over `http:request` counts only the handshake, and a
+temporal rule that starts to match later does not close the open WebSocket.
+
+**The gateway scrubs each server message.** When a credential route matches the destination, the
+response fold that removes the secret from a reply removes it from each server message and control
+frame too. It reads one message at a time, so it does not find a secret that the server splits
+across two messages. A session ends after 300 seconds with no byte in either direction, and has no
+limit on its life while bytes move.
+
 ### Cloud instance metadata
 
 **Policy is the only check on metadata endpoints.** The gateway has no built-in block. A policy

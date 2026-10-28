@@ -157,6 +157,11 @@ name = "credential_method_scope"
 path = "tests/credential_method_scope.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "websocket_policy"
+path = "tests/websocket_policy.rs"
+required-features = ["test-support"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
