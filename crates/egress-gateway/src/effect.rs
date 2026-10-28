@@ -213,6 +213,23 @@ pub trait EffectPermit: Send {
     fn mark_indeterminate(self: Box<Self>);
 }
 
+/// Run `work` on this thread, where it may block, and keep the runtime's other tasks running.
+///
+/// This is the one way to call the synchronous seam (`EffectInterceptor`, `EffectPermit`, and
+/// `Emitter`) from a gateway worker. On a worker of a multi-thread runtime, `block_in_place` first
+/// hands the worker's other tasks to another thread, so one slow decision stalls only its own
+/// exchange. Anywhere else, and in a nested call, `work` runs inline. Either way `work` runs on the
+/// calling thread, so an `intercept` and the `emit` that reports it, in one closure, share one
+/// thread with no `.await` between them.
+#[cfg(feature = "tls-intercept")]
+pub(crate) fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
 /// Makes the permit's indeterminate transition automatic on every early exit.
 #[cfg(feature = "tls-intercept")]
 pub(crate) struct ClaimedEffectPermit {
@@ -237,9 +254,11 @@ impl ClaimedEffectPermit {
 
 #[cfg(feature = "tls-intercept")]
 impl Drop for ClaimedEffectPermit {
+    /// A claim can drop on a gateway worker, so the mark goes through [`off_worker`], as each
+    /// `record_outcome` call does.
     fn drop(&mut self) {
         if let Some(permit) = self.permit.take() {
-            permit.mark_indeterminate();
+            off_worker(|| permit.mark_indeterminate());
         }
     }
 }
@@ -298,5 +317,97 @@ mod tests {
 
         assert_eq!(recorded.load(Ordering::SeqCst), 0);
         assert_eq!(indeterminate.load(Ordering::SeqCst), 1);
+    }
+
+    /// A permit whose mark blocks until another task of the runtime has run.
+    struct WaitingPermit {
+        handle: tokio::runtime::Handle,
+        other_ran: Arc<AtomicUsize>,
+    }
+
+    impl EffectPermit for WaitingPermit {
+        fn record_outcome(self: Box<Self>, _outcome: EffectOutcome) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn mark_indeterminate(self: Box<Self>) {
+            let (ran, ran_after) = std::sync::mpsc::channel();
+            self.handle.spawn(async move { ran.send(()).unwrap() });
+            if ran_after
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok()
+            {
+                self.other_ran.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// On a one-worker runtime, a claim that drops on the worker marks its permit in `off_worker`,
+    /// so another task runs while the mark blocks.
+    #[test]
+    fn dropping_a_claim_on_a_worker_keeps_other_tasks_running() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let other_ran = Arc::new(AtomicUsize::new(0));
+        let claim = ClaimedEffectPermit::new(Box::new(WaitingPermit {
+            handle: runtime.handle().clone(),
+            other_ran: other_ran.clone(),
+        }));
+        runtime
+            .block_on(runtime.spawn(async move { drop(claim) }))
+            .unwrap();
+        assert_eq!(
+            other_ran.load(Ordering::SeqCst),
+            1,
+            "another task ran while the mark blocked"
+        );
+    }
+
+    /// The thread that `work` ran on, and the thread that called `off_worker`.
+    fn threads_of_one_call() -> (std::thread::ThreadId, std::thread::ThreadId) {
+        let caller = std::thread::current().id();
+        (off_worker(|| std::thread::current().id()), caller)
+    }
+
+    #[test]
+    fn off_worker_runs_inline_outside_a_runtime() {
+        let (ran, caller) = threads_of_one_call();
+        assert_eq!(ran, caller);
+    }
+
+    #[test]
+    fn off_worker_runs_inline_on_a_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (ran, caller) = runtime.block_on(async { threads_of_one_call() });
+        assert_eq!(ran, caller);
+    }
+
+    /// On a one-worker runtime, a task whose `off_worker` call blocks still lets another task run,
+    /// and the call runs on the thread that made it.
+    #[test]
+    fn off_worker_keeps_the_calling_thread_on_a_multi_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let blocked = runtime.spawn(async move {
+            let caller = std::thread::current().id();
+            let ran = off_worker(|| {
+                // The other task exists only while this call blocks.
+                let (other_ran, ran_after) = std::sync::mpsc::channel();
+                handle.spawn(async move { other_ran.send(()).unwrap() });
+                let other = ran_after.recv_timeout(std::time::Duration::from_secs(5));
+                (std::thread::current().id(), other.is_ok())
+            });
+            (ran, caller)
+        });
+        let ((ran, other_ran), caller) = runtime.block_on(blocked).unwrap();
+        assert!(other_ran, "another task ran while the call blocked");
+        assert_eq!(ran, caller);
     }
 }

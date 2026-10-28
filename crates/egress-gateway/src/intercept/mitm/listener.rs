@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::audit::RequestId;
@@ -13,7 +14,7 @@ use super::SharedState;
 use super::connect::{self, ConnectRequest};
 use super::resolve::PinnedDestination;
 use crate::audit::{Decision as AuditDecision, EgressDecision, NetworkAuditEvent};
-use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
+use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, off_worker};
 use crate::error::ProxyError;
 
 /// The one listener that `start` bound, before the gateway runtime registers it.
@@ -95,96 +96,132 @@ pub(super) async fn accept_loop(
                 Err(_) => break,
             },
         };
-        serve_connection(client, Arc::clone(&state), slot);
+        tokio::spawn(serve_connection(client, Arc::clone(&state), slot));
     }
     // The listener and the state drop before the caller reports the end of the loop.
     drop(listener);
     drop(state);
 }
 
-/// Serve one connection on a blocking thread, with its existing blocking handler. The thread holds
-/// the slot until the connection ends.
-fn serve_connection(client: Accepted, state: Arc<SharedState>, slot: Slot) {
-    // A socket that cannot go back to blocking mode is a silent drop.
-    let Ok(client) = client.into_blocking() else {
-        return;
+/// Serve one connection: read its first head, then route it. The task holds the slot until the
+/// connection ends.
+async fn serve_connection(client: Accepted, state: Arc<SharedState>, slot: Slot) {
+    let handled = match client {
+        Accepted::Tcp(stream) => route(stream, &state, slot).await,
+        Accepted::Unix(stream) => route(stream, &state, slot).await,
     };
-    tokio::task::spawn_blocking(move || {
-        let _slot = slot;
-        let handled = match client {
-            BlockingClient::Tcp(stream) => dispatch_connection(stream, &state),
-            BlockingClient::Unix(stream) => handle_connection_unix(stream, &state),
-        };
-        if let Err(err) = handled {
-            // Never silently swallow a handler failure — record it (secret-free) so a broken
-            // connection is observable rather than a mystery. `host`/`port` are unknown this
-            // early, so the audit line names the failure with a placeholder target.
-            state.audit.push(NetworkAuditEvent::deny(
-                "-",
-                0,
-                format!("connection handler error: {err}"),
-                RequestId::new("egress-connection-error"),
-            ));
-        }
-    });
+    if let Err(err) = handled {
+        // Never silently swallow a handler failure — record it (secret-free) so a broken
+        // connection is observable rather than a mystery. `host`/`port` are unknown this
+        // early, so the audit line names the failure with a placeholder target.
+        state.audit.push(NetworkAuditEvent::deny(
+            "-",
+            0,
+            format!("connection handler error: {err}"),
+            RequestId::new("egress-connection-error"),
+        ));
+    }
 }
 
-/// An accepted connection as a blocking std socket, for the blocking handlers.
-enum BlockingClient {
-    Tcp(TcpStream),
-    Unix(UnixStream),
+/// A client socket of one transport, as the async front reads it and as a blocking handler takes it.
+trait Client: AsyncRead + AsyncWrite + Unpin + Send + 'static {
+    /// The same socket as a blocking std stream.
+    type Blocking: Read + Write + Send + 'static;
+
+    /// Return the socket to blocking mode.
+    fn into_blocking(self) -> io::Result<Self::Blocking>;
+
+    /// Serve a first head that is not a `CONNECT`, on a blocking thread.
+    fn serve_other(
+        client: Self::Blocking,
+        head: String,
+        state: &SharedState,
+    ) -> Result<(), ProxyError>;
 }
 
-impl Accepted {
-    fn into_blocking(self) -> io::Result<BlockingClient> {
-        Ok(match self {
-            Self::Tcp(stream) => {
-                let stream = stream.into_std()?;
-                stream.set_nonblocking(false)?;
-                BlockingClient::Tcp(stream)
-            }
-            Self::Unix(stream) => {
-                let stream = stream.into_std()?;
-                stream.set_nonblocking(false)?;
-                BlockingClient::Unix(stream)
-            }
-        })
+impl Client for tokio::net::TcpStream {
+    type Blocking = TcpStream;
+
+    fn into_blocking(self) -> io::Result<TcpStream> {
+        let stream = self.into_std()?;
+        stream.set_nonblocking(false)?;
+        Ok(stream)
+    }
+
+    /// Not a CONNECT. Treat it as a plain-HTTP absolute-form request — the same controls apply
+    /// (net:connect and the L7 legs), over plaintext with no CONNECT ack. The CONNECT-only
+    /// v1 used to 400 here.
+    fn serve_other(client: TcpStream, head: String, state: &SharedState) -> Result<(), ProxyError> {
+        handle_plain_http(client, head, state)
+    }
+}
+
+impl Client for tokio::net::UnixStream {
+    type Blocking = UnixStream;
+
+    fn into_blocking(self) -> io::Result<UnixStream> {
+        let stream = self.into_std()?;
+        stream.set_nonblocking(false)?;
+        Ok(stream)
+    }
+
+    /// The AF_UNIX transport stays CONNECT-only: a non-CONNECT head is a 400, because the AF_UNIX
+    /// pin has no plain-HTTP client.
+    fn serve_other(
+        mut client: UnixStream,
+        _head: String,
+        _state: &SharedState,
+    ) -> Result<(), ProxyError> {
+        let _ = write_status(&mut client, 400, "bad request");
+        Ok(())
     }
 }
 
 /// Route one client connection by request shape, after reading its head.
 ///
-/// A CONNECT opens the TLS interception path ([`handle_tls_connect`]); anything else is treated as a
-/// plain-HTTP absolute-form request ([`handle_plain_http`]). Reading the head is the only work shared
-/// before the split, so it lives here and each handler owns its transport and L7 path from there.
-fn dispatch_connection(mut client: TcpStream, state: &SharedState) -> Result<(), ProxyError> {
-    // A short read or a malformed head is a silent drop, as before.
-    let head = match read_until_headers_end(&mut client) {
+/// A CONNECT opens the TLS interception path ([`tls_path`]); anything else goes to the transport's
+/// blocking handler ([`Client::serve_other`]). Reading the head is the only work shared before the
+/// split. A short read or a malformed head is a silent drop.
+async fn route<C: Client>(
+    mut client: C,
+    state: &Arc<SharedState>,
+    slot: Slot,
+) -> Result<(), ProxyError> {
+    let head = match read_until_headers_end(&mut client).await {
         Ok(head) => head,
         Err(_) => return Ok(()),
     };
     match connect::parse_connect(&head) {
         // HTTPS via CONNECT: terminate TLS and inspect.
-        Some(connect) => handle_tls_connect(client, connect, state),
-        // Not a CONNECT. Treat it as a plain-HTTP absolute-form request — the same controls apply
-        // (net:connect and the L7 legs), over plaintext with no CONNECT ack. The CONNECT-only
-        // v1 used to 400 here.
-        None => handle_plain_http(client, head, state),
+        Some(connect) => tls_path(client, connect, state, slot).await,
+        None => {
+            let Ok(client) = client.into_blocking() else {
+                return Ok(());
+            };
+            let state = Arc::clone(state);
+            run_blocking(slot, move || C::serve_other(client, head, &state)).await
+        }
     }
 }
 
-/// Handle one CONNECT (HTTPS) connection: run the shared L4 controls, terminate TLS, run the L7 legs.
-fn handle_tls_connect(
-    mut client: TcpStream,
+/// The CONNECT acknowledgement, written once the upstream is open and its outcome is recorded.
+const CONNECT_ACK: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// Handle one CONNECT (HTTPS) connection: run the shared L4 controls, acknowledge, then terminate
+/// TLS and run the L7 legs on a blocking thread.
+async fn tls_path<C: Client>(
+    mut client: C,
     connect: ConnectRequest,
-    state: &SharedState,
+    state: &Arc<SharedState>,
+    slot: Slot,
 ) -> Result<(), ProxyError> {
     // Best-effort token check — never the primary defense.
     if !connect::token_ok(
         state.expected_token.as_deref(),
         connect.proxy_authorization.as_deref(),
     ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
+        let reply = status_reply(407, "proxy authentication required");
+        let _ = write_client(&mut client, reply.as_bytes()).await;
         return Ok(());
     }
 
@@ -192,18 +229,20 @@ fn handle_tls_connect(
 
     // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
     // `net:connect` effect. Claimed and opened BEFORE the CONNECT ack, so a denial returns 403 without
-    // creating a socket or exposing a false tunnel.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
+    // creating a socket or exposing a false tunnel. The whole sequence is synchronous and runs in
+    // one `off_worker` call, so each decision and its emit share one thread, and a slow decision
+    // stalls only this connection.
+    let upstream = match off_worker(|| open_governed_upstream(state, &connect, &correlation)) {
         Ok(upstream) => upstream,
         Err(error) => {
-            error.write_response(&mut client, "CONNECT");
+            let _ = write_client(&mut client, &error.response_bytes("CONNECT")).await;
             return Ok(());
         }
     };
 
     // The upstream is open and its outcome was recorded; now let the client proceed.
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+    write_client(&mut client, CONNECT_ACK)
+        .await
         .map_err(|e| ProxyError::Io(format!("writing CONNECT ack: {e}")))?;
 
     // Every connection is terminated and inspected. There is no un-inspected path: a
@@ -222,10 +261,31 @@ fn handle_tls_connect(
     // The gateway would honour a refusal on that leg: `l7::intercept_tls` emits a deny event and
     // withholds the bytes. The shipped interceptor never issues one.
     //
-    // A handshake or pin failure hard-fails (drop), never a downgrade; the accept loop
+    // A handshake or pin failure hard-fails (drop), never a downgrade; the connection task
     // audits the error.
-    super::l7::intercept_tls(client, upstream, &connect, state, correlation)?;
-    Ok(())
+    let client = client
+        .into_blocking()
+        .map_err(|e| ProxyError::Io(format!("preparing the client socket: {e}")))?;
+    let state = Arc::clone(state);
+    run_blocking(slot, move || {
+        super::l7::intercept_tls(client, upstream, &connect, &state, correlation)
+    })
+    .await
+}
+
+/// Run a blocking handler on the blocking pool, holding `slot` until it returns.
+///
+/// A panic stays inside its connection, as a panic on a connection thread did.
+async fn run_blocking(
+    slot: Slot,
+    work: impl FnOnce() -> Result<(), ProxyError> + Send + 'static,
+) -> Result<(), ProxyError> {
+    let handled = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        work()
+    })
+    .await;
+    handled.unwrap_or(Ok(()))
 }
 
 /// Handle one plain-HTTP (non-CONNECT, absolute-form) client request end-to-end.
@@ -309,59 +369,6 @@ fn handle_plain_http(
     )
 }
 
-/// Handle one AF_UNIX client connection end-to-end. Mirrors [`handle_tls_connect`]
-/// step for step — read CONNECT head, best-effort token check, the shared L4 controls, then the L7
-/// legs — differing only in the client leg's type (`UnixStream`). It stays CONNECT-only: a non-CONNECT
-/// head is a 400, because the AF_UNIX pin has no plain-HTTP client. The shared L4 controls
-/// ([`open_governed_upstream`]) and the L7 path ([`super::l7::intercept_tls`]) are reused unchanged.
-fn handle_connection_unix(mut client: UnixStream, state: &SharedState) -> Result<(), ProxyError> {
-    // 1. Read the CONNECT head. Same byte-exact protocol as the TCP path.
-    let head = match read_until_headers_end(&mut client) {
-        Ok(head) => head,
-        Err(_) => return Ok(()),
-    };
-    let connect = match connect::parse_connect(&head) {
-        Some(c) => c,
-        None => {
-            let _ = write_status(&mut client, 400, "bad request");
-            return Ok(());
-        }
-    };
-
-    // 2. Best-effort token check — never the primary defense.
-    if !connect::token_ok(
-        state.expected_token.as_deref(),
-        connect.proxy_authorization.as_deref(),
-    ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
-        return Ok(());
-    }
-
-    let correlation = RequestId::unique();
-
-    // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-    // `net:connect` effect — transport-agnostic, so the AF_UNIX path reuses it unchanged. Opened
-    // before the CONNECT ack, exactly as on the TCP client path.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            error.write_response(&mut client, "CONNECT");
-            return Ok(());
-        }
-    };
-
-    // The upstream is open and its outcome was recorded; now let the client proceed.
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .map_err(|e| ProxyError::Io(format!("writing CONNECT ack: {e}")))?;
-
-    // Same generic L7 interception as the TCP path — `intercept_tls` is generic over the client
-    // stream, so the `UnixStream` client flows through unchanged. Termination is
-    // unconditional here for the same reason as the TCP path.
-    super::l7::intercept_tls(client, upstream, &connect, state, correlation)?;
-    Ok(())
-}
-
 /// A failure before CONNECT can be acknowledged.
 enum OpenUpstreamError {
     /// The effect interceptor explicitly denied the socket open.
@@ -378,6 +385,13 @@ impl OpenUpstreamError {
                 let _ = write_status(stream, 502, "bad gateway");
             }
         }
+    }
+
+    /// The bytes that [`write_response`](Self::write_response) writes, for an async client stream.
+    fn response_bytes(&self, method: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.write_response(&mut bytes, method);
+        bytes
     }
 
     fn audit_reason(&self) -> &'static str {
@@ -571,12 +585,17 @@ fn emit_connect_decision(
     });
 }
 
-/// Read the CONNECT head from `stream` up to the `\r\n\r\n` terminator (bounded), as a string.
-fn read_until_headers_end<S: Read>(stream: &mut S) -> std::io::Result<String> {
+/// Read the first head from `stream` up to the `\r\n\r\n` terminator (bounded), as a string.
+///
+/// One byte for each read, on an unbuffered stream: every byte after the head, such as a
+/// `ClientHello` sent with the `CONNECT`, stays in the socket for the next reader.
+async fn read_until_headers_end<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<String> {
+    use tokio::io::AsyncReadExt;
+
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        let n = stream.read(&mut byte)?;
+        let n = stream.read(&mut byte).await?;
         if n == 0 {
             break;
         }
@@ -588,11 +607,21 @@ fn read_until_headers_end<S: Read>(stream: &mut S) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Write a minimal status line + empty body to the client (for a proxy-level refusal). Generic over
-/// any [`Write`] for the same reason as [`read_until_headers_end`].
+/// Write `bytes` to an async client stream.
+async fn write_client<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    stream.write_all(bytes).await
+}
+
+/// A minimal status line + empty body (for a proxy-level refusal).
+fn status_reply(status: u16, msg: &str) -> String {
+    format!("HTTP/1.1 {status} {msg}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+}
+
+/// Write [`status_reply`] to a blocking client stream.
 fn write_status<S: Write>(stream: &mut S, status: u16, msg: &str) -> std::io::Result<()> {
-    let body = format!("HTTP/1.1 {status} {msg}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    stream.write_all(body.as_bytes())
+    stream.write_all(status_reply(status, msg).as_bytes())
 }
 
 #[cfg(test)]
@@ -1020,5 +1049,35 @@ mod tests {
         assert_eq!(fixture.refused.addr.port(), fixture.dead.port());
         confirm_closed(fixture.dead).unwrap();
         fixture.refused.assert_live();
+    }
+
+    /// Run `future` to its end on a current-thread runtime with timers and I/O.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// The head read takes no byte after the head, so a `ClientHello` sent with the `CONNECT` stays
+    /// in the socket for the TLS acceptor.
+    #[test]
+    fn the_connect_head_read_leaves_the_next_bytes_in_the_stream() {
+        let head = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (rest, read) = block_on(async {
+            let (mut gateway, mut client) = tokio::net::UnixStream::pair().unwrap();
+            client.write_all(head).await.unwrap();
+            client.write_all(b"\x16\x03\x01hello").await.unwrap();
+            drop(client);
+            let read = read_until_headers_end(&mut gateway).await.unwrap();
+            let mut rest = Vec::new();
+            gateway.read_to_end(&mut rest).await.unwrap();
+            (rest, read)
+        });
+        assert_eq!(read.as_bytes(), head);
+        assert_eq!(rest, b"\x16\x03\x01hello");
     }
 }
