@@ -1,11 +1,12 @@
 //! The accept loop and per-connection handler.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::audit::RequestId;
 
@@ -17,90 +18,140 @@ use crate::audit::{Decision as AuditDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
 use crate::error::ProxyError;
 
-/// A counting semaphore bounding the number of in-flight connection threads, with no external
-/// dependency. `acquire` blocks the accept loop until a slot frees, so
-/// an untrusted workload cannot make the adapter spawn unbounded OS threads (backpressure, not an
-/// optimization). Each [`Permit`] releases its slot on drop.
-struct ConnectionLimiter {
-    available: Mutex<usize>,
-    freed: Condvar,
+/// The one listener that `start` bound, before the gateway runtime registers it.
+pub(super) enum BoundListener {
+    /// A TCP listener on loopback.
+    Tcp(std::net::TcpListener),
+    /// An AF_UNIX listener (the pin mode).
+    Unix(std::os::unix::net::UnixListener),
 }
 
-impl ConnectionLimiter {
-    fn new(max: usize) -> Self {
-        Self {
-            // A zero cap would deadlock the accept loop; clamp to at least one slot.
-            available: Mutex::new(max.max(1)),
-            freed: Condvar::new(),
+impl BoundListener {
+    /// Make accepts non-blocking, as the runtime requires before it registers the listener.
+    pub(super) fn set_nonblocking(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(listener) => listener.set_nonblocking(true),
+            Self::Unix(listener) => listener.set_nonblocking(true),
         }
     }
 
-    /// Block until a slot is free, then take it. Returns a [`Permit`] that releases on drop.
-    fn acquire(self: &Arc<Self>) -> Permit {
-        let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
-        while *available == 0 {
-            available = self
-                .freed
-                .wait(available)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-        *available -= 1;
-        Permit {
-            limiter: self.clone(),
-        }
+    /// Register the listener with the current runtime.
+    pub(super) fn into_tokio(self) -> io::Result<Listening> {
+        Ok(match self {
+            Self::Tcp(listener) => Listening::Tcp(tokio::net::TcpListener::from_std(listener)?),
+            Self::Unix(listener) => Listening::Unix(tokio::net::UnixListener::from_std(listener)?),
+        })
     }
 }
 
-/// A held connection slot; returns it to the [`ConnectionLimiter`] on drop.
-struct Permit {
-    limiter: Arc<ConnectionLimiter>,
+/// The listener, registered with the gateway runtime.
+pub(super) enum Listening {
+    Tcp(tokio::net::TcpListener),
+    Unix(tokio::net::UnixListener),
 }
 
-impl Drop for Permit {
-    fn drop(&mut self) {
-        let mut available = self
-            .limiter
-            .available
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *available += 1;
-        self.limiter.freed.notify_one();
+impl Listening {
+    async fn accept(&self) -> io::Result<Accepted> {
+        Ok(match self {
+            Self::Tcp(listener) => Accepted::Tcp(listener.accept().await?.0),
+            Self::Unix(listener) => Accepted::Unix(listener.accept().await?.0),
+        })
     }
 }
 
-/// Run the accept loop until `stop` is set. Each connection is handled on its own thread,
-/// **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting more, so
-/// an untrusted workload cannot exhaust the host with unbounded threads.
-pub(super) fn accept_loop(listener: TcpListener, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
-    let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
+/// One accepted client connection.
+enum Accepted {
+    Tcp(tokio::net::TcpStream),
+    Unix(tokio::net::UnixStream),
+}
+
+/// One held connection slot. The slot frees when this value drops: at the end of the connection,
+/// on any error, or in a panic unwind.
+struct Slot {
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Run the accept loop until `stopping` turns `true` or its sender drops. Each connection holds one
+/// of the `slots`, which `config.max_connections` sizes: the loop accepts, then waits for a free
+/// slot before it accepts more, so an untrusted workload cannot make the gateway serve without bound
+/// (backpressure, not an optimization). Both waits watch the stop, so a full slot set cannot hold
+/// the stop back.
+pub(super) async fn accept_loop(
+    listener: Listening,
+    state: Arc<SharedState>,
+    slots: Arc<Semaphore>,
+    mut stopping: watch::Receiver<bool>,
+) {
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stop| *stop) => break,
+            accepted = listener.accept() => accepted,
         };
-        // Block here until a connection slot is free (backpressure), then hand the permit to the
-        // worker thread so the slot is released when the connection finishes.
-        let permit = limiter.acquire();
-        let head_deadline = Instant::now() + state.client_limits.first_head;
-        let state = state.clone();
-        std::thread::spawn(move || {
-            // The permit lives for the duration of the connection; dropping it frees the slot.
-            let _permit = permit;
-            if let Err(err) = dispatch_connection(stream, head_deadline, &state) {
-                // Never silently swallow a handler failure — record it (secret-free) so a broken
-                // connection is observable rather than a mystery. `host`/`port` are unknown this
-                // early, so the audit line names the failure with a placeholder target.
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
+        let Ok(client) = accepted else { continue };
+        let slot = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stop| *stop) => break,
+            permit = Arc::clone(&slots).acquire_owned() => match permit {
+                Ok(permit) => Slot { _permit: permit },
+                Err(_) => break,
+            },
+        };
+        serve_connection(client, Arc::clone(&state), slot);
+    }
+    // The listener and the state drop before the caller reports the end of the loop.
+    drop(listener);
+    drop(state);
+}
+
+/// Serve one connection on a blocking thread, with its existing blocking handler. The thread holds
+/// the slot until the connection ends.
+fn serve_connection(client: Accepted, state: Arc<SharedState>, slot: Slot) {
+    let head_deadline = Instant::now() + state.client_limits.first_head;
+    // A socket that cannot go back to blocking mode is a silent drop, as one that takes no bound.
+    let Ok(client) = client.into_blocking() else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        let handled = match client {
+            BlockingClient::Tcp(stream) => dispatch_connection(stream, head_deadline, &state),
+            BlockingClient::Unix(stream) => handle_connection_unix(stream, head_deadline, &state),
+        };
+        if let Err(err) = handled {
+            // Never silently swallow a handler failure — record it (secret-free) so a broken
+            // connection is observable rather than a mystery. `host`/`port` are unknown this
+            // early, so the audit line names the failure with a placeholder target.
+            state.audit.push(NetworkAuditEvent::deny(
+                "-",
+                0,
+                format!("connection handler error: {err}"),
+                RequestId::new("egress-connection-error"),
+            ));
+        }
+    });
+}
+
+/// An accepted connection as a blocking std socket, for the blocking handlers.
+enum BlockingClient {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl Accepted {
+    fn into_blocking(self) -> io::Result<BlockingClient> {
+        Ok(match self {
+            Self::Tcp(stream) => {
+                let stream = stream.into_std()?;
+                stream.set_nonblocking(false)?;
+                BlockingClient::Tcp(stream)
             }
-        });
+            Self::Unix(stream) => {
+                let stream = stream.into_std()?;
+                stream.set_nonblocking(false)?;
+                BlockingClient::Unix(stream)
+            }
+        })
     }
 }
 
@@ -272,45 +323,6 @@ fn handle_plain_http(
         state,
         correlation,
     )
-}
-
-/// Run the AF_UNIX accept loop until `stop` is set. A near-duplicate of
-/// [`accept_loop`] with `UnixStream` in place of `TcpStream`: same [`ConnectionLimiter`] backpressure,
-/// same per-connection thread model, same audit-on-handler-error. It exists because the workload under
-/// the AF_UNIX egress pin cannot create an `AF_INET` socket at all — a TCP listener would serve no one —
-/// so the proxy binds only the AF_UNIX socket and speaks the identical CONNECT/TLS/L7 protocol over it.
-/// It duplicates rather than adds a `TcpStream`/`UnixStream` trait, to keep the change local and
-/// the diff small (revisit if a third transport ever appears).
-pub(super) fn accept_loop_unix(
-    listener: UnixListener,
-    state: Arc<SharedState>,
-    stop: Arc<AtomicBool>,
-) {
-    let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // Same backpressure as the TCP loop: block on a free slot before accepting more.
-        let permit = limiter.acquire();
-        let head_deadline = Instant::now() + state.client_limits.first_head;
-        let state = state.clone();
-        std::thread::spawn(move || {
-            let _permit = permit;
-            if let Err(err) = handle_connection_unix(stream, head_deadline, &state) {
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
-            }
-        });
-    }
 }
 
 /// Handle one AF_UNIX client connection end-to-end. Mirrors [`handle_tls_connect`]
@@ -603,40 +615,12 @@ fn write_status<S: Write>(stream: &mut S, status: u16, msg: &str) -> std::io::Re
 mod tests {
     use super::*;
 
-    /// The limiter caps concurrent permits and blocks a further acquire until one is released.
-    #[test]
-    fn limiter_caps_and_releases() {
-        let limiter = Arc::new(ConnectionLimiter::new(2));
-        let a = limiter.acquire();
-        let b = limiter.acquire();
-        assert_eq!(*limiter.available.lock().unwrap(), 0, "both slots taken");
-
-        // A third acquire on another thread must block until a slot frees.
-        let limiter2 = limiter.clone();
-        let handle = std::thread::spawn(move || {
-            let _c = limiter2.acquire(); // blocks until `a` (or `b`) drops
-        });
-        // Give the spawned thread a moment to reach the blocked wait.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!handle.is_finished(), "third acquire must block while full");
-
-        drop(a); // free one slot → the blocked acquire proceeds
-        handle.join().unwrap();
-        drop(b);
-        assert_eq!(*limiter.available.lock().unwrap(), 2, "all slots returned");
-    }
-
-    /// A zero cap is clamped to one slot so the accept loop can never deadlock on a misconfig.
-    #[test]
-    fn zero_cap_is_clamped_to_one() {
-        let limiter = Arc::new(ConnectionLimiter::new(0));
-        assert_eq!(*limiter.available.lock().unwrap(), 1);
-        let _permit = limiter.acquire(); // does not deadlock
-    }
-
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::os::unix::net::UnixListener;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::super::runtime::GatewayThread;
 
     use crate::capability::CapabilitySet;
     use crate::effect::{EffectAttempt, EffectInterceptor, EffectPermit};
@@ -1096,7 +1080,7 @@ mod tests {
     /// that does not free fails a test instead of hanging it.
     struct Gateway {
         addr: SocketAddr,
-        stop: Arc<AtomicBool>,
+        _gateway: GatewayThread,
     }
 
     impl Gateway {
@@ -1111,10 +1095,10 @@ mod tests {
             shared.config.max_connections = 1;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             let addr = listener.local_addr().unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let stopping = stop.clone();
-            std::thread::spawn(move || accept_loop(listener, Arc::new(shared), stopping));
-            Self { addr, stop }
+            Self {
+                addr,
+                _gateway: serve_listener(BoundListener::Tcp(listener), shared),
+            }
         }
 
         /// A client whose reads give up after 10 s.
@@ -1136,11 +1120,11 @@ mod tests {
         }
     }
 
-    impl Drop for Gateway {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            let _ = TcpStream::connect(self.addr);
-        }
+    /// Serve `listener` on a gateway runtime. Dropping the returned thread value stops its accept
+    /// loop and does not wait for it.
+    fn serve_listener(listener: BoundListener, shared: SharedState) -> GatewayThread {
+        listener.set_nonblocking().unwrap();
+        GatewayThread::start(listener, Arc::new(shared)).unwrap()
     }
 
     /// A plain-HTTP origin on loopback that reads one request and answers with `reply` of the
@@ -1503,7 +1487,7 @@ mod tests {
     /// A gateway on an AF_UNIX socket with one slot, stopped on drop and never joined.
     struct UnixGateway {
         path: std::path::PathBuf,
-        stop: Arc<AtomicBool>,
+        _gateway: GatewayThread,
     }
 
     impl UnixGateway {
@@ -1514,10 +1498,10 @@ mod tests {
                 std::env::temp_dir().join(format!("gwcl-{}-{name}.sock", std::process::id()));
             let _ = std::fs::remove_file(&path);
             let listener = UnixListener::bind(&path).unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let stopping = stop.clone();
-            std::thread::spawn(move || accept_loop_unix(listener, Arc::new(shared), stopping));
-            Self { path, stop }
+            Self {
+                _gateway: serve_listener(BoundListener::Unix(listener), shared),
+                path,
+            }
         }
 
         /// A client whose reads give up after 10 s.
@@ -1541,8 +1525,6 @@ mod tests {
 
     impl Drop for UnixGateway {
         fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            let _ = UnixStream::connect(&self.path);
             let _ = std::fs::remove_file(&self.path);
         }
     }

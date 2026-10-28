@@ -399,8 +399,8 @@ pub(crate) struct Contained {
     _relays: Vec<crate::run::netns_relay::NetnsRelay>,
 
     /// This box's trusted half. It outlives the workload it decides for: dropping it unbinds the
-    /// broker socket, joins the gateway's thread, withdraws the live record, and releases the box
-    /// lock. [`Contained::wait`] also watches its broker, because a boundary that stopped serving
+    /// broker socket, stops the gateway's accept loop, withdraws the live record, and releases the
+    /// box lock. [`Contained::wait`] also watches its broker, because a boundary that stopped serving
     hosted: crate::run::hosted::HostedBox,
 }
 

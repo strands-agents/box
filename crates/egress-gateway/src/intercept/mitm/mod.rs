@@ -11,18 +11,20 @@ mod listener;
 mod request_leg;
 mod resolve;
 mod response_leg;
+mod runtime;
 mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::ClientConfig;
 
 use self::ca::EphemeralCa;
 use self::handle::{BoundTransport, CredentialEnv};
+use self::listener::BoundListener;
+use self::runtime::GatewayThread;
 use crate::audit::SharedAuditLog;
 use crate::capability::CapabilitySet;
 use crate::effect::EffectInterceptor;
@@ -85,11 +87,10 @@ pub struct MitmConfig {
     /// The longest one exchange waits on its upstream socket, per read or write and in total;
     /// defaults to 300 seconds.
     pub upstream_read_deadline: std::time::Duration,
-    /// The maximum number of connections handled concurrently. The adapter is thread-per-connection
-    /// (this crate pulls in no async runtime), so this bounds the thread count: excess connections wait
-    /// for a slot rather than spawning unbounded OS threads. The workload is contained but *untrusted*
-    /// (it is the very thing this crate exists to contain), so the cap is a hard backpressure limit,
-    /// not an optimization. Defaults to 256.
+    /// The maximum number of connections handled concurrently. Each connection holds one slot from
+    /// its accept to its end, so excess connections wait for a slot rather than being served without
+    /// bound. The workload is contained but *untrusted* (it is the very thing this crate exists to
+    /// contain), so the cap is a hard backpressure limit, not an optimization. Defaults to 256.
     pub max_connections: usize,
     /// Remote MCP servers, as `(host, name)` pairs. A request whose destination host matches an entry
     /// is treated as an MCP stream for the server `name`: the L7 leg parses the JSON-RPC frame and
@@ -296,13 +297,11 @@ impl MitmInterceptor {
             client_limits: ClientLimits::default(),
         });
 
-        let stop = Arc::new(AtomicBool::new(false));
-
         // Bind exactly one transport. `unix_socket_path: Some(path)` binds ONLY an AF_UNIX
         // socket — no `TcpListener` is created in that mode — since a workload contained by the
         // seccomp pin cannot reach a TCP port at all. `None` (the default) keeps today's behavior:
         // bind `127.0.0.1:0`. Each arm records the transport it bound so the handle never guesses.
-        let (transport, accept_thread) = match &config.unix_socket_path {
+        let (transport, listener) = match &config.unix_socket_path {
             None => {
                 // Default: bind 127.0.0.1:0.
                 let listener = std::net::TcpListener::bind(config.bind_addr)
@@ -311,12 +310,7 @@ impl MitmInterceptor {
                     .local_addr()
                     .map_err(|e| ProxyError::Bind(format!("reading bound addr: {e}")))?
                     .port();
-                let accept_thread = {
-                    let state = state.clone();
-                    let stop = stop.clone();
-                    std::thread::spawn(move || listener::accept_loop(listener, state, stop))
-                };
-                (BoundTransport::Tcp(port), accept_thread)
+                (BoundTransport::Tcp(port), BoundListener::Tcp(listener))
             }
             Some(path) => {
                 // AF_UNIX-only pin: bind ONLY the UnixListener, never a TcpListener.
@@ -338,14 +332,17 @@ impl MitmInterceptor {
                         ))
                     },
                 )?;
-                let accept_thread = {
-                    let state = state.clone();
-                    let stop = stop.clone();
-                    std::thread::spawn(move || listener::accept_loop_unix(listener, state, stop))
-                };
-                (BoundTransport::Unix(path.clone()), accept_thread)
+                (
+                    BoundTransport::Unix(path.clone()),
+                    BoundListener::Unix(listener),
+                )
             }
         };
+        // The gateway runtime registers the listener, which requires non-blocking accepts.
+        listener
+            .set_nonblocking()
+            .map_err(|e| ProxyError::Bind(format!("setting the listener non-blocking: {e}")))?;
+        let gateway = GatewayThread::start(listener, state)?;
 
         Ok(MitmHandle::new(
             transport,
@@ -353,8 +350,7 @@ impl MitmInterceptor {
             ssl_cert_file,
             credential_env,
             audit,
-            stop,
-            accept_thread,
+            gateway,
         ))
     }
 }

@@ -1,12 +1,8 @@
 //! [`MitmHandle`] — the supervisor's control surface for a running adapter.
 
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::thread::JoinHandle;
 
+use super::runtime::GatewayThread;
 use crate::audit::{NetworkAuditEvent, SharedAuditLog};
 
 /// Which transport the adapter actually bound.
@@ -33,9 +29,7 @@ pub struct MitmHandle {
     ssl_cert_file: Option<PathBuf>,
     credential_env: Vec<CredentialEnv>,
     audit: SharedAuditLog,
-    stop: Arc<AtomicBool>,
-    accept_thread: Option<JoinHandle<()>>,
-    shutdown_connection: OnceLock<OwnedFd>,
+    gateway: GatewayThread,
 }
 
 impl MitmHandle {
@@ -46,8 +40,7 @@ impl MitmHandle {
         ssl_cert_file: Option<PathBuf>,
         credential_env: Vec<CredentialEnv>,
         audit: SharedAuditLog,
-        stop: Arc<AtomicBool>,
-        accept_thread: JoinHandle<()>,
+        gateway: GatewayThread,
     ) -> Self {
         Self {
             transport,
@@ -55,9 +48,7 @@ impl MitmHandle {
             ssl_cert_file,
             credential_env,
             audit,
-            stop,
-            accept_thread: Some(accept_thread),
-            shutdown_connection: OnceLock::new(),
+            gateway,
         }
     }
 
@@ -117,45 +108,36 @@ impl MitmHandle {
         self.audit.drain()
     }
 
-    /// Shut the adapter down: flip the stop flag and unblock the accept loop by poking the
-    /// listener. Idempotent — a second call (or `Drop`) is a no-op.
+    /// Shut the adapter down: stop the accept loop, so the listener closes. Idempotent — a second
+    /// call (or `Drop`) is a no-op. It makes no connection and does not wait.
     pub fn shutdown(&self) {
-        if self.stop.swap(true, Ordering::SeqCst) {
-            return; // already shutting down
-        }
-        // Keep the wakeup connection open until the accept thread exits.
-        let connection = match &self.transport {
-            BoundTransport::Tcp(port) => {
-                std::net::TcpStream::connect(("127.0.0.1", *port)).map(OwnedFd::from)
-            }
-            BoundTransport::Unix(path) => UnixStream::connect(path).map(OwnedFd::from),
-        };
-        if let Ok(connection) = connection {
-            let _ = self.shutdown_connection.set(connection);
-        }
+        self.gateway.stop();
     }
 }
 
 impl Drop for MitmHandle {
-    /// Shut down and join the accept thread on drop.
+    /// Stop the accept loop, and return when it has closed the listener. Open connections run to
+    /// their end on the gateway thread.
     fn drop(&mut self) {
-        self.shutdown();
-        if let Some(handle) = self.accept_thread.take() {
-            let _ = handle.join();
-        }
+        self.gateway.stop();
+        self.gateway.wait_for_accept_end();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::os::unix::net::UnixListener;
+    use std::io;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
     use super::*;
+    use crate::capability::CapabilitySet;
+    use crate::effect::{EffectAttempt, EffectInterceptor, EffectPermit};
+    use crate::intercept::mitm::{MitmConfig, MitmInterceptor};
 
     /// A short, unique AF_UNIX socket path under the temp dir. Kept short deliberately: `sun_path` is
     /// capped (~104 bytes on macOS, 108 on Linux), so a long tempdir base plus a long filename would
@@ -166,63 +148,35 @@ mod tests {
         std::env::temp_dir().join(format!("slc-{}-{n}.sock", std::process::id()))
     }
 
-    /// Mirror `listener::accept_loop`'s stop-poll + blocking-accept shape: block in `accept()` and only
-    /// recheck `stop` when a connection wakes the loop. This is exactly the structure `shutdown()` must
-    /// unblock, so the drop-does-not-hang test exercises the real regression rather than a stand-in.
+    /// An authority that refuses every effect.
+    struct RefuseEffects;
+
+    impl EffectInterceptor for RefuseEffects {
+        fn intercept(&self, _: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+    }
+
+    /// Start a real adapter with `config`.
+    fn start(config: MitmConfig) -> MitmHandle {
+        MitmInterceptor::start(config, CapabilitySet::default(), Arc::new(RefuseEffects)).unwrap()
+    }
+
+    /// A real adapter on the AF_UNIX transport.
     fn unix_handle() -> (MitmHandle, PathBuf) {
         let path = unique_sock_path();
         // A stale socket file from a crashed prior run would fail bind; clear it first (best-effort).
         let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let accept_thread = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    drop(incoming);
-                }
-            })
-        };
-        let handle = MitmHandle::new(
-            BoundTransport::Unix(path.clone()),
-            None,
-            None,
-            Vec::new(),
-            SharedAuditLog::new(),
-            stop,
-            accept_thread,
-        );
+        let handle = start(MitmConfig {
+            unix_socket_path: Some(path.clone()),
+            ..MitmConfig::default()
+        });
         (handle, path)
     }
 
-    /// A TCP-transport handle whose accept thread mirrors the same stop-poll shape.
+    /// A real adapter on the TCP transport.
     fn tcp_handle() -> MitmHandle {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let stop = Arc::new(AtomicBool::new(false));
-        let accept_thread = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    drop(incoming);
-                }
-            })
-        };
-        MitmHandle::new(
-            BoundTransport::Tcp(port),
-            None,
-            None,
-            Vec::new(),
-            SharedAuditLog::new(),
-            stop,
-            accept_thread,
-        )
+        start(MitmConfig::default())
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.
@@ -262,15 +216,14 @@ mod tests {
         }
     }
 
-    /// `Drop` (via `shutdown()`) must
-    /// unblock the AF_UNIX accept loop over `UnixStream`, not the old `TcpStream::connect` that would
-    /// never wake it. Bounded so a regression fails this test rather than hanging the whole suite.
+    /// `Drop` must stop the AF_UNIX accept loop and return. Bounded so a regression fails this test
+    /// rather than hanging the whole suite.
     #[test]
     fn drop_does_not_hang_under_af_unix() {
         let (handle, _path) = unix_handle();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            drop(handle); // shutdown() self-connects over UnixStream, unblocking accept()
+            drop(handle);
             let _ = tx.send(());
         });
         assert!(

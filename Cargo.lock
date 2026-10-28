@@ -3994,6 +3994,7 @@ dependencies = [
  "serde_json",
  "strands-box-credentials",
  "thiserror 2.0.21",
+ "tokio",
  "webpki-roots",
  "zeroize",
 ]

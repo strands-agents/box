@@ -242,8 +242,9 @@ serves only HTTP/1.1, and it connects only to the pinned address.
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
 never a TCP port. Every admitted connection is terminated and inspected, so TLS
-interception is not selective. The adapter is thread-per-connection, and
-`max_connections` bounds the thread count. `upstream_read_deadline` bounds each read and each
+interception is not selective. The adapter runs on its own tokio runtime, on a
+thread that it starts, and `max_connections` bounds the connections that it
+serves at once. `upstream_read_deadline` bounds each read and each
 write on an upstream socket and one exchange's upstream reads and writes as a whole, so an
 upstream that never drains or sips the request, or never replies or drips its reply, ends the
 exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
@@ -266,10 +267,10 @@ key sets these bounds.
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
-transports when a CA directory is configured. `Drop` shuts the adapter down and
-joins the accept thread. A successful wakeup connection stays open until the
-accept thread exits. A failed wakeup connection or an exhausted connection limit
-can still block shutdown.
+transports when a CA directory is configured. `shutdown()` and `Drop` stop the
+accept loop with no connection to the listener. `Drop` returns when the loop has
+closed the listener, also when every connection slot is held. Open connections
+run to their end on the gateway thread.
 
 ## Errors
 

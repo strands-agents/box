@@ -136,8 +136,9 @@ Conventions: `docs/conventions.md`.
   `StripQueryParam` beside it.
 - Keep `read_until_headers_end` byte-at-a-time and unbuffered; a `BufReader` strands the
   `ClientHello` and breaks TLS termination.
-- Keep `BoundTransport`, and self-connect in `shutdown()` over the bound transport; a `u16`
-  deadlocks `Drop`'s `join()` under the AF_UNIX pin, where `env_vars()` omits `HTTP(S)_PROXY`.
+- Keep `shutdown()` free of I/O; `Drop` waits only for the accept loop, never for `accept()`. A
+  wakeup connection to the listener can fail under a signal or a full slot set, and then `Drop`
+  hangs (#180).
 - Keep `MAX_CACHED_LEAVES = 64` and clear the cache on reaching it; each entry holds a leaf key for
   the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
 - Refuse an unframed message on a reusable connection when keep-alive lands. `read_body_to_close`
