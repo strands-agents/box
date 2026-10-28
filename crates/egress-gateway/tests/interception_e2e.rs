@@ -1063,3 +1063,65 @@ fn a_path_scoped_secret_never_rides_plain_http() {
     assert!(audit.contains("a secret must ride TLS"), "{audit}");
     assert!(audit.contains("not RFC 3986"), "{audit}");
 }
+
+/// **A secret never rides a later plain request of a kept-alive connection.** The first request
+/// names a destination with no credential, is served, and keeps the connection. The second, on the
+/// same connection, names the credentialed destination: it gets the marked `403` and the end of
+/// the connection, and the origin never sees it.
+#[test]
+fn a_credentialed_destination_is_refused_on_any_plain_request() {
+    use std::io::{Read, Write};
+    let (host, open) = ("api.plain.test", "open.plain.test");
+    let origin = PlainOrigin::start();
+    let port = origin.port;
+    let (store, phantom) = opaque_store(host, port, "sk_live_REALSECRET");
+    let controls = CapabilitySet::builder()
+        .add_credential(CredentialCapability::new(pat(host, port), store))
+        .build();
+    let config = MitmConfig {
+        dns_overrides: [host, open]
+            .iter()
+            .map(|name| (name.to_string(), "127.0.0.1".parse().unwrap()))
+            .collect(),
+        ..MitmConfig::default()
+    };
+    let handle =
+        MitmInterceptor::start(config, controls, FixedPolicy::allowing(&[host, open])).unwrap();
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", proxy_port(&handle))).unwrap();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+
+    write!(
+        tcp,
+        "GET http://{open}:{port}/first HTTP/1.1\r\nHost: {open}:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let expected = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    let mut first = vec![0u8; expected.len()];
+    tcp.read_exact(&mut first).unwrap();
+    assert_eq!(first, expected, "{}", String::from_utf8_lossy(&first));
+
+    write!(
+        tcp,
+        "GET http://{host}:{port}/second HTTP/1.1\r\nHost: {host}:{port}\r\n\
+         Authorization: Bearer {phantom}\r\n\r\n"
+    )
+    .unwrap();
+    let mut second = Vec::new();
+    let _ = tcp.read_to_end(&mut second);
+    let second = String::from_utf8_lossy(&second);
+    assert!(
+        second.starts_with("HTTP/1.1 403")
+            && second
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+        "the second request is refused, and the connection closes: {second:?}"
+    );
+    let seen = origin.requests();
+    assert!(
+        seen.len() == 1 && seen[0].starts_with("GET /first "),
+        "only the first request reached the origin: {seen:?}"
+    );
+    let audit = format!("{:?}", handle.drain_audit_events());
+    assert!(audit.contains("a secret must ride TLS"), "{audit}");
+}

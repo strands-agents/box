@@ -718,6 +718,40 @@ fn a_connect_after_a_plain_request_is_refused_after_the_complete_reply() {
     assert_eq!(log.of_kind("Resolve").len(), 1, "{:#?}", log.attempts());
 }
 
+/// **Each plain request is checked for its own `Proxy-Authorization`.** On one kept-alive
+/// connection, a request with the gateway's token is served, a request with no token is served
+/// (the check is best effort, as on a connection of its own), and a request with another token gets
+/// the `407` and the end of the connection, and opens no upstream socket.
+#[test]
+fn each_plain_request_is_checked_for_its_own_proxy_token() {
+    let origin = PlainOrigin::start(OK.to_vec());
+    let log = Log::permit_all();
+    let (handle, _) = gateway(&[], &[], &log, |config| {
+        config.expected_token = Some("the-token".to_string());
+    });
+    let mut client = plain_client(&handle);
+    let addr = origin.addr;
+    for (token, status) in [
+        ("Proxy-Authorization: Bearer the-token\r\n", "200"),
+        ("", "200"),
+        ("Proxy-Authorization: Bearer another-token\r\n", "407"),
+    ] {
+        write!(
+            client,
+            "GET http://{addr}/token HTTP/1.1\r\nHost: {addr}\r\n{token}\r\n"
+        )
+        .unwrap();
+        let reply = read_reply(&mut client);
+        assert!(
+            reply.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{token:?}: {reply}"
+        );
+    }
+    assert!(plain_reads_end(&mut client), "the 407 closes the connection");
+    assert_eq!(origin.heads().len(), 2, "the refused request opened no socket");
+    assert_eq!(log.of_kind("Resolve").len(), 2, "{:#?}", log.attempts());
+}
+
 /// **A refused pipelined request does not enter a slow reply**: the first request gets a 4 MiB
 /// reply that the client reads slowly, and the `CONNECT` that rides it is refused only after that
 /// reply, whose body arrives exact.
@@ -833,4 +867,31 @@ fn shutdown_ends_idle_kept_alive_connections() {
     for client in &mut clients {
         assert!(client.reads_end_within(END_WAIT));
     }
+}
+
+/// **At the stop, a connection inside an exchange delivers its whole reply, then closes.**
+/// `shutdown` returns at once while the upstream drips its reply, and the reply says
+/// `Connection: close`.
+#[test]
+fn shutdown_lets_a_busy_kept_alive_connection_finish_its_reply() {
+    let host = "busy-stop.test";
+    let upstream = TlsUpstream::start_dripping(host, OK, Duration::from_millis(10));
+    let log = Log::permit_all();
+    let (handle, _) = gateway(&[&upstream], &[host], &log, |_| {});
+    let mut client = WorkloadClient::connect(port(&handle), host, upstream.port());
+    client.send_raw(get(host, upstream.port(), "/busy").as_bytes());
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    handle.shutdown();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    let reply = client.read_response();
+    assert!(
+        reply.starts_with("HTTP/1.1 200 ") && says_close(&reply) && reply.ends_with("\r\n\r\nok"),
+        "{reply}"
+    );
+    assert!(client.reads_end_within(END_WAIT));
 }

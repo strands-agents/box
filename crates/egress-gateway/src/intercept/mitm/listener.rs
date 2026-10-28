@@ -1851,14 +1851,17 @@ mod tests {
         assert_no_denial(&emitter, &audit, "plain");
     }
 
-    /// **The wait for the next head and that head share one bound.** A kept-alive tunnel whose
-    /// next head drips, each byte under the idle bound, is cut when the head bound passes since the
-    /// first reply, and the dripped request raises no decision.
+    /// **The wait for the next head and that head share one bound.** A kept-alive tunnel waits
+    /// most of the head bound, then its next head drips, each byte under the idle bound. The cut
+    /// comes when the head bound passes since the first reply, which is less than one head bound
+    /// after the first dripped byte, and the dripped request raises no decision.
     #[test]
     fn a_next_head_that_drips_is_cut_at_the_head_bound() {
+        const HEAD: Duration = Duration::from_millis(500);
+        const PAUSE: Duration = Duration::from_millis(300);
         let policy = AddressPolicy::permit_all();
         let mut tunnel = Tunnel::new(policy.clone(), Duration::from_secs(60));
-        tunnel.state.client_limits.first_head = Duration::from_millis(500);
+        tunnel.state.client_limits.first_head = HEAD;
         let (origin, replied) = tls_origin(tunnel.origin, 2);
         let gateway = Gateway::serve(tunnel.state);
         let mut client = gateway.connect();
@@ -1874,6 +1877,7 @@ mod tests {
         let mut reply = vec![0u8; b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nyy".len()];
         stream.read_exact(&mut reply).unwrap();
         replied.join().unwrap();
+        std::thread::sleep(PAUSE);
         let started = Instant::now();
         let mut cut = false;
         for byte in head.as_bytes() {
@@ -1894,9 +1898,10 @@ mod tests {
         };
         let waited = started.elapsed();
         assert!(rest.is_empty(), "{}", String::from_utf8_lossy(&rest));
+        // A head timer that started at the first dripped byte would cut at one head bound after it.
         assert!(
-            cut && waited < Duration::from_millis(50) * head.len() as u32,
-            "the head bound cut the drip before its end: {waited:?}"
+            cut && waited < HEAD,
+            "the bound that started with the wait cut the drip: {waited:?} after its first byte"
         );
         assert_eq!(
             policy.seen().len(),
