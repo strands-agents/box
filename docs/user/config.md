@@ -201,6 +201,12 @@ their place.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On Linux, write access permits ordinary file writes and executable-bit changes. It does not
+permit changing a file's owner or group, or requesting set-user-ID or set-group-ID bits during
+permission changes or creation. These requests fail with `EPERM` (operation not permitted).
+Opening an existing file without creation flags does not use its supplied creation mode.
+Existing shared-group directories retain Linux's normal group inheritance for new subdirectories.
+
 ### Direct access by operating system
 
 The read and write lists state separate permissions. These rules also apply to local servers

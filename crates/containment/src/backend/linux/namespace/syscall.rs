@@ -603,6 +603,36 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     // API returns `EPERM`. Add the entry when libc carries the constant.
     // Privilege and identity surfaces the namespaces do not close.
     MediatedSyscall {
+        name: "fchmod",
+        number: libc::SYS_fchmod,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat",
+        number: libc::SYS_fchmodat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat2",
+        number: FCHMODAT2,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "openat",
+        number: libc::SYS_openat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "mkdirat",
+        number: libc::SYS_mkdirat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
         name: "ioctl",
         number: libc::SYS_ioctl,
         disposition: Disposition::ArgumentScoped,
@@ -815,6 +845,18 @@ impl SyscallPolicy {
         &self,
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
+        if entry.number == libc::SYS_fchmod {
+            return special_file_mode_rules(1, None);
+        }
+        if entry.number == libc::SYS_fchmodat || entry.number == FCHMODAT2 {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_mkdirat {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_openat {
+            return special_file_mode_rules(3, Some(2));
+        }
         if entry.number == libc::SYS_ioctl {
             return terminal_input_injection_rules();
         }
@@ -868,6 +910,38 @@ impl SyscallPolicy {
             .map_err(filter_error)?,
         ])
     }
+}
+
+fn special_file_mode_rules(
+    mode_argument: u8,
+    flags_argument: Option<u8>,
+) -> Result<Vec<SeccompRule>, ContainmentError> {
+    let mut rules = Vec::new();
+    for bit in [0o4000, 0o2000] {
+        let mode = SeccompCondition::new(
+            mode_argument,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(bit),
+            bit,
+        )
+        .map_err(filter_error)?;
+        if let Some(argument) = flags_argument {
+            for flag in [libc::O_CREAT, libc::O_TMPFILE] {
+                let flag = flag as u64;
+                let flags = SeccompCondition::new(
+                    argument,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::MaskedEq(flag),
+                    flag,
+                )
+                .map_err(filter_error)?;
+                rules.push(SeccompRule::new(vec![mode.clone(), flags]).map_err(filter_error)?);
+            }
+        } else {
+            rules.push(SeccompRule::new(vec![mode]).map_err(filter_error)?);
+        }
+    }
+    Ok(rules)
 }
 
 fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1124,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn the_file_mode_calls_and_the_creation_mask_are_permitted() {
+    fn file_mode_calls_are_restricted_but_the_creation_mask_is_not() {
         for required in ["fchmod", "fchmodat", "fchmodat2", "umask"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1134,7 +1208,15 @@ mod tests {
                  EPERM, and a caller that tries the newest spelling first would read that as a \
                  real failure instead of falling back"
             );
-            assert!(!MEDIATED.iter().any(|entry| entry.name == required));
+            let restriction = MEDIATED.iter().find(|entry| entry.name == required);
+            if required == "umask" {
+                assert!(restriction.is_none());
+            } else {
+                assert!(matches!(
+                    restriction.unwrap().disposition,
+                    Disposition::ArgumentScoped
+                ));
+            }
         }
     }
 

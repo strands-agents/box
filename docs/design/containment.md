@@ -174,6 +174,23 @@ The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
 list for every platform. The other floors depend on the run.
 
+### Linux file permission changes
+
+A writable Linux bind shares the underlying file with the host. The mount's `nosuid` option
+prevents set-user-ID and set-group-ID bits from changing process identity when a file runs; it does not prevent them
+from being stored on the host file.
+
+The syscall restriction filter rejects either bit in `fchmod`, `fchmodat`, and `fchmodat2`.
+It also rejects either bit in `mkdirat` and in the creation mode of `openat` when `O_CREAT` or
+`O_TMPFILE` is present. It checks the low 32 bits that the kernel uses. An `openat` call without
+creation flags ignores the mode argument, so that unused argument does not cause a refusal.
+The permit filter continues to exclude ownership-changing calls, `openat2`, and `mknodat`.
+Ordinary writes, executable-bit changes, and permitted compiler output remain available.
+
+These checks govern requested modes. A pre-existing set-group-ID directory can still pass its
+group and directory inheritance bit to new subdirectories. The filter does not remove existing
+bits or change the host's directory inheritance rules.
+
 ### How you check a box's reach
 
 A filesystem grant is reach that no policy decision covers, and no record of each access exists
