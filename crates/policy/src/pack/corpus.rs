@@ -181,13 +181,21 @@ fn every_corpus_row_parses_to_its_action_fields_and_effects() {
     let mut count = 0;
     for path in corpus_files() {
         let file = path.file_name().unwrap_or_default().display().to_string();
+        if file.ends_with(".pack.toml") {
+            continue;
+        }
         let Some(stem) = file.strip_suffix(".corpus.md") else {
             failures.push(format!("{file}: is not named `<pack>.corpus.md`"));
             continue;
         };
-        let pack_path = Path::new(PACKS)
-            .join("valid")
-            .join(format!("{stem}.pack.toml"));
+        let beside = path.with_file_name(format!("{stem}.pack.toml"));
+        let pack_path = if beside.exists() {
+            beside
+        } else {
+            Path::new(PACKS)
+                .join("valid")
+                .join(format!("{stem}.pack.toml"))
+        };
         let pack = Pack::load(&pack_path).expect("the corpus pack loads");
         let grammar = ShellGrammar::compile(&pack).expect("the corpus pack compiles");
         let text = std::fs::read_to_string(&path).expect("the corpus file reads");

@@ -3,8 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{EffectChanges, OptionValue, Pack, ShellAction, ShellOption};
-use super::usage::{Separator, Usage};
-use super::{PackRefusal, Place};
+use super::usage::{Separator, Usage, UsageFault};
 
 /// What the shell grammar made of one command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +95,7 @@ pub(super) enum FieldSource {
 
 impl ShellGrammar {
     /// Compile the usage line of each shell action in `pack`.
-    pub(crate) fn compile(pack: &Pack) -> Result<Self, PackRefusal> {
+    pub(crate) fn compile(pack: &Pack) -> Result<Self, UsageFault> {
         let anywhere = OptionTable::of(&pack.global_options, |option| option.anywhere);
         let mut actions = Vec::new();
         for (name, action) in &pack.actions {
@@ -116,12 +115,8 @@ impl ActionGrammar {
         action: &ShellAction,
         pack: &Pack,
         anywhere: &OptionTable,
-    ) -> Result<Self, PackRefusal> {
-        let usage =
-            Usage::read(&action.usage, &pack.program).map_err(|fault| PackRefusal::BadUsage {
-                place: Place::Action(name.to_string()),
-                fault,
-            })?;
+    ) -> Result<Self, UsageFault> {
+        let usage = Usage::read(&action.usage, &pack.program)?;
         let mut fields = Vec::new();
         if usage.globals {
             fields.extend(pack.global_options.iter().map(option_field));
