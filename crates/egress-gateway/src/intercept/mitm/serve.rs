@@ -364,6 +364,7 @@ impl Session {
             true,
             correlation,
             request,
+            inbound.handshake,
             state,
         );
         let upstream = upstream
@@ -455,7 +456,15 @@ impl Session {
         };
         request.headers.set("Host", host_value);
         // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
-        let exchange = Exchange::new(&connect, Binding::None, false, correlation, request, state);
+        let exchange = Exchange::new(
+            &connect,
+            Binding::None,
+            false,
+            correlation,
+            request,
+            inbound.handshake,
+            state,
+        );
         self.forward(exchange, version, upstream, Hop::Plain).await
     }
 

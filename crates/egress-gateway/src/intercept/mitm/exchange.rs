@@ -20,6 +20,7 @@ use super::l7::{canonicalize_request_path, reconstruct_target, validate_request_
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
 use super::serve::WriteCount;
+use super::websocket::Handshake;
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent, RequestId};
@@ -37,6 +38,8 @@ pub(super) struct Exchange<'a> {
     correlation: RequestId,
     pub(super) request: InterceptedRequest,
     pub(super) method: String,
+    /// What the request head asks for in `Upgrade`.
+    handshake: Handshake,
     /// The judged path, before any credential mutation.
     workload_path: String,
     forward_target: String,
@@ -105,6 +108,7 @@ pub(super) type ResponsePhase = for<'a> fn(
 /// The request phases, in the order they run.
 pub(super) const REQUEST_PHASES: &[RequestPhase] = &[
     canonicalize_path,
+    screen_websocket,
     refuse_plaintext_credential,
     apply_request_capabilities,
     recheck_binding,
@@ -119,13 +123,15 @@ pub(super) const RESPONSE_PHASES: &[ResponsePhase] = &[
 ];
 
 impl<'a> Exchange<'a> {
-    /// Start the exchange of `request` on the connection that `connect` admitted.
+    /// Start the exchange of `request` on the connection that `connect` admitted. `handshake` is
+    /// what its head asks for in `Upgrade`.
     pub(super) fn new(
         connect: &'a ConnectRequest,
         binding: Binding,
         intercepted: bool,
         correlation: RequestId,
         request: InterceptedRequest,
+        handshake: Handshake,
         state: &SharedState,
     ) -> Self {
         let correlation = correlation.with_headers(&request.headers);
@@ -140,6 +146,7 @@ impl<'a> Exchange<'a> {
             intercepted,
             correlation,
             method: request.method.clone().unwrap_or_else(|| "GET".to_string()),
+            handshake,
             workload_path: request.target.path.clone(),
             request,
             forward_target: String::new(),
@@ -260,6 +267,41 @@ fn canonicalize_path(
     exchange.request.target.path.clone_from(&path);
     exchange.workload_path = path;
     Ok(())
+}
+
+/// Refuse a WebSocket handshake that the gateway does not relay, before any credential or policy
+/// sees it, and remove the extensions of one that it relays.
+fn screen_websocket(
+    exchange: &mut Exchange<'_>,
+    state: &SharedState,
+) -> std::result::Result<(), Refusal> {
+    let (reason, status, body): (&str, u16, &'static [u8]) = match &exchange.handshake {
+        Handshake::None => return Ok(()),
+        Handshake::Malformed(reason) => (reason, 400, b"malformed WebSocket handshake"),
+        // Every message of a plain-HTTP WebSocket crosses in clear text, and a secret rides only
+        // TLS.
+        Handshake::WebSocket { .. } if !exchange.intercepted => (
+            "upgrade on a plaintext request",
+            403,
+            b"WebSocket requires TLS",
+        ),
+        // Frames to a remote MCP server would cross with no `mcp:call` decision.
+        Handshake::WebSocket { .. } if state.mcp_server_for(&exchange.connect.host).is_some() => (
+            "upgrade to a remote MCP server",
+            403,
+            b"WebSocket refused for an MCP server",
+        ),
+        Handshake::WebSocket { .. } => {
+            // `permessage-deflate` compresses each message before the gateway reads it, so the
+            // scrub could not find a secret in it. The fold and the upstream never see the offer.
+            exchange.request.headers.remove("sec-websocket-extensions");
+            return Ok(());
+        }
+    };
+    Err(Refusal {
+        reason: format!("websocket: {reason}"),
+        reply: Reply::Diagnostic { status, body },
+    })
 }
 
 /// Refuse a plain-HTTP request on which a credential would attach.
@@ -768,6 +810,7 @@ mod tests {
             intercepted,
             RequestId::new("phases"),
             request,
+            Handshake::None,
             &state,
         );
         REQUEST_PHASES

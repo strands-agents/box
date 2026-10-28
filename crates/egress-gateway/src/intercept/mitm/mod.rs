@@ -16,6 +16,7 @@ mod response_leg;
 mod runtime;
 mod serve;
 mod tls;
+mod websocket;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

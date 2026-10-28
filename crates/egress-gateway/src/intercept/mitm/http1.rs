@@ -38,7 +38,7 @@ fn is_token_byte(byte: u8) -> bool {
 }
 
 /// Trim HTTP optional whitespace (SP / HTAB), without accepting other Unicode whitespace.
-fn trim_ows(value: &str) -> &str {
+pub(super) fn trim_ows(value: &str) -> &str {
     value.trim_matches(|character| matches!(character, ' ' | '\t'))
 }
 

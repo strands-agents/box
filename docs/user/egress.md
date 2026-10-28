@@ -130,6 +130,14 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
+| `WebSocket requires TLS` | A WebSocket handshake came on a plain `http://` request. Use `wss://`. |
+| `WebSocket refused for an MCP server` | A WebSocket handshake went to the host of an http MCP server. |
+
+A request that names `websocket` in its `Upgrade` header and is not a valid WebSocket handshake
+gets an HTTP 400 with the same header and the body `malformed WebSocket handshake`. A valid
+handshake is a `GET` over HTTP/1.1 with `Connection: Upgrade`, `Sec-WebSocket-Version: 13`, one
+`Sec-WebSocket-Key`, and no body. The gateway removes `Sec-WebSocket-Extensions` from each
+handshake, so no message is compressed.
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 

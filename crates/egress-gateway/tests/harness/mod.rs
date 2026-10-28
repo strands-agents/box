@@ -501,6 +501,11 @@ impl WorkloadClient {
     pub fn read_status(&mut self) -> u16 {
         parse_status(&self.read_response())
     }
+
+    /// The established TLS tunnel, for a test that speaks its own protocol over it.
+    pub fn into_tls(self) -> StreamOwned<ClientConnection, TcpStream> {
+        self.tls.expect("connect (TLS) first")
+    }
 }
 
 /// A serialized guard that sets the ambient `AWS_*` env for the v1 provider and restores it on drop.

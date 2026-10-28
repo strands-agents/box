@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 use super::http1::{self, ResponseBodyMode};
 use super::serve::WriteCount;
+use super::websocket::{self, Handshake};
 use crate::boundary::{BodyRef, HeaderMap, InterceptedResponse};
 use crate::error::{ProxyError, Result};
 use crate::mcp::mcp_denial_response;
@@ -122,6 +123,8 @@ pub(super) struct Inbound {
     /// a body framing.
     pub(super) headers: HeaderMap,
     pub(super) body: Vec<u8>,
+    /// What the head asks for in `Upgrade`, read before the hop-by-hop strip.
+    pub(super) handshake: Handshake,
 }
 
 /// Read the head and the whole body of one request from the workload, up to `max` body bytes.
@@ -142,6 +145,12 @@ where
         parts.headers.contains_key(CONTENT_LENGTH) || parts.headers.contains_key(TRANSFER_ENCODING);
     let mut headers = header_map_from(&parts.headers);
     let body = collect_body(body, max, "request").await?;
+    let handshake = websocket::classify(
+        parts.method.as_str(),
+        parts.version,
+        &parts.headers,
+        body.len(),
+    );
     http1::strip_hop_by_hop_headers(&mut headers)?;
     if framed {
         headers.set("Content-Length", body.len().to_string());
@@ -152,6 +161,7 @@ where
         version: parts.version,
         headers,
         body,
+        handshake,
     })
 }
 
