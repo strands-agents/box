@@ -1132,14 +1132,13 @@ impl ConfigFile {
     ))]
     fn uses_native_filesystem(&self) -> bool {
         let contained = crate::record::config::mcp::contained_specs(&self.mcp);
-        self.agent
-            .iter()
-            .chain(self.tool.values())
-            .chain(contained.values().map(|server| &server.spec))
-            .any(|spec| {
-                spec.native_filesystem_policy
-                    .unwrap_or(self.experimental_features.native_filesystem_policy)
-            })
+        process::uses_native_filesystem(
+            self.agent
+                .iter()
+                .chain(self.tool.values())
+                .chain(contained.values().map(|server| &server.spec)),
+            self.experimental_features.native_filesystem_policy,
+        )
     }
 
     fn read(path: &Path) -> Result<Self, ConfigError> {

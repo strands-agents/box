@@ -321,15 +321,14 @@ impl Registration {
     }
 }
 pub(crate) fn selected(record: &crate::record::config::Record) -> bool {
-    record
-        .agent
-        .iter()
-        .chain(record.tool.values())
-        .chain(record.contained_mcp.values().map(|server| &server.spec))
-        .any(|spec| {
-            spec.native_filesystem_policy
-                .unwrap_or(record.experimental_features.native_filesystem_policy)
-        })
+    crate::record::config::process::uses_native_filesystem(
+        record
+            .agent
+            .iter()
+            .chain(record.tool.values())
+            .chain(record.contained_mcp.values().map(|server| &server.spec)),
+        record.experimental_features.native_filesystem_policy,
+    )
 }
 
 pub(crate) fn preflight() -> Result<(), BoxError> {

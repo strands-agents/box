@@ -63,6 +63,8 @@ unsafe extern "C" {
     fn box_es_set_process_mode(client: *mut c_void, pid: i32, mediated: bool) -> bool;
     fn box_es_stop(client: *mut c_void) -> i32;
     #[cfg(test)]
+    fn box_es_test_open(mode: u32, flags: u32, event: *mut RawEvent) -> bool;
+    #[cfg(test)]
     fn box_es_event_size() -> usize;
     #[cfg(test)]
     fn box_es_event_offset(field: usize) -> usize;
@@ -164,7 +166,12 @@ impl Plan {
                     add(&source, operation, "fs:read", false);
                 }
                 if event.flags & FREAD != 0 {
-                    add(&source, FsOperation::ReadContent, "fs:read", false);
+                    let operation = if event.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+                        FsOperation::Enumerate
+                    } else {
+                        FsOperation::ReadContent
+                    };
+                    add(&source, operation, "fs:read", false);
                 }
                 // FTRUNC can request a write even with a read-only descriptor.
                 if event.flags & (FWRITE | libc::O_TRUNC as u32) != 0 {

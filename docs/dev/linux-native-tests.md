@@ -16,7 +16,7 @@ The operation suites use the shared launcher under a private build switch. This 
 
 ```sh
 RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_adapter_tests" cargo build -p strands-box -p strands-box-containment --all-features
-RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_adapter_tests" cargo test -p strands-box --all-features --test linux_native_paths --test linux_native_directories -- --test-threads=1
+RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_adapter_tests" cargo test -p strands-box --all-features --test linux_native_paths --test linux_native_directories --test linux_native_policy_semantics -- --test-threads=1
 ```
 
 Set `NATIVE_TEST_ROOT` to a short writable directory. The C fixtures require ARM64 Linux. Rebuild with `--cfg box_native_test_faults` added, then select the race suite explicitly:

@@ -27,15 +27,19 @@ const NO_LINKS: u64 = RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS;
 const IN_ROOT: u64 = RESOLVE_IN_ROOT;
 fn open(path: &str, flags: i32) -> io::Result<OwnedFd> {
     let path = CString::new(path)?;
+    // SAFETY: CString supplies a live terminated path; open returns a new descriptor or an error.
     let fd = notify::checked(unsafe { libc::open(path.as_ptr(), flags, 0o600) })?;
+    // SAFETY: The successful open returned a fresh descriptor; ownership transfers exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 fn openat2(root: i32, path: &[u8], flags: u64, mode: u64, resolve: u64) -> io::Result<OwnedFd> {
     let path = CString::new(path)?;
     let how = [flags, mode, resolve];
+    // SAFETY: The terminated path and three-u64 open_how buffer remain live for this synchronous call.
     let fd = notify::checked(unsafe {
         libc::syscall(libc::SYS_openat2, root, path.as_ptr(), how.as_ptr(), 24) as i32
     })?;
+    // SAFETY: The successful open returned a fresh descriptor; ownership transfers exactly once.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 struct RequestPath {
@@ -165,7 +169,9 @@ fn process_file(request: &notify::Request, path: &Path) -> Result<Option<PathBuf
 }
 
 fn content_file(descriptor: &OwnedFd, path: &Path) -> io::Result<libc::stat> {
+    // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
     notify::checked(unsafe { libc::fstat(descriptor.as_raw_fd(), &mut stat) })?;
     let kind = stat.st_mode & libc::S_IFMT;
     let runtime_device = kind == libc::S_IFCHR
@@ -189,7 +195,9 @@ fn private_temporary_file(root: i32, path: &Path, object: &OwnedFd) -> io::Resul
         0,
         IN_ROOT | NO_LINKS,
     )?;
+    // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
     let mut filesystem = unsafe { std::mem::zeroed::<libc::statfs>() };
+    // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
     notify::checked(unsafe { libc::fstatfs(temporary.as_raw_fd(), &mut filesystem) })?;
     if filesystem.f_type != libc::TMPFS_MAGIC {
         return Ok(false);
@@ -351,7 +359,9 @@ pub(super) fn file_request(
             )
             .map_err(BoxLookupError)?;
             content_file(&pinned, &process_path)?;
+            // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
             let mut filesystem = unsafe { std::mem::zeroed::<libc::statfs>() };
+            // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
             notify::checked(unsafe { libc::fstatfs(pinned.as_raw_fd(), &mut filesystem) })?;
             if filesystem.f_type != libc::PROC_SUPER_MAGIC {
                 return Err("process file is outside the captured proc filesystem".into());
@@ -361,7 +371,9 @@ pub(super) fn file_request(
         let resolved = RequestPath::new(root, request, path, 0)?;
         let pinned = resolved.pin(flags).map_err(BoxLookupError)?;
         let actual_path = std::fs::read_link(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?;
+        // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
         let mut kind = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
         notify::checked(unsafe { libc::fstat(pinned.as_raw_fd(), &mut kind) })?;
         if kind.st_mode & libc::S_IFMT == libc::S_IFLNK && flags & libc::O_PATH == 0 {
             return Err(Box::new(BoxLookupError(io::Error::from_raw_os_error(
@@ -369,7 +381,9 @@ pub(super) fn file_request(
             ))));
         }
         let identity = if flags & libc::O_PATH != 0 {
+            // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
             let mut identity = unsafe { std::mem::zeroed::<libc::stat>() };
+            // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
             notify::checked(unsafe { libc::fstat(pinned.as_raw_fd(), &mut identity) })?;
             identity
         } else {
@@ -413,7 +427,9 @@ pub(super) fn file_request(
             0,
             RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
         )?;
+        // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
         let mut host_identity = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
         notify::checked(unsafe { libc::fstat(host.as_raw_fd(), &mut host_identity) })?;
         if (identity.st_dev, identity.st_ino) != (host_identity.st_dev, host_identity.st_ino) {
             return Err("host and Box paths identify different files".into());
@@ -505,6 +521,7 @@ pub(super) fn file_request(
         Ok(source) => {
             if truncate {
                 notify::valid(listener, request.id)?;
+                // SAFETY: The owned descriptor remains live; ftruncate validates the scalar length.
                 let effect = notify::checked(unsafe {
                     libc::ftruncate(source.as_raw_fd(), request.data.args[1] as libc::off_t)
                 });
@@ -576,7 +593,9 @@ fn entry_identity(
     descriptor: &OwnedFd,
     expected: libc::mode_t,
 ) -> io::Result<(libc::dev_t, libc::ino_t)> {
+    // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
     notify::checked(unsafe { libc::fstat(descriptor.as_raw_fd(), &mut stat) })?;
     let kind = stat.st_mode & libc::S_IFMT;
     if (expected != 0 && kind != expected)
@@ -691,17 +710,22 @@ fn creation_entry(
         let Some(object) = source.object.as_ref() else {
             return Ok(source);
         };
+        // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
         let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
         notify::checked(unsafe { libc::fstat(object.as_raw_fd(), &mut stat) })?;
         if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
             return Ok(source);
         }
+        // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
         let mut filesystem = unsafe { std::mem::zeroed::<libc::statfs>() };
+        // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
         notify::checked(unsafe { libc::fstatfs(object.as_raw_fd(), &mut filesystem) })?;
         if filesystem.f_type == libc::PROC_SUPER_MAGIC {
             return Err(BoxLookupError(io::Error::from_raw_os_error(libc::ELOOP)).into());
         }
         let mut target = [0_u8; 4096];
+        // SAFETY: The live descriptor and writable output buffer remain valid for this synchronous call.
         let length = notify::checked(unsafe {
             libc::readlinkat(
                 object.as_raw_fd(),
@@ -887,10 +911,13 @@ pub(super) fn entry_request(
             let mut checks = vec![
                 (&source.path, FsOperation::Rename),
                 (&source.path, FsOperation::ReadContent),
-                (&destination.path, FsOperation::WriteContent),
             ];
             if destination.exists {
                 checks.push((&destination.path, FsOperation::RemoveFile));
+            }
+            checks.push((&destination.path, FsOperation::Rename));
+            if destination.exists {
+                checks.push((&destination.path, FsOperation::WriteContent));
             }
             checks
         }
@@ -960,6 +987,7 @@ pub(super) fn entry_request(
     }
     super::fault::at("entry-verified")?;
     notify::valid(listener, request.id)?;
+    // SAFETY: Owned descriptors and CStrings outlive these synchronous calls, including the guarded closures.
     let effect = unsafe {
         match number {
             libc::SYS_openat | libc::SYS_mkdirat => {
@@ -1037,6 +1065,7 @@ pub(super) fn entry_request(
     let (result, outcome) = if error.is_some() {
         (FsResult::Failed, "failed")
     } else if number == libc::SYS_openat {
+        // SAFETY: The successful open returned a fresh descriptor; ownership transfers exactly once.
         let descriptor = unsafe {
             OwnedFd::from_raw_fd(
                 *effect
@@ -1184,7 +1213,9 @@ mod path_tests {
         )
         .unwrap();
         let link = resolved.pin(libc::O_PATH | libc::O_NOFOLLOW).unwrap();
+        // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
         let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: The descriptor is borrowed from a live owner and the output structure is writable.
         notify::checked(unsafe { libc::fstat(link.as_raw_fd(), &mut stat) }).unwrap();
         assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFLNK);
         assert_eq!(
