@@ -107,6 +107,20 @@ pub enum Outcome<'a> {
         /// The upstream's reply status, or `None` when no reply arrived.
         status: Option<u16>,
     },
+    /// One upgrade handshake left the box (`http:upgrade::response`).
+    ///
+    /// Recorded like [`Outcome::Mcp`]: a handshake that may have reached the server is a
+    /// `response`, whatever the server replied. The reply status rides `http:request::response`.
+    HttpUpgrade {
+        /// The logical destination host.
+        host: &'a str,
+        /// The logical destination port.
+        port: u16,
+        /// The request path, without its query.
+        path: &'a str,
+        /// The requested protocol, in lowercase.
+        protocol: &'a str,
+    },
     /// A resolved command line finished (`shell:exec::response`).
     ///
     /// The response names the same action whose request was authorized, so a rule can

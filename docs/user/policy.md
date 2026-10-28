@@ -23,7 +23,8 @@ Four parts of the box ask policy, each about its own boundary:
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
 - **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+  `http:request`, once per WebSocket handshake, as `http:upgrade`, and once per MCP request over
+  HTTP, as `mcp:call`.
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -107,14 +108,15 @@ Two refusals look like a denial, and no `permit` lifts them:
 
 ## The actions
 
-The box ships ten actions in four categories, and generates one more for each MCP tool it
+The box ships eleven actions in four categories, and generates one more for each MCP tool it
 discovers. [The action vocabulary](policy/actions.md) lists the fields of each one.
 
 - **[Filesystem](policy/actions.md#filesystem)**: a file operation in Strands Shell or Monty.
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
 - **[Network](policy/actions.md#network)**: an outbound call through the egress gateway. Each call
   is two decisions: `net:connect` for the connection, before TLS, and `http:request` for each
-  request inside it, after TLS on an HTTPS connection.
+  request inside it, after TLS on an HTTPS connection. A WebSocket handshake is also decided as
+  `http:upgrade`, after `http:request` permits it.
 - **[Shell](policy/actions.md#shell)**: a command line in Strands Shell, judged once after the
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
@@ -125,10 +127,10 @@ discovers. [The action vocabulary](policy/actions.md) lists the fields of each o
 
 ## Common rules
 
-Seven rules an operator writes often. Each one is a working rule. Copy it beside the permits from
+Eight rules an operator writes often. Each one is a working rule. Copy it beside the permits from
 [your first policy](tutorials/first-policy.md), replace `~/project` with your project directory, and
 run the box. Two of them say what else `box.toml` needs. The first six are `forbid` rules. The last
-is a pair of `permit` rules that replace two from the tutorial.
+two are `permit` rules: the seventh replaces two from the tutorial, and the eighth adds three.
 
 ### A budget over time
 
@@ -200,6 +202,8 @@ when temporal {
   reply arrives. A refused request does not count, and one still in flight does not count yet.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
+- A WebSocket counts once, as its handshake. The messages it carries after the handshake don't
+  count.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
   description. [How a denial reads](#how-a-denial-reads) shows the form.
 
@@ -407,6 +411,42 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
+
+### Open a WebSocket to one host
+
+The agent opens a WebSocket to `wss://echo.websocket.org`, and a WebSocket to any other host is
+refused. The handshake is a `GET`, so it needs an `http:request` permit, and the switch to
+WebSocket needs an `http:upgrade` permit:
+
+```text
+@id("echo_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "echo.websocket.org" && context.input.port == 443 };
+
+@id("echo_handshake")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "echo.websocket.org" && context.input.method == "GET" };
+
+@id("echo_websocket")
+permit (principal, action == Box::Action::"http:upgrade", resource)
+when { context.input.host == "echo.websocket.org" && context.input.protocol == "websocket" };
+```
+
+Without `echo_websocket`, the handshake gets a `403` whose body is the denial:
+
+```text
+http:upgrade gate: policy denied this operation on 'echo.websocket.org:443/' [default-deny]: No permit policy matched this request.
+```
+
+- An `http:request` permit admits a `GET` to its host, and a WebSocket to the same host still needs
+  its own `http:upgrade` permit.
+- `http:upgrade` reads `host`, `port`, `path`, and `protocol`, so a rule can hold a WebSocket to one
+  path, as `context.input.path == "/chat"`.
+- Policy decides the handshake once, and no message after it reaches history. A rule that reads
+  history, such as a budget, a rate limit, or a rule that closes egress after a secret read, stops
+  new WebSockets and leaves an open one running.
+  [Policy limitations](security.md#policy-limitations) says what to do about it, and
+  [WebSocket](egress.md#websocket) lists what the gateway does with the messages.
 
 ## Troubleshooting load failures
 

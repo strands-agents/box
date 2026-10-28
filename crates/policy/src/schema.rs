@@ -108,6 +108,8 @@ pub(crate) mod action {
     pub(crate) const NET_CONNECT: &str = "net:connect";
     /// `http:request` — the L7 HTTP decision; its one `::response` carries the reply's `status`.
     pub(crate) const HTTP_REQUEST: &str = "http:request";
+    /// `http:upgrade` — a protocol upgrade, decided after `http:request` permits its handshake.
+    pub(crate) const HTTP_UPGRADE: &str = "http:upgrade";
     /// `mcp:call` — one tool call on a connected MCP server.
     pub(crate) const MCP_CALL: &str = "mcp:call";
     /// `shell:exec` — a resolved command line whose program the Shell implements.
@@ -245,6 +247,8 @@ pub(crate) mod attr {
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
+    /// `context.input.protocol` — the requested upgrade protocol (`http:upgrade`).
+    pub(crate) const PROTOCOL: &str = "protocol";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -396,9 +400,9 @@ fn fixed_action_uid(id: &str) -> Result<EntityUid, PolicyError> {
 }
 
 /// Every action id, in one place, so the cached UIDs cover exactly the closed set
-/// [`action_id`] can return. The nine actions the box raises: five filesystem verbs,
-/// two network decisions, and two shell command decisions. The schema has no group
-/// actions, so every id here is one a request names directly.
+/// [`action_id`] can return. The eleven actions the box raises: five filesystem verbs,
+/// three network decisions, two shell command decisions, and `mcp:call`. The schema has no
+/// group actions, so every id here is one a request names directly.
 ///
 /// **There is no response action.** The response leg is `http:request`'s response phase: it
 /// records what came back and takes no decision, so it names no action of its own.
@@ -410,6 +414,7 @@ const ACTION_IDS: &[&str] = &[
     action::FS_OTHER,
     action::NET_CONNECT,
     action::HTTP_REQUEST,
+    action::HTTP_UPGRADE,
     action::SHELL_EXEC,
     action::SHELL_SPAWN,
     action::MCP_CALL,
@@ -422,6 +427,7 @@ pub(crate) fn action_id(req: &Request<'_>) -> &'static str {
         Request::Fs { operation, .. } => fs_action_id(*operation),
         Request::Connect { .. } => action::NET_CONNECT,
         Request::Http { .. } => action::HTTP_REQUEST,
+        Request::HttpUpgrade { .. } => action::HTTP_UPGRADE,
         Request::ShellExec { .. } => action::SHELL_EXEC,
         // A tool call with arguments uses [`ActionIdentity::McpTool`].
         Request::McpCall { .. } => action::MCP_CALL,
@@ -546,6 +552,29 @@ fn context_for(
             (
                 attr::INTERCEPTED.to_string(),
                 RestrictedExpression::new_bool(*intercepted),
+            ),
+        ],
+        Request::HttpUpgrade {
+            host,
+            port,
+            path,
+            protocol,
+        } => vec![
+            (
+                attr::HOST.to_string(),
+                RestrictedExpression::new_string((*host).to_string()),
+            ),
+            (
+                attr::PORT.to_string(),
+                RestrictedExpression::new_long(i64::from(*port)),
+            ),
+            (
+                attr::PATH.to_string(),
+                RestrictedExpression::new_string((*path).to_string()),
+            ),
+            (
+                attr::PROTOCOL.to_string(),
+                RestrictedExpression::new_string((*protocol).to_string()),
             ),
         ],
         Request::McpCall {
@@ -736,6 +765,12 @@ mod tests {
                 body_bytes: 12,
                 intercepted: true,
             },
+            Request::HttpUpgrade {
+                host: "h",
+                port: 443,
+                path: "/socket",
+                protocol: "websocket",
+            },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {
                 command: "rm -rf /tmp/x",
@@ -771,6 +806,33 @@ mod tests {
                 to_cedar_request(&principal, r, &identity, schema).is_ok(),
                 "failed to map {r:?}"
             );
+        }
+    }
+
+    /// `http:upgrade` reads exactly `host`, `port`, `path`, and `protocol`.
+    #[test]
+    fn the_http_upgrade_action_declares_four_inputs() {
+        let schema = schema().expect("shipped schema");
+        let action = fixed_action_uid(action::HTTP_UPGRADE).expect("the cached upgrade uid");
+        assert!(schema.actions().any(|declared| *declared == action));
+        let conforms = |input: serde_json::Value| {
+            Context::from_json_value(
+                serde_json::json!({ "input": input }),
+                Some((schema, &action)),
+            )
+            .is_ok()
+        };
+        assert!(conforms(serde_json::json!({
+            "host": "echo.example.com", "port": 443, "path": "/socket", "protocol": "websocket"
+        })));
+        for refused in [
+            serde_json::json!({ "host": "echo.example.com", "port": 443, "path": "/socket" }),
+            serde_json::json!({
+                "host": "echo.example.com", "port": 443, "path": "/socket", "protocol": "websocket",
+                "method": "GET"
+            }),
+        ] {
+            assert!(!conforms(refused.clone()), "{refused}");
         }
     }
 

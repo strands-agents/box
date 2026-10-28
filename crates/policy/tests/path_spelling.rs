@@ -481,6 +481,49 @@ fn a_cased_host_literal_is_refused_and_its_lowercase_form_forbids_the_connect() 
     assert!(connects(&engine, "other.example.com"));
 }
 
+/// `http:upgrade` reads the same `host` as `http:request`, so the judge holds its literal to the
+/// same spelling.
+#[test]
+fn an_impossible_host_literal_on_http_upgrade_is_refused_and_its_canonical_form_loads() {
+    let home = Home::new();
+    for (literal, advice) in [
+        ("Echo.Example.com", "write \"echo.example.com\""),
+        ("echo.example.com:443", "context.input.port"),
+        ("wss://echo.example.com", "a host holds only letters"),
+    ] {
+        let upgrade = format!(
+            r#"@id("sockets")
+            permit(principal, action == Box::Action::"http:upgrade", resource)
+            when {{ context.input.host == "{literal}" }};"#
+        );
+        let reason = refusal(home.open("upgrade-host", &upgrade));
+        assert!(reason.contains("rule @id(\"sockets\")"), "{reason}");
+        assert!(reason.contains(advice), "{literal}: {reason}");
+    }
+
+    let canonical = r#"permit(principal, action == Box::Action::"http:upgrade", resource)
+        when { context.input.host == "echo.example.com" };"#;
+    let engine = home
+        .open("canonical-upgrade-host", canonical)
+        .expect("the canonical spelling loads");
+    let upgrades = |host| {
+        engine
+            .decide(
+                &GovernedBox::assigned("spelling"),
+                &Principal::agent(),
+                &Request::HttpUpgrade {
+                    host,
+                    port: 443,
+                    path: "/socket",
+                    protocol: "websocket",
+                },
+            )
+            .is_allow()
+    };
+    assert!(upgrades("echo.example.com"));
+    assert!(!upgrades("other.example.com"));
+}
+
 /// The gateway binds a host its parser accepts, so the judge refuses every other spelling and
 /// refuses none of those.
 #[test]

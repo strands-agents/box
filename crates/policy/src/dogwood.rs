@@ -904,6 +904,8 @@ fn outcome_kind(outcome: &Outcome<'_>) -> &'static str {
         // delivered `Http` request is a `response` regardless of a 500. A call that never completes
         // records nothing, so there is no MCP `::error` producer.
         Outcome::Mcp { .. } => KIND_RESPONSE,
+        // Recorded on the same terms as `Mcp`, so there is no `http:upgrade::error` producer.
+        Outcome::HttpUpgrade { .. } => KIND_RESPONSE,
     }
 }
 
@@ -944,6 +946,7 @@ fn outcome_action_id(outcome: &Outcome<'_>) -> &'static str {
     match outcome {
         Outcome::Connect { .. } => action::NET_CONNECT,
         Outcome::Http { .. } => action::HTTP_REQUEST,
+        Outcome::HttpUpgrade { .. } => action::HTTP_UPGRADE,
         Outcome::ShellRun { .. } => action::SHELL_EXEC,
         Outcome::ShellSpawn { .. } => action::SHELL_SPAWN,
         // The response names the SAME coarse action as the request, so a rule joining
@@ -1002,6 +1005,12 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
             (attr::INTERCEPTED, Value::Bool(*intercepted)),
         ],
+        Request::HttpUpgrade {
+            host,
+            port,
+            path,
+            protocol,
+        } => upgrade_fields(host, *port, path, protocol),
         Request::McpCall {
             server,
             method,
@@ -1078,6 +1087,16 @@ fn argument_fields(args: &[String]) -> Vec<(&'static str, Value)> {
     fields
 }
 
+/// The `http:upgrade` fields, one helper for both legs so they cannot disagree.
+fn upgrade_fields(host: &str, port: u16, path: &str, protocol: &str) -> Vec<(&'static str, Value)> {
+    vec![
+        (attr::HOST, Value::String(host.to_string())),
+        (attr::PORT, Value::Int(i64::from(port))),
+        (attr::PATH, Value::String(path.to_string())),
+        (attr::PROTOCOL, Value::String(protocol.to_string())),
+    ]
+}
+
 fn credential_read_fields(paths: &[String]) -> Vec<(&'static str, Value)> {
     if paths.is_empty() {
         Vec::new()
@@ -1119,6 +1138,12 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             ),
             (attr::INTERCEPTED, Value::Bool(true)),
         ],
+        Outcome::HttpUpgrade {
+            host,
+            port,
+            path,
+            protocol,
+        } => upgrade_fields(host, *port, path, protocol),
         Outcome::ShellRun {
             command,
             program,

@@ -185,7 +185,7 @@ of the four actions, and the slot is reserved for a verb upstream has not yet ad
 its own action, so a permit written for a different verb never inherits it.
 
 The rest of the fixed vocabulary is `Box::Action::"net:connect"`,
-`Box::Action::"http:request"`, `Box::Action::"shell:exec"`,
+`Box::Action::"http:request"`, `Box::Action::"http:upgrade"`, `Box::Action::"shell:exec"`,
 `Box::Action::"shell:spawn"`, and `Box::Action::"mcp:call"`. MCP discovery adds one namespaced
 action for each tool.
 
@@ -195,10 +195,11 @@ reply's `output.status`, so a temporal rule can count server errors; a rule cann
 reply's size.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
-egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,
-`shell:spawn`, and `fs:*`. The Python interpreter decides `fs:*`. The local MCP broker decides
-`mcp:call` and generated tool refinements. All four are adapters over the one `PolicyEngine` the
-trusted `run` process holds for that box, so they share one decision history.
+egress gateway decides `net:connect`, `http:request`, and `http:upgrade` for a WebSocket
+handshake. The Strands Shell decides `shell:exec`, `shell:spawn`, and `fs:*`. The Python
+interpreter decides `fs:*`. The local MCP broker decides `mcp:call` and generated tool refinements.
+All four are adapters over the one `PolicyEngine` the trusted `run` process holds for that box, so
+they share one decision history.
 
 **A cap must be a `forbid`.** Permits combine by permit-overrides, so a second
 `permit … when temporal { count < N }` scoped to a whole action grants everything the

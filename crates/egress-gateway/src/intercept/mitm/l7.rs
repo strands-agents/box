@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,8 +12,10 @@ use rustls::{ClientConnection, ServerConnection, StreamOwned};
 use zeroize::Zeroizing;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
+use super::http1::Hop;
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
+use super::websocket::{self, UpgradeRequest, Upgraded};
 use super::{SharedState, http1, tls};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent};
@@ -28,8 +31,9 @@ use crate::mcp::{
 ///
 /// A thin transport wrapper: it does the TLS-specific setup (present a per-host leaf, open the
 /// upstream TLS), reads the request, checks the CONNECT binding, then hands the shared request and
-/// response legs to [`run_l7_legs`].
-pub(super) fn intercept_tls<C: Read + Write>(
+/// response legs to [`run_l7_legs`]. An accepted WebSocket handshake continues in
+/// [`websocket::relay`] on the same two connections.
+pub(super) fn intercept_tls<C: Read + Write + AsRawFd>(
     client: C,
     upstream: TcpStream,
     connect: &ConnectRequest,
@@ -109,16 +113,32 @@ pub(super) fn intercept_tls<C: Read + Write>(
 
     // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
     // flag inside the shared core.
-    run_l7_legs(
+    let Some(upgraded) = run_l7_legs(
         connect,
         req,
+        parsed.upgrade,
         &mut upstream_tls,
         client_tls.get_mut(),
         state,
         correlation,
         true, // TLS was terminated to see this request
         |method, target, headers| validate_request_binding(connect, method, target, headers),
-    )
+    )?
+    else {
+        return Ok(());
+    };
+    // The relay takes the plaintext each side sent after its head.
+    let client_carried = client_tls.buffer().to_vec();
+    let StreamOwned { conn, sock } = client_tls.into_inner();
+    let client = websocket::Peer::new(conn, sock, client_carried);
+    let upstream_carried = upstream_tls.buffer().to_vec();
+    let StreamOwned {
+        conn: upstream_conn,
+        sock: upstream_sock,
+    } = upstream_tls.into_inner();
+    let upstream =
+        websocket::Peer::new(upstream_conn, upstream_sock.into_inner(), upstream_carried);
+    websocket::relay(client, upstream, connect, upgraded, state)
 }
 
 /// Run the shared L7 request/response legs over an already-open client writer and upstream stream.
@@ -128,18 +148,20 @@ pub(super) fn intercept_tls<C: Read + Write>(
 /// and `client_writer` the sink for diagnostics and the governed response. `revalidate` runs after
 /// the credential mutation — the TLS path re-checks the CONNECT binding there; plain HTTP has no
 /// authority to bind, so it passes a no-op. Every control (request/response legs, effect lifecycle,
-/// audit) fires identically for both.
+/// audit) fires identically for both. Returns what the relay needs when the exchange released a
+/// `101` for a WebSocket handshake.
 #[allow(clippy::too_many_arguments)]
 fn run_l7_legs<S, CW>(
     connect: &ConnectRequest,
     mut req: InterceptedRequest,
+    upgrade: UpgradeRequest,
     upstream: &mut BufReader<S>,
     client_writer: &mut CW,
     state: &SharedState,
     correlation: RequestId,
     intercepted: bool,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
-) -> Result<()>
+) -> Result<Option<Upgraded>>
 where
     S: Read + Write,
     CW: Write,
@@ -168,13 +190,56 @@ where
                     method: req.method.as_deref(),
                     path: &req.target.path,
                     reason: &reason,
+                    status: 403,
                     diagnostic: b"request path is not a valid address",
                 },
                 correlation,
             );
-            return Ok(());
+            return Ok(None);
         }
     };
+
+    // Refuse a WebSocket upgrade the relay cannot govern, before any request leg runs.
+    let (websocket_key, refusal) = match upgrade {
+        UpgradeRequest::None => (None, None),
+        UpgradeRequest::Malformed(reason) => (
+            None,
+            Some((reason, 400, &b"malformed WebSocket handshake"[..])),
+        ),
+        UpgradeRequest::WebSocket(_) if !intercepted => (
+            None,
+            Some((
+                "upgrade on a plaintext request",
+                403,
+                &b"WebSocket requires TLS"[..],
+            )),
+        ),
+        UpgradeRequest::WebSocket(_) if state.mcp_server_for(&connect.host).is_some() => (
+            None,
+            Some((
+                "upgrade to a remote MCP server",
+                403,
+                &b"WebSocket refused for an MCP server"[..],
+            )),
+        ),
+        UpgradeRequest::WebSocket(key) => (Some(key), None),
+    };
+    if let Some((reason, status, diagnostic)) = refusal {
+        refuse_request(
+            state,
+            connect,
+            client_writer,
+            RefusedRequest {
+                method: req.method.as_deref(),
+                path: &req.target.path,
+                reason: &format!("websocket: {reason}"),
+                status,
+                diagnostic,
+            },
+            correlation,
+        );
+        return Ok(None);
+    }
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     if !intercepted && state.controls.matches_any(&req.target.as_destination()) {
@@ -186,11 +251,12 @@ where
                 method: req.method.as_deref(),
                 path: &req.target.path,
                 reason: "credential would attach on a plaintext request; refused — a secret must ride TLS",
+                status: 403,
                 diagnostic: b"credential not permitted on a plaintext request",
             },
             correlation,
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let cx = CapabilityContext::new(
@@ -206,7 +272,7 @@ where
     // instead, so an attempt or a durable record never carries credential material.
     let workload_path = req.target.path.clone();
 
-    match request_leg::evaluate_and_apply(&state.controls, &mut req, &cx) {
+    let credentialed = match request_leg::evaluate_and_apply(&state.controls, &mut req, &cx) {
         RequestDecision::Block(reason) => {
             let reason = reason.to_string(); // format once, use for both audit sinks
             state.audit.push(NetworkAuditEvent::deny(
@@ -233,10 +299,10 @@ where
                 403,
                 b"blocked by egress control",
             );
-            return Ok(());
+            return Ok(None);
         }
-        RequestDecision::Forward => {}
-    }
+        RequestDecision::Forward { credentialed } => credentialed,
+    };
 
     // A capability may annotate this allow — an advisory credential injection records that a secret
     // was attached against an absent or unrecognised placeholder. Journalled on the allow decision
@@ -272,7 +338,7 @@ where
             error.http_status(),
             b"request authority rejected",
         );
-        return Ok(());
+        return Ok(None);
     }
     // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
     // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
@@ -306,7 +372,7 @@ where
                     correlation,
                 );
                 write_trusted_diagnostic(client_writer, &request_method, 403, b"MCP frame refused");
-                return Ok(());
+                return Ok(None);
             }
         },
         None => None,
@@ -327,6 +393,14 @@ where
         }
         _ => Cow::Borrowed(req.body.as_bytes()),
     };
+    // The `101` must answer the handshake as forwarded, after the request leg ran.
+    let expected = websocket_key
+        .as_deref()
+        .map(|key| websocket::Expected::new(key, &req.headers));
+    let hop = match expected {
+        Some(_) => Hop::WebSocket,
+        None => Hop::Close,
+    };
     let mut prepared_request = Zeroizing::new(Vec::new());
     http1::write_request(
         &mut *prepared_request,
@@ -334,6 +408,7 @@ where
         &fwd_target,
         &req.headers,
         &forwarded_body,
+        hop,
     )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
@@ -342,6 +417,7 @@ where
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
+        upgrade: expected.as_ref().map(|_| websocket::PROTOCOL),
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
             match &target.identity {
@@ -395,7 +471,7 @@ where
                     .mcp_server_for(&connect.host)
                     .map(|_| req.body.as_bytes()),
             );
-            return Ok(());
+            return Ok(None);
         }
     };
     emit_decision(
@@ -423,6 +499,7 @@ where
         &mut *upstream,
         &request_method,
         state.config.response_limits.max_body_bytes,
+        expected.as_ref(),
     ) {
         Ok(parsed_res) => parsed_res,
         Err(failure) => {
@@ -438,6 +515,38 @@ where
                     "recording upstream request outcome after a failed reply: {error}"
                 ))
             })?;
+            if expected.is_some() && failure.status == Some(101) {
+                let reason = match failure.error {
+                    ProxyError::Intercept(reason) => reason,
+                    other => other.to_string(),
+                };
+                let reason = format!("websocket: {reason}");
+                state.audit.push(NetworkAuditEvent::deny(
+                    &connect.host,
+                    connect.port,
+                    reason.clone(),
+                    correlation.clone(),
+                ));
+                emit_decision(
+                    state,
+                    DecisionSubject {
+                        host: &connect.host,
+                        port: connect.port,
+                        method: &request_method,
+                        path: &workload_path,
+                    },
+                    AuditDecision::Deny,
+                    &reason,
+                    correlation,
+                );
+                write_trusted_diagnostic(
+                    client_writer,
+                    &request_method,
+                    502,
+                    b"WebSocket upgrade response refused",
+                );
+                return Ok(None);
+            }
             return Err(failure.error);
         }
     };
@@ -477,7 +586,7 @@ where
                 403,
                 b"response blocked by egress control",
             );
-            return Ok(());
+            return Ok(None);
         }
         ResponseDecision::RedirectReentry(location) => Some(location),
         ResponseDecision::Return => None,
@@ -532,7 +641,7 @@ where
                 correlation.clone(),
             ));
             write_interceptor_error(client_writer, &request_method, &error, None);
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -559,6 +668,14 @@ where
         &prepared_response,
         response_permit,
         "governed response",
+    )?;
+    Ok(
+        (expected.is_some() && res.status == 101).then_some(Upgraded {
+            cx,
+            credentialed,
+            correlation,
+            path: workload_path,
+        }),
     )
 }
 
@@ -610,16 +727,23 @@ pub(super) fn forward_plain(
     };
     req.headers.set("Host", host_value);
 
-    run_l7_legs(
+    let upgraded = run_l7_legs(
         connect,
         req,
+        parsed.upgrade,
         &mut upstream_buf,
         client_writer,
         state,
         correlation,
         false, // plain HTTP was never encrypted — not TLS-intercepted
         |_method, _target, _headers| Ok(()),
-    )
+    )?;
+    match upgraded {
+        None => Ok(()),
+        Some(_) => Err(ProxyError::Intercept(
+            "a WebSocket on a plaintext request has no relay".to_string(),
+        )),
+    }
 }
 
 /// Wrap the already-open pinned upstream socket in the additive TLS trust bundle.
@@ -649,6 +773,11 @@ impl<S> Bounded<S> {
             inner,
             deadline: Instant::now() + within,
         }
+    }
+
+    /// The stream without its deadline, for the relay after a `101`.
+    fn into_inner(self) -> S {
+        self.inner
     }
 
     fn check(&self, direction: &'static str) -> io::Result<()> {
@@ -808,15 +937,15 @@ fn deliver_or_record_failure<W: Write>(
 }
 
 /// What an egress decision is *about* — the non-secret identity of one exchange.
-struct DecisionSubject<'a> {
-    host: &'a str,
-    port: u16,
-    method: &'a str,
-    path: &'a str,
+pub(super) struct DecisionSubject<'a> {
+    pub(super) host: &'a str,
+    pub(super) port: u16,
+    pub(super) method: &'a str,
+    pub(super) path: &'a str,
 }
 
 /// Emit one final egress decision.
-fn emit_decision(
+pub(super) fn emit_decision(
     state: &SharedState,
     subject: DecisionSubject<'_>,
     decision: AuditDecision,
@@ -849,10 +978,11 @@ struct RefusedRequest<'a> {
     method: Option<&'a str>,
     path: &'a str,
     reason: &'a str,
+    status: u16,
     diagnostic: &'a [u8],
 }
 
-/// Record a refused request and answer the client 403.
+/// Record a refused request and answer the client with its status.
 fn refuse_request(
     state: &SharedState,
     connect: &ConnectRequest,
@@ -881,7 +1011,7 @@ fn refuse_request(
     write_trusted_diagnostic(
         client_writer,
         refused.method.unwrap_or("GET"),
-        403,
+        refused.status,
         refused.diagnostic,
     );
 }

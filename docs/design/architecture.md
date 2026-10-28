@@ -89,7 +89,10 @@ residual risk ([a declared network
 exception](decisions.md#native-egress-is-an-operator-declared-leaf-escape)). The gateway terminates
 each connection, which is why no tunnel is opaque to the boundary ([the gateway terminates every
 connection](decisions.md#no-connection-is-opaque-to-the-boundary)). It raises `net:connect` for each
-destination and `http:request` for each request, and it holds no allow list of its own.
+destination, `http:request` for each request, and `http:upgrade` for each WebSocket handshake, and
+it holds no allow list of its own. After a WebSocket opens, the gateway reads every frame, and no
+rule decides a message ([policy decides the WebSocket handshake and no
+message](decisions.md#policy-decides-the-websocket-handshake-and-no-message)).
 
 The gateway is also where a credential is added, because the workload never holds one. The workload
 gets a placeholder, and the gateway swaps in the real secret on a permitted request to the destination
@@ -176,7 +179,7 @@ Python.
 | Broker | The trusted process, its own thread | The whole run | Nothing. It routes each request. |
 | Strands Shell | The trusted process | One command | Asks policy: `shell:exec` or `shell:spawn`, then `fs:*` per effect |
 | Monty | The trusted process | One script | Asks policy: `fs:*` per file operation |
-| Egress gateway | The trusted process | The whole run | Asks policy: `net:connect`, `http:request`, and `mcp:call` for a remote server |
+| Egress gateway | The trusted process | The whole run | Asks policy: `net:connect`, `http:request`, `http:upgrade` for a WebSocket, and `mcp:call` for a remote server |
 | MCP broker | The trusted process, within the broker | The whole run | Asks policy: `shell:spawn` to start a local MCP server, then `mcp:call` per request |
 | Collector | The trusted process | Opened before the box, drained after it | Nothing |
 | Trampoline | Outside the sandbox | Until it becomes the contained program | Nothing |

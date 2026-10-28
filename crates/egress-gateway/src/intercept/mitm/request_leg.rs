@@ -7,7 +7,10 @@ use crate::capability::{CapabilityContext, CapabilitySet};
 /// block with the deny reason.
 pub(super) enum RequestDecision {
     /// Forward the request; its headers/target have had the allowed mutations applied.
-    Forward,
+    Forward {
+        /// Whether a credential mutation was applied.
+        credentialed: bool,
+    },
     /// Block the request with this reason.
     Block(crate::boundary::DenyReason),
 }
@@ -26,8 +29,9 @@ pub(super) fn evaluate_and_apply(
     // Allow for a TLS-terminated route.
     match controls.evaluate_request(req, cx) {
         Verdict::Allow { mutations } => {
+            let credentialed = !mutations.is_empty();
             apply_all(mutations, req);
-            RequestDecision::Forward
+            RequestDecision::Forward { credentialed }
         }
         Verdict::Deny { reason } => RequestDecision::Block(reason),
     }
@@ -98,7 +102,10 @@ mod tests {
             CapabilityContext::new(RequestId::new("t"), 0, Target::new("api.example.com", 443));
         let mut req = http_req();
         let decision = evaluate_and_apply(&set, &mut req, &cx);
-        assert!(matches!(decision, RequestDecision::Forward));
+        assert!(matches!(
+            decision,
+            RequestDecision::Forward { credentialed: true }
+        ));
         // The phantom was stripped and the real secret attached (interceptor applied the mutations).
         assert_eq!(req.headers.get("authorization"), Some("Bearer real"));
     }

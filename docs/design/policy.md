@@ -100,7 +100,7 @@ the rule](decisions.md#one-principal-one-resource-and-the-action-scopes-the-rule
 |---|---|
 | Strands Shell | `shell:exec` or `shell:spawn` per command line, and `fs:read`, `fs:write`, `fs:delete`, or `fs:move` per file operation |
 | Monty | `fs:read`, `fs:write`, `fs:delete`, or `fs:move` per `os` call |
-| Egress gateway | `net:connect`, `http:request`, and `mcp:call` with its per-tool action for a remote MCP server |
+| Egress gateway | `net:connect`, `http:request`, `http:upgrade` for a WebSocket handshake, and `mcp:call` with its per-tool action for a remote MCP server |
 | MCP broker | `mcp:call` with its per-tool action for a local MCP server |
 
 The Shell asks once per command line, after it has resolved the program, and then once per file
@@ -130,7 +130,11 @@ leave the other two out. A shell response carries the command's exit status as `
 a command that a signal killed records 128 plus the signal number, so a rule can require a passing
 test before it permits a commit. A connect that definitely failed is a `::error`, and one that may
 have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
-still counts the uncertain ones.
+still counts the uncertain ones. A WebSocket handshake records `http:upgrade` events beside its
+`http:request` events, and the messages after it record nothing, so a rule can count WebSockets
+and can't count their messages, and a rule that starts to match after a handshake doesn't close
+that WebSocket ([policy decides the WebSocket handshake and no
+message](decisions.md#policy-decides-the-websocket-handshake-and-no-message)).
 
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead ([temporal rules are enforced

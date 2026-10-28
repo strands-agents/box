@@ -4,10 +4,10 @@
 //! |---|---|---|---|
 //! | boundary | egress-proxy | Strands Shell | Monty |
 //! | feature | `egress-adapter` | `shell-adapter` | `script-adapter` |
-//! | actions | `net:connect`, `http:request` | `shell:exec`, `fs:*` | `fs:*` |
+//! | actions | `net:connect`, `http:request`, `http:upgrade`, `mcp:call` | `shell:exec`, `fs:*` | `fs:*` |
 //! | refusal | `io::Error` | `io::Error` | a Python exception |
 //!
-//! The egress row names two actions because the release of a reply raises no decision. The
+//! The egress row names no response action because the release of a reply raises no decision. The
 //! reply reaches history once, as `output.status` on the request's `http:request::response`.
 //!
 //! [`Request`]: crate::Request

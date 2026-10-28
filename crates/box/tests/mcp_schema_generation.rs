@@ -1305,9 +1305,15 @@ fn no_declared_servers_write_both_canonical_artifacts_and_keep_legacy_files() {
     );
     assert!(!config.join("actions.cedarschema").exists());
     assert!(!config.join("events.dwschema").exists());
-    assert_eq!(
-        std::fs::read_to_string(directory.join("actions.cedarschema")).expect("read actions"),
-        CANONICAL_SCHEMA
+    let actions =
+        std::fs::read_to_string(directory.join("actions.cedarschema")).expect("read actions");
+    assert_eq!(actions, CANONICAL_SCHEMA);
+    let (schema, _) = Schema::from_cedarschema_str(&actions).expect("the action schema parses");
+    assert!(
+        schema
+            .actions()
+            .any(|action| action.to_string() == r#"Box::Action::"http:upgrade""#),
+        "the generated schema declares http:upgrade"
     );
     assert_eq!(
         std::fs::read(directory.join("events.dwschema")).expect("read events"),

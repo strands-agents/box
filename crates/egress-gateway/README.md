@@ -55,12 +55,15 @@ kinds, and the proxy presents each one immediately before its effect:
 | Attempt | Fields | Reported when |
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `intercepted`, `mcp`, `upgrade` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
-edit. `body_bytes` is a length.
+edit. `body_bytes` is a length. `upgrade` is `Some("websocket")` for a WebSocket
+handshake and `None` for every other request; an interceptor that admits the
+request on its other fields alone admits the WebSocket too, so the policy adapter
+decides `http:upgrade` on it as a second gate.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
@@ -220,7 +223,37 @@ write on an upstream socket and one exchange's upstream reads and writes as a wh
 upstream that never drains or sips the request, or never replies or drips its reply, ends the
 exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
 exchange whose request and reply together take longer than the deadline, with no reply to the
-workload; `box.toml` exposes no key for it.
+workload; `box.toml` exposes no key for it. After a WebSocket upgrade, `upstream_read_deadline` is
+the idle limit instead, with no total limit, and `response_limits.max_body_bytes` also caps one
+reassembled WebSocket message.
+
+### WebSocket
+
+The adapter relays a WebSocket (RFC 6455) on the TLS path only. It recognizes a
+handshake (`GET`, HTTP/1.1, `Upgrade: websocket`, `Connection: upgrade`,
+`Sec-WebSocket-Version: 13`, a 16-byte key, no body), removes
+`Sec-WebSocket-Extensions` and `Content-Length` before any capability reads the
+head, and presents the `HttpRequest` attempt with `upgrade: Some("websocket")`.
+The request leg runs unchanged, so a capability attaches or signs a credential on
+the handshake. `Upgrade: websocket` and `Connection: Upgrade` are written back
+after the request leg.
+
+| Case | The workload receives |
+|---|---|
+| A request that names `websocket` and fails a handshake check | `400`, body `malformed WebSocket handshake` |
+| A handshake on the plain-HTTP path | `403`, body `WebSocket requires TLS` |
+| A handshake to a configured remote MCP host | `403`, body `WebSocket refused for an MCP server` |
+| A `101` with a wrong `Sec-WebSocket-Accept`, an extension, or a subprotocol the client did not offer | `502`, body `WebSocket upgrade response refused` |
+| An accepted `101` | `HTTP/1.1 101 Switching Protocols`, after the response leg and a `ResponseRelease` permit |
+
+Each refusal is a static diagnostic with the `x-strands-box-egress` header and a
+`websocket: <reason>` deny audit event. After an accepted `101`, the relay runs
+on the connection's thread and holds its `max_connections` slot until the
+WebSocket ends. It decodes every frame, fails closed on each RFC 6455 violation, and
+sends each reassembled message on in fragments the size of the largest one its
+sender used (at least 1 KiB), masked with a fresh key toward the upstream. When the request leg
+applied a credential, each upstream message passes through the response leg, so
+the attached secret is redacted. No `EffectAttempt` is presented for a message.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.

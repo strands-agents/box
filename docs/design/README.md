@@ -25,7 +25,7 @@ enforcement, [`policy.md`](./policy.md) for decisions, and
 | [`mcp-discovery.md`](./mcp-discovery.md) | How a box learns each MCP server's tools while it runs, stages their schemas, and finishes discovery. |
 | [`decisions.md`](./decisions.md) | Why the design is the way it is. A historical record, so the code is the authority where the two disagree. |
 | [`policy.md`](./policy.md) | Where policy sits beside operating system enforcement, how one engine per box decides each mediated request, and what the durable history does and doesn't guarantee. |
-| [`egress.md`](./egress.md) | How traffic reaches the egress gateway, how it decides each connection and request, and how it adds credentials. |
+| [`egress.md`](./egress.md) | How traffic reaches the egress gateway, how it decides each connection and request, how a WebSocket passes through it, and how it adds credentials. |
 | [`credentials.md`](./credentials.md) | How Box keeps each real secret in the box's trusted process, how the gateway swaps or signs it onto a permitted request, and what a tool or local MCP server gets. |
 | [`monty.md`](./monty.md) | How Box runs a Python script in Monty, decides each file operation it makes, and sends its `fetch()` through the egress gateway. |
 | [`macos-enforcement.md`](./macos-enforcement.md) | How Seatbelt enforces each sandbox on macOS, how the profile for a tool or local MCP server differs from the agent's, and where the restrictions end. |

@@ -259,6 +259,50 @@ fn http_refusals_reach_the_workload_without_forwarding_the_request() {
 }
 
 #[test]
+fn upgrade_refusals_reach_the_workload_without_forwarding_the_handshake() {
+    for (source, expected) in cases(r#"Box::Action::"http:upgrade""#) {
+        let (handle, upstream, emitter) =
+            tls_gateway(&format!("{CONNECT}\n{HTTP}\n{source}"), false);
+        let port = upstream.port();
+        let expected = expected.replace(RESOURCE, &format!("{HOST}:{port}/socket"));
+        let mut client = WorkloadClient::connect(handle.port().unwrap(), HOST, port);
+        client.send_raw(
+            format!(
+                "GET /socket HTTP/1.1\r\nHost: {HOST}:{port}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        let response = client.read_response();
+        assert_eq!(
+            response_body(&response),
+            format!("http:upgrade gate: {expected}")
+        );
+        assert_eq!(
+            upstream.request_count(),
+            0,
+            "the upstream sees no handshake"
+        );
+        let events = handle.drain_audit_events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.decision == AuditDecision::Deny)
+                .count(),
+            1
+        );
+        let decisions = emitter.records();
+        let refusal = decisions.last().expect("the refusal is recorded");
+        assert_eq!(refusal.decision, AuditDecision::Deny);
+        assert_eq!(
+            (refusal.method.as_str(), refusal.path.as_str()),
+            ("GET", "/socket")
+        );
+    }
+}
+
+#[test]
 fn remote_mcp_refusals_keep_the_request_id_and_explain_the_deciding_gate() {
     for (action, permits, prefix, resource) in [
         (

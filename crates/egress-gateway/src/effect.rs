@@ -126,6 +126,10 @@ pub enum EffectAttempt<'a> {
         /// The MCP frame this request carries, when its destination is a configured remote MCP
         /// server; `None` otherwise. Present drives the `mcp:call` gate alongside `http:request`.
         mcp: Option<McpFrame<'a>>,
+        /// The protocol this request asks to upgrade to, in lowercase: `Some("websocket")` for a
+        /// WebSocket handshake, `None` for every other request. Present drives the `http:upgrade`
+        /// gate after `http:request`, so a permit for the request alone never opens the upgrade.
+        upgrade: Option<&'a str>,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {

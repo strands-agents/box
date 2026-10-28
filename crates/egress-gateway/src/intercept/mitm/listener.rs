@@ -159,9 +159,10 @@ fn handle_tls_connect(
     // connection whose plaintext the boundary cannot see could not raise `http:request`, so it would
     // be exempt from the request authorization and would carry no credential decision either.
     //
-    // **Two decisions, not three, and the actions are `net:connect` and `http:request`.** This named
-    // `net:request` and `net:response` and called them two of three authorizations. Neither action
-    // exists.
+    // **The actions are `net:connect`, then `http:request` for the request, and a second gate after
+    // `http:request` for an MCP frame (`mcp:call`) or a WebSocket handshake (`http:upgrade`).** This
+    // named `net:request` and `net:response` and called them two of three authorizations. Neither
+    // action exists.
     //
     // The response leg takes **no decision**. `policy`'s egress adapter matches `ResponseRelease`
     // and returns `Ok(())`, so a rule cannot refuse a release or budget on a response size. The

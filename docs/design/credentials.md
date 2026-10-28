@@ -138,6 +138,12 @@ flowchart TD
 A refusal is an HTTP 403 with the header `x-strands-box-egress: refused`, and a body that says why
 ([the error table](../user/egress.md#errors-and-exit-codes)).
 
+**A WebSocket gets these steps once, on its handshake.** The route acts on the `GET` that opens the
+WebSocket, and policy decides that request. After the server's `101`, the route doesn't act on a
+client message, so a placeholder inside one reaches the server as the placeholder. On an `env://`
+route, each copy of the secret in a server message reaches the process as `[REDACTED]` ([how a
+WebSocket passes through the gateway](./egress.md#how-a-websocket-passes-through-the-gateway)).
+
 ## `env://`: the placeholder swap
 
 The process sends the placeholder where it would send the real secret. The gateway finds it, clears

@@ -152,7 +152,8 @@ a rule could not read off the action.
 
 Every action accepts `Box::Agent`, so the principal narrows nothing and a rule that leaves it
 unconstrained is the same rule as one naming it. The **action** is what scopes a rule. The egress
-gateway raises `Box::Action::"net:connect"` and `Box::Action::"http:request"`. The shell raises
+gateway raises `Box::Action::"net:connect"` and `Box::Action::"http:request"`, and
+`Box::Action::"http:upgrade"` for a WebSocket handshake. The shell raises
 `Box::Action::"shell:exec"` and `Box::Action::"shell:spawn"`. An MCP stream raises
 `Box::Action::"mcp:call"`, and a generated tool refinement raises
 `<normalized-server>::Action::"<tool>"`. Either interpreter raises `fs:*`.
@@ -191,6 +192,7 @@ every `fs:*` action carries `operation`, while network and shell inputs do not.
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
 | `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool` |
+| `HttpUpgrade` | `Box::Action::"http:upgrade"` | `host: &str`, `port: u16`, `path: &str`, `protocol: &str` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -388,6 +390,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
 | `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `HttpUpgrade` | `host`, `port`, `path`, `protocol` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
@@ -397,6 +400,10 @@ One HTTP exchange records exactly one `http:request::response`, at reply time. I
 that got no reply records the same event with no `output`, so a rule on `output.status`
 does not match it. A rule reads `status` in a temporal predicate over `::response`; a decision
 carries no `output`.
+
+An `HttpUpgrade` outcome records one `http:upgrade::response`, with no `output`. The reply status
+of the handshake stays on its `http:request::response`, so an accepted WebSocket reads there as
+`output.status: 101`. There is no `http:upgrade::error` producer.
 
 A response names the same action whose request was authorized, so a rule joins a
 `shell:exec::request` to its own response and to no other.
@@ -495,7 +502,13 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 `decide` and `record` it makes.
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
-`Request::Http`. A response release raises **no request and no decision**, and its permit
+`Request::Http`. An HTTP request attempt whose `upgrade` is set is a WebSocket handshake: when
+`Request::Http` allows it, the interceptor decides `Request::HttpUpgrade` on the same host, port,
+and path, with `protocol` set to the upgrade token. A denial at either reads
+`http:request gate: …` or `http:upgrade gate: …`. An attempt that carries both an MCP frame and an
+upgrade is refused before either decision. The permit records `http:upgrade::response` beside
+`http:request::response` for every delivery except a definite `Failed`, the same terms as the
+`mcp:call` response leg. A response release raises **no request and no decision**, and its permit
 records nothing. The gateway consumes the request permit at reply time with
 `EffectOutcome::Replied`, so the one `http:request::response` an exchange records carries
 the reply as `output.status`, which only a `when temporal { … }` rule reads.

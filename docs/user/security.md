@@ -33,16 +33,18 @@ table, because direct reach raises no decision.
 
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
-in Monty (the box's Python), each connection and HTTP request through the egress gateway, and each
-MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy) lists them, and
-[policy limitations](#policy-limitations) says what a broad permit reaches. An
+in Monty (the box's Python), each connection, HTTP request, and WebSocket handshake through the
+egress gateway, and each MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy)
+lists them, and [policy limitations](#policy-limitations) says what a broad permit reaches. An
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
 
-Two things pass with no decision from either tier:
+Three things pass with no decision from either tier:
 
 - The reply to an HTTP request. Its status is recorded as `output.status`, so a temporal rule can
   read it.
+- Each WebSocket message after a handshake that `http:upgrade` permitted. The gateway reads every
+  frame, and [WebSocket](egress.md#websocket) lists what it checks and changes.
 - A few MCP protocol methods, and every notification. [MCP](policy/actions.md#mcp) lists them by
   transport.
 
@@ -125,6 +127,14 @@ records why, the item links it.
   [how Box decides a file operation](../design/monty.md#how-box-decides-a-file-operation).
 - **The decision log records the rule and the path, and not the operation.** A `cat` and an `ls`
   of one file produce the same entry.
+- **A rule that reads history doesn't close an open WebSocket.** Policy decides a WebSocket once,
+  at its handshake, and no message after it reaches history. A rule that starts to refuse after
+  the handshake refuses each new request and WebSocket, and the open WebSocket keeps carrying
+  messages until it closes or goes idle. A byte budget or a rate limit over `http:request` counts
+  none of its messages. When a rule must stop egress after an event, such as a secret read, permit
+  `http:upgrade` for no host the rule guards. See
+  [policy decides the WebSocket handshake and no
+  message](../design/decisions.md#policy-decides-the-websocket-handshake-and-no-message).
 - **A long temporal window slows every decision on that action.** Each decision recounts the events
   in the window, so a `24h` window on a busy action costs more than a `1m` one. Pick the shortest
   window the rule needs. See [residual risk](../design/policy.md#residual-risk).

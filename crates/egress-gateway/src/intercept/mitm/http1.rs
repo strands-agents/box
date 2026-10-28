@@ -4,6 +4,7 @@ use std::io::{self, BufRead, Write};
 
 use zeroize::Zeroizing;
 
+use super::websocket::{self, UpgradeRequest};
 use crate::boundary::HeaderMap;
 use crate::error::{ProxyError, Result};
 
@@ -18,6 +19,8 @@ pub(super) struct ParsedRequest {
     pub(super) headers: HeaderMap,
     /// The request body (materialized, bounded by the read limit).
     pub(super) body: Vec<u8>,
+    /// The WebSocket upgrade the request asks for, if any.
+    pub(super) upgrade: UpgradeRequest,
 }
 
 /// A parsed HTTP/1.1 response read off the wire.
@@ -181,7 +184,7 @@ fn is_token_byte(byte: u8) -> bool {
 }
 
 /// Trim HTTP optional whitespace (SP / HTAB), without accepting other Unicode whitespace.
-fn trim_ows(value: &str) -> &str {
+pub(super) fn trim_ows(value: &str) -> &str {
     value.trim_matches(|character| matches!(character, ' ' | '\t'))
 }
 
@@ -581,8 +584,13 @@ pub(super) fn read_request<R: BufRead>(stream: &mut R, max_body: usize) -> Resul
         Some(BodyFraming::Chunked) => read_chunked_body(stream, max_body)?,
         None => Vec::new(),
     };
+    let upgrade = websocket::classify(&method, req.version, &headers, &body);
     strip_hop_by_hop_headers(&mut headers)?;
-    if framing.is_some() {
+    if let UpgradeRequest::WebSocket(_) = upgrade {
+        // Before any control or signer reads the head: no body, and no extension offer.
+        headers.remove("content-length");
+        headers.remove("sec-websocket-extensions");
+    } else if framing.is_some() {
         headers.set("Content-Length", body.len().to_string());
     }
     Ok(ParsedRequest {
@@ -590,6 +598,7 @@ pub(super) fn read_request<R: BufRead>(stream: &mut R, max_body: usize) -> Resul
         target,
         headers,
         body,
+        upgrade,
     })
 }
 
@@ -621,6 +630,7 @@ fn read_one_response<R: BufRead>(
     stream: &mut R,
     request_method: &str,
     max_body: usize,
+    websocket: Option<&websocket::Expected>,
 ) -> std::result::Result<ParsedResponse, ReplyFailure> {
     let head = read_head(stream).map_err(ReplyFailure::before_head)?;
     let mut header_storage = [httparse::EMPTY_HEADER; 64];
@@ -635,6 +645,13 @@ fn read_one_response<R: BufRead>(
     }
     let code = res.code.unwrap_or(0);
     let headers = header_map_from(res.headers);
+    if code == 101
+        && let Some(expected) = websocket
+    {
+        websocket::check_switching_protocols(&headers, expected).map_err(|reason| {
+            ReplyFailure::after_head(code)(ProxyError::Intercept(reason.to_string()))
+        })?;
+    }
     read_response_body(stream, request_method, res.version, code, headers, max_body)
         .map_err(ReplyFailure::after_head(code))
 }
@@ -684,18 +701,24 @@ fn read_response_body<R: BufRead>(
 }
 
 /// Read the final HTTP/1.1 response for `request_method`, consuming bounded informational responses.
+///
+/// A `101` is final only when it answers the WebSocket handshake `websocket` describes.
 pub(super) fn read_response<R: BufRead>(
     stream: &mut R,
     request_method: &str,
     max_body: usize,
+    websocket: Option<&websocket::Expected>,
 ) -> std::result::Result<ParsedResponse, ReplyFailure> {
     let mut informational_responses = 0;
     loop {
-        let response = read_one_response(stream, request_method, max_body)?;
+        let response = read_one_response(stream, request_method, max_body, websocket)?;
         let refused = ReplyFailure::after_head(response.status);
         if response.status == 101 {
+            if websocket.is_some() {
+                return Ok(response);
+            }
             return Err(refused(ProxyError::Intercept(
-                "HTTP protocol upgrades are not supported".to_string(),
+                "a 101 to a request that is not a WebSocket handshake is refused".to_string(),
             )));
         }
         if request_method.eq_ignore_ascii_case("CONNECT") && (200..300).contains(&response.status) {
@@ -745,12 +768,31 @@ fn write_content_length_and_terminator(out: &mut String, len: usize) {
     let _ = write!(out, "Content-Length: {len}\r\n\r\n");
 }
 
+/// The hop-by-hop fields a message ends its head with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Hop {
+    /// `Connection: close`: one exchange per connection.
+    Close,
+    /// `Upgrade: websocket` and `Connection: Upgrade`, with no `Content-Length`.
+    WebSocket,
+}
+
+impl Hop {
+    fn fields(self) -> &'static str {
+        match self {
+            Self::Close => "Connection: close\r\n",
+            Self::WebSocket => "Upgrade: websocket\r\nConnection: Upgrade\r\n",
+        }
+    }
+}
+
 /// A head-buffer capacity that the write cannot exceed, so `out` allocates **once**.
 fn estimate_head_capacity(headers: &HeaderMap, caller_overhead: usize) -> usize {
     let headers_bytes: usize = headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum();
-    // `Connection: close\r\n` is 19; `Content-Length: \r\n\r\n` is 20 framing bytes plus at most 20
-    // digits for a `u64`-sized length. 8 bytes of slack absorbs a future single-header addition.
-    headers_bytes + caller_overhead + 19 + 20 + 20 + 8
+    // The hop fields are at most 41 bytes; `Content-Length: \r\n\r\n` is 20 framing bytes plus at
+    // most 20 digits for a `u64`-sized length. 8 bytes of slack absorbs a future single-header
+    // addition.
+    headers_bytes + caller_overhead + Hop::WebSocket.fields().len() + 20 + 20 + 8
 }
 
 /// The request line's contribution to [`estimate_head_capacity`]:
@@ -860,13 +902,20 @@ pub(super) fn write_prepared_and_flush<W: Write>(
 
 /// Serialize a request in origin form (`METHOD target HTTP/1.1\r\nheaders\r\n\r\nbody`) for
 /// forwarding to the upstream, refreshing `Content-Length` to the (possibly mutated) body length.
+/// A WebSocket handshake carries no `Content-Length`.
 pub(super) fn write_request<W: Write>(
     stream: &mut W,
     method: &str,
     target: &str,
     headers: &HeaderMap,
     body: &[u8],
+    hop: Hop,
 ) -> Result<()> {
+    if hop == Hop::WebSocket && !body.is_empty() {
+        return Err(ProxyError::Intercept(
+            "a WebSocket handshake carries no body".to_string(),
+        ));
+    }
     let nominated = connection_nominated_headers(headers)?;
     // The head buffer is where the attached credential is serialized, so it is wiped on drop. The
     // request leg has already run by the time this is called: one of the header values below *is* the
@@ -885,13 +934,17 @@ pub(super) fn write_request<W: Write>(
         }
         push_header_line(&mut out, name, value);
     }
-    out.push_str("Connection: close\r\n");
-    write_content_length_and_terminator(&mut out, body.len());
+    out.push_str(hop.fields());
+    match hop {
+        Hop::Close => write_content_length_and_terminator(&mut out, body.len()),
+        Hop::WebSocket => out.push_str("\r\n"),
+    }
     write_message(stream, out, body, "request")
 }
 
 /// Serialize a response (`HTTP/1.1 status\r\nheaders\r\n\r\nbody`) for return to the workload,
-/// refreshing `Content-Length` to the (possibly scrubbed) body length.
+/// refreshing `Content-Length` to the (possibly scrubbed) body length. A `101` is the answer to an
+/// accepted WebSocket handshake.
 pub(super) fn write_response<W: Write>(
     stream: &mut W,
     request_method: &str,
@@ -924,7 +977,11 @@ pub(super) fn write_response<W: Write>(
         }
         push_header_line(&mut out, name, value);
     }
-    out.push_str("Connection: close\r\n");
+    out.push_str(if status == 101 {
+        Hop::WebSocket.fields()
+    } else {
+        Hop::Close.fields()
+    });
     match body_mode {
         ResponseBodyMode::Payload => {
             write_content_length_and_terminator(&mut out, body.len());
@@ -948,6 +1005,7 @@ pub(super) fn write_response<W: Write>(
 /// A minimal reason phrase for a status code (only the ones the proxy itself emits need be exact).
 fn reason(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         403 => "Forbidden",
         407 => "Proxy Authentication Required",
@@ -969,11 +1027,11 @@ mod tests {
     fn a_reply_that_fails_after_its_head_keeps_its_status() {
         let mut cursor =
             Cursor::new(b"HTTP/1.1 500 Internal\r\nContent-Length: 100\r\n\r\nshort".to_vec());
-        let failure = read_response(&mut cursor, "GET", 1024).unwrap_err();
+        let failure = read_response(&mut cursor, "GET", 1024, None).unwrap_err();
         assert_eq!(failure.status, Some(500));
 
         let mut cursor = Cursor::new(b"HTTP/1.1 5".to_vec());
-        let failure = read_response(&mut cursor, "GET", 1024).unwrap_err();
+        let failure = read_response(&mut cursor, "GET", 1024, None).unwrap_err();
         assert_eq!(failure.status, None);
     }
 
@@ -1074,7 +1132,15 @@ mod tests {
         assert_eq!(req.body, b"hello");
 
         let mut out = Vec::new();
-        write_request(&mut out, &req.method, &req.target, &req.headers, &req.body).unwrap();
+        write_request(
+            &mut out,
+            &req.method,
+            &req.target,
+            &req.headers,
+            &req.body,
+            Hop::Close,
+        )
+        .unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("POST /v1/x HTTP/1.1\r\n"));
         assert!(s.contains("Content-Length: 5\r\n"));
@@ -1085,7 +1151,7 @@ mod tests {
     fn reads_a_response() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let res = read_response(&mut cursor, "GET", 1024)
+        let res = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap();
         assert_eq!(res.status, 200);
@@ -1096,7 +1162,7 @@ mod tests {
     fn body_over_limit_is_response_limit_error() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let err = read_response(&mut cursor, "GET", 10)
+        let err = read_response(&mut cursor, "GET", 10, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(err, ProxyError::ResponseLimit(_)));
@@ -1121,7 +1187,7 @@ mod tests {
             "\r\n"
         );
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let response = read_response(&mut cursor, "GET", 1024)
+        let response = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap();
         assert_eq!(response.body, b"okthere");
@@ -1179,6 +1245,7 @@ mod tests {
             &request.target,
             &request.headers,
             &request.body,
+            Hop::Close,
         )
         .unwrap();
         let wire = String::from_utf8(out).unwrap();
@@ -1198,7 +1265,7 @@ mod tests {
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2;name=\"open\r\nok\r\n0\r\n\r\n",
         ] {
             let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-            let error = read_response(&mut cursor, "GET", 1024)
+            let error = read_response(&mut cursor, "GET", 1024, None)
                 .map_err(|failure| failure.error)
                 .unwrap_err();
             assert!(
@@ -1222,7 +1289,7 @@ mod tests {
             "\r\n"
         );
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let error = read_response(&mut cursor, "GET", 7)
+        let error = read_response(&mut cursor, "GET", 7, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(error, ProxyError::ResponseLimit(_)));
@@ -1235,7 +1302,7 @@ mod tests {
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;{extension}\r\na\r\n0\r\n\r\n"
         );
         let mut cursor = Cursor::new(raw.into_bytes());
-        let error = read_response(&mut cursor, "GET", 1024)
+        let error = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(error, ProxyError::Intercept(_)));
@@ -1250,7 +1317,7 @@ mod tests {
             chunk.repeat(17)
         );
         let mut cursor = Cursor::new(raw.into_bytes());
-        let error = read_response(&mut cursor, "GET", 1024)
+        let error = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(
@@ -1280,7 +1347,7 @@ mod tests {
             let error = if raw.starts_with("POST") {
                 read_request(&mut cursor, 1024).unwrap_err()
             } else {
-                read_response(&mut cursor, "GET", 1024)
+                read_response(&mut cursor, "GET", 1024, None)
                     .map_err(|failure| failure.error)
                     .unwrap_err()
             };
@@ -1299,7 +1366,7 @@ mod tests {
         ] {
             let raw = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: {value}\r\n\r\n");
             let mut cursor = Cursor::new(raw.into_bytes());
-            let error = read_response(&mut cursor, "GET", 1024)
+            let error = read_response(&mut cursor, "GET", 1024, None)
                 .map_err(|failure| failure.error)
                 .unwrap_err();
             assert!(matches!(error, ProxyError::Intercept(_)), "{value}");
@@ -1313,7 +1380,7 @@ mod tests {
         );
         let mut cursor = Cursor::new(raw.as_bytes());
         assert!(matches!(
-            read_response(&mut cursor, "GET", 1024).map_err(|failure| failure.error),
+            read_response(&mut cursor, "GET", 1024, None).map_err(|failure| failure.error),
             Err(ProxyError::Intercept(_))
         ));
     }
@@ -1332,7 +1399,7 @@ mod tests {
             "\r\n"
         );
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let error = read_response(&mut cursor, "GET", 1024)
+        let error = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(error, ProxyError::Intercept(_)));
@@ -1348,7 +1415,7 @@ mod tests {
         ] {
             let raw = format!("HTTP/1.1 200 OK\r\n{headers}\r\n");
             let mut cursor = Cursor::new(raw.into_bytes());
-            let error = read_response(&mut cursor, "GET", 1024)
+            let error = read_response(&mut cursor, "GET", 1024, None)
                 .map_err(|failure| failure.error)
                 .unwrap_err();
             assert!(matches!(error, ProxyError::Intercept(_)), "{headers:?}");
@@ -1365,7 +1432,7 @@ mod tests {
             let mut cursor = Cursor::new(raw.into_bytes());
             assert!(
                 matches!(
-                    read_response(&mut cursor, "GET", 1024).map_err(|failure| failure.error),
+                    read_response(&mut cursor, "GET", 1024, None).map_err(|failure| failure.error),
                     Err(ProxyError::Intercept(_))
                 ),
                 "{header:?}"
@@ -1385,7 +1452,7 @@ mod tests {
         let response = "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n";
         let mut cursor = Cursor::new(response.as_bytes());
         assert!(matches!(
-            read_response(&mut cursor, "GET", 1024).map_err(|failure| failure.error),
+            read_response(&mut cursor, "GET", 1024, None).map_err(|failure| failure.error),
             Err(ProxyError::Intercept(_))
         ));
     }
@@ -1402,7 +1469,7 @@ mod tests {
         let response = "HTTP/1.1 200 Connection Established\r\n\r\n";
         let mut cursor = Cursor::new(response.as_bytes());
         assert!(matches!(
-            read_response(&mut cursor, "CONNECT", 1024).map_err(|failure| failure.error),
+            read_response(&mut cursor, "CONNECT", 1024, None).map_err(|failure| failure.error),
             Err(ProxyError::Intercept(_))
         ));
 
@@ -1426,7 +1493,7 @@ mod tests {
     fn response_without_content_length_reads_to_eof() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nstreamed body with no length";
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let res = read_response(&mut cursor, "GET", 1024)
+        let res = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap();
         assert_eq!(res.status, 200);
@@ -1440,7 +1507,7 @@ mod tests {
         let big = "z".repeat(1000);
         let raw = format!("HTTP/1.1 200 OK\r\n\r\n{big}");
         let mut cursor = Cursor::new(raw.into_bytes());
-        let err = read_response(&mut cursor, "GET", 100)
+        let err = read_response(&mut cursor, "GET", 100, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(err, ProxyError::ResponseLimit(_)), "got {err:?}");
@@ -1457,7 +1524,7 @@ mod tests {
         ] {
             let raw = format!("{status_line}LEFTOVER");
             let mut cursor = Cursor::new(raw.into_bytes());
-            let res = read_response(&mut cursor, "GET", 1024)
+            let res = read_response(&mut cursor, "GET", 1024, None)
                 .map_err(|failure| failure.error)
                 .unwrap();
             assert_eq!(res.status, code);
@@ -1476,7 +1543,7 @@ mod tests {
             "ok"
         );
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let response = read_response(&mut cursor, "POST", 1024)
+        let response = read_response(&mut cursor, "POST", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap();
         assert_eq!(response.status, 200);
@@ -1487,7 +1554,7 @@ mod tests {
     fn informational_response_cap_is_enforced() {
         let raw = "HTTP/1.1 100 Continue\r\n\r\n".repeat(MAX_INFORMATIONAL_RESPONSES + 1);
         let mut cursor = Cursor::new(raw.into_bytes());
-        let error = read_response(&mut cursor, "POST", 1024)
+        let error = read_response(&mut cursor, "POST", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(
@@ -1500,7 +1567,7 @@ mod tests {
         let raw =
             "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let error = read_response(&mut cursor, "GET", 1024)
+        let error = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(matches!(error, ProxyError::Intercept(_)));
@@ -1510,7 +1577,7 @@ mod tests {
     fn head_response_preserves_metadata_length_without_payload() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nLEFTOVER";
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let response = read_response(&mut cursor, "HEAD", 1024)
+        let response = read_response(&mut cursor, "HEAD", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap();
         assert!(response.body.is_empty());
@@ -1535,7 +1602,7 @@ mod tests {
     fn lowercase_head_is_an_extension_method_with_a_payload() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
         let mut cursor = Cursor::new(raw.as_bytes());
-        let response = read_response(&mut cursor, "head", 1024).unwrap();
+        let response = read_response(&mut cursor, "head", 1024, None).unwrap();
         assert_eq!(response.body, b"ok");
 
         let mut out = Vec::new();
@@ -1560,7 +1627,7 @@ mod tests {
             big.len()
         );
         let mut cursor = Cursor::new(raw.into_bytes());
-        let res = read_response(&mut cursor, "GET", 1 << 20).unwrap();
+        let res = read_response(&mut cursor, "GET", 1 << 20, None).unwrap();
         assert_eq!(res.body.len(), 50_000);
         assert!(res.body.iter().all(|&b| b == b'x'));
     }
@@ -1571,7 +1638,7 @@ mod tests {
     fn short_body_fails_closed() {
         let raw = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"; // 5 bytes, claims 10
         let mut cursor = Cursor::new(raw.as_bytes().to_vec());
-        let err = read_response(&mut cursor, "GET", 1024)
+        let err = read_response(&mut cursor, "GET", 1024, None)
             .map_err(|failure| failure.error)
             .unwrap_err();
         assert!(
@@ -1714,7 +1781,7 @@ mod tests {
         let big = vec![b'z'; COALESCE_BODY_LIMIT + 1];
         let headers = HeaderMap::new();
         let mut out = Vec::new();
-        write_request(&mut out, "PUT", "/upload", &headers, &big).unwrap();
+        write_request(&mut out, "PUT", "/upload", &headers, &big, Hop::Close).unwrap();
         let sep = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
         let (head, wire_body) = out.split_at(sep);
         assert_eq!(wire_body, &big[..]);
@@ -1729,7 +1796,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append("Content-Length", "9999"); // stale
         let mut out = Vec::new();
-        write_request(&mut out, "POST", "/", &headers, b"abc").unwrap();
+        write_request(&mut out, "POST", "/", &headers, b"abc", Hop::Close).unwrap();
         let s = String::from_utf8_lossy(&out);
         assert!(s.contains("Content-Length: 3\r\n"));
         assert!(!s.contains("9999"));
@@ -1758,7 +1825,7 @@ mod tests {
         ]);
 
         let mut out = Vec::new();
-        write_request(&mut out, "POST", "/", &headers, b"body").unwrap();
+        write_request(&mut out, "POST", "/", &headers, b"body", Hop::Close).unwrap();
         let wire = String::from_utf8(out).unwrap().to_ascii_lowercase();
         for removed in [
             "keep-alive:",
@@ -1841,5 +1908,183 @@ mod tests {
         assert_eq!(failure.accepted_bytes, 7);
         assert_eq!(failure.error.kind(), io::ErrorKind::TimedOut);
         assert!(failure.during_flush);
+    }
+
+    const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+    fn handshake_request(extra: &str) -> String {
+        format!(
+            "GET /chat HTTP/1.1\r\nHost: echo.example\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {KEY}\r\n\
+             Sec-WebSocket-Protocol: chat\r\n{extra}\r\n"
+        )
+    }
+
+    #[test]
+    fn a_handshake_is_read_with_its_key_and_without_its_extensions() {
+        let raw = handshake_request(
+            "Sec-WebSocket-Extensions: permessage-deflate\r\nContent-Length: 0\r\n",
+        );
+        let mut cursor = Cursor::new([raw.as_bytes(), &[0x81, 0x85]].concat());
+        let request = read_request(&mut cursor, 1024).unwrap();
+        assert_eq!(request.upgrade, UpgradeRequest::WebSocket(KEY.to_string()));
+        for removed in [
+            "upgrade",
+            "connection",
+            "sec-websocket-extensions",
+            "content-length",
+        ] {
+            assert!(!request.headers.contains(removed), "{removed} survived");
+        }
+        for kept in [
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "sec-websocket-protocol",
+        ] {
+            assert!(request.headers.contains(kept), "{kept} was removed");
+        }
+        assert_eq!(
+            cursor.position() as usize,
+            raw.len(),
+            "bytes after the head stay unread"
+        );
+    }
+
+    #[test]
+    fn a_malformed_handshake_is_read_and_classified() {
+        let raw = handshake_request("").replace("Version: 13", "Version: 8");
+        let request = read_request(&mut Cursor::new(raw.into_bytes()), 1024).unwrap();
+        assert_eq!(
+            request.upgrade,
+            UpgradeRequest::Malformed("handshake version is not 13")
+        );
+    }
+
+    #[test]
+    fn an_h2c_upgrade_is_stripped_as_before() {
+        let raw = "GET / HTTP/1.1\r\nHost: h\r\nUpgrade: h2c\r\n\
+                   Connection: Upgrade, HTTP2-Settings\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n";
+        let request = read_request(&mut Cursor::new(raw.as_bytes()), 1024).unwrap();
+        assert_eq!(request.upgrade, UpgradeRequest::None);
+        for removed in ["upgrade", "connection", "http2-settings"] {
+            assert!(!request.headers.contains(removed), "{removed} survived");
+        }
+    }
+
+    #[test]
+    fn a_forwarded_handshake_names_the_upgrade_and_no_length() {
+        let headers = HeaderMap::from_pairs([
+            ("Host".to_string(), "echo.example".to_string()),
+            ("Sec-WebSocket-Key".to_string(), KEY.to_string()),
+            ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+            ("Connection".to_string(), "close".to_string()),
+        ]);
+        let mut out = Vec::new();
+        write_request(&mut out, "GET", "/chat", &headers, b"", Hop::WebSocket).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "GET /chat HTTP/1.1\r\nHost: echo.example\r\nSec-WebSocket-Key: {KEY}\r\n\
+                 Sec-WebSocket-Version: 13\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+            )
+        );
+        assert!(
+            write_request(&mut Vec::new(), "GET", "/", &headers, b"x", Hop::WebSocket).is_err()
+        );
+    }
+
+    #[test]
+    fn a_101_is_written_with_the_upgrade_and_no_length() {
+        let headers = HeaderMap::from_pairs([
+            (
+                "Sec-WebSocket-Accept".to_string(),
+                "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".to_string(),
+            ),
+            ("Content-Length".to_string(), "0".to_string()),
+        ]);
+        let mut out = Vec::new();
+        write_response(&mut out, "GET", 101, &headers, b"").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+             Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        );
+    }
+
+    fn expected() -> websocket::Expected {
+        let offered =
+            HeaderMap::from_pairs([("Sec-WebSocket-Protocol".to_string(), "chat".to_string())]);
+        websocket::Expected::new(KEY, &offered)
+    }
+
+    #[test]
+    fn a_101_that_answers_the_handshake_ends_at_its_head() {
+        let head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                    Connection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+                    Sec-WebSocket-Protocol: chat\r\n\r\n";
+        let mut cursor = Cursor::new([head.as_bytes(), &[0x81, 0x02, b'h', b'i']].concat());
+        let response = read_response(&mut cursor, "GET", 1024, Some(&expected())).unwrap();
+        assert_eq!(response.status, 101);
+        assert!(response.body.is_empty());
+        assert_eq!(response.headers.get("sec-websocket-protocol"), Some("chat"));
+        assert!(!response.headers.contains("upgrade"));
+        assert_eq!(
+            cursor.position() as usize,
+            head.len(),
+            "the first frame stays unread"
+        );
+
+        let mut cursor = Cursor::new(head.as_bytes());
+        assert!(
+            read_response(&mut cursor, "GET", 1024, None).is_err(),
+            "a 101 to an ordinary request stays refused"
+        );
+    }
+
+    #[test]
+    fn a_101_that_does_not_answer_the_handshake_is_refused_with_its_status() {
+        let head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                    Connection: Upgrade\r\nSec-WebSocket-Accept: AAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n";
+        let failure = read_response(
+            &mut Cursor::new(head.as_bytes()),
+            "GET",
+            1024,
+            Some(&expected()),
+        )
+        .unwrap_err();
+        assert_eq!(failure.status, Some(101));
+        assert!(
+            matches!(&failure.error, ProxyError::Intercept(reason)
+                if reason == "101 carries a wrong Sec-WebSocket-Accept"),
+            "{:?}",
+            failure.error
+        );
+
+        let refused = "HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\n\r\nno";
+        let response = read_response(
+            &mut Cursor::new(refused.as_bytes()),
+            "GET",
+            1024,
+            Some(&expected()),
+        )
+        .unwrap();
+        assert_eq!(
+            response.status, 403,
+            "a non-101 answer is an ordinary response"
+        );
+        assert_eq!(response.body, b"no");
+    }
+
+    #[test]
+    fn a_websocket_head_fits_its_estimate() {
+        let headers = HeaderMap::from_pairs([
+            ("Host".to_string(), "echo.example".to_string()),
+            ("Sec-WebSocket-Key".to_string(), KEY.to_string()),
+            ("Authorization".to_string(), "A".repeat(512)),
+        ]);
+        let budget = estimate_head_capacity(&headers, request_line_bytes("GET", "/chat"));
+        let mut out = Vec::new();
+        write_request(&mut out, "GET", "/chat", &headers, b"", Hop::WebSocket).unwrap();
+        assert!(out.len() <= budget, "{} > {budget}", out.len());
     }
 }

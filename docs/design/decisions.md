@@ -1662,6 +1662,84 @@ that one server, with a warning on stderr, exactly as
 describes. Only a durable fault is fatal to the box. Putting that orchestration inside the policy engine was rejected, because it
 changes the policy facade to buy something the box already owns.
 
+<a id="a-websocket-upgrade-passes-a-second-gate"></a>
+### A WebSocket upgrade passes a second gate, `http:upgrade`, after `http:request`
+
+A WebSocket handshake is an ordinary `GET`, so `http:request` decides it first, on the same fields
+as any request. When it permits, the gateway raises `http:upgrade { host, port, path, protocol }`
+on the same host, port, and path, and a deny at either gate wins, as on the
+[MCP second gate](#a-remote-mcp-tool-call-passes-a-second-gate). An attribute on `http:request`,
+such as `context.input.upgrade`, was rejected: every deployed `http:request` permit that admits a
+`GET` to a host would then admit a WebSocket to it, so shipping WebSocket support would widen a
+policy that nobody edited. A separate action is default-deny, so a policy that never names
+`http:upgrade` refuses every WebSocket. The gateway refuses an upgrade to a configured remote MCP
+server before either gate, because its frames would cross with no `mcp:call` decision, and the
+adapter refuses an attempt that carries both an MCP frame and an upgrade. The cost is a third
+network permit for each WebSocket destination, and one more action in the closed vocabulary.
+
+<a id="the-gateway-reads-every-websocket-frame-and-negotiates-no-extension"></a>
+### The gateway reads every WebSocket frame, and negotiates no extension
+
+After a `101`, the gateway keeps both TLS connections and decodes each frame in both directions. It
+never splices the two sockets, so [no tunnel is opaque](#no-connection-is-opaque-to-the-boundary)
+still holds after the upgrade. It removes `Sec-WebSocket-Extensions` from the handshake and refuses
+a `101` that names one, because an extension such as `permessage-deflate` compresses a message
+before the gateway sees it, and the response scrub cannot find a secret in compressed bytes. A frame
+that breaks RFC 6455 closes the connection, with 1002 (1007 for text that is not UTF-8) to the side
+that sent it, so a malformed frame never reaches the peer. The other side gets 1001 when the client
+broke the rule, and 1014 when the server did, because a client library such as Python
+`websockets` reads 1001 as a clean close and would hide the lost server message. The cost is
+bandwidth, because every message travels uncompressed, and a server that requires an extension
+cannot be reached through the box.
+
+<a id="a-websocket-message-is-reassembled-re-framed-re-masked-and-scrubbed"></a>
+### A WebSocket message is reassembled, re-framed, re-masked, and scrubbed
+
+The gateway reassembles each data message from its fragments, up to the response body limit, so it
+scrubs a whole message rather than a fragment that splits a secret in two. It then sends the
+message on in fragments the size of the largest fragment the sender used, or in one frame when the
+sender sent one. A single frame for every message was rejected, because a server that limits its
+frame size, as AgentCore Runtime does at 64 KB and API Gateway at 32 KB, closes with 1009 on a
+message that the client split to fit. A fragment is never smaller than 1 KiB, so a message sent in
+one-byte fragments doesn't cost a frame header and a mask key per byte. Toward the server it masks every frame again with a fresh
+random key, so the server never sees a mask key the workload chose. When the handshake carried a
+credential, each server message passes through the same response scrub as an HTTP body. A ping or
+pong that carries the secret loses its payload, and a close frame keeps only its code, because
+`[REDACTED]` can push a control frame past its 125-byte limit. The route acts on the handshake
+only, so a placeholder inside a client message reaches the server unchanged. The cost: a message
+waits whole in the gateway before it moves, a message above the limit closes the connection with
+1009, the scrub reads one message at a time so a secret that the server splits across two messages
+passes, and a protocol that carries its credential inside a message gets no credential from the
+box.
+
+<a id="a-websocket-ends-on-idle-and-has-no-lifetime-limit"></a>
+### A WebSocket ends after an idle period, and has no lifetime limit
+
+An HTTP exchange has one total deadline, `upstream_read_deadline`, 300 seconds by default. After a
+`101`, the same value is an idle limit instead: when no bytes move in either direction for that
+long, the gateway sends close 1001 to both sides. A ping counts as traffic. A total limit was
+rejected, because a WebSocket client such as an agent node or a chat session keeps one connection
+open for hours, and a 300-second cap would cut each one. The cost: an open WebSocket keeps its
+connection thread and one of the gateway's connection slots, 256 by default, for as long as it
+lives, so a workload that holds 256 WebSockets open stalls every new connection from its box until
+one closes.
+
+<a id="policy-decides-the-websocket-handshake-and-no-message"></a>
+### Policy decides the WebSocket handshake, and no rule decides a message
+
+The `http:upgrade` permit admits the whole connection. No action is raised for a message, and no
+message enters history. A per-message action was rejected for now, for three reasons. The action
+vocabulary is frozen, and a per-message action would be a second change to it. Every decision
+appends to durable history before it answers, under the one lock, so a decision per message would
+put a history write on every message of a busy WebSocket and slow every other decision in the box.
+And the gateway does not interpret a payload, so a rule could read only a message's size and type.
+The cost: once a WebSocket opens, the workload can send any message to that server for as long as
+the connection stays open, so an `http:upgrade` permit is wider than a permit on every request to
+the same host and path. Each request is decided against the history at its own time, and a message
+never is: a budget or a rate limit counts none of the messages, and a rule that closes egress after
+an event, such as a secret read, refuses new requests while an open WebSocket keeps carrying
+messages.
+
 ## Credentials
 
 <a id="the-workload-holds-a-phantom-and-the-gateway-holds-the-secret"></a>

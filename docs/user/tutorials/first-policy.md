@@ -6,7 +6,7 @@ By the end of this page you have a policy that permits the project and the model
 file, and a decision log you can read with `jq`.
 
 Audience: an operator who has run [getting started](../getting-started.md) and wants to write a
-policy by hand. [Policy](../policy.md) names each part of a rule and the ten actions, and
+policy by hand. [Policy](../policy.md) names each part of a rule and the eleven actions, and
 [the action vocabulary](../policy/actions.md) lists every field a rule can read.
 
 > **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box

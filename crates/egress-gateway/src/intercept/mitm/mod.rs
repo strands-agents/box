@@ -11,6 +11,7 @@ mod request_leg;
 mod resolve;
 mod response_leg;
 mod tls;
+mod websocket;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -34,7 +35,8 @@ pub use handle::MitmHandle;
 /// Response size/content limits enforced on the response leg.
 #[derive(Debug, Clone)]
 pub struct ResponseLimits {
-    /// Maximum response body bytes buffered before a `ResponseLimit` error.
+    /// Maximum response body bytes buffered before a `ResponseLimit` error, and the largest
+    /// WebSocket message.
     pub max_body_bytes: usize,
 }
 
@@ -82,13 +84,13 @@ pub struct MitmConfig {
     /// the pinned address.
     pub dns_overrides: Vec<(String, std::net::IpAddr)>,
     /// The longest one exchange waits on its upstream socket, per read or write and in total;
-    /// defaults to 300 seconds.
+    /// defaults to 300 seconds. After a WebSocket upgrade it is the idle limit, with no total.
     pub upstream_read_deadline: std::time::Duration,
     /// The maximum number of connections handled concurrently. The adapter is thread-per-connection
     /// (this crate pulls in no async runtime), so this bounds the thread count: excess connections wait
     /// for a slot rather than spawning unbounded OS threads. The workload is contained but *untrusted*
     /// (it is the very thing this crate exists to contain), so the cap is a hard backpressure limit,
-    /// not an optimization. Defaults to 256.
+    /// not an optimization. Defaults to 256. An upgraded WebSocket holds its slot until it closes.
     pub max_connections: usize,
     /// Remote MCP servers, as `(host, name)` pairs. A request whose destination host matches an entry
     /// is treated as an MCP stream for the server `name`: the L7 leg parses the JSON-RPC frame and

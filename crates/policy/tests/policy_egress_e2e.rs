@@ -204,6 +204,7 @@ fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
         body_bytes,
         intercepted: true,
         mcp: None,
+        upgrade: None,
     }
 }
 
@@ -237,6 +238,7 @@ fn mcp_request_attempt(
             tool,
             arguments,
         }),
+        upgrade: None,
     }
 }
 
@@ -490,6 +492,7 @@ fn request_to_host(host: &'static str) -> EffectAttempt<'static> {
         body_bytes: 0,
         intercepted: true,
         mcp: None,
+        upgrade: None,
     }
 }
 
@@ -540,4 +543,192 @@ fn a_host_wildcard_admits_the_subdomain_and_refuses_the_apex_until_a_clause_name
     for host in ["example.net", "example.com.evil.net"] {
         assert_default_denied(&apex_named_too, host);
     }
+}
+
+const UPGRADE_HOST: &str = "echo.example.com";
+
+/// A WebSocket handshake as the gateway raises it: a GET whose attempt names the protocol.
+fn upgrade_attempt(upgrade: Option<&'static str>) -> EffectAttempt<'static> {
+    EffectAttempt::HttpRequest {
+        host: UPGRADE_HOST,
+        port: 443,
+        method: "GET",
+        path: "/socket",
+        body_bytes: 0,
+        intercepted: true,
+        mcp: None,
+        upgrade,
+    }
+}
+
+const UPGRADE_REQUEST_PERMIT: &str = r#"
+    permit(principal, action == Box::Action::"http:request", resource)
+    when { context.input.host == "echo.example.com" };
+"#;
+
+const UPGRADE_PERMIT: &str = r#"
+    permit(principal, action == Box::Action::"http:upgrade", resource)
+    when {
+        context.input.host == "echo.example.com" &&
+        context.input.port == 443 &&
+        context.input.path == "/socket" &&
+        context.input.protocol == "websocket"
+    };
+"#;
+
+/// The action of every verdict the engine reaches.
+#[derive(Default)]
+struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+impl policy::DecisionObserver for DecidedActions {
+    fn observed(&self, action: &str, _resource: &str, _decision: &policy::Decision) {
+        self.0.lock().unwrap().push(action.to_string());
+    }
+}
+
+impl DecidedActions {
+    fn taken(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+fn observed_interceptor(src: &str) -> (Arc<dyn EffectInterceptor>, Arc<DecidedActions>) {
+    let decided = Arc::new(DecidedActions::default());
+    let policy = support::open_policy(sources(src))
+        .expect("egress effect policy opens")
+        .observed_by(Arc::clone(&decided) as Arc<dyn policy::DecisionObserver>);
+    (interceptor_from(policy), decided)
+}
+
+/// A handshake passes only when `http:request` and `http:upgrade` both permit it, and
+/// `http:upgrade` reads the same host, port, and path, and the protocol.
+#[test]
+fn an_upgrade_passes_when_both_gates_permit_it() {
+    let (interceptor, decided) =
+        observed_interceptor(&format!("{UPGRADE_REQUEST_PERMIT}{UPGRADE_PERMIT}"));
+    interceptor
+        .intercept(&upgrade_attempt(Some("websocket")))
+        .expect("both gates permit the handshake")
+        .record_outcome(EffectOutcome::Replied {
+            accepted_bytes: 120,
+            status: 101,
+        })
+        .expect("the switch records");
+    assert_eq!(
+        decided.taken(),
+        [
+            r#"Box::Action::"http:request""#,
+            r#"Box::Action::"http:upgrade""#
+        ],
+        "http:request decides first, then http:upgrade"
+    );
+
+    let reason = interceptor
+        .intercept(&upgrade_attempt(Some("h2c")))
+        .err()
+        .expect("the permit names only websocket")
+        .to_string();
+    assert!(reason.starts_with("http:upgrade gate: "), "{reason}");
+}
+
+/// A permit on `http:request` alone never opens an upgrade: `http:upgrade` is default-deny.
+#[test]
+fn an_http_request_permit_alone_refuses_the_upgrade() {
+    let interceptor = egress_interceptor(UPGRADE_REQUEST_PERMIT);
+    let denied = interceptor
+        .intercept(&upgrade_attempt(Some("websocket")))
+        .err()
+        .expect("no http:upgrade permit matches");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        denied.to_string(),
+        "http:upgrade gate: policy denied this operation on 'echo.example.com:443/socket' \
+         [default-deny]: No permit policy matched this request."
+    );
+    interceptor
+        .intercept(&upgrade_attempt(None))
+        .expect("the same GET with no upgrade still passes")
+        .mark_indeterminate();
+}
+
+/// A `forbid` on `http:upgrade` wins over its permit.
+#[test]
+fn a_forbid_on_http_upgrade_wins_over_its_permit() {
+    let interceptor = egress_interceptor(&format!(
+        r#"{UPGRADE_REQUEST_PERMIT}{UPGRADE_PERMIT}
+        @id("no-sockets")
+        forbid(principal, action == Box::Action::"http:upgrade", resource)
+        when {{ context.input.path like "/socket*" }};"#
+    ));
+    let reason = interceptor
+        .intercept(&upgrade_attempt(Some("websocket")))
+        .err()
+        .expect("the forbid wins")
+        .to_string();
+    assert_eq!(
+        reason,
+        "http:upgrade gate: policy denied this operation on 'echo.example.com:443/socket' \
+         [policy: no-sockets]."
+    );
+}
+
+/// A refusal at `http:request` ends the exchange before `http:upgrade` is asked.
+#[test]
+fn an_http_request_refusal_is_reached_before_http_upgrade() {
+    let (interceptor, decided) = observed_interceptor(UPGRADE_PERMIT);
+    let reason = interceptor
+        .intercept(&upgrade_attempt(Some("websocket")))
+        .err()
+        .expect("no http:request permit matches")
+        .to_string();
+    assert!(reason.starts_with("http:request gate: "), "{reason}");
+    assert_eq!(decided.taken(), [r#"Box::Action::"http:request""#]);
+}
+
+/// A request with no upgrade never reaches `http:upgrade`, so an existing policy decides it as
+/// before, even beside a `forbid` on every upgrade.
+#[test]
+fn a_request_without_an_upgrade_never_consults_http_upgrade() {
+    let (interceptor, decided) = observed_interceptor(&format!(
+        r#"{UPGRADE_REQUEST_PERMIT}
+        forbid(principal, action == Box::Action::"http:upgrade", resource);"#
+    ));
+    interceptor
+        .intercept(&upgrade_attempt(None))
+        .expect("an ordinary GET passes on its http:request permit")
+        .mark_indeterminate();
+    assert_eq!(decided.taken(), [r#"Box::Action::"http:request""#]);
+}
+
+/// An upgrade on an MCP request is refused before any gate decides it, whatever policy permits.
+#[test]
+fn an_mcp_frame_with_an_upgrade_is_refused() {
+    let (interceptor, decided) = observed_interceptor(
+        r#"permit(principal, action == Box::Action::"http:request", resource);
+           permit(principal, action == Box::Action::"http:upgrade", resource);
+           permit(principal, action == Box::Action::"mcp:call", resource);"#,
+    );
+    let attempt = EffectAttempt::HttpRequest {
+        host: "mcp-fixture.demo",
+        port: 8931,
+        method: "GET",
+        path: "/mcp",
+        body_bytes: 0,
+        intercepted: true,
+        mcp: Some(McpFrame::List {
+            server: "demo",
+            method: "tools/list",
+        }),
+        upgrade: Some("websocket"),
+    };
+    let denied = interceptor
+        .intercept(&attempt)
+        .err()
+        .expect("an upgrade on an MCP request is refused");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        denied.to_string(),
+        "http:upgrade gate: an upgrade on an MCP request is refused"
+    );
+    assert!(decided.taken().is_empty(), "no gate decides the attempt");
 }

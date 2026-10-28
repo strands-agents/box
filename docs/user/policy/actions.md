@@ -1,7 +1,7 @@
 # The action vocabulary
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships ten actions, and generates one more for each MCP tool it discovers.
+ships eleven actions, and generates one more for each MCP tool it discovers.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
@@ -31,12 +31,12 @@ A field marked `?` below is optional. Read it behind a guard, as
 guard refuses to load.
 
 The name `path` appears on two kinds of action: a filesystem path on `fs:*` and a URL path on
-`http:request`. A rule that names both kinds tells them apart with `context.input has operation`,
-because only `fs:*` carries `operation`.
+`http:request` and `http:upgrade`. A rule that names both kinds tells them apart with
+`context.input has operation`, because only `fs:*` carries `operation`.
 
-## The ten actions
+## The eleven actions
 
-Ten actions in four categories, and one generated action per MCP tool:
+Eleven actions in four categories, and one generated action per MCP tool:
 
 - **[Filesystem](#filesystem)**, raised by Strands Shell (the box's shell) and by Monty (the box's
   Python interpreter).
@@ -50,6 +50,7 @@ Ten actions in four categories, and one generated action per MCP tool:
 - **[Network](#network)**, raised by the egress gateway.
   - `net:connect`: each connection, before TLS.
   - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection.
+  - `http:upgrade`: each WebSocket handshake, after `http:request` permitted it.
 - **[Shell](#shell)**, raised by Strands Shell.
   - `shell:exec`: a command line that runs a program the shell implements, such as `cat` or `grep`.
   - `shell:spawn`: a command line that runs a program of the surrounding OS, such as `git`. The box
@@ -96,7 +97,7 @@ names only `fs:other` refuses to load.
 
 ## Network
 
-Each outbound call is two decisions, both of which must permit.
+Each outbound call is two decisions, both of which must permit. A WebSocket is three.
 
 **`net:connect`**, once per connection, before TLS:
 
@@ -123,6 +124,41 @@ with `the types String and ipaddr are not compatible`.
 
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
+
+**`http:upgrade`**, once per WebSocket handshake, after `http:request` permitted it:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `host` | String | The destination host, as `http:request` saw it. |
+| `port` | Long | The destination port. |
+| `path` | String | The URL path in canonical form, without the query, as `http:request` saw it. |
+| `protocol` | String | The protocol the handshake asks for, always in lowercase: `websocket`. A rule that compares it with another spelling, such as `"WebSocket"`, never matches. |
+
+A WebSocket handshake is a `GET` with no body, so `http:request` decides it first. When
+`http:request` permits it, `http:upgrade` decides the switch to WebSocket. A
+`forbid` at either action refuses the handshake, and with no `http:upgrade` permit the handshake is
+refused as `http:upgrade gate: … [default-deny]`. A WebSocket needs a permit on each:
+
+```text
+@id("echo_handshake")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "echo.websocket.org" && context.input.method == "GET" };
+
+@id("echo_websocket")
+permit (principal, action == Box::Action::"http:upgrade", resource)
+when { context.input.host == "echo.websocket.org" && context.input.protocol == "websocket" };
+```
+
+A `permit` whose scope names no action, such as
+`permit (principal, action, resource) when { context.input has host && … };`, also permits
+`http:upgrade` on each host it matches, so a policy written that way opens WebSockets with no new
+rule.
+
+The messages after the handshake raise no decision and add nothing to history. A temporal rule,
+such as a byte budget or a rate limit over `http:request::response`, counts none of them, and a
+rule that starts to refuse after the handshake leaves the open WebSocket running.
+[WebSocket](../egress.md#websocket) lists what the gateway does with the messages, and
+[policy limitations](../security.md#policy-limitations) says what to do about it.
 
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
@@ -226,7 +262,8 @@ What each caller records as a response:
 |---|---|---|
 | `fs:*` | When the operation ends | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status, `101` for an accepted WebSocket handshake |
+| `http:upgrade` | At reply time, once per handshake, whatever the reply status. A handshake that did not leave the box records none. | none |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
 

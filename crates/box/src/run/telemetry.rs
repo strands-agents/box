@@ -364,10 +364,20 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         };
         let refusal = result.as_ref().err().map(std::string::ToString::to_string);
         let effective = match effect {
+            // The gate that decided names the action: `http:request` when it denies, and
+            // `http:upgrade` otherwise.
+            EgressEffectAttempt::HttpRequest {
+                upgrade: Some(_), ..
+            } => {
+                let action = observations
+                    .last()
+                    .map_or(UPGRADE_ACTION, |observed| observed.action.as_str());
+                ordinary_egress_decision(action, &identity, refusal, &observations)
+            }
             EgressEffectAttempt::HttpRequest {
                 mcp: Some(frame), ..
             } => remote_mcp_decision(frame, refusal, &observations),
-            _ => ordinary_egress_decision(&identity, refusal, &observations),
+            _ => ordinary_egress_decision(identity.action(), &identity, refusal, &observations),
         };
         PENDING_EGRESS_DECISION.with(|pending| {
             pending.borrow_mut().replace(PendingEgressDecision {
@@ -495,27 +505,22 @@ impl EgressIdentity {
     }
 }
 
-/// The effective decision for an egress attempt that carries no MCP frame.
+/// The action an upgrade handshake reports when no policy verdict decided it.
+const UPGRADE_ACTION: &str = r#"Box::Action::"http:upgrade""#;
+
+/// The effective decision for an egress attempt that the MCP gates do not decide, under `action`.
 fn ordinary_egress_decision(
+    action: &str,
     identity: &EgressIdentity,
     refusal: Option<String>,
     observations: &[ObservedDecision],
 ) -> EffectiveDecision {
     let determined = observations.last();
     match refusal {
-        Some(refusal) => EffectiveDecision::gate_deny(
-            identity.action(),
-            identity.resource(),
-            "egress",
-            refusal,
-            determined,
-        ),
-        None => EffectiveDecision::gate_permit(
-            identity.action(),
-            identity.resource(),
-            "egress",
-            determined,
-        ),
+        Some(refusal) => {
+            EffectiveDecision::gate_deny(action, identity.resource(), "egress", refusal, determined)
+        }
+        None => EffectiveDecision::gate_permit(action, identity.resource(), "egress", determined),
     }
 }
 
@@ -1055,6 +1060,7 @@ mod tests {
                 body_bytes: 0,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .expect("ordinary HTTP is admitted")
             .mark_indeterminate();
@@ -1142,6 +1148,7 @@ mod tests {
                 body_bytes: 0,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .err()
             .expect("no permit matches a GET");
@@ -1187,6 +1194,123 @@ mod tests {
         assert_eq!(recorded[1].cause(), DecisionCause::NoMatch);
     }
 
+    /// **An upgrade handshake is recorded under the gate that decided it**: `http:request` when
+    /// it refuses, and `http:upgrade` otherwise, with the policy that decided.
+    #[test]
+    fn an_upgrade_records_the_gate_and_the_policy_that_decided_it() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("upgrade-telemetry.cedar"),
+                text: r#"
+                    @id("echo-requests")
+                    permit(principal, action == Box::Action::"http:request", resource)
+                    when { context.input.host == "echo.example.com" };
+                    @id("echo-sockets")
+                    permit(principal, action == Box::Action::"http:upgrade", resource)
+                    when { context.input.protocol == "websocket" };
+                    @id("no-admin-sockets")
+                    forbid(principal, action == Box::Action::"http:upgrade", resource)
+                    when { context.input.path == "/admin" };
+                "#
+                .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver));
+        let interceptor = EgressDecisionInterceptor::over(EgressPolicyInterceptor::into_handle(
+            Arc::new(policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+        ));
+        let recorder = DecisionRecorder::discarding();
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+        let exchange = |host: &'static str, path: &'static str, mcp, upgrade| {
+            let attempt = EgressEffectAttempt::HttpRequest {
+                host,
+                port: 443,
+                method: "GET",
+                path,
+                body_bytes: 0,
+                intercepted: true,
+                mcp,
+                upgrade: Some(upgrade),
+            };
+            let before = recorder.recorded().len();
+            let (decision, reason) = match interceptor.intercept(&attempt) {
+                Ok(permit) => {
+                    permit.mark_indeterminate();
+                    (AuditDecision::Allow, String::new())
+                }
+                Err(refusal) => (AuditDecision::Deny, refusal.to_string()),
+            };
+            emitter.emit(EgressDecision {
+                host: host.to_string(),
+                port: 443,
+                method: "GET".to_string(),
+                path: path.to_string(),
+                decision,
+                reason,
+                correlation: RequestId::new("upgrade"),
+            });
+            let mut recorded = recorder.recorded();
+            assert_eq!(recorded.len(), before + 1, "one record per exchange");
+            recorded.pop().expect("the exchange's record")
+        };
+        let authored = |record: &EffectiveDecision| {
+            record
+                .attribution()
+                .iter()
+                .filter_map(|entry| entry.annotation_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let both = exchange("echo.example.com", "/socket", None, "websocket");
+        let (action, resource, _, verdict, _) = both.parts();
+        assert_eq!(action, r#"Box::Action::"http:upgrade""#);
+        assert_eq!(resource, "echo.example.com:443/socket");
+        assert_eq!(verdict, EffectiveVerdict::Permit);
+        assert_eq!(authored(&both), ["echo-sockets"]);
+
+        let forbidden = exchange("echo.example.com", "/admin", None, "websocket");
+        let (action, _, _, verdict, reason) = forbidden.parts();
+        assert_eq!(action, r#"Box::Action::"http:upgrade""#);
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(reason, Some("a forbid rule matched"));
+        assert_eq!(authored(&forbidden), ["no-admin-sockets"]);
+
+        let unpermitted = exchange("echo.example.com", "/socket", None, "h2c");
+        let (action, _, _, verdict, _) = unpermitted.parts();
+        assert_eq!(action, r#"Box::Action::"http:upgrade""#);
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(unpermitted.cause(), DecisionCause::NoMatch);
+
+        let host_refused = exchange("other.example.com", "/socket", None, "websocket");
+        let (action, resource, _, verdict, _) = host_refused.parts();
+        assert_eq!(action, r#"Box::Action::"http:request""#);
+        assert_eq!(resource, "other.example.com:443/socket");
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+
+        let mcp = exchange(
+            "echo.example.com",
+            "/socket",
+            Some(McpFrame::List {
+                server: "demo",
+                method: "tools/list",
+            }),
+            "websocket",
+        );
+        let (action, _, rule, verdict, reason) = mcp.parts();
+        assert_eq!(action, r#"Box::Action::"http:upgrade""#);
+        assert_eq!(rule, &EffectiveRule::Enforcement("egress"));
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(
+            reason,
+            Some("http:upgrade gate: an upgrade on an MCP request is refused")
+        );
+    }
+
     /// **One exchange's verdict never reaches another exchange's record.** The captured verdict is
     /// held in one slot, so an emitted decision naming a different exchange must fall back to the
     /// gateway's own label rather than take what is waiting there.
@@ -1220,6 +1344,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         let emitted = |host: &str, port, method: &str, path: &str| EgressDecision {
             host: host.to_string(),
@@ -1433,6 +1558,7 @@ mod tests {
                 tool: "add",
                 arguments,
             }),
+            upgrade: None,
         }
     }
 

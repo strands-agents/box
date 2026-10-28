@@ -3986,6 +3986,7 @@ dependencies = [
  "base64 0.23.1",
  "fluent-uri",
  "httparse",
+ "libc",
  "rcgen",
  "ring",
  "rustls",

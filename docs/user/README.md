@@ -4,14 +4,14 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 - [`getting-started.md`](./getting-started.md): download Box, then write and run a box for an agent.
   Start here.
-- [`egress.md`](./egress.md): the `[egress.<name>]` table, which gives the agent a credential for a service.
+- [`egress.md`](./egress.md): the `[egress.<name>]` table, which gives the agent a credential for a service, and WebSocket through the egress gateway.
 - [`mcp.md`](./mcp.md): the `[mcp.<name>]` table, for a stdio or an http MCP server.
 - [`mcp-policy.md`](./mcp-policy.md): write the rules that let the agent use an MCP server.
 - [`monty.md`](./monty.md): the Python that a box runs, its file operations, `fetch()`, and the rules to write.
 - [`shell.md`](./shell.md): Strands Shell, the agent's shell, with what runs where, the fields a rule reads, and the exit statuses.
 - [`shell-policy.md`](./shell-policy.md): write policy for the agent's shell commands, the programs it runs, and the files they touch.
 - [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, what each record carries, and how to read a records file.
-- [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
+- [`policy.md`](./policy.md): what a policy is, when the box asks it, the eleven actions, the eight
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
   Box always enforces, and the policy limitations.

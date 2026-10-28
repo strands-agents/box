@@ -186,6 +186,18 @@ pub enum Request<'a> {
         /// Whether the request was seen through TLS interception (vs. tunneled).
         intercepted: bool,
     },
+    /// One protocol upgrade (`http:upgrade`), decided after `http:request` permits its
+    /// handshake.
+    HttpUpgrade {
+        /// Destination host.
+        host: &'a str,
+        /// Destination port.
+        port: u16,
+        /// Request path, as `http:request` saw it.
+        path: &'a str,
+        /// The requested protocol, in lowercase (`websocket`).
+        protocol: &'a str,
+    },
     /// One MCP request, with per-tool actions for `tools/call` and `mcp:call` for other methods.
     McpCall {
         /// Trusted server name from operator configuration.
@@ -258,6 +270,9 @@ impl Request<'_> {
             Request::Fs { path, .. } => path.reported().into_owned(),
             Request::Connect { host, port, .. } => format!("{host}:{port}"),
             Request::Http {
+                host, port, path, ..
+            }
+            | Request::HttpUpgrade {
                 host, port, path, ..
             } => format!("{host}:{port}{path}"),
             Request::McpCall {

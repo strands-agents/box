@@ -100,6 +100,24 @@ impl EgressPolicyInterceptor {
         }
     }
 
+    /// The `http:upgrade` gate on an allowed `http:request`, on the same host, port, and path.
+    fn upgrade_gate(
+        &self,
+        host: &str,
+        port: u16,
+        path: &str,
+        protocol: &str,
+    ) -> Result<(), String> {
+        let request = Request::HttpUpgrade {
+            host,
+            port,
+            path,
+            protocol,
+        };
+        authorize(&self.policy, &self.governed, &self.principal, &request)
+            .map_err(|reason| format!("http:upgrade gate: {reason}"))
+    }
+
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
     fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<(), String> {
@@ -207,6 +225,12 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 decision @ Decision::Deny { .. } => Err(decision.to_string()),
                 Decision::Allow { .. } => Ok(()),
             },
+            // The gateway never raises an upgrade on an MCP request, and this adapter refuses one.
+            EgressEffectAttempt::HttpRequest {
+                mcp: Some(_),
+                upgrade: Some(_),
+                ..
+            } => Err("http:upgrade gate: an upgrade on an MCP request is refused".to_string()),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -215,9 +239,11 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                upgrade,
             } => {
                 // The `http:request` gate. `decide` records to history, so it is called exactly
-                // once here; the `mcp:call` gate below is the second recorded decision.
+                // once here; the `mcp:call` or `http:upgrade` gate below is the second recorded
+                // decision.
                 match self.policy.decide(
                     &self.governed,
                     &self.principal,
@@ -236,6 +262,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         reason: DenyReason::PolicyPending,
                         ..
                     } if self.mcp_hosts.contains(*host)
+                        && upgrade.is_none()
                         && !matches!(
                             mcp,
                             Some(
@@ -250,8 +277,12 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     decision @ Decision::Deny { .. } => {
                         Err(format!("http:request gate: {decision}"))
                     }
-                    // Allowed; the `mcp:call` gate and per-tool refinement run on the Ready authority.
-                    Decision::Allow { .. } => self.mcp_gates(mcp),
+                    // Allowed; the `http:upgrade` gate runs on an upgrade, and the `mcp:call` gate
+                    // and per-tool refinement run on the Ready authority.
+                    Decision::Allow { .. } => match upgrade {
+                        Some(protocol) => self.upgrade_gate(host, *port, path, protocol),
+                        None => self.mcp_gates(mcp),
+                    },
                 }
             }
             // The release of a reply to the workload decides nothing and records nothing. The
@@ -380,6 +411,8 @@ enum AttemptIdentity {
         path: String,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
+        /// The upgrade protocol, when `http:upgrade` permitted this request.
+        upgrade: Option<String>,
     },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
@@ -405,6 +438,7 @@ impl AttemptIdentity {
                 method,
                 path,
                 mcp,
+                upgrade,
                 ..
             } => Self::Http {
                 host: (*host).to_string(),
@@ -439,6 +473,7 @@ impl AttemptIdentity {
                         uri: Some((*uri).to_string()),
                     }),
                 }),
+                upgrade: upgrade.map(str::to_string),
             },
             _ => Self::Unmapped,
         }
@@ -486,6 +521,7 @@ impl LocalPolicyEffectPermit {
                     method,
                     path,
                     mcp,
+                    upgrade,
                 },
                 Some(delivery),
             ) => {
@@ -512,7 +548,7 @@ impl LocalPolicyEffectPermit {
                 // call is a `response` whatever the server then replies (a JSON-RPC error is still
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
-                match mcp {
+                let recorded = match mcp {
                     Some(mcp) if !matches!(delivery, Delivery::Failed) => {
                         http.and(self.policy.record(
                             &self.governed,
@@ -527,6 +563,22 @@ impl LocalPolicyEffectPermit {
                         ))
                     }
                     _ => http,
+                };
+                // The `http:upgrade::response` leg, on the same terms as the `mcp:call` leg above.
+                match upgrade {
+                    Some(protocol) if !matches!(delivery, Delivery::Failed) => {
+                        recorded.and(self.policy.record(
+                            &self.governed,
+                            &self.principal,
+                            &Outcome::HttpUpgrade {
+                                host,
+                                port: *port,
+                                path,
+                                protocol,
+                            },
+                        ))
+                    }
+                    _ => recorded,
                 }
             }
             // A message attempt whose outcome carries no delivery, or an unmapped
@@ -749,6 +801,7 @@ mod tests {
             body_bytes: 32,
             intercepted: false,
             mcp: Some(McpFrame::List { server, method }),
+            upgrade: None,
         }
     }
 
@@ -770,6 +823,7 @@ mod tests {
                 tool,
                 arguments,
             }),
+            upgrade: None,
         }
     }
 
@@ -1378,6 +1432,7 @@ mod tests {
                 body_bytes: 42,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .expect("request is allowed")
             .record_outcome(EgressEffectOutcome::Completed(100))
@@ -1408,6 +1463,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
             host: "api.github.com",
@@ -1499,6 +1555,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         for _ in 0..3 {
             fixture
@@ -1567,6 +1624,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
             let fixture = interceptor(source);
@@ -1662,6 +1720,7 @@ mod tests {
             body_bytes,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
 
         interceptor
@@ -1693,6 +1752,7 @@ mod tests {
             body_bytes: 0,
             intercepted,
             mcp: None,
+            upgrade: None,
         };
 
         // TLS-terminated (intercepted == true) satisfies the rule.
@@ -1704,6 +1764,131 @@ mod tests {
         assert!(
             interceptor.intercept(&request(false)).is_err(),
             "a plain-HTTP request must not satisfy a rule that requires intercepted"
+        );
+    }
+
+    /// A WebSocket handshake to `echo.example.com`, or the same GET with no upgrade.
+    fn handshake(upgrade: Option<&'static str>) -> EgressEffectAttempt<'static> {
+        EgressEffectAttempt::HttpRequest {
+            host: "echo.example.com",
+            port: 443,
+            method: "GET",
+            path: "/socket",
+            body_bytes: 0,
+            intercepted: true,
+            mcp: None,
+            upgrade,
+        }
+    }
+
+    const UPGRADE_PERMITS: &str = r#"
+        permit(principal, action == Box::Action::"http:request", resource)
+        when { context.input.host == "echo.example.com" };
+        permit(principal, action == Box::Action::"http:upgrade", resource)
+        when { context.input.protocol == "websocket" };
+    "#;
+
+    /// `decide` records the `http:upgrade::request` event with its four inputs, so a rule over
+    /// history sees the upgrade.
+    #[test]
+    fn the_upgrade_decision_reaches_history() {
+        let fixture = interceptor(&format!(
+            r#"{UPGRADE_PERMITS}
+            forbid(principal, action == Box::Action::"http:request", resource)
+            when temporal {{
+              formerly within 3600s (
+                Box::Action::"http:upgrade"::request{{
+                  input.host: "echo.example.com",
+                  input.port: 443,
+                  input.path: "/socket",
+                  input.protocol: "websocket"
+                }}
+              )
+            }};"#
+        ));
+        fixture
+            .intercept(&handshake(None))
+            .expect("no upgrade is in history yet")
+            .mark_indeterminate();
+        fixture
+            .intercept(&handshake(Some("websocket")))
+            .expect("the upgrade is decided after its request")
+            .mark_indeterminate();
+        assert!(
+            fixture.intercept(&handshake(None)).is_err(),
+            "the recorded http:upgrade::request must arm the forbid"
+        );
+    }
+
+    /// Every delivered handshake records one `http:upgrade::response`, so a cap over it counts
+    /// upgrades and leaves an ordinary request to its own gate.
+    #[test]
+    fn a_delivered_upgrade_records_a_response_leg_a_temporal_cap_counts() {
+        let fixture = interceptor(&format!(
+            r#"{UPGRADE_PERMITS}
+            forbid(principal, action == Box::Action::"http:upgrade", resource)
+            when temporal {{
+              exists (n: Long). (
+                (count for (t: Timepoint). where (
+                  formerly within 3600s (
+                    Box::Action::"http:upgrade"::response{{ input.host: "echo.example.com" }} && tp(t)
+                  )
+                )) == n
+                && n >= 2
+              )
+            }};"#
+        ));
+        for (accepted_bytes, status) in [(120, 101), (120, 401)] {
+            fixture
+                .intercept(&handshake(Some("websocket")))
+                .expect("an upgrade under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Replied {
+                    accepted_bytes,
+                    status,
+                })
+                .expect("the delivered handshake records its response leg");
+        }
+        let reason = fixture
+            .intercept(&handshake(Some("websocket")))
+            .err()
+            .expect("two delivered handshakes arm the cap")
+            .to_string();
+        assert!(reason.starts_with("http:upgrade gate: "), "{reason}");
+        fixture
+            .intercept(&handshake(None))
+            .expect("the cap counts upgrades, not requests")
+            .mark_indeterminate();
+    }
+
+    /// A handshake that provably never left records no `http:upgrade::response`, as an MCP call
+    /// does not.
+    #[test]
+    fn a_handshake_that_failed_to_deliver_records_no_upgrade_response_leg() {
+        let fixture = interceptor(&format!(
+            r#"{UPGRADE_PERMITS}
+            forbid(principal, action == Box::Action::"http:upgrade", resource)
+            when temporal {{
+              formerly within 3600s (
+                Box::Action::"http:upgrade"::response{{ input.protocol: "websocket" }}
+              )
+            }};"#
+        ));
+        fixture
+            .intercept(&handshake(Some("websocket")))
+            .expect("the first upgrade is admitted")
+            .record_outcome(EgressEffectOutcome::Failed {
+                accepted_bytes: 0,
+                error_kind: std::io::ErrorKind::ConnectionReset,
+            })
+            .expect("a failed delivery records no response leg");
+        fixture
+            .intercept(&handshake(Some("websocket")))
+            .expect("no response leg is in history")
+            .record_outcome(EgressEffectOutcome::Indeterminate { accepted_bytes: 8 })
+            .expect("an uncertain delivery records a response leg");
+        assert!(
+            fixture.intercept(&handshake(Some("websocket"))).is_err(),
+            "an uncertain delivery counts, exactly as on the mcp:call leg"
         );
     }
 }

@@ -7,11 +7,12 @@ secret never enters a box.
 
 | The gateway | What it does |
 |---|---|
-| Decides | `net:connect` for each destination, before DNS and again for each address it dials. `http:request` for each request. `mcp:call` for each request to an http MCP server. |
+| Decides | `net:connect` for each destination, before DNS and again for each address it dials. `http:request` for each request. `http:upgrade` for each WebSocket handshake. `mcp:call` for each request to an http MCP server. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
-[How Box runs MCP servers](./mcp.md) covers `mcp:call`.
+[How Box runs MCP servers](./mcp.md) covers `mcp:call`, and [how a WebSocket passes through the
+gateway](#how-a-websocket-passes-through-the-gateway) covers `http:upgrade`.
 
 ## How traffic reaches the gateway
 
@@ -127,7 +128,10 @@ encoded, removes `.` and `..` segments, and leaves out the query.
 
 **The gateway opens TLS to the server last.** Only after `http:request` permits does it connect TLS
 to the server, verify the server's certificate against a compiled-in set of public root
-certificates, and forward the request. Each connection carries one request.
+certificates, and forward the request. Each connection carries one request. When that request is a
+WebSocket handshake and the server accepts it, the connection then carries the WebSocket until it
+closes ([how a WebSocket passes through the
+gateway](#how-a-websocket-passes-through-the-gateway)).
 
 **A refusal is marked.** A request the gateway refuses gets a 403 with the header
 `x-strands-box-egress: refused`, and a body that says why. A `net:connect` refusal of a `CONNECT`
@@ -140,6 +144,120 @@ MCP server gets a JSON-RPC error body.
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames
 `metadata.google.internal` and `metadata.azure.internal`, and one for the metadata addresses
 `169.254.*`, `fd00:ec2::254`, and the IPv6 link-local range.
+
+## How a WebSocket passes through the gateway
+
+A WebSocket starts as one HTTP `GET` that asks the server to switch protocols, and the gateway
+decides that request like any other. Once the server agrees with `101 Switching Protocols`, the
+same connection carries WebSocket frames, and the gateway stays in the middle: it reads each frame
+the workload or the server sends, and writes its own. This happens only on the TLS path, inside a
+`CONNECT`.
+
+```mermaid
+sequenceDiagram
+    participant W as Workload
+    participant G as Egress gateway
+    participant P as Policy engine
+    participant S as Server
+    Note over W,G: CONNECT, net:connect, and TLS, as for any HTTPS request
+    W->>G: GET with Upgrade: websocket
+    G->>G: Check the handshake, and add the route's credential
+    G->>P: http:request
+    P-->>G: permit
+    G->>P: http:upgrade
+    P-->>G: permit
+    G->>S: The handshake, with no extension offered
+    S-->>G: 101 with Sec-WebSocket-Accept
+    G-->>W: 101, after the response scrub
+    loop Until a close, the end of either stream, or the idle limit
+        W->>G: Frames
+        G->>S: Each message in the client's fragment size, masked again
+        S-->>G: Frames
+        G-->>W: Each message in the server's fragment size, scrubbed when credentialed
+    end
+```
+
+### The handshake
+
+**The gateway recognizes a handshake before it removes the hop-by-hop fields.** A request is a
+WebSocket handshake when it's an HTTP/1.1 `GET` with no body, `Upgrade: websocket`, a `Connection`
+field that names `upgrade`, `Sec-WebSocket-Version: 13`, and a `Sec-WebSocket-Key` that decodes to
+16 bytes. A request that asks for `websocket` and fails one of those checks gets a 400. Any other
+`Upgrade` token, such as `h2c`, is removed as before, and the request goes on as plain HTTP/1.1.
+
+**Two refusals come before policy.** The gateway refuses a handshake to the host of a configured
+http MCP server, because its frames would cross with no `mcp:call` decision. It also refuses a
+handshake on the plain-HTTP path, because the gateway relays a WebSocket only between two TLS
+connections. Each refusal is a 403, and no request reaches the server.
+
+**Policy decides the handshake twice.** `http:request` sees it as a `GET` with no body. When
+`http:request` permits, the gateway raises `http:upgrade` on the same host, port, and path, with
+`protocol` set to `websocket`. A deny at either gate wins. `http:upgrade` is default-deny, so a
+policy written before WebSocket support admits no WebSocket ([a WebSocket upgrade passes a second
+gate](decisions.md#a-websocket-upgrade-passes-a-second-gate)).
+
+**The route acts on the handshake as on any request.** Before a route or policy reads the head, the
+gateway removes `Sec-WebSocket-Extensions`, so the client can't negotiate compression or any other
+extension ([the gateway reads every WebSocket frame and negotiates no
+extension](decisions.md#the-gateway-reads-every-websocket-frame-and-negotiates-no-extension)). A
+signed route signs the head as it stands, `Sec-WebSocket-Key` and the other WebSocket fields
+included. The gateway adds `Upgrade: websocket` and `Connection: Upgrade` back only when it writes
+the request out, after the route has run, so a signature never covers a hop-by-hop field.
+
+**The gateway accepts a `101` only when it answers the handshake it forwarded.**
+`Sec-WebSocket-Accept` must be the value RFC 6455 derives from the key, the response must name no
+extension, and a subprotocol must be one the client offered. Any other `101` gets a 502. A `101` to
+a request that wasn't a handshake is refused, as it always was. Any other status, such as `401`, is
+an ordinary response. An accepted `101` goes through the same response scrub and release as every
+response, and the `http:request` history records it as the reply, with status `101`.
+
+### The relay
+
+**The gateway reads every frame.** After the `101`, it keeps both TLS connections and decodes the
+frames in each direction. It checks each one against RFC 6455: a client frame is masked and a server
+frame isn't, the reserved bits are clear, the opcode is one the RFC defines, a control frame is
+unfragmented and at most 125 bytes, and a continuation belongs to an open message. A frame that
+fails a check closes the connection, with 1002 to the side that sent it, or 1007 for text that
+isn't UTF-8. The other side gets 1001 when the workload sent the frame, and 1014 when the server
+did, so a client library such as Python `websockets` reports the lost server message as an error
+rather than a clean close.
+
+**Each message is reassembled, then sent on in its sender's fragment size.** The gateway holds a
+message until its last fragment arrives, up to the response body limit, 16 MiB by default. A larger
+message closes the connection, with 1009 to its sender. It then writes the message in fragments the
+size of the largest fragment the sender used, but at least 1 KiB, or in one frame when the sender
+sent one, so a server that limits its frame size, such as AgentCore Runtime at 64 KB, gets fragments
+the client sized for it. Control frames pass at once, even between the fragments of a message.
+Toward the server, the gateway masks each frame with a fresh random key, and toward the workload it
+sends frames unmasked ([a WebSocket message is reassembled, re-framed, re-masked, and
+scrubbed](decisions.md#a-websocket-message-is-reassembled-re-framed-re-masked-and-scrubbed)).
+
+**Server messages are scrubbed when the handshake carried a credential.** Each server message
+passes through the same response scrub as an HTTP body, so a copy of an `env://` secret arrives at
+the workload as `[REDACTED]`. A ping or pong that carries the secret loses its payload, and a close
+frame keeps only its code. The scrub reads one message at a time, so a secret that the server
+splits across two messages reaches the workload in two parts. The route doesn't act on client
+messages, so a placeholder inside one reaches the server as the placeholder.
+
+**The connection ends when it goes idle.** After the `101`, the upstream deadline that bounds an
+HTTP exchange becomes an idle limit, 300 seconds by default. When no bytes move in either direction
+for that long, both sides get close 1001. There's no total limit, so a WebSocket that keeps
+traffic moving, pings included, stays open ([a WebSocket ends on idle and has no lifetime
+limit](decisions.md#a-websocket-ends-on-idle-and-has-no-lifetime-limit)).
+
+**One WebSocket holds one connection slot.** The relay runs on the connection's own thread and
+keeps the connection's slot until it closes, so each open WebSocket counts against the gateway's
+256 concurrent connections. When the queue for one side holds more than 256 KiB, the gateway stops
+reading the other side until the queue drains, so a queue holds at most 256 KiB plus one whole
+message.
+
+**Policy decides no message.** The `http:upgrade` permit admits the whole connection, and no
+message reaches the policy engine or its history. A rule that reads history, such as a budget or a
+rule that closes egress after a secret read, therefore stops new requests and WebSockets and leaves
+an open WebSocket running ([policy decides the WebSocket handshake and no
+message](decisions.md#policy-decides-the-websocket-handshake-and-no-message)). A close the gateway
+makes, for a protocol fault, an oversized message, or a refused server message, reaches the decision
+log as a deny with its reason. A clean close, the session length, and the byte counts do not.
 
 ## How credentials are added
 
@@ -239,6 +357,8 @@ If `net:connect` refuses the host at step 2, `curl` gets the 403 in reply to its
 - [How Box keeps credentials out of the box](./credentials.md): the vault, the placeholder swap,
   signed routes, and credentials for a tool or a local MCP server.
 - [How Box runs MCP servers](./mcp.md): the `mcp:call` decision for an http MCP server.
+- [WebSocket](../user/egress.md#websocket): the policy a WebSocket needs, its limits, and its
+  errors.
 - [How Box contains a process](./containment.md): the two kinds of enforcement, and native
   egress.
 - [Policy](./policy.md): how the engine decides each request.

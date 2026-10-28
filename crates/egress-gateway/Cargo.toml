@@ -22,6 +22,7 @@ tls-intercept = [
     "dep:webpki-roots",
     "dep:ring",
     "dep:rcgen",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -64,6 +65,8 @@ webpki-roots = { version = "1", optional = true }
 ring = { version = "0.17", optional = true }
 # X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
+# poll(2) over the two sockets of an upgraded WebSocket connection.
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # The full-interception E2E stands up a real TLS upstream and a real TLS workload client (both

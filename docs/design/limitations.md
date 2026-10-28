@@ -51,7 +51,7 @@ Keep filesystem permits to the paths the task needs.
 
 ## How access choices change the risk
 
-Seven configuration choices widen what a program can reach without a policy decision for each
+Eight configuration choices widen what a program can reach without a policy decision for each
 access. Review each one before you run:
 
 | Choice | Why you'd make it | What it allows |
@@ -62,6 +62,7 @@ access. Review each one before you run:
 | A tool, on macOS | Let a compiler or version control tool run its helpers. | Its sandbox runs any helper, loads code from its writable grants, and sees which paths exist across the home ([a tool's sandbox](containment.md#a-tools-leaf-box)). |
 | The same path under `exec` and `write` | Let a build run what it compiles. | Box warns and starts anyway, so the workload can replace that program ([write plus execute warns](decisions.md#write-plus-execute-warns-and-does-not-refuse)). |
 | A program with no tool table | Run a program under one of the agent's `exec` entries. | It gets the agent's grants plus the wider reach of a tool's sandbox, and the startup report doesn't show the wider part. |
+| An `http:upgrade` permit | Let a client use a WebSocket API. | Each message after the handshake crosses with no policy decision, for as long as the WebSocket stays open, and a history rule that starts to match later, such as a budget or a rule that closes egress after a secret read, doesn't close it. A placeholder inside a message reaches the server as the placeholder ([policy decides the WebSocket handshake and no message](decisions.md#policy-decides-the-websocket-handshake-and-no-message)). |
 | `contain_egress = false` on a local MCP server or a tool | Support a client that can't use the gateway. | Its traffic bypasses the gateway and its policy checks. Its filesystem restrictions still apply. A tool's arguments come from the agent, so a native tool is direct egress the agent can aim ([native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape)). |
 
 ## Protections Box doesn't provide

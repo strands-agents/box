@@ -37,6 +37,12 @@ The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and retur
 `record_outcome` and `mark_indeterminate` consume `self: Box<Self>`, and `ClaimedEffectPermit`'s
 `Drop` calls `mark_indeterminate`, so one permit makes one terminal transition even on a panic.
 
+`EffectAttempt::HttpRequest` carries `intercepted`, `mcp`, and `upgrade` beside the routing fields.
+`upgrade` is `Some("websocket")` for a validated WebSocket handshake on the TLS path and `None` for
+every other request. The policy adapter decides `http:upgrade` on it after `http:request`, so never
+drop it from a handshake: an `http:request` permit alone would then open the WebSocket. A WebSocket
+message presents no attempt.
+
 ### One thing here is deliberately not authorization
 
 The gateway holds no destination deny list. A metadata or link-local address is refused by a policy
@@ -68,6 +74,81 @@ The gateway holds no destination deny list. A metadata or link-local address is 
   [no connection is opaque](../../docs/design/decisions.md#no-connection-is-opaque-to-the-boundary).
   Do not re-add a visibility gate.
 - The dependency direction stays `egress-gateway -> credentials`.
+
+## WebSocket relay
+
+`intercept/mitm/websocket.rs` holds the handshake checks (`classify`, `check_switching_protocols`)
+and the relay; `intercept/mitm/websocket/frame.rs` holds the RFC 6455 frame codec. Both are private,
+so the façade does not move. The relay exists on the TLS path only.
+
+- Classify the handshake in `http1::read_request` before `strip_hop_by_hop_headers`, and remove
+  `Sec-WebSocket-Extensions` and `Content-Length` there, before any capability or signer reads the
+  head. A negotiated extension such as `permessage-deflate` makes a message unreadable to the scrub.
+- Re-add `Upgrade: websocket` and `Connection: Upgrade` only in `http1::write_request`
+  (`Hop::WebSocket`), after the request leg ran. The SigV4 signer signs every header it is handed,
+  and a signature that covers `Connection` gets 403 from an AWS front door (measured against an
+  AgentCore Runtime `/ws` endpoint; a signed `upgrade` or `sec-websocket-version` is accepted).
+- Refuse a handshake to a configured remote MCP host, and a handshake on the plain-HTTP path, in
+  `run_l7_legs` before the request leg. Frames to an MCP host would cross with no `mcp:call`.
+- Accept a `101` only through `check_switching_protocols`, against the `Expected` built from the
+  headers as forwarded. A `101` to a request that was not a handshake stays refused.
+- Run the relay on the connection's own thread, single-threaded over `poll(2)`, and drive both
+  rustls connections by hand. Two blocking threads that share one TLS connection deadlock under
+  two-way backpressure. The connection's limiter permit stays held for the WebSocket's life.
+- Carry the plaintext each side sent past its head into the relay: the client and upstream
+  `buffer()` and what rustls holds. Losing it drops the first message, which a server that greets
+  at once (echo.websocket.org) shows.
+- Take the raw stream out of `Bounded` after the `101`. `upstream_read_deadline` is the idle limit
+  there, with no total limit.
+- Stop reading one side while the other side's queue holds more than `PENDING_LIMIT` (256 KiB).
+  It gates reading and does not cap the queue: one whole message, up to `max_body_bytes`, is queued
+  past it. Poll with a zero timeout while held-back input can move: without it, a burst test failed
+  5 runs in 8 because the relay waited the whole idle limit with work pending.
+- Free an emptied outbox or decoder buffer above `frame::KEEP_CAPACITY` (1 MiB), because a
+  WebSocket has no lifetime limit and would hold its largest message's allocation while it idles.
+- Set `TCP_NODELAY` on both relay sockets (`prepare_socket`), as WebSocket stacks do; small frames
+  otherwise wait on Nagle on the upstream leg.
+- Decode fail closed: masking by direction, clear RSV bits, known opcodes, unfragmented control
+  frames of at most 125 bytes, a 64-bit length with its high bit clear, fragment order, UTF-8 after
+  reassembly, and a valid close payload. Check a message's size from the frame header, before its
+  payload arrives. Check fragment order from the header too. Close the violator with 1002 (1007 for
+  UTF-8). Close the peer with 1001 when the workload broke the rule, and the workload with 1014
+  when the upstream did: Python `websockets` reads 1001 as a clean close, so a dropped server
+  message would end the workload's read loop with no error.
+- Send a message on in fragments no larger than the largest fragment its sender used
+  (`Event::Message::fragment`), or in one frame when it came in one. AgentCore Runtime caps a frame
+  at 64 KB and API Gateway at 32 KB, and each closes 1009 on a whole message a client split to fit
+  (`a_fragmented_message_reaches_a_frame_limited_server_in_fragments`). Keep the `MIN_FRAGMENT`
+  (1 KiB) floor: without it, a message sent in one-byte fragments goes out at about seven times
+  `max_body_bytes`, with one random fill per byte
+  (`a_message_in_tiny_fragments_goes_on_in_one_kib_fragments`).
+- Mask every frame toward the upstream with a fresh `SystemRandom` key, and never forward the
+  workload's key.
+- When the request leg applied a mutation (`RequestDecision::Forward { credentialed }`), run each
+  upstream message through `response_leg`. Cut a control frame that carried the secret instead of
+  replacing the secret, because `[REDACTED]` can push it past 125 bytes. A `Block` closes the
+  upstream with 1008 and the workload with 1014; no shipped control blocks a message, because
+  `redact` hands the response leg no headers, so no test reaches it.
+- Residual: the scrub reads one event at a time, so a secret the upstream splits across two
+  messages, or across a message and a control frame, reaches the workload in parts. Pinned by
+  `tests/websocket_e2e.rs::a_secret_split_across_two_server_messages_is_not_redacted`.
+- Never put payload bytes in an audit reason, an error, or a `Debug` output. `frame::Event`'s
+  `Debug` prints the kind and the length only.
+- Keep the linger: shut down both write halves and drain for up to `LINGER` (2 s). Closing a socket
+  that still holds unread bytes sends a TCP reset, and the close frame (the 1009 case) is lost.
+- A placeholder inside a message is not swapped; a route acts on the handshake only. Do not add a
+  swap without a design decision.
+- A close the gateway makes after the `101`, and a refused `101`, push a `NetworkAuditEvent` deny and
+  emit a deny `EgressDecision` with the same secret-free reason, through `l7::emit_decision`. The box
+  reads only the decision, because it never drains the audit log. Pinned by
+  `websocket_e2e.rs::a_relay_refusal_is_emitted_as_a_deny_decision` and
+  `a_refused_101_is_emitted_as_a_deny_decision`.
+- Residual: a clean close emits nothing, so no record holds a WebSocket's end, duration, or byte
+  count. A record for that is a new record shape.
+- Residual: policy decides the handshake only, so a temporal rule that starts to match after the
+  `101` leaves the WebSocket open. Pinned by `policy/tests/websocket_policy_e2e.rs`
+  (`an_open_websocket_outlives_a_temporal_forbid_that_arms_after_its_handshake`,
+  `a_byte_budget_counts_no_websocket_message`).
 
 ## Internal Ownership
 

@@ -181,6 +181,15 @@ type NetworkResponseOutput = {
   status: Long
 };
 
+// The protocol upgrade input. `host`, `port`, and `path` are the values `http:request`
+// saw for the same handshake. `protocol` is the requested protocol, in lowercase.
+type NetworkUpgradeInput = {
+  host: String,
+  port: Long,
+  path: String,
+  protocol: String
+};
+
 // The L4 connect, raised once per pinned address. Holds even against an agent that
 // links its own TLS.
 action "net:connect" appliesTo {
@@ -196,6 +205,16 @@ action "http:request" appliesTo {
   principal: Agent,
   resource: Resource,
   context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
+};
+
+// The protocol upgrade decision, a second gate after `http:request` permits the
+// handshake. A permit on `http:request` alone never opens an upgrade:
+//
+//   permit … when { context.input.host == "echo.example.com" && context.input.protocol == "websocket" };
+action "http:upgrade" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: NetworkUpgradeInput }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
