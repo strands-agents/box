@@ -65,8 +65,9 @@ webpki-roots = { version = "1", optional = true }
 ring = { version = "0.17", optional = true }
 # X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
-# The gateway's own multi-thread runtime: the accept loop, the connection slots, and the stop signal.
-tokio = { version = "1", optional = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# The gateway's own multi-thread runtime: the accept loop, the connection slots, the stop signal,
+# and the first head of each connection.
+tokio = { version = "1", optional = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 # The full-interception E2E stands up a real TLS upstream and a real TLS workload client (both
