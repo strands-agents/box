@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import target_validation as target
 
@@ -41,9 +41,10 @@ class TargetEvidenceTests(unittest.TestCase):
             "os.execv(command[0], command)\n")
         row = runner.file_effects()
         self.assertFalse(row["pass"])
-        self.assertTrue(row["checks"]["uncontained_control"])
-        self.assertTrue(row["checks"]["allowed_write"])
-        self.assertFalse(row["checks"]["completed"])
+        self.assertEqual(row["checks"], {
+            "completed": False, "allowed_write": True, "readonly_unchanged": True,
+            "private_unchanged": True, "uncontained_control": True,
+        })
 
     def test_timeout_with_a_successful_exit_and_marker_still_fails(self):
         runner = self.shim("raise SystemExit(0)\n")
@@ -74,14 +75,46 @@ class TargetEvidenceTests(unittest.TestCase):
 
     def test_only_specific_native_setup_refusal_is_evidence(self):
         marker = self.root / "entered"
-        row = {"exit_code": 1, "stdout": "", "stderr": target.REFUSALS[0], "timed_out": False}
+        row = {"exit_code": 1, "stdout": "", "stderr": target.REFUSALS[0],
+               "timed_out": False, "workload_entered": False}
         self.assertTrue(target.refused(row, marker))
         for replacement in ({"exit_code": 0}, {"timed_out": True},
-                            {"stdout": "WORKLOAD_ENTERED"}, {"stderr": "usage error"}):
+                            {"stdout": "WORKLOAD_ENTERED"}, {"workload_entered": True},
+                            {"stderr": "usage error"}):
             with self.subTest(replacement=replacement):
                 self.assertFalse(target.refused({**row, **replacement}, marker))
         marker.write_text("entered")
         self.assertFalse(target.refused(row, marker))
+
+    def test_cleanup_timeout_retains_failure_logs(self):
+        runner = self.shim("raise SystemExit(0)\n")
+        root = runner.config("wedged", ["/usr/bin/bash", "-c", "exit 0"])
+        (root / "stdout").write_text("partial output")
+        (root / "stderr").write_text("diagnostic")
+        child = Mock(returncode=None)
+        child.poll.return_value = None
+        child.wait.side_effect = subprocess.TimeoutExpired("box", 5)
+        with patch.object(runner, "launch", return_value=child), \
+             patch.object(target, "cleanup", return_value=[]):
+            row = runner.run(root)
+        self.assertTrue(row["timed_out"])
+        self.assertTrue(row["kill_timed_out"])
+        self.assertEqual(row["stdout"], "partial output")
+        self.assertEqual(row["stderr"], "diagnostic")
+        self.assertFalse(target.succeeded(row))
+        child.kill.assert_called_once()
+
+    def test_native_entry_cannot_hide_outside_the_log_tail(self):
+        runner = self.shim("raise SystemExit(0)\n")
+        for offset in (0, 65530):
+            with self.subTest(offset=offset):
+                (self.root / "stdout").write_text("x" * offset + "WORKLOAD_ENTERED" + "y" * 40000)
+                (self.root / "stderr").write_text(target.REFUSALS[0])
+                row = runner.result(self.root, Mock(returncode=1))
+                self.assertNotIn("WORKLOAD_ENTERED", row["stdout"])
+                self.assertEqual(len(row["stdout"]), 24000)
+                self.assertTrue(row["workload_entered"])
+                self.assertFalse(target.refused(row, self.root / "missing-marker"))
 
     def test_missing_heartbeat_is_not_stopped_write_evidence(self):
         with patch.object(target.time, "sleep"), patch.object(target, "living", return_value=[]):

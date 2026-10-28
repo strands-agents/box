@@ -110,12 +110,13 @@ def stopped(root):
 
 def succeeded(result):
     return (result["exit_code"] == 0 and not result["timed_out"]
-            and not result["test_owned_cleanup"])
+            and not result["test_owned_cleanup"] and not result.get("kill_timed_out", False))
 
 
 def refused(result, marker):
     return (result["exit_code"] not in (None, 0) and not result["timed_out"]
-            and not marker.exists() and "WORKLOAD_ENTERED" not in result["stdout"]
+            and not marker.exists() and not result["workload_entered"]
+            and "WORKLOAD_ENTERED" not in result["stdout"]
             and any(message in result["stderr"] for message in REFUSALS))
 
 
@@ -176,16 +177,22 @@ class Target:
             )
 
     def result(self, root, child, timed_out=False):
-        result = {"exit_code": child.returncode, "timed_out": timed_out}
+        result = {"exit_code": child.returncode, "timed_out": timed_out, "workload_entered": False}
         for name in ("stdout", "stderr"):
+            tail = b""
             with (root / name).open("rb") as source:
-                source.seek(max(0, source.seek(0, 2) - 24000))
-                result[name] = source.read().decode(errors="replace")
+                for chunk in iter(lambda: source.read(65536), b""):
+                    window = tail + chunk
+                    if name == "stdout" and b"WORKLOAD_ENTERED" in window:
+                        result["workload_entered"] = True
+                    tail = window[-24000:]
+            result[name] = tail.decode(errors="replace")
         return result
 
     def run(self, root):
         child = self.launch(root)
         timed_out = False
+        kill_timed_out = False
         try:
             child.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -194,8 +201,12 @@ class Target:
             survivors = cleanup(root)
             if child.poll() is None:
                 child.kill()
-            child.wait(timeout=5)
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill_timed_out = True
         result = self.result(root, child, timed_out)
+        result["kill_timed_out"] = kill_timed_out
         result["test_owned_cleanup"] = survivors
         return result
 
