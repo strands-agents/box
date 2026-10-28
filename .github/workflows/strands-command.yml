@@ -90,7 +90,7 @@ jobs:
       # from the pull request head, so a pull request cannot rewrite the prompt
       # that reviews it.
       - name: Check out the reviewer prompt
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: trusted-prompt
