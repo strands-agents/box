@@ -423,25 +423,32 @@ impl Session {
                     )))
                 }
             }
+            Err(error) if error.is_parse() && requested => {
+                // hyper answered a head after a served request itself. That head opened no
+                // upstream socket and reached no decision, so the connection ends as a wait ends,
+                // with no audit line and no record: also when the head came in one read with the
+                // request before it, and the connection never waited.
+                let _ = parts.io.into_inner().shutdown().await;
+                Ok(())
+            }
             Err(error) if error.is_parse() => {
-                // hyper answered the head itself. The request never reached a decision. On a
-                // tunnel that served no request, the record names the connection that the gateway
-                // decided and opened; a later head opened no upstream socket, so it records nothing.
+                // hyper answered the first head itself. The request never reached a decision. On a
+                // tunnel, the record names the connection that the gateway decided and opened.
                 let error =
                     ProxyError::Intercept(format!("parsing request: {}", error_text(&error)));
-                match &self.route {
-                    Route::Tunnel {
-                        connect,
-                        correlation,
-                        ..
-                    } if !requested => off_worker(|| {
+                if let Route::Tunnel {
+                    connect,
+                    correlation,
+                    ..
+                } = &self.route
+                {
+                    off_worker(|| {
                         record_request_failure(
                             &self.state,
                             &Subject::connection(connect, correlation),
                             &error,
                         );
-                    }),
-                    Route::Tunnel { .. } | Route::Plain => {}
+                    });
                 }
                 Err(error)
             }
@@ -1261,9 +1268,16 @@ fn request_outcome(sent: Writes, status: Option<u16>) -> EffectOutcome {
     }
 }
 
-/// The outcome of the release permit, from what the client stream accepted since the claim.
+/// The outcome of the release permit, from what the client stream accepted since the claim. A
+/// reply that left whole counts up to the flush that ended it, so a reply that hyper wrote after
+/// it, such as its `400` to a later head, is not part of it.
 fn release_outcome(written: Writes, start: usize, delivered: bool) -> EffectOutcome {
-    let accepted_bytes = written.accepted.saturating_sub(start);
+    let end = if written.flushed {
+        written.message_end
+    } else {
+        written.accepted
+    };
+    let accepted_bytes = end.saturating_sub(start);
     if delivered {
         EffectOutcome::Completed(accepted_bytes)
     } else if written.flush_error {
@@ -1304,6 +1318,8 @@ pub(super) struct Writes {
     pub(super) flush_error: bool,
     /// The bytes that the stream had accepted when its current message started.
     pub(super) message_start: usize,
+    /// The bytes that the stream had accepted when its current message left whole.
+    pub(super) message_end: usize,
 }
 
 /// The write count of one stream, shared by the stream and the exchange.
@@ -1344,7 +1360,10 @@ impl WriteCount {
         self.0.send_if_modified(|writes| {
             let left =
                 writes.body_taken && writes.accepted > writes.message_start && !writes.flushed;
-            writes.flushed |= left;
+            if left {
+                writes.flushed = true;
+                writes.message_end = writes.accepted;
+            }
             left
         });
     }
@@ -1512,14 +1531,28 @@ mod tests {
         }
     }
 
-    /// **The release counts only the bytes after its claim**, so an interim `100 Continue` that
-    /// hyper wrote first is not part of the reply.
+    /// **The release counts only the bytes after its claim and up to the flush that ended it**, so
+    /// an interim `100 Continue` that hyper wrote first, and hyper's own reply to a later head, are
+    /// not part of the reply.
     #[test]
     fn the_release_counts_only_reply_bytes() {
         let written = writes(125, false, false);
         assert_eq!(
             release_outcome(written, 25, true),
             EffectOutcome::Completed(100)
+        );
+        // hyper's own reply to a later head follows the flush that ended the reply.
+        let count = WriteCount::new();
+        count.accepted(25);
+        count.begin_message();
+        count.body_taken();
+        count.accepted(40);
+        count.flushed();
+        count.accepted(30);
+        count.flushed();
+        assert_eq!(
+            release_outcome(count.snapshot(), 25, true),
+            EffectOutcome::Completed(40)
         );
         let cut = Writes {
             accepted: 60,

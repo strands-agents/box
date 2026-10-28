@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egress_gateway::{
-    CapabilitySet, EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, MitmConfig,
-    MitmHandle, MitmInterceptor, PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, StubEmitter,
+    AuditDecision, CapabilitySet, EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit,
+    MitmConfig, MitmHandle, MitmInterceptor, PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, StubEmitter,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -452,6 +452,76 @@ fn a_malformed_pipelined_request_does_not_cancel_the_one_before_it() {
     assert!(client.reads_end_within(END_WAIT));
     assert_eq!(log.of_kind("Resolve").len(), 1, "{:#?}", log.attempts());
     assert_eq!(log.of_kind("HttpRequest").len(), 1, "{:#?}", log.attempts());
+}
+
+/// Assert that the end of a connection left no denial in the audit log, and that the release of
+/// its last reply counted the bytes of that reply only.
+fn assert_quiet_end(handle: &MitmHandle, log: &Log, case: &str) {
+    // The connection task pushes its audit line after the end of the connection.
+    std::thread::sleep(Duration::from_millis(200));
+    let denials: Vec<String> = handle
+        .drain_audit_events()
+        .into_iter()
+        .filter(|event| event.decision == AuditDecision::Deny)
+        .map(|event| event.reason)
+        .collect();
+    assert!(denials.is_empty(), "{case}: {denials:?}");
+    let outcomes = log.outcomes();
+    assert_eq!(
+        outcomes.last(),
+        Some(&format!("Completed({})", OK.len())),
+        "{case}: the release counts its own reply: {outcomes:#?}"
+    );
+}
+
+/// **A later head that hyper refuses ends the connection quietly, however it arrives**: in one
+/// write with the request before it, or in its own write after the reply. The earlier reply
+/// arrives whole, then hyper's `400`, then the end. No audit line is a denial, and the release of
+/// the earlier reply does not count the `400`.
+#[test]
+fn a_later_head_that_hyper_refuses_ends_quietly_however_it_arrives() {
+    const BAD: &[u8] = b"NOT A REQUEST\r\n\r\n";
+    let host = "later.test";
+    let upstream = TlsUpstream::start_with_response(host, OK);
+    let origin = PlainOrigin::start(OK.to_vec());
+    let addr = origin.addr;
+    for own_write in [false, true] {
+        let case = format!("tunnel, own write {own_write}");
+        let log = Log::permit_all();
+        let (handle, _) = gateway(&[&upstream], &[host], &log, |_| {});
+        let mut client = WorkloadClient::connect(port(&handle), host, upstream.port());
+        let first = get(host, upstream.port(), "/ok");
+        if own_write {
+            client.send_raw(first.as_bytes());
+            assert_eq!(client.read_response().as_bytes(), OK, "{case}");
+            client.send_raw(BAD);
+        } else {
+            client.send_raw(&[first.as_bytes(), BAD].concat());
+            assert_eq!(client.read_response().as_bytes(), OK, "{case}");
+        }
+        let refusal = client.read_response();
+        assert!(refusal.starts_with("HTTP/1.1 400 "), "{case}: {refusal}");
+        assert!(client.reads_end_within(END_WAIT), "{case}");
+        assert_quiet_end(&handle, &log, &case);
+
+        let case = format!("plain, own write {own_write}");
+        let log = Log::permit_all();
+        let (handle, _) = gateway(&[], &[], &log, |_| {});
+        let mut client = plain_client(&handle);
+        let first = format!("GET http://{addr}/ok HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        if own_write {
+            client.write_all(first.as_bytes()).unwrap();
+            assert_eq!(read_reply(&mut client).as_bytes(), OK, "{case}");
+            client.write_all(BAD).unwrap();
+        } else {
+            client.write_all(&[first.as_bytes(), BAD].concat()).unwrap();
+            assert_eq!(read_reply(&mut client).as_bytes(), OK, "{case}");
+        }
+        let refusal = read_reply(&mut client);
+        assert!(refusal.starts_with("HTTP/1.1 400 "), "{case}: {refusal}");
+        assert!(plain_reads_end(&mut client), "{case}");
+        assert_quiet_end(&handle, &log, &case);
+    }
 }
 
 /// **An idle pause between two requests does not count on the upstream clock**: each request has
