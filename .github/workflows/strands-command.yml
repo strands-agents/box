@@ -85,6 +85,29 @@ jobs:
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
+      # The reviewer prompt comes from the commit this workflow runs from (the
+      # default branch for a comment, the dispatched ref for a dispatch), never
+      # from the pull request head, so a pull request cannot rewrite the prompt
+      # that reviews it.
+      - name: Check out the reviewer prompt
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-prompt
+          persist-credentials: false
+          sparse-checkout: .github/strands/reviewer-system-prompt.md
+          sparse-checkout-cone-mode: false
+
+      - name: Read the reviewer prompt
+        id: prompt
+        run: |
+          delimiter="PROMPT_$(openssl rand -hex 16)"
+          {
+            echo "suffix<<$delimiter"
+            cat trusted-prompt/.github/strands/reviewer-system-prompt.md
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Parse input
         id: parse
         uses: strands-agents/devtools/strands-command/actions/strands-input-parser@main
@@ -92,6 +115,9 @@ jobs:
           issue_id: ${{ inputs.issue_id }}
           command: ${{ inputs.command }}
           session_id: ${{ inputs.session_id }}
+          # Appended to the system prompt of every mode; the file itself limits
+          # its instructions to the reviewer.
+          system_prompt_suffix: ${{ steps.prompt.outputs.suffix }}
           # Auto-review supplies the event SHA via inputs.head_sha; a /strands
           # comment leaves it empty and uses the head resolved by the
           # authorization job. Either way the parser uses that commit instead of
@@ -121,6 +147,9 @@ jobs:
           aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
           sessions_bucket: ${{ secrets.AGENT_SESSIONS_BUCKET }}
           write_permission: 'false'
+          # The role in AWS_ROLE_ARN must be allowed to invoke this model.
+          model_id: global.anthropic.claude-opus-5-5
+          reasoning_effort: high
 
   finalize:
     if: always() && (startsWith(github.event.comment.body, '/strands') || github.event_name == 'workflow_dispatch')
