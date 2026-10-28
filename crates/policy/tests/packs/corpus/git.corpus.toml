@@ -1,0 +1,494 @@
+# git pack corpus
+#
+# Each case is one argv, and what the shell grammar of `../valid/git.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+# Cases marked "verified" were checked against git 2.50.
+
+[[case]]
+argv = ["git", "push", "-f", "origin", "main"]
+action = "push"
+fields = { force = true, refspec = ["main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "-uf", "origin", "main"]
+action = "push"
+fields = { force = true, refspec = ["main"], remote = "origin", set_upstream = true }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "origin", "main", "--force"]
+action = "push"
+fields = { force = true, refspec = ["main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "--force-with-lease", "origin", "main"]
+action = "push"
+fields = { force_with_lease = "", refspec = ["main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "--force-with-lease=main:abc123", "origin", "main"]
+action = "push"
+fields = { force_with_lease = "main:abc123", refspec = ["main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+# An optional value never takes the next word
+[[case]]
+argv = ["git", "push", "--force-with-lease", "origin"]
+action = "push"
+fields = { force_with_lease = "", remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "origin", "+main"]
+action = "push"
+fields = { refspec = ["+main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "origin", "+refs/heads/*:refs/heads/*"]
+action = "push"
+fields = { refspec = ["+refs/heads/*:refs/heads/*"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "-C", "app", "push", "-f", "origin", "main"]
+action = "push"
+fields = { directory = "app", force = true, refspec = ["main"], remote = "origin" }
+effects = ["force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "-n", "-f", "origin", "main"]
+action = "push"
+fields = { dry_run = true, force = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+# The same as the row above: removes win, in any order
+[[case]]
+argv = ["git", "push", "-fn", "origin", "main"]
+action = "push"
+fields = { dry_run = true, force = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "push", "origin", ":old-topic"]
+action = "push"
+fields = { refspec = [":old-topic"], remote = "origin" }
+effects = ["delete_remote_ref", "network"]
+
+[[case]]
+argv = ["git", "push", "-d", "origin", "old-topic"]
+action = "push"
+fields = { delete = true, refspec = ["old-topic"], remote = "origin" }
+effects = ["delete_remote_ref", "network"]
+
+[[case]]
+argv = ["git", "push", "--mirror", "backup"]
+action = "push"
+fields = { mirror = true, remote = "backup" }
+effects = ["delete_remote_ref", "force_push", "network"]
+
+[[case]]
+argv = ["git", "push", "--prune", "origin", "refs/heads/*:refs/heads/*"]
+action = "push"
+fields = { prune = true, refspec = ["refs/heads/*:refs/heads/*"], remote = "origin" }
+effects = ["delete_remote_ref", "network"]
+
+# `remote` is absent, so a policy that reads only `remote` misses this push
+[[case]]
+argv = ["git", "push", "--repo=upstream"]
+action = "push"
+fields = { repo = "upstream" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "push", "-o", "ci.skip", "origin"]
+action = "push"
+fields = { push_option = ["ci.skip"], remote = "origin" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "push", "--receive-pack=/tmp/x", "../local.git", "main"]
+action = "push"
+fields = { receive_pack = "/tmp/x", refspec = ["main"], remote = "../local.git" }
+effects = ["network", "run_program"]
+
+# After `--`, every word is an operand, so `-f` is a refspec and not `--force`
+[[case]]
+argv = ["git", "push", "origin", "--", "-f"]
+action = "push"
+fields = { refspec = ["-f"], remote = "origin" }
+effects = ["network"]
+
+# Git takes `--dele` as `--delete` (verified); the parser does no prefix matching
+[[case]]
+argv = ["git", "push", "--dele", "origin", "main"]
+action = "unmodeled"
+
+# The pack does not declare the negation
+[[case]]
+argv = ["git", "push", "--no-force", "origin", "main"]
+action = "unmodeled"
+
+# A flag with no value is given a value (git: "takes no value", verified)
+[[case]]
+argv = ["git", "push", "--dry-run=yes"]
+action = "unmodeled"
+
+[[case]]
+argv = ["git", "-c", "core.sshCommand=/tmp/x", "push", "origin", "main"]
+action = "push"
+fields = { config = ["core.sshCommand=/tmp/x"], refspec = ["main"], remote = "origin" }
+effects = ["network", "override_config"]
+
+# `--exec-path` not declared on purpose
+[[case]]
+argv = ["git", "--exec-path=/tmp/evil", "push"]
+action = "unmodeled"
+
+# Non-repeated value option given twice (git would cd into `a/b`)
+[[case]]
+argv = ["git", "-C", "a", "-C", "b", "status"]
+action = "unmodeled"
+
+# Git refuses `-Capp` (verified); over-acceptance is harmless
+[[case]]
+argv = ["git", "-Capp", "status"]
+action = "status"
+fields = { directory = "app" }
+
+# The value is taken before the command word
+[[case]]
+argv = ["git", "-C", "push", "status"]
+action = "status"
+fields = { directory = "push" }
+
+# The separate-word form (verified)
+[[case]]
+argv = ["git", "--git-dir", "../o/.git", "--work-tree", "../o", "log"]
+action = "log"
+fields = { git_dir = "../o/.git", work_tree = "../o" }
+
+# Global option after the subcommand (git: "unknown switch", verified)
+[[case]]
+argv = ["git", "status", "-C", "."]
+action = "unmodeled"
+
+# A value option ends the cluster and takes the next word (verified)
+[[case]]
+argv = ["git", "commit", "-am", "fix parser"]
+action = "commit"
+fields = { all = true, message = ["fix parser"] }
+
+# The value is attached to the flag
+[[case]]
+argv = ["git", "commit", "-mmsg"]
+action = "commit"
+fields = { message = ["msg"] }
+
+# The value is attached to the flag
+[[case]]
+argv = ["git", "commit", "-mmsg"]
+action = "commit"
+fields = { message = ["msg"] }
+
+# Short value option with attached `=`; git reads `=foo` (verified), clap reads `foo`
+[[case]]
+argv = ["git", "commit", "-m=foo"]
+action = "unmodeled"
+
+# A repeated option
+[[case]]
+argv = ["git", "commit", "-m", "a", "-m", "b"]
+action = "commit"
+fields = { message = ["a", "b"] }
+
+# The value is missing
+[[case]]
+argv = ["git", "commit", "-m"]
+action = "unmodeled"
+
+[[case]]
+argv = ["git", "commit", "--amend", "--no-edit"]
+action = "commit"
+fields = { amend = true, no_edit = true }
+effects = ["rewrite_history"]
+
+# For commit, `-n` is `--no-verify`
+[[case]]
+argv = ["git", "commit", "-n", "-m", "wip"]
+action = "commit"
+fields = { message = ["wip"], no_verify = true }
+effects = ["skip_hooks"]
+
+# Prefix of `--amend`; git accepts it (verified)
+[[case]]
+argv = ["git", "commit", "--amen", "--no-edit"]
+action = "unmodeled"
+
+[[case]]
+argv = ["git", "commit", "--amend", "--dry-run"]
+action = "commit"
+fields = { amend = true, dry_run = true }
+
+[[case]]
+argv = ["git", "reset", "--hard", "HEAD~1"]
+action = "reset"
+fields = { commit = "HEAD~1", hard = true }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "reset", "HEAD", "--", "src/lib.rs"]
+action = "reset"
+fields = { commit = "HEAD", pathspec = ["src/lib.rs"] }
+
+# Commit absent (`--` splits the groups)
+[[case]]
+argv = ["git", "reset", "--", "HEAD"]
+action = "reset"
+fields = { pathspec = ["HEAD"] }
+
+[[case]]
+argv = ["git", "rebase", "-i", "--autosquash", "main"]
+action = "rebase"
+fields = { autosquash = true, interactive = true, upstream = "main" }
+effects = ["rewrite_history"]
+
+[[case]]
+argv = ["git", "rebase", "-x", "cargo test", "origin/main"]
+action = "rebase"
+fields = { exec = ["cargo test"], upstream = "origin/main" }
+effects = ["rewrite_history", "run_program"]
+
+[[case]]
+argv = ["git", "rebase", "--abort"]
+action = "rebase"
+fields = { abort = true }
+
+[[case]]
+argv = ["git", "clean", "-fdx"]
+action = "clean"
+fields = { directories = true, force = true, ignored = true }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "clean", "-nfd"]
+action = "clean"
+fields = { directories = true, dry_run = true, force = true }
+
+[[case]]
+argv = ["git", "clean", "-i"]
+action = "clean"
+fields = { interactive = true }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "checkout", "--", "src/main.rs"]
+action = "checkout"
+fields = { pathspec = ["src/main.rs"] }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "checkout", "."]
+action = "checkout"
+fields = { target = "." }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "checkout", "-b", "topic", "origin/main"]
+action = "checkout"
+fields = { create = "topic", target = "origin/main" }
+
+# Known gap: git restores the file; the parser cannot tell a path from a branch
+[[case]]
+argv = ["git", "checkout", "src/main.rs"]
+action = "checkout"
+fields = { target = "src/main.rs" }
+
+# A lone `-` is an operand
+[[case]]
+argv = ["git", "checkout", "-"]
+action = "checkout"
+fields = { target = "-" }
+
+[[case]]
+argv = ["git", "switch", "-c", "feature"]
+action = "switch"
+fields = { create = "feature" }
+
+[[case]]
+argv = ["git", "switch", "-f", "main"]
+action = "switch"
+fields = { discard_changes = true, target = "main" }
+effects = ["discard_changes"]
+
+[[case]]
+argv = ["git", "status", "-sb"]
+action = "status"
+fields = { branch = true, short = true }
+
+# Optional value, attached
+[[case]]
+argv = ["git", "status", "-uno"]
+action = "status"
+fields = { untracked_files = "no" }
+
+[[case]]
+argv = ["git", "status", "-u", "no"]
+action = "status"
+fields = { pathspec = ["no"], untracked_files = "" }
+
+# The pack has no `-<n>` form
+[[case]]
+argv = ["git", "log", "-5", "--oneline"]
+action = "unmodeled"
+
+# A string: the parser does not check that the value is a number
+[[case]]
+argv = ["git", "log", "-n5", "--oneline", "main"]
+action = "log"
+fields = { max_count = "5", oneline = true, revision = ["main"] }
+
+# No `type = "long"`, so the value is not checked
+[[case]]
+argv = ["git", "log", "--max-count=many"]
+action = "log"
+fields = { max_count = "many" }
+
+[[case]]
+argv = ["git", "log", "-p", "--", "src/"]
+action = "log"
+fields = { patch = true, path = ["src/"] }
+
+[[case]]
+argv = ["git", "log", "--output=/tmp/x"]
+action = "log"
+fields = { output = "/tmp/x" }
+effects = ["write_file"]
+
+[[case]]
+argv = ["git", "diff", "--no-index", "/etc/passwd", "/dev/null"]
+action = "diff"
+fields = { commit = ["/dev/null", "/etc/passwd"], no_index = true }
+effects = ["read_outside_repo"]
+
+[[case]]
+argv = ["git", "diff", "--cached", "--", "src"]
+action = "diff"
+fields = { cached = true, path = ["src"] }
+
+[[case]]
+argv = ["git", "diff", "--ext-diff", "HEAD~1"]
+action = "diff"
+fields = { commit = ["HEAD~1"], ext_diff = true }
+effects = ["run_program"]
+
+[[case]]
+argv = ["git", "add", "-A"]
+action = "add"
+fields = { all = true }
+
+[[case]]
+argv = ["git", "add", "--", "-weird-name"]
+action = "add"
+fields = { pathspec = ["-weird-name"] }
+
+# For fetch, `-n` is not dry-run
+[[case]]
+argv = ["git", "fetch", "-n", "origin"]
+action = "fetch"
+fields = { no_tags = true, remote = "origin" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "fetch", "--upload-pack=/tmp/x", "origin"]
+action = "fetch"
+fields = { remote = "origin", upload_pack = "/tmp/x" }
+effects = ["network", "run_program"]
+
+[[case]]
+argv = ["git", "pull", "--rebase"]
+action = "pull"
+fields = { rebase = "" }
+effects = ["network", "rewrite_history"]
+
+[[case]]
+argv = ["git", "pull", "-r", "origin", "main"]
+action = "pull"
+fields = { rebase = "", refspec = ["main"], remote = "origin" }
+effects = ["network", "rewrite_history"]
+
+[[case]]
+argv = ["git", "pull", "--rebase=false", "origin", "main"]
+action = "pull"
+fields = { rebase = "false", refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "--no-pager", "-c", "color.ui=always", "log"]
+action = "log"
+fields = { config = ["color.ui=always"], no_pager = true }
+effects = ["override_config"]
+
+# An unknown subcommand
+[[case]]
+argv = ["git", "frobnicate"]
+action = "unmodeled"
+
+# A git configuration alias, which the parser cannot see
+[[case]]
+argv = ["git", "ci", "-m", "x"]
+action = "unmodeled"
+
+# No command word
+[[case]]
+argv = ["git"]
+action = "unmodeled"
+
+# No command word
+[[case]]
+argv = ["git", "--version"]
+action = "unmodeled"
+
+# `--help` not declared
+[[case]]
+argv = ["git", "push", "--help"]
+action = "unmodeled"
+
+# A global option, a cluster, and operands
+[[case]]
+argv = ["git", "-C", "app", "push", "-uf", "origin", "main"]
+action = "push"
+fields = { directory = "app", force = true, refspec = ["main"], remote = "origin", set_upstream = true }
+effects = ["force_push", "network"]
+
+# A shortened long option
+[[case]]
+argv = ["git", "push", "--forc", "origin", "main"]
+action = "unmodeled"
+
+# `--` before the operands, with no `--` in the usage
+[[case]]
+argv = ["git", "push", "--", "origin", "main"]
+action = "push"
+fields = { refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+# An optional value takes the rest of its cluster
+[[case]]
+argv = ["git", "status", "-usb"]
+action = "status"
+fields = { untracked_files = "sb" }
+
+# `--` before the command words
+[[case]]
+argv = ["git", "--", "status"]
+action = "unmodeled"
+
+# The git pack has no `[+<toolchain>]`
+[[case]]
+argv = ["git", "+stable", "status"]
+action = "unmodeled"
