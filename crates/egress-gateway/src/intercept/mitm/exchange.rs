@@ -308,7 +308,10 @@ fn canonicalize_path(
 
 /// Refuse a WebSocket handshake that the gateway does not relay, before any credential or policy
 /// sees it. For one that it relays, take a session slot, and remove the extensions and the length.
-fn screen_websocket(
+///
+/// The plain-HTTP path runs this before it dials, so a request there that names `websocket` reaches
+/// no `net:connect` decision.
+pub(super) fn screen_websocket(
     exchange: &mut Exchange<'_>,
     state: &SharedState,
 ) -> std::result::Result<(), Refusal> {

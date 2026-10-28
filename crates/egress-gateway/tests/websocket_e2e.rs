@@ -14,7 +14,7 @@ mod harness;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -839,6 +839,7 @@ fn a_post_that_asks_for_websocket_is_refused_with_400() {
     );
 }
 
+/// The refusal comes before the policy decides the connection: no `net:connect`, and no dial.
 #[test]
 fn a_plaintext_websocket_handshake_is_refused() {
     let host = "plain.ws.test";
@@ -846,8 +847,11 @@ fn a_plaintext_websocket_handshake_is_refused() {
     let port = origin.local_addr().unwrap().port();
     let heads = Arc::new(Mutex::new(Vec::new()));
     let record = heads.clone();
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dialed = dials.clone();
     std::thread::spawn(move || {
         for mut stream in origin.incoming().flatten() {
+            dialed.fetch_add(1, Ordering::SeqCst);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let head = read_head(&mut stream);
             if !head.is_empty() {
@@ -887,7 +891,12 @@ fn a_plaintext_websocket_handshake_is_refused() {
         heads.lock().unwrap().is_empty(),
         "the origin sees no request"
     );
-    assert_eq!(policy.requests(), Vec::<String>::new());
+    assert_eq!(dials.load(Ordering::SeqCst), 0, "no upstream is dialed");
+    assert_eq!(
+        policy.kinds(),
+        Vec::<&str>::new(),
+        "the policy decides nothing"
+    );
     assert!(
         denials(&handle)
             .iter()

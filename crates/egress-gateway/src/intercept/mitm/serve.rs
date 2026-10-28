@@ -37,7 +37,7 @@ use super::deadline::{CLIENT_IDLE_PASSED, Disarm, Idle, UPSTREAM_IDLE_PASSED};
 use super::exchange::{
     Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, Unfinished,
     audit_release, claim_release, decide_request, prepare_request, prepare_response,
-    record_refusal, record_request_failure, record_unfinished,
+    record_refusal, record_request_failure, record_unfinished, screen_websocket,
 };
 use super::l7::{split_target, validate_request_binding};
 use super::listener::{PROXY_AUTHENTICATION_REQUIRED, open_governed_upstream};
@@ -450,14 +450,6 @@ impl Session {
                 PROXY_AUTHENTICATION_REQUIRED,
             ));
         }
-        // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-        // `net:connect` effect — identical to the CONNECT path, in one `off_worker` call.
-        let upstream = match off_worker(|| open_governed_upstream(state, &connect, &correlation)) {
-            Ok(upstream) => upstream,
-            Err(error) => return Ok(error.response(&inbound.method, version)),
-        };
-        let upstream = TcpStream::from_std(upstream)
-            .map_err(|e| ProxyError::Io(format!("registering the upstream socket: {e}")))?;
         let mut target = Target::new(connect.host.clone(), connect.port);
         (target.path, target.query) = split_target(&origin_target);
         let mut request = InterceptedRequest {
@@ -484,15 +476,28 @@ impl Session {
         };
         request.headers.set("Host", host_value);
         // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
-        let exchange = Exchange::new(
+        let mut exchange = Exchange::new(
             &connect,
             Binding::None,
             false,
-            correlation,
+            correlation.clone(),
             request,
             inbound.handshake,
             state,
         );
+        // The gateway relays no WebSocket on plain HTTP, so it refuses a request that names
+        // `websocket` before the policy decides the connection, and dials no upstream for it.
+        if let Err(refusal) = screen_websocket(&mut exchange, state) {
+            return Ok(off_worker(|| refuse(&exchange, refusal, state, version)));
+        }
+        // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
+        // `net:connect` effect — identical to the CONNECT path, in one `off_worker` call.
+        let upstream = match off_worker(|| open_governed_upstream(state, &connect, &correlation)) {
+            Ok(upstream) => upstream,
+            Err(error) => return Ok(error.response(&exchange.method, version)),
+        };
+        let upstream = TcpStream::from_std(upstream)
+            .map_err(|e| ProxyError::Io(format!("registering the upstream socket: {e}")))?;
         self.forward(exchange, version, upstream, Hop::Plain).await
     }
 
