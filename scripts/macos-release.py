@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Package and verify the macOS release through the configured signing service."""
+"""Sign, notarize, and verify the macOS release through the configured services."""
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -13,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import tempfile
 import time
 from urllib.parse import urlsplit
 import uuid
@@ -26,6 +28,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 exec "$root/Box.app/Contents/MacOS/box" "$@"
 '''
+NOTARY_TIMEOUT = "30m"
+SUBMISSION_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+SECRET_ARN = r"arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+"
 
 
 def require(condition, message):
@@ -184,6 +189,83 @@ def verify(app, team, profile_name, evidence):
     })
 
 
+def notary_key(secret):
+    try:
+        value = json.loads(secret)
+    except ValueError:
+        value = None
+    require(isinstance(value, dict), "Notarization secret is not a JSON object")
+    key_id, key = value.get("key_id"), value.get("private_key")
+    require(isinstance(key_id, str) and re.fullmatch(r"[A-Z0-9]{10,}", key_id),
+            "Invalid notarization key ID")
+    require(isinstance(key, str) and key.strip().startswith("-----BEGIN PRIVATE KEY-----")
+            and key.strip().endswith("-----END PRIVATE KEY-----"),
+            "Invalid notarization private key")
+    return key_id, key
+
+
+@contextlib.contextmanager
+def notary_auth(profile=None, key=None):
+    if profile:
+        yield ["--keychain-profile", profile]
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "notary.p8"
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+            stream.write(key[1])
+        yield ["--key", str(path), "--key-id", key[0]]
+
+
+def notarize(app, auth, evidence):
+    evidence.mkdir(parents=True, exist_ok=True)
+    archive = evidence / "Box.zip"
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(archive)], check=True)
+    submitted = subprocess.run(
+        ["xcrun", "notarytool", "submit", str(archive), *auth, "--wait",
+         "--timeout", NOTARY_TIMEOUT, "--output-format", "json"],
+        capture_output=True, text=True)
+    try:
+        submission = json.loads(submitted.stdout)
+    except ValueError:
+        submission = None
+    if not isinstance(submission, dict):
+        submission = {"output": (submitted.stdout + submitted.stderr)[-2000:]}
+    save(evidence / "submission.json", submission)
+    identifier = str(submission.get("id", ""))
+    require(re.fullmatch(SUBMISSION_ID, identifier), "Notarization submission failed: "
+            + str(submission.get("message") or submitted.stderr or submitted.stdout)[-500:])
+    log = evidence / "log.json"
+    if subprocess.run(["xcrun", "notarytool", "log", identifier, *auth, str(log)],
+                      capture_output=True).returncode:
+        print(f"Could not download the notarization log for {identifier}", flush=True)
+    status = submission.get("status")
+    if status != "Accepted" and log.exists():
+        print(log.read_text(), flush=True)
+    require(status == "Accepted", f"Notarization {identifier} ended with status {status}")
+    for attempt in range(1, 6):
+        stapled = subprocess.run(["xcrun", "stapler", "staple", str(app)],
+                                 capture_output=True, text=True)
+        if stapled.returncode == 0:
+            break
+        require(attempt < 5, f"Stapling failed: {(stapled.stdout + stapled.stderr)[-500:]}")
+        time.sleep(30)
+    return identifier
+
+
+def verify_notarization(app, evidence):
+    evidence.mkdir(parents=True, exist_ok=True)
+    stapled = subprocess.run(["xcrun", "stapler", "validate", str(app)],
+                             capture_output=True, text=True)
+    require(stapled.returncode == 0, "Missing or invalid stapled notarization ticket")
+    paths = (app, *(app / "Contents/MacOS" / name for name in BINARIES))
+    for path in paths:
+        subprocess.run(["codesign", "--verify", "--strict", "--check-notarization",
+                        "-R", "=notarized", str(path)], check=True)
+    save(evidence / "notarization.json", {
+        "stapled": True, "notarized": [str(path.relative_to(app.parent)) for path in paths],
+    })
+
+
 class Signer:
     def __init__(self):
         import boto3
@@ -266,6 +348,17 @@ def release(args):
     work = args.work.resolve()
     work.mkdir()
     signer = Signer()
+    key = None
+    if args.notary_key_secret:
+        region = args.notary_key_secret.split(":")[3]
+        secret = signer.session.client("secretsmanager", region_name=region).get_secret_value(
+            SecretId=args.notary_key_secret)
+        key = notary_key(secret.get("SecretString", ""))
+    with notary_auth(args.notary_keychain_profile, key) as auth:
+        checked = subprocess.run(["xcrun", "notarytool", "history", *auth,
+                                  "--output-format", "json"], capture_output=True, text=True)
+    require(checked.returncode == 0,
+            f"Notarization credentials were refused: {(checked.stderr or checked.stdout)[-500:]}")
     binaries = work / "binaries"
     unpack_build(args.input, binaries)
     helper_input = work / "helper-input"
@@ -286,6 +379,9 @@ def release(args):
     for name in BINARIES[1:]:
         require(digest(binaries / name) == digest(app / "Contents/MacOS" / name),
                 "Application signing changed a helper")
+    with notary_auth(args.notary_keychain_profile, key) as auth:
+        submission = notarize(app, auth, work / "notarization")
+    verify_notarization(app, work / "verification")
     stage = work / "package"
     stage_package(app, stage)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +390,7 @@ def release(args):
         "source_sha": args.source_sha, "version": args.version,
         "features": ["native-filesystem-policy"],
         "input_sha256": digest(args.input), "output_sha256": digest(args.output),
-        "notarized": False,
+        "notarized": True, "notarization_id": submission,
     })
 
 
@@ -306,13 +402,22 @@ if __name__ == "__main__":
         sign.add_argument("--" + name, required=True, type=Path)
     sign.add_argument("--version", required=True)
     sign.add_argument("--source-sha", required=True)
+    notary = sign.add_mutually_exclusive_group(required=True)
+    notary.add_argument("--notary-key-secret",
+                        help="ARN of a Secrets Manager secret that holds an App Store Connect API key")
+    notary.add_argument("--notary-keychain-profile",
+                        help="notarytool keychain profile for a local run")
     check = sub.add_parser("verify")
     check.add_argument("--app", required=True, type=Path)
     check.add_argument("--evidence", required=True, type=Path)
     args = parser.parse_args()
     if args.command == "sign":
         require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha), "Expected a full source SHA")
+        require(bool(args.notary_keychain_profile)
+                or re.fullmatch(SECRET_ARN, args.notary_key_secret or ""),
+                "Expected a notarization secret ARN or keychain profile")
         release(args)
     else:
         verify(args.app, os.environ["CD_SIGNER_TEAM_ID"],
                os.environ["CD_SIGNER_PROFILE_NAME"], args.evidence)
+        verify_notarization(args.app, args.evidence)

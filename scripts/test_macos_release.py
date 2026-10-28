@@ -5,6 +5,7 @@ from pathlib import Path
 import plistlib
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -161,6 +162,129 @@ class MacOSReleaseTests(unittest.TestCase):
             str(package / "Box.app/Contents/MacOS/box"), "two words", "*.txt", "",
         ])
 
+    KEY = "-----BEGIN PRIVATE KEY-----\nMIGT\n-----END PRIVATE KEY-----\n"
+    SUBMISSION = "2efe2717-52ef-43a5-96dc-0797e4ca1041"
+
+    def test_notary_key_requires_a_key_id_and_a_private_key(self):
+        valid = {"key_id": "ABCDE12345", "private_key": self.KEY}
+        self.assertEqual(release.notary_key(json.dumps(valid)), ("ABCDE12345", self.KEY))
+        for secret in ["", "not json", "[]", json.dumps({"private_key": self.KEY}),
+                       json.dumps({**valid, "key_id": "short"}),
+                       json.dumps({**valid, "key_id": "abcde12345"}),
+                       json.dumps({"key_id": "ABCDE12345"}),
+                       json.dumps({**valid, "private_key": "app-specific-password"})]:
+            with self.subTest(secret=secret), self.assertRaises(ValueError):
+                release.notary_key(secret)
+
+    def test_api_key_file_is_private_and_removed_after_use(self):
+        with release.notary_auth(key=("ABCDE12345", self.KEY)) as auth:
+            path = Path(auth[1])
+            self.assertEqual(auth, ["--key", str(path), "--key-id", "ABCDE12345"])
+            self.assertEqual(path.read_text(), self.KEY)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(path.exists())
+        with self.assertRaises(RuntimeError):
+            with release.notary_auth(key=("ABCDE12345", self.KEY)) as auth:
+                path = Path(auth[1])
+                raise RuntimeError
+        self.assertFalse(path.exists())
+        with release.notary_auth("local-profile") as auth:
+            self.assertEqual(auth, ["--keychain-profile", "local-profile"])
+
+    def notarize(self, submission, staple_failures=0):
+        calls = []
+
+        def run(command, **options):
+            calls.append(command)
+            if command[:3] == ["xcrun", "notarytool", "submit"]:
+                return subprocess.CompletedProcess(command, 0, submission, "")
+            if command[:3] == ["xcrun", "stapler", "staple"]:
+                attempts = sum(1 for call in calls if call[:3] == command[:3])
+                return subprocess.CompletedProcess(command, int(attempts <= staple_failures), "", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        auth = ["--keychain-profile", "test"]
+        with patch.object(release.subprocess, "run", side_effect=run), \
+                patch.object(release.time, "sleep"):
+            try:
+                return release.notarize(self.root / "Box.app", auth, self.root / "evidence"), calls
+            except ValueError as error:
+                return error, calls
+
+    def test_notarization_staples_only_after_apple_accepts(self):
+        accepted = json.dumps({"id": self.SUBMISSION, "status": "Accepted", "message": "done"})
+        result, calls = self.notarize(accepted)
+        self.assertEqual(result, self.SUBMISSION)
+        self.assertEqual([call[:3] for call in calls], [
+            ["ditto", "-c", "-k"], ["xcrun", "notarytool", "submit"],
+            ["xcrun", "notarytool", "log"], ["xcrun", "stapler", "staple"],
+        ])
+        self.assertIn("--wait", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--keychain-profile") + 1], "test")
+        saved = json.loads((self.root / "evidence/submission.json").read_text())
+        self.assertEqual(saved["status"], "Accepted")
+        for status in ("Invalid", "Rejected", "In Progress", None):
+            with self.subTest(status=status):
+                result, calls = self.notarize(json.dumps({"id": self.SUBMISSION, "status": status}))
+                self.assertIsInstance(result, ValueError)
+                self.assertNotIn(["xcrun", "stapler", "staple"], [call[:3] for call in calls])
+
+    def test_notarization_requires_a_submission_id(self):
+        for output in ["", "not json", "[]", json.dumps({"message": "Invalid credentials"}),
+                       json.dumps({"id": "../../escape", "status": "Accepted"})]:
+            with self.subTest(output=output):
+                (self.root / "evidence/submission.json").unlink(missing_ok=True)
+                result, calls = self.notarize(output)
+                self.assertIsInstance(result, ValueError)
+                self.assertEqual(len(calls), 2)
+                self.assertTrue((self.root / "evidence/submission.json").exists())
+
+    def test_stapling_retries_then_fails(self):
+        accepted = json.dumps({"id": self.SUBMISSION, "status": "Accepted"})
+        result, calls = self.notarize(accepted, staple_failures=2)
+        self.assertEqual(result, self.SUBMISSION)
+        self.assertEqual(sum(call[:3] == ["xcrun", "stapler", "staple"] for call in calls), 3)
+        result, calls = self.notarize(accepted, staple_failures=5)
+        self.assertIsInstance(result, ValueError)
+        self.assertEqual(sum(call[:3] == ["xcrun", "stapler", "staple"] for call in calls), 5)
+
+    def test_secret_arn_accepts_secrets_manager_arns_only(self):
+        import re
+
+        for value in [
+            "arn:aws:secretsmanager:us-west-2:123456789012:secret:box/notary-AbCdEf",
+            "arn:aws-us-gov:secretsmanager:us-gov-west-1:123456789012:secret:notary_key+1=@.-x",
+        ]:
+            with self.subTest(value=value):
+                self.assertTrue(re.fullmatch(release.SECRET_ARN, value))
+        for value in [
+            "", "notary", "arn:aws:secretsmanager:", "arn:aws:s3:::bucket",
+            "arn:aws:secretsmanager:us-west-2:12345:secret:x",
+            "arn:aws:secretsmanager:us-west-2:123456789012:other:x",
+            "arn:aws:secretsmanager:us-west-2:123456789012:secret:",
+            "arn:aws:secretsmanager:us-west-2:123456789012:secret:x y",
+        ]:
+            with self.subTest(value=value):
+                self.assertIsNone(re.fullmatch(release.SECRET_ARN, value))
+
+    def test_sign_requires_exactly_one_notarization_credential(self):
+        script = Path(release.__file__)
+        base = [sys.executable, str(script), "sign", "--input", "unused", "--output", "unused",
+                "--work", str(self.root / "work"), "--version", "0.1.1", "--source-sha", "a" * 40]
+        for extra, code in [
+            ([], 2),
+            (["--notary-key-secret", "arn:aws:secretsmanager:x", "--notary-keychain-profile", "p"], 2),
+            (["--notary-key-secret", "my-secret"], 1),
+            (["--notary-key-secret", "arn:aws:secretsmanager:"], 1),
+            (["--notary-key-secret", "arn:aws:secretsmanager:us-west-2:123456789012:other:x"], 1),
+            (["--notary-key-secret", ""], 1),
+            (["--notary-keychain-profile", ""], 1),
+        ]:
+            with self.subTest(extra=extra):
+                result = subprocess.run(base + extra, capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertFalse((self.root / "work").exists())
+
 
 class WorkflowGateTests(unittest.TestCase):
     def test_release_source_cannot_select_the_verification_harness(self):
@@ -220,7 +344,7 @@ class WorkflowGateTests(unittest.TestCase):
         valid = {
             **os.environ, "PREMERGE_TEST": "true", "DRY_RUN": "true", "SIGN_MACOS": "true",
             "REPOSITORY": "strands-agents/box",
-            "WORKFLOW_REF": "refs/heads/feature/macos-release-signing",
+            "WORKFLOW_REF": "refs/heads/feature/macos-release-notarization",
             "RELEASE_SHA": fixture.main,
         }
         changes = [
@@ -265,6 +389,41 @@ class WorkflowGateTests(unittest.TestCase):
             condition = job.split("    if: |\n", 1)[1].split("    runs-on:", 1)[0]
             self.assertIn("inputs.dry_run != true &&", condition)
             self.assertIn("inputs.premerge_signing_test != true &&", condition)
+
+    def test_signing_notarizes_with_the_environment_api_key_secret(self):
+        from test_release_source import WORKFLOW, workflow_command
+
+        job = WORKFLOW.read_text().split("\n  sign-macos:\n", 1)[1].split("\n  verify-macos:\n", 1)[0]
+        self.assertIn("NOTARY_API_KEY_SECRET: ${{ vars.NOTARY_API_KEY_SECRET }}", job)
+        command = workflow_command("Sign, notarize, and staple the application")
+        self.assertIn('--notary-key-secret "$NOTARY_API_KEY_SECRET"', command)
+        self.assertNotIn("--notary-keychain-profile", command)
+
+    def test_inspection_refuses_a_macos_package_without_a_stapled_ticket(self):
+        import os
+        from test_release_source import WORKFLOW, workflow_command
+
+        name = "Assert the macOS package carries its notarization ticket"
+        step = WORKFLOW.read_text().split(f"      - name: {name}\n", 1)[1]
+        self.assertTrue(step.startswith("        if: needs.verify-macos.result == 'success'\n"))
+        command = workflow_command(name)
+        signature = "./Box.app/Contents/_CodeSignature/CodeResources"
+        for members, success in [
+            (["./box", signature, "./Box.app/Contents/CodeResources"], True),
+            (["./box", signature], False),
+            (["./box"], False),
+            (None, False),
+        ]:
+            with self.subTest(members=members), tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / "release").mkdir()
+                if members is not None:
+                    path = Path(directory) / "release/box-v0.1.1-aarch64-apple-darwin.tar.gz"
+                    with tarfile.open(path, "w:gz") as archive:
+                        for member in members:
+                            archive.addfile(tarfile.TarInfo(member), io.BytesIO(b""))
+                result = subprocess.run(["bash", "-c", command], cwd=directory,
+                                        env={**os.environ, "NEW_TAG": "v0.1.1"}, capture_output=True)
+                self.assertEqual(result.returncode == 0, success)
 
 
 if __name__ == "__main__":
