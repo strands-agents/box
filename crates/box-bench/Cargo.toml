@@ -3,7 +3,7 @@ name = "box-bench"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Measures fresh Box startup against a direct workload."
+description = "Measures fresh Box startup and egress gateway cost against a direct workload."
 default-run = "box-bench"
 
 [workspace]

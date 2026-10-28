@@ -1,7 +1,9 @@
-//! Measures fresh Box startup through a contained workload's readiness marker.
+//! Measures fresh Box startup through a contained workload's readiness marker, and the egress
+//! gateway against direct requests.
 
 #![warn(missing_docs, unreachable_pub)]
 
+mod egress;
 mod protocol;
 
 use std::env;
@@ -16,10 +18,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "\
 Usage: box-bench PATH-TO-STRANDS-BOX
+       box-bench egress PATH-TO-STRANDS-BOX
 
 Build Box and this crate in release mode, then run box-bench with the strands-box binary.
 Each pair runs box-bench-probe startup in a fresh box and directly, alternating order.
 The clock stops when the runner reads READY. Shutdown is outside the measured startup.
+The egress mode runs box-bench-probe egress in a box and directly, and sends the same
+plain-HTTP requests through the gateway and straight to a loopback upstream.
 Results go to target/results/<run> in this crate.
 ";
 
@@ -49,26 +54,28 @@ impl Fixtures {
         Ok(Self(path))
     }
 
-    fn prepare(&self, index: usize, probe: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    fn prepare(
+        &self,
+        index: usize,
+        probe: &Path,
+        mode: &str,
+        policy: &str,
+    ) -> io::Result<(PathBuf, PathBuf)> {
         let directory = self.0.join(index.to_string());
         private_directory(&directory)?;
         let box_directory = directory.join("box");
         private_directory(&box_directory)?;
         let workspace = directory.join("workspace");
         private_directory(&workspace)?;
-        fs::write(
-            directory.join("policy.dw"),
-            "forbid(principal, action, resource);\n",
-        )?;
+        fs::write(directory.join("policy.dw"), policy)?;
         let config = directory.join("box.toml");
         fs::write(
             &config,
             format!(
-                "name = \"startup\"\nbox_dir = {}\npolicy = \"policy.dw\"\n\
-             [agent]\ncommand = [{}, \"{}\"]\nworkspace = {}\n",
+                "name = \"{mode}\"\nbox_dir = {}\npolicy = \"policy.dw\"\n\
+             [agent]\ncommand = [{}, \"{mode}\"]\nworkspace = {}\n",
                 toml_path(&box_directory)?,
                 toml_path(probe)?,
-                protocol::STARTUP,
                 toml_path(&workspace)?,
             ),
         )?;
@@ -192,14 +199,6 @@ fn benchmark(box_binary: &Path, output: &Path) -> io::Result<()> {
     let probe = env::current_exe()?
         .with_file_name("box-bench-probe")
         .canonicalize()?;
-    fs::write(
-        output.join("metadata.txt"),
-        format!(
-            "os={}\narchitecture={}\n",
-            env::consts::OS,
-            env::consts::ARCH
-        ),
-    )?;
     let fixtures = Fixtures::new()?;
     let mut samples = File::create(output.join("samples.partial.csv"))?;
     writeln!(samples, "pair,phase,first,box_ns,direct_ns,added_ns")?;
@@ -207,7 +206,12 @@ fn benchmark(box_binary: &Path, output: &Path) -> io::Result<()> {
     let mut direct = Vec::new();
     let mut added = Vec::new();
     for index in 0..=ITERATIONS {
-        let (config, directory) = fixtures.prepare(index, &probe)?;
+        let (config, directory) = fixtures.prepare(
+            index,
+            &probe,
+            protocol::STARTUP,
+            "forbid(principal, action, resource);\n",
+        )?;
         let mut box_command = Command::new(box_binary);
         box_command
             .args(["run", "--config"])
@@ -266,9 +270,11 @@ fn benchmark(box_binary: &Path, output: &Path) -> io::Result<()> {
 }
 
 fn run() -> io::Result<()> {
-    let mut args = env::args_os().skip(1);
-    let (Some(box_binary), None) = (args.next(), args.next()) else {
-        return Err(io::Error::other(USAGE));
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let (egress, box_binary) = match &args[..] {
+        [box_binary] => (false, box_binary),
+        [mode, box_binary] if mode == "egress" => (true, box_binary),
+        _ => return Err(io::Error::other(USAGE)),
     };
     let box_binary = PathBuf::from(box_binary)
         .canonicalize()
@@ -279,7 +285,20 @@ fn run() -> io::Result<()> {
     fs::create_dir_all(output.parent().expect("results directory"))?;
     private_directory(&output)?;
     eprintln!("results: {}", output.display());
-    benchmark(&box_binary, &output).inspect_err(|error| {
+    fs::write(
+        output.join("metadata.txt"),
+        format!(
+            "os={}\narchitecture={}\n",
+            env::consts::OS,
+            env::consts::ARCH
+        ),
+    )?;
+    let result = if egress {
+        egress::benchmark(&box_binary, &output)
+    } else {
+        benchmark(&box_binary, &output)
+    };
+    result.inspect_err(|error| {
         let _ = fs::write(output.join("failure.txt"), error.to_string());
     })
 }
