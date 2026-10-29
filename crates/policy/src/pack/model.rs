@@ -347,10 +347,7 @@ fn readable_flag(flag: &str) -> bool {
         !long.is_empty() && !long.contains('=')
     } else if let Some(short) = flag.strip_prefix('-') {
         let mut characters = short.chars();
-        matches!(
-            (characters.next(), characters.next()),
-            (Some(character), None) if character != '-'
-        )
+        matches!((characters.next(), characters.next()), (Some(_), None))
     } else {
         false
     }

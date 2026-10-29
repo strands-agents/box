@@ -1,4 +1,4 @@
-# expect: tool pack <file>: `[shell.status] options.short`: flag "--short=yes" must be `--` and a name with no `=`, or `-` and one character that is not `-`
+# expect: tool pack <file>: `[shell.status] options.short`: flag "--short=yes" must be `--` and a name with no `=`, or `-` and one character
 # A tool pack for git: push, commit, and status.
 
 pack    = "git"
