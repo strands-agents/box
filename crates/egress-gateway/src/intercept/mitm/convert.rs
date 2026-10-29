@@ -412,6 +412,26 @@ pub(super) fn response_out(
     Ok(response)
 }
 
+/// A static proxy-level reply with no body and no marker: `HTTP/1.1 <status> <message>`, then
+/// `Content-Length: 0` and `Connection: close`, as the front writes it.
+pub(super) fn status_response(
+    version: Version,
+    status: u16,
+    message: &'static str,
+) -> Response<Whole> {
+    let mut response = Response::new(Whole::new(Bytes::new()));
+    *response.status_mut() =
+        StatusCode::from_u16(status).expect("a static reply has a valid status");
+    *response.version_mut() = version;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+    headers.insert(CONNECTION, HeaderValue::from_static("close"));
+    response
+        .extensions_mut()
+        .insert(hyper::ext::ReasonPhrase::from_static(message.as_bytes()));
+    response
+}
+
 /// A proxy-originated diagnostic: a static, secret-free body under the refusal marker.
 pub(super) fn diagnostic_response(
     request_method: &str,
@@ -620,6 +640,50 @@ mod tests {
         assert_eq!(response.status(), 502);
         let body = futures_body(response);
         assert_eq!(body, b"effect interceptor unavailable");
+    }
+
+    /// **The upstream request and the reply drop each hop-by-hop field and each field that
+    /// `Connection` names**, and keep the end-to-end fields, with one `Connection: close`.
+    #[test]
+    fn writers_strip_hop_by_hop_and_connection_nominated_headers() {
+        let headers = HeaderMap::from_pairs([
+            ("Connection".to_string(), "keep-alive, X-Remove".to_string()),
+            ("Keep-Alive".to_string(), "timeout=5".to_string()),
+            ("Proxy-Connection".to_string(), "keep-alive".to_string()),
+            (
+                "Proxy-Authorization".to_string(),
+                "Basic c2VjcmV0".to_string(),
+            ),
+            (
+                "Proxy-Authenticate".to_string(),
+                "Basic realm=\"proxy\"".to_string(),
+            ),
+            ("TE".to_string(), "trailers".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Trailer".to_string(), "Digest".to_string()),
+            ("X-Remove".to_string(), "hop-only".to_string()),
+            ("X-End-To-End".to_string(), "keep".to_string()),
+        ]);
+
+        let request = upstream_request("POST", "/", &headers, b"body".to_vec(), WriteCount::new())
+            .unwrap()
+            .into_inner();
+        let response = response_out(
+            "POST",
+            Version::HTTP_11,
+            200,
+            &headers,
+            Bytes::from_static(b"body"),
+        )
+        .unwrap();
+        for sent in [request.headers(), response.headers()] {
+            let names: Vec<&str> = sent.keys().map(HeaderName::as_str).collect();
+            assert_eq!(names, ["x-end-to-end", "connection", "content-length"]);
+            assert_eq!(sent["connection"], "close");
+            assert_eq!(sent["x-end-to-end"], "keep");
+            assert_eq!(sent["content-length"], "4");
+        }
     }
 
     /// **A request that ends before its body is an early close**, not a framing refusal.

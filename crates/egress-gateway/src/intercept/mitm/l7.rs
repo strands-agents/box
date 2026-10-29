@@ -1,302 +1,13 @@
-//! The blocking plain-HTTP exchange, and the request checks that every exchange shares.
+//! The request checks that every exchange shares, and the static refusals that the gateway writes
+//! before the CONNECT acknowledgement.
 
-use std::io::{self, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::time::{Duration, Instant};
-
-use crate::audit::RequestId;
+use std::io::{self, Write};
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
-use super::exchange::{
-    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, audit_release,
-    claim_release, decide_request, prepare_request_bytes, prepare_response_bytes, record_refusal,
-};
-use super::{SharedState, http1};
-use crate::audit::NetworkAuditEvent;
-use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
-use crate::effect::{ClaimedEffectPermit, EffectOutcome};
+use super::http1;
+use crate::boundary::{HeaderMap, Target};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{mcp_denial_response, normalize_path};
-
-/// Run the phases of one plain-HTTP exchange over an already-open client writer and upstream stream.
-///
-/// `upstream` is the buffered upstream, and `client_writer` the sink for diagnostics and the
-/// governed response.
-fn run_l7_legs<S, CW>(
-    mut exchange: Exchange<'_>,
-    upstream: &mut BufReader<S>,
-    client_writer: &mut CW,
-    state: &SharedState,
-) -> Result<()>
-where
-    S: Read + Write,
-    CW: Write,
-{
-    for phase in REQUEST_PHASES {
-        if let Err(refusal) = phase(&mut exchange, state) {
-            refuse(&exchange, refusal, state, client_writer);
-            return Ok(());
-        }
-    }
-    // Serialize the fully mutated request before claiming its effect permit.
-    let prepared_request = prepare_request_bytes(&mut exchange)?;
-    let request_permit = match decide_request(&exchange, state) {
-        Ok(permit) => permit,
-        Err(reply) => {
-            write_reply(
-                client_writer,
-                &exchange.method,
-                reply,
-                Some(exchange.request.body.as_bytes()),
-            );
-            return Ok(());
-        }
-    };
-    // The request permit is consumed at reply time, or when no reply comes.
-    let (request_permit, request_bytes) = deliver_or_record_failure(
-        upstream.get_mut(),
-        &prepared_request,
-        request_permit,
-        "upstream request",
-    )?;
-    drop(prepared_request);
-
-    // --- Response leg: read, evaluate+apply, return ---
-    let mut response = read_reply(
-        upstream,
-        &exchange.method,
-        request_permit,
-        request_bytes,
-        state,
-    )?;
-    for phase in RESPONSE_PHASES {
-        if let Err(refusal) = phase(&mut exchange, &mut response, state) {
-            let subject = exchange.subject();
-            state.audit.push(NetworkAuditEvent::deny(
-                subject.host,
-                subject.port,
-                refusal.reason,
-                subject.correlation.clone(),
-            ));
-            write_reply(client_writer, subject.method, refusal.reply, None);
-            return Ok(());
-        }
-    }
-
-    // Serialize only after response controls and leakback scrubbing have finished, then claim the
-    // release immediately before the governed bytes are delivered to the workload.
-    let prepared_response = prepare_response_bytes(&exchange, &response)?;
-    let response_permit = match claim_release(
-        &exchange,
-        response.status,
-        response.body.as_bytes().len(),
-        state,
-    ) {
-        Ok(permit) => permit,
-        Err(refusal) => {
-            let subject = exchange.subject();
-            state.audit.push(NetworkAuditEvent::deny(
-                subject.host,
-                subject.port,
-                refusal.reason,
-                subject.correlation.clone(),
-            ));
-            write_reply(client_writer, subject.method, refusal.reply, None);
-            return Ok(());
-        }
-    };
-    audit_release(&exchange, state);
-    deliver_effect(
-        client_writer,
-        &prepared_response,
-        response_permit,
-        "governed response",
-    )
-}
-
-/// Read the upstream reply, and record the request outcome that it shows.
-fn read_reply<S: Read>(
-    upstream: &mut BufReader<S>,
-    request_method: &str,
-    request_permit: ClaimedEffectPermit,
-    request_bytes: usize,
-    state: &SharedState,
-) -> Result<InterceptedResponse> {
-    let parsed_res = match http1::read_response(
-        upstream,
-        request_method,
-        state.config.response_limits.max_body_bytes,
-    ) {
-        Ok(parsed_res) => parsed_res,
-        Err(failure) => {
-            let outcome = match failure.status {
-                Some(status) => EffectOutcome::Replied {
-                    accepted_bytes: request_bytes,
-                    status,
-                },
-                None => EffectOutcome::Completed(request_bytes),
-            };
-            request_permit.record_outcome(outcome).map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording upstream request outcome after a failed reply: {error}"
-                ))
-            })?;
-            return Err(failure.error);
-        }
-    };
-    request_permit
-        .record_outcome(EffectOutcome::Replied {
-            accepted_bytes: request_bytes,
-            status: parsed_res.status,
-        })
-        .map_err(|error| {
-            ProxyError::Io(format!(
-                "recording upstream request outcome after the reply: {error}"
-            ))
-        })?;
-    // Move, don't clone — `parsed_res` is dead after this; the body can be large.
-    Ok(InterceptedResponse::http(
-        parsed_res.status,
-        parsed_res.headers,
-        BodyRef::Bytes(parsed_res.body),
-    ))
-}
-
-/// Record a refusal of the request, then answer the workload.
-fn refuse<W: Write>(
-    exchange: &Exchange<'_>,
-    refusal: Refusal,
-    state: &SharedState,
-    client_writer: &mut W,
-) {
-    record_refusal(state, &exchange.subject(), &refusal.reason);
-    write_reply(
-        client_writer,
-        &exchange.method,
-        refusal.reply,
-        Some(exchange.request.body.as_bytes()),
-    );
-}
-
-/// Answer the workload with the reply of a refusal.
-fn write_reply<W: Write>(
-    client_writer: &mut W,
-    request_method: &str,
-    reply: Reply,
-    mcp_request: Option<&[u8]>,
-) {
-    match reply {
-        Reply::Diagnostic { status, body } => {
-            write_trusted_diagnostic(client_writer, request_method, status, body);
-        }
-        Reply::Interceptor { error, mcp } => write_interceptor_error(
-            client_writer,
-            request_method,
-            &error,
-            mcp_request.filter(|_| mcp),
-        ),
-    }
-}
-
-/// Forward a plain-HTTP (non-TLS) exchange to an already-open plaintext upstream.
-///
-/// A thin transport wrapper: the request was already read (`parsed`) and `origin_target` is its
-/// origin-form target (`/path?query`) from the absolute URL. It builds the boundary request and
-/// hands the shared legs to [`run_l7_legs`], which canonicalizes the path and refuses a credential
-/// on it. Plain HTTP has no CONNECT authority to bind against, so the post-mutation re-check does
-/// nothing.
-pub(super) fn forward_plain(
-    client_writer: &mut TcpStream,
-    upstream: TcpStream,
-    connect: &ConnectRequest,
-    parsed: http1::ParsedRequest,
-    origin_target: String,
-    state: &SharedState,
-    correlation: RequestId,
-) -> Result<()> {
-    let mut upstream_buf =
-        BufReader::new(Bounded::new(upstream, state.config.upstream_read_deadline));
-
-    let mut target = Target::new(connect.host.clone(), connect.port);
-    let (path, query) = split_target(&origin_target);
-    target.path = path;
-    target.query = query;
-
-    let mut req = InterceptedRequest {
-        target,
-        method: Some(parsed.method),
-        headers: parsed.headers,
-        body: BodyRef::Bytes(parsed.body),
-        advisory_note: None,
-    };
-
-    // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
-    // destination twice — in the absolute-form request line and in `Host` — and the workload controls
-    // both. The TLS path re-checks that they agree (`validate_request_binding`); the plain path has no
-    // CONNECT authority to bind against, so it normalizes instead: rewrite `Host` to the URL host, so
-    // the destination the box authorized is the one the upstream routes on (no vhost smuggling).
-    //
-    // The port is omitted only for 80 — plain HTTP's sole default. `http://host:443/` keeps `:443`,
-    // because 443 is not the default under the `http` scheme, and a dropped port would make `Host`
-    // name a different authority than the one authorized.
-    let host_value = if connect.port == 80 {
-        connect.host.clone()
-    } else {
-        format!("{}:{}", connect.host, connect.port)
-    };
-    req.headers.set("Host", host_value);
-
-    // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
-    let exchange = Exchange::new(connect, Binding::None, false, correlation, req, state);
-    run_l7_legs(exchange, &mut upstream_buf, client_writer, state)
-}
-
-/// An upstream stream whose reads and writes fail once the exchange's deadline has passed.
-struct Bounded<S> {
-    inner: S,
-    deadline: Instant,
-}
-
-impl<S> Bounded<S> {
-    fn new(inner: S, within: Duration) -> Self {
-        Self {
-            inner,
-            deadline: Instant::now() + within,
-        }
-    }
-
-    fn check(&self, direction: &'static str) -> io::Result<()> {
-        if Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("upstream {direction} deadline passed"),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl<S: Read> Read for Bounded<S> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.check("read")?;
-        self.inner.read(buf)
-    }
-}
-
-/// The most bytes one upstream write hands the inner stream.
-const BOUNDED_WRITE_CHUNK: usize = 64 * 1024;
-
-impl<S: Write> Write for Bounded<S> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.check("write")?;
-        // Split a large plain-HTTP write, as TLS already splits one into records.
-        self.inner.write(&buf[..buf.len().min(BOUNDED_WRITE_CHUNK)])
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
 
 /// Write an effect refusal or a static interceptor failure.
 pub(super) fn write_interceptor_error<W: Write>(
@@ -318,7 +29,13 @@ pub(super) fn write_interceptor_error<W: Write>(
     if let Some(response) = mcp_request.and_then(|request| mcp_denial_response(request, &message)) {
         let mut headers = proxy_originated_headers();
         headers.set("Content-Type", "application/json".to_string());
-        let _ = http1::write_response(stream, request_method, 403, &headers, response.as_bytes());
+        let _ = http1::write_static_response(
+            stream,
+            request_method,
+            403,
+            &headers,
+            response.as_bytes(),
+        );
         let _ = stream.flush();
     } else {
         write_trusted_diagnostic(stream, request_method, 403, message.as_bytes());
@@ -332,7 +49,7 @@ fn write_trusted_diagnostic<W: Write>(
     status: u16,
     body: &[u8],
 ) {
-    let _ = http1::write_response(
+    let _ = http1::write_static_response(
         stream,
         request_method,
         status,
@@ -350,64 +67,6 @@ fn proxy_originated_headers() -> crate::boundary::HeaderMap {
         crate::PROXY_ORIGIN_VALUE.to_string(),
     );
     headers
-}
-
-/// Deliver prepared bytes and consume the claimed permit with the observed truth.
-fn deliver_effect<W: Write>(
-    stream: &mut W,
-    prepared: &[u8],
-    permit: ClaimedEffectPermit,
-    description: &str,
-) -> Result<()> {
-    let (permit, accepted_bytes) =
-        deliver_or_record_failure(stream, prepared, permit, description)?;
-    permit
-        .record_outcome(EffectOutcome::Completed(accepted_bytes))
-        .map_err(|error| {
-            ProxyError::Io(format!(
-                "recording {description} outcome after I/O: {error}"
-            ))
-        })
-}
-
-/// Deliver prepared bytes; a failure consumes the permit, and a delivery hands it back with the
-/// accepted count so the caller records the outcome it observes.
-fn deliver_or_record_failure<W: Write>(
-    stream: &mut W,
-    prepared: &[u8],
-    permit: ClaimedEffectPermit,
-    description: &str,
-) -> Result<(ClaimedEffectPermit, usize)> {
-    match http1::write_prepared_and_flush(stream, prepared) {
-        Ok(accepted_bytes) => Ok((permit, accepted_bytes)),
-        Err(failure) => {
-            let error_kind = failure.error.kind();
-            let error_message = failure.error.to_string();
-            let outcome = if failure.during_flush {
-                EffectOutcome::Indeterminate {
-                    accepted_bytes: failure.accepted_bytes,
-                }
-            } else if failure.accepted_bytes == 0 {
-                EffectOutcome::Failed {
-                    accepted_bytes: 0,
-                    error_kind,
-                }
-            } else {
-                EffectOutcome::Partial {
-                    accepted_bytes: failure.accepted_bytes,
-                    error_kind,
-                }
-            };
-            permit.record_outcome(outcome).map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording failed {description} outcome after I/O: {error}"
-                ))
-            })?;
-            Err(ProxyError::Io(format!(
-                "delivering {description}: {error_message}"
-            )))
-        }
-    }
 }
 
 /// The RFC 3986 normal form of an origin-form request path, `/` when it is empty, or why it is refused.
@@ -486,7 +145,6 @@ pub(super) fn validate_request_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::EffectPermit;
 
     /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
     /// denial, so a refusal this gateway writes must name itself.
@@ -692,115 +350,5 @@ mod tests {
                 "target={target:?}, hosts={hosts:?}"
             );
         }
-    }
-    use std::sync::{Arc, Mutex};
-
-    struct RecordingPermit {
-        outcomes: Arc<Mutex<Vec<EffectOutcome>>>,
-    }
-
-    impl EffectPermit for RecordingPermit {
-        fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
-            self.outcomes.lock().unwrap().push(outcome);
-            Ok(())
-        }
-
-        fn mark_indeterminate(self: Box<Self>) {
-            panic!("delivery tests always report a terminal outcome");
-        }
-    }
-
-    fn permit(outcomes: &Arc<Mutex<Vec<EffectOutcome>>>) -> ClaimedEffectPermit {
-        ClaimedEffectPermit::new(Box::new(RecordingPermit {
-            outcomes: outcomes.clone(),
-        }))
-    }
-
-    struct FailingWriter {
-        limit: usize,
-        accepted: usize,
-        fail_flush: bool,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.accepted == self.limit {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write failed"));
-            }
-            let count = bytes.len().min(self.limit - self.accepted);
-            self.accepted += count;
-            Ok(count)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            if self.fail_flush {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "flush failed"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn recorded_outcome(writer: &mut impl Write, bytes: &[u8]) -> (Result<()>, EffectOutcome) {
-        let outcomes = Arc::new(Mutex::new(Vec::new()));
-        let result = deliver_effect(writer, bytes, permit(&outcomes), "test message");
-        let outcome = outcomes.lock().unwrap()[0];
-        (result, outcome)
-    }
-
-    #[test]
-    fn delivery_records_completed_bytes() {
-        let mut writer = Vec::new();
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_ok());
-        assert_eq!(outcome, EffectOutcome::Completed(7));
-    }
-
-    #[test]
-    fn delivery_records_zero_byte_failure() {
-        let mut writer = FailingWriter {
-            limit: 0,
-            accepted: 0,
-            fail_flush: false,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(
-            outcome,
-            EffectOutcome::Failed {
-                accepted_bytes: 0,
-                error_kind: io::ErrorKind::BrokenPipe,
-            }
-        );
-    }
-
-    #[test]
-    fn delivery_records_partial_write() {
-        let mut writer = FailingWriter {
-            limit: 3,
-            accepted: 0,
-            fail_flush: false,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(
-            outcome,
-            EffectOutcome::Partial {
-                accepted_bytes: 3,
-                error_kind: io::ErrorKind::BrokenPipe,
-            }
-        );
-    }
-
-    #[test]
-    fn delivery_records_indeterminate_flush() {
-        let mut writer = FailingWriter {
-            limit: usize::MAX,
-            accepted: 0,
-            fail_flush: true,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(outcome, EffectOutcome::Indeterminate { accepted_bytes: 7 });
     }
 }

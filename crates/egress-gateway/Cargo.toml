@@ -50,9 +50,6 @@ zeroize = { version = "1", features = ["derive"] }
 # Base64 for BasicAuth credential injection (`Authorization: Basic <base64>`).
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 
-# HTTP/1.1 request/response parsing on the intercepted plaintext leg.
-httparse = "1"
-
 # JSON-RPC frame classification for both kinds of MCP server (identifiers only — no body is retained).
 serde_json = "1"
 

@@ -12,15 +12,14 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use zeroize::Zeroizing;
 
+use super::SharedState;
 use super::connect::ConnectRequest;
 use super::convert::{UpstreamRequest, Whole, response_out, upstream_request};
 use super::l7::{canonicalize_request_path, reconstruct_target, validate_request_binding};
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
 use super::serve::WriteCount;
-use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent, RequestId};
 use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse};
@@ -335,28 +334,6 @@ pub(super) fn prepare_request(
     )
 }
 
-/// Serialize the mutated request for the blocking plain-HTTP path, with the canonical frame of a
-/// remote `resources/read`.
-pub(super) fn prepare_request_bytes(exchange: &mut Exchange<'_>) -> Result<Zeroizing<Vec<u8>>> {
-    // The serialized request carries the credential the request leg just attached, so the buffer is
-    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
-    // not `Zeroize`-aware, a known residual).
-    let frame = canonical_frame(exchange);
-    let forwarded_body = frame
-        .as_deref()
-        .unwrap_or_else(|| exchange.request.body.as_bytes());
-    let mut prepared = Zeroizing::new(Vec::new());
-    http1::write_request(
-        &mut *prepared,
-        &exchange.method,
-        &exchange.forward_target,
-        &exchange.request.headers,
-        forwarded_body,
-    )?;
-    exchange.forwarded_bytes = forwarded_body.len();
-    Ok(prepared)
-}
-
 /// Claim the request permit, then record its decision, with no other seam call between the two.
 pub(super) fn decide_request(
     exchange: &Exchange<'_>,
@@ -501,22 +478,6 @@ pub(super) fn prepare_response(
         &response.headers,
         body,
     )
-}
-
-/// Serialize the governed response for the blocking plain-HTTP path, after every response phase.
-pub(super) fn prepare_response_bytes(
-    exchange: &Exchange<'_>,
-    response: &InterceptedResponse,
-) -> Result<Vec<u8>> {
-    let mut prepared = Vec::new();
-    http1::write_response(
-        &mut prepared,
-        &exchange.method,
-        response.status,
-        &response.headers,
-        response.body.as_bytes(),
-    )?;
-    Ok(prepared)
 }
 
 /// Claim the release of the governed response of `status` with `body_bytes` of body.

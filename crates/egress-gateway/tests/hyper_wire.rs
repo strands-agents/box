@@ -622,3 +622,155 @@ fn a_nested_connect_is_refused() {
         assert!(log.is_empty(), "{method}: {log:?}");
     }
 }
+
+/// A plain-HTTP origin on loopback that reads one request head and answers `reply`, then closes.
+/// Its thread returns the head that it read.
+fn plain_origin(reply: &'static [u8]) -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") && matches!(stream.read(&mut byte), Ok(1)) {
+            head.push(byte[0]);
+        }
+        let _ = stream.write_all(reply);
+        String::from_utf8_lossy(&head).into_owned()
+    });
+    (port, thread)
+}
+
+/// Send `request` whole to a gateway on plain HTTP, and read until the gateway closes.
+fn plain_exchange(handle: &MitmHandle, request: &str) -> String {
+    use std::io::{Read, Write};
+
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", handle.port().unwrap())).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    let mut reply = Vec::new();
+    let _ = client.read_to_end(&mut reply);
+    String::from_utf8_lossy(&reply).into_owned()
+}
+
+/// A gateway that permits loopback on plain HTTP, with an expected proxy token.
+fn plain_gateway() -> (MitmHandle, Arc<Log>) {
+    let log = Arc::new(Log::default());
+    let config = MitmConfig {
+        expected_token: Some("token".to_string()),
+        ..MitmConfig::default()
+    };
+    let handle = MitmInterceptor::start(config, CapabilitySet::default(), log.clone()).unwrap();
+    (handle, log)
+}
+
+/// **On plain HTTP, the gateway's static replies keep their bytes**: a target that names no
+/// destination, a wrong proxy token, and a body whose chunk framing is broken each get the same
+/// reply as before, with no request effect.
+#[test]
+fn plain_refusals_keep_their_bytes() {
+    let (handle, log) = plain_gateway();
+    let cases = [
+        (
+            "GET /origin-form HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n",
+            "HTTP/1.1 400 bad request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+        (
+            "GET http://127.0.0.1:9/token HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\
+             Proxy-Authorization: Bearer wrong\r\n\r\n",
+            "HTTP/1.1 407 proxy authentication required\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n",
+        ),
+        (
+            "POST http://127.0.0.1:9/chunks HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\
+             Transfer-Encoding: chunked\r\n\r\nzz\r\n",
+            "HTTP/1.1 400 bad request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ),
+    ];
+    for (request, reply) in cases {
+        assert_eq!(plain_exchange(&handle, request), reply, "{request:?}");
+    }
+    assert!(log.seen().is_empty(), "{:?}", log.seen());
+}
+
+/// **On plain HTTP, a target byte that `http::Uri` refuses gets hyper's own `400`**, with no
+/// refusal marker, before any decision and before any upstream socket opens.
+#[test]
+fn a_target_byte_that_http_uri_refuses_gets_hyper_400_on_plain_http() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (handle, log) = plain_gateway();
+    let reply = plain_exchange(
+        &handle,
+        &format!("GET http://127.0.0.1:{port}/a<b HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert_eq!(
+        reply,
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    assert!(log.seen().is_empty(), "{:?}", log.seen());
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "no upstream socket opened"
+    );
+}
+
+/// **On plain HTTP, an upper-case scheme is served.** `http::Uri` reads the scheme
+/// case-insensitively and spells it in lower case, so `HTTP://` names the same destination as
+/// `http://`: the host is judged, and the request is decided and forwarded. The old reader
+/// compared the raw target with `http://` and answered 400.
+#[test]
+fn an_upper_case_scheme_on_plain_http_is_served() {
+    let (port, origin) = plain_origin(OK_REPLY);
+    let (handle, log) = plain_gateway();
+    let reply = plain_exchange(
+        &handle,
+        &format!("GET HTTP://127.0.0.1:{port}/upper HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert_eq!(
+        reply,
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
+    );
+    let head = origin.join().unwrap();
+    assert!(head.starts_with("GET /upper HTTP/1.1\r\n"), "{head}");
+    assert!(
+        log.wait_for(4).contains(&Seen::Request {
+            method: "GET".to_string(),
+            path: "/upper".to_string(),
+        }),
+        "{:?}",
+        log.seen()
+    );
+}
+
+/// **On plain HTTP, a reply with no length is read to its close** and released under one
+/// `Content-Length`, and an HTTP/1.0 request gets an `HTTP/1.0` reply (W4).
+#[test]
+fn a_plain_reply_with_no_length_is_read_to_its_close() {
+    let (port, origin) = plain_origin(b"HTTP/1.1 200 OK\r\n\r\nuntil-close");
+    let (handle, log) = plain_gateway();
+    let reply = plain_exchange(
+        &handle,
+        &format!("GET http://127.0.0.1:{port}/close HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert_eq!(
+        reply,
+        "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Length: 11\r\n\r\nuntil-close"
+    );
+    let head = origin.join().unwrap();
+    assert!(
+        head.starts_with("GET /close HTTP/1.1\r\n") && head.contains("\r\nHost: 127.0.0.1:"),
+        "{head}"
+    );
+    assert!(
+        log.wait_for(4)
+            .contains(&Seen::ReleaseOutcome(EffectOutcome::Completed(reply.len()))),
+        "{:?}",
+        log.seen()
+    );
+}
