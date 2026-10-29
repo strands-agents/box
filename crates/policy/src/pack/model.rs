@@ -245,7 +245,7 @@ impl ShellOption {
         if spec.flag.is_empty() {
             return refuse(OptionFault::NoFlag);
         }
-        if let Some(flag) = spec.flag.iter().find(|flag| !well_formed_flag(flag)) {
+        if let Some(flag) = spec.flag.iter().find(|flag| !readable_flag(flag)) {
             return refuse(OptionFault::MalformedFlag(flag.clone()));
         }
         let value = match spec.value {
@@ -341,14 +341,15 @@ pub(super) fn command_word(word: &str) -> bool {
         })
 }
 
-fn well_formed_flag(flag: &str) -> bool {
+/// Whether a command line can give `flag`: `--` and a name with no `=`, or `-` and one character.
+fn readable_flag(flag: &str) -> bool {
     if let Some(long) = flag.strip_prefix("--") {
-        command_word(long)
+        !long.is_empty() && !long.contains('=')
     } else if let Some(short) = flag.strip_prefix('-') {
         let mut characters = short.chars();
         matches!(
             (characters.next(), characters.next()),
-            (Some(character), None) if character.is_ascii_alphanumeric()
+            (Some(character), None) if character != '-'
         )
     } else {
         false

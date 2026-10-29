@@ -98,7 +98,9 @@ pub(crate) enum PackRefusal {
 pub(crate) enum OptionFault {
     #[error("declares no flag")]
     NoFlag,
-    #[error("flag {0:?} must be `-x` or `--long-name`, and must not carry `=`")]
+    #[error(
+        "flag {0:?} must be `--` and a name with no `=`, or `-` and one character that is not `-`"
+    )]
     MalformedFlag(String),
     #[error("takes no value, so it cannot carry `like` or `when`")]
     PatternWithoutValue,

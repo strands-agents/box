@@ -1,0 +1,31 @@
+# curl pack corpus
+#
+# Each case is one argv, and what the shell grammar of `../valid/curl.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# A long flag with a period
+[[case]]
+argv = ["curl", "get", "--http1.1", "https://example.com"]
+action = "get"
+fields = { http1_1 = true, url = "https://example.com" }
+effects = ["network"]
+
+# A long flag with an underscore, and one with an uppercase letter
+[[case]]
+argv = ["curl", "get", "--short_form", "--Short", "https://example.com"]
+action = "get"
+fields = { short = true, short_form = true, url = "https://example.com" }
+effects = ["network"]
+
+# A short flag that is not a letter, in a cluster with a short flag that takes a value
+[[case]]
+argv = ["curl", "get", "-#d", "x=1", "https://example.com"]
+action = "get"
+fields = { data = "x=1", progress = true, url = "https://example.com" }
+effects = ["network", "upload"]
+
+# The parser matches a long flag only by its full spelling, so `--http1` is not `--http1.1`
+[[case]]
+argv = ["curl", "get", "--http1", "https://example.com"]
+action = "unmodeled"
