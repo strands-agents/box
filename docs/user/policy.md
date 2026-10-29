@@ -642,7 +642,13 @@ Actions are in the same family when their names start the same way before the `:
 can't. Each MCP tool action is a family of its own.
 
 A rule that checks `context.input` and names no action gets the same error. Name the action the
-rule is for.
+rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
+`action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
+
+```text
+forbid(principal, action, resource)
+when { action == Box::Action::"fs:read" && context.input.path like "*/secrets.env" };
+```
 
 ### One `@id` on two rules
 

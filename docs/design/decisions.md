@@ -725,7 +725,9 @@ not a cap.
 An input attribute means what the action makes it mean: `path` is a filesystem path on `fs:*` and a
 URL path on `http:request`, and `host` is a destination on `net:connect` and any argument a
 generated tool action declares. So the load refuses a rule that reads `context.input` and does not
-constrain its action to one family, and names the actions to write. A family is the prefix before
+constrain its action to one family, and names the actions to write. A read is one in a `when` or
+`unless` condition; a `when temporal` clause names its own action, so the check does not look inside
+it. A family is the prefix before
 `:` in a `Box::Action` name (`fs`, `shell`, `net`, `http`, `mcp`), and each generated tool action
 is a family of its own. The check needs no action schema, so it runs before strict validation and
 before a box with an MCP server stages a tool schema: a rule that reads the input across a tool
