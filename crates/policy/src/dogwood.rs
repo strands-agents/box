@@ -539,17 +539,107 @@ pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> 
 /// Parse and macro-expand a source bundle, and refuse a read of `context.input` without one
 /// action family, without an MCP action schema.
 pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
-    parse_policy_source(source)?;
+    let expanded = parse_policy_source(source)?;
+    refuse_input_across_families_before_discovery(&expanded).map_err(Refused::into_error)
+}
+
+/// Refuse a macro-expanded rule that reads `context.input` without one action family, before an
+/// MCP action schema stages.
+pub(crate) fn refuse_input_across_families_before_discovery(
+    expanded: &[String],
+) -> Result<(), Refused> {
+    let source = expanded
+        .iter()
+        .map(|policy| without_temporal(policy))
+        .collect::<Vec<_>>()
+        .join("\n");
     let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-    let parsed = dogwood_language::ParsedPolicySet::parse(source, &service_schema()?)
-        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
-    // A bundle that does not lower before discovery is parked by `open_staged`, which judges it.
+    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(&source, &service_schema()?) else {
+        return Ok(());
+    };
     let Ok(lowered) = parsed.lower(&policy_schema) else {
         return Ok(());
     };
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|_| None)
-        .map_err(Refused::into_error)
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
+        rule_ref(&lowered, cedar_policy_id, &[])
+    })
+}
+
+/// A rendered rule with each `temporal { … }` expression replaced by `true`.
+fn without_temporal(rendered: &str) -> String {
+    const KEYWORD: &str = "temporal";
+    let bytes = rendered.as_bytes();
+    let mut out = String::with_capacity(rendered.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            let end = string_end(bytes, index);
+            out.push_str(&rendered[index..end]);
+            index = end;
+            continue;
+        }
+        let starts_word = index == 0
+            || !(bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'.');
+        if starts_word && rendered[index..].starts_with(KEYWORD) {
+            let after = index + KEYWORD.len();
+            let open = after
+                + rendered[after..]
+                    .bytes()
+                    .take_while(u8::is_ascii_whitespace)
+                    .count();
+            if bytes.get(open) == Some(&b'{')
+                && let Some(close) = block_end(bytes, open)
+            {
+                out.push_str("true");
+                index = close;
+                continue;
+            }
+        }
+        let character = rendered[index..].chars().next().unwrap_or_default();
+        out.push(character);
+        index += character.len_utf8().max(1);
+    }
+    out
+}
+
+/// The byte after the string literal that opens at `start`.
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the `}` that closes the block that opens at `open`.
+fn block_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = string_end(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Strict-validate canonical policy statements against an ordered schema set.

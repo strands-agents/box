@@ -631,6 +631,20 @@ fn a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema
                    || (action == Box::Action::"fs:read" && context.input.path like "*/secret")
                };"#,
         ),
+        (
+            "temporal_tool.dw",
+            r#"@id("temporal_tool")
+               forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( srv::Action::"read"::request{ input.path: _ } ) };"#,
+        ),
+        (
+            "temporal_box.dw",
+            r#"@id("temporal_box")
+               forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( Box::Action::"fs:read"::request{ input.path: "a}\"{" } ) };"#,
+        ),
     ] {
         let history = tempfile::tempdir().expect("history directory");
         let refusal = PolicyEngine::open_staged(
@@ -670,6 +684,12 @@ fn staged_validation_refuses_a_read_of_the_input_across_families() {
         (
             "unscoped.dw",
             r#"forbid(principal, action, resource) when { context.input has path };"#,
+        ),
+        (
+            "temporal.dw",
+            r#"forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( srv::Action::"read"::request{ input.path: _ } ) };"#,
         ),
     ] {
         let refusal = PolicyEngine::validate_staged(&[source(name, text)])

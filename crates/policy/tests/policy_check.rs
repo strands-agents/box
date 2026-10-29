@@ -69,6 +69,8 @@ const ACROSS_FAMILIES: &str = "@id(\"secrets\") forbid (principal, action in [Bo
 
 const ACROSS_A_TOOL: &str = "@id(\"mixed\") forbid (principal, action in [Box::Action::\"fs:read\", alpha::Action::\"read\"], resource) when { context.input has path };\n";
 
+const ACROSS_A_TOOL_TEMPORAL: &str = "@id(\"mixed_temporal\") forbid (principal, action in [Box::Action::\"fs:read\", alpha::Action::\"read\"], resource) when { context.input has path } when temporal { formerly within 60s ( alpha::Action::\"read\"::request{ input.path: _ } ) };\n";
+
 const TYPED: &str =
     "@id(\"tool\") permit (principal, action == alpha::Action::\"read\", resource);\n";
 
@@ -191,6 +193,7 @@ fn a_staged_check_refuses_exactly_what_open_staged_refuses() {
         SPELLING,
         ACROSS_FAMILIES,
         ACROSS_A_TOOL,
+        ACROSS_A_TOOL_TEMPORAL,
         TYPED,
     ] {
         let with_tool = format!("{text}\n{TYPED}");
@@ -295,6 +298,10 @@ fn a_read_of_the_input_across_families_names_its_rule() {
     for (check, position) in [
         (check(&format!("{GOOD}\n{ACROSS_FAMILIES}")), 2),
         (check_staged(&format!("{GOOD}\n{ACROSS_A_TOOL}")), 2),
+        (
+            check_staged(&format!("{GOOD}\n{ACROSS_A_TOOL_TEMPORAL}")),
+            2,
+        ),
     ] {
         let finding = &check.errors()[0];
         assert!(
