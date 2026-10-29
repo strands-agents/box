@@ -12,6 +12,7 @@ use super::Pack;
 use super::grammar::{FieldKind, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
 use super::schema::pack_action_schema;
+use crate::check::Refused;
 use crate::dogwood::{check_against, service_schema};
 use crate::schema::ActionSchema;
 use crate::spelling::Operator;
@@ -278,6 +279,18 @@ fn field_condition(
     })
 }
 
+/// The reason the load gives for the condition of [`mistyped_condition`], which names the
+/// type that the schema gives a field of `kind`.
+fn mistyped_reason(kind: FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Bool => "expected Set<__cedar::internal::Any> but saw Bool",
+        FieldKind::String => "expected Set<__cedar::internal::Any> but saw String",
+        FieldKind::Set => "expected String but saw Set<String>",
+    }
+}
+/// The reason the load gives for a rule that names an effect the pack does not declare.
+const UNDECLARED_EFFECT: &str = "is not declared as a valid eid";
+
 /// A condition that reads a field of `kind` as a type it does not have.
 fn mistyped_condition(name: &str, kind: FieldKind) -> String {
     match kind {
@@ -352,18 +365,36 @@ fn verdict(
     ))
 }
 
-/// The indexes of the rules that a refusal of `source` names, or `None` when it loads.
-fn refused_rules(source: &str, pack: &Pack) -> Option<BTreeSet<usize>> {
-    let schema = pack_action_schema(std::slice::from_ref(pack), &[]).expect("the schema composes");
-    let refused = check_against(source, schema, &Operator::unanchored(), true, &[]).err()?;
-    Some(
-        refused
-            .findings
-            .iter()
-            .flat_map(|finding| finding.rules())
-            .map(|rule| rule.position() - 1)
-            .collect(),
-    )
+/// Load `source` against `pack` through the strict load path, keeping the whole refusal.
+fn load(source: &str, pack: &Pack) -> Result<(), Refused> {
+    let schema = pack_action_schema(std::slice::from_ref(pack), &[]).map_err(Refused::from)?;
+    check_against(source, schema, &Operator::unanchored(), true, &[]).map(|_| ())
+}
+
+/// The message of each finding of `refused` that names rule `index`.
+fn messages_for(refused: &Refused, index: usize) -> Vec<&str> {
+    refused
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .rules()
+                .iter()
+                .any(|rule| rule.position() == index + 1)
+        })
+        .map(|finding| finding.message())
+        .collect()
+}
+
+/// The refusal as one line, and the rules it names, by position.
+fn describe(refused: &Refused) -> String {
+    let rules: BTreeSet<usize> = refused
+        .findings
+        .iter()
+        .flat_map(|finding| finding.rules())
+        .map(|rule| rule.position())
+        .collect();
+    format!("{} (rules {rules:?})", refused.error)
 }
 
 /// The conjunction of `conditions`, nested as a balanced tree to stay within the evaluation depth.
@@ -491,12 +522,15 @@ fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<Stri
         .iter()
         .map(|event| rule(&namespace, &event.action, &all_of(&event.conditions)))
         .collect();
-    if let Some(rules) = refused_rules(&exact, pack) {
-        for index in rules {
-            failures.push(format!(
-                "{}: the rule over its values is refused",
-                events[index].at
-            ));
+    if let Err(refused) = load(&exact, pack) {
+        failures.push(format!(
+            "{file}: the rules over the case values are refused: {}",
+            describe(&refused)
+        ));
+        for (index, event) in events.iter().enumerate() {
+            if !messages_for(&refused, index).is_empty() {
+                failures.push(format!("{}: its rule is one that is refused", event.at));
+            }
         }
         return;
     }
@@ -510,6 +544,13 @@ fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<Stri
         }
     }
     let negated: String = negations.iter().map(|(_, rule)| rule.as_str()).collect();
+    if let Err(refused) = load(&negated, pack) {
+        failures.push(format!(
+            "{file}: the negated rules are refused: {}",
+            describe(&refused)
+        ));
+        return;
+    }
     let service = service_schema().expect("the event schema builds");
     let policy_schema = dogwood_language::PolicySchema::from_cedarschema_str(&schema.source)
         .expect("the action schema reads");
@@ -547,7 +588,8 @@ fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<Stri
     }
 }
 
-/// Check that a rule which reads any field of any action of `pack` as another type is refused.
+/// Check that a rule which reads a field as another type, or names an undeclared effect, is refused
+/// for that reason.
 fn check_field_types(file: &str, pack: &Pack, failures: &mut Vec<String>) {
     let namespace = pack.namespace();
     let mut probes = Vec::new();
@@ -555,6 +597,7 @@ fn check_field_types(file: &str, pack: &Pack, failures: &mut Vec<String>) {
         for (name, kind) in fields {
             probes.push((
                 format!("{}.{name}", action.as_str()),
+                mistyped_reason(kind),
                 rule(&namespace, action.as_str(), &mistyped_condition(name, kind)),
             ));
         }
@@ -563,6 +606,7 @@ fn check_field_types(file: &str, pack: &Pack, failures: &mut Vec<String>) {
         let undeclared = format!("{}_undeclared", effect.as_str());
         probes.push((
             format!("effect {undeclared}"),
+            UNDECLARED_EFFECT,
             rule(
                 &namespace,
                 UNMODELED_ACTION,
@@ -573,12 +617,25 @@ fn check_field_types(file: &str, pack: &Pack, failures: &mut Vec<String>) {
             ),
         ));
     }
-    let source: String = probes.iter().map(|(_, rule)| rule.as_str()).collect();
-    let refused = refused_rules(&source, pack).unwrap_or_default();
-    for (index, (name, _)) in probes.iter().enumerate() {
-        if !refused.contains(&index) {
+    if probes.is_empty() {
+        return;
+    }
+    let source: String = probes.iter().map(|(_, _, rule)| rule.as_str()).collect();
+    let refused = match load(&source, pack) {
+        Ok(()) => {
             failures.push(format!(
-                "{file}: a rule that reads {name} as another type loads"
+                "{file}: every rule that reads a value as another type loads"
+            ));
+            return;
+        }
+        Err(refused) => refused,
+    };
+    for (index, (name, reason, _)) in probes.iter().enumerate() {
+        let messages = messages_for(&refused, index);
+        if !matches!(messages.as_slice(), [message] if message.contains(reason)) {
+            failures.push(format!(
+                "{file}: the probe over {name} is not refused for {reason:?}: {messages:?}; {}",
+                describe(&refused)
             ));
         }
     }
@@ -589,6 +646,9 @@ fn every_corpus_case_gives_an_event_that_its_generated_schema_types_and_decides(
     let mut failures = Vec::new();
     let mut count = 0;
     for (file, pack, cases) in corpora() {
+        if cases.is_empty() {
+            failures.push(format!("{file}: holds no case"));
+        }
         count += cases.len();
         check_corpus(&file, &pack, &cases, &mut failures);
         check_field_types(&file, &pack, &mut failures);

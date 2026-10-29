@@ -218,13 +218,13 @@ mod tests {
                 "a rule is refused without its pack",
                 vec![],
                 r#"forbid (principal, action == Tool::git::Action::"push", resource);"#,
-                Some("unrecognized action"),
+                Some(r#"unrecognized action `Tool::git::Action::"push"`"#),
             ),
             (
                 "a v1 rule is refused against a v2 pack",
                 vec![at_version("git-push-commit-status", 2)],
                 r#"forbid (principal, action == Tool::git::Action::"push", resource);"#,
-                Some("unrecognized action"),
+                Some(r#"unrecognized action `Tool::git::Action::"push"`"#),
             ),
             (
                 "a v2 rule loads against a v2 pack",
@@ -245,21 +245,23 @@ mod tests {
                 "a rule over the group of a pack that is not installed is refused",
                 vec![git()],
                 r#"permit (principal, action in Tool::cargo::Action::"*", resource);"#,
-                Some("unrecognized action"),
+                Some(r#"unrecognized action `Tool::cargo::Action::"*"`"#),
             ),
             (
                 "an effect of another pack is refused",
                 vec![git(), cargo()],
                 r#"forbid (principal, action == Tool::git::Action::"push", resource)
                    when { context.input.effects.contains(Tool::cargo::Effect::"update_lockfile") };"#,
-                Some("are not compatible"),
+                Some("the types Tool::cargo::Effect and Tool::git::Effect are not compatible"),
             ),
             (
                 "an effect the pack does not declare is refused",
                 vec![git()],
                 r#"forbid (principal, action == Tool::git::Action::"push", resource)
                    when { context.input.effects.contains(Tool::git::Effect::"delete_data") };"#,
-                Some("is not declared as a valid eid"),
+                Some(
+                    r#"entity `Tool::git::Effect::"delete_data"` is of an enumerated entity type, but `"delete_data"` is not declared as a valid eid"#,
+                ),
             ),
             (
                 "a field the action does not have is refused",
@@ -350,7 +352,15 @@ mod tests {
     fn two_packs_with_one_namespace_do_not_compose() {
         let packs = [valid("git"), valid("git-push-commit-status")];
 
-        assert!(pack_action_schema(&packs, &[]).is_err());
+        let error = pack_action_schema(&packs, &[])
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+
+        assert!(
+            error.contains("duplicate namespace id: `Tool::git`"),
+            "{error}"
+        );
     }
 
     #[test]
