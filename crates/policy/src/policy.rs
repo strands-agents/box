@@ -338,9 +338,9 @@ impl PolicyEngine {
     /// The per-tool refinement for one `tools/call`.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
-    /// the coarse grant) or when no rule forbids it; returns `Deny` only on an explicit `forbid` or
-    /// an evaluation fault. `arguments` is the raw `params.arguments`, typed against the composed
-    /// schema by the engine's request gate (`context_for`'s `from_json`).
+    /// the coarse grant) or when no rule forbids it; returns `Deny` on a degraded or pending tool,
+    /// an explicit `forbid`, or an evaluation fault. `arguments` is the raw `params.arguments`,
+    /// typed against the composed schema by the engine's request gate (`context_for`'s `from_json`).
     pub fn refine_tool_call(
         &self,
         governed: &GovernedBox,
@@ -362,15 +362,16 @@ impl PolicyEngine {
             Ok(action) => action,
             Err(_) => return self.conclude(&identity, &request, Decision::internal_fault()),
         };
+        // A degraded tool is refused ahead of the declaration test, so the coarse-allow upgrade
+        // below cannot reach it. Its argument constraint can never be enforced, whether or not the
+        // committed schema declares the tool action.
+        if let Some(refusal) = self.authority.degraded_refusal(&identity) {
+            return self.conclude(&identity, &request, refusal);
+        }
         if !self.declares_tool_action(&action) {
-            // A tool with no declared per-tool action can be one of three things while its schema is
-            // absent: degraded (its server's `tools/list` was denied, so it never stages) →
-            // deny fail-closed, so a hardcoded call cannot ride the coarse allow with its argument
-            // constraint unenforceable; pending (still discovering) → hold transiently; or a
-            // genuinely unruled tool → ride the coarse allow as before.
-            let decision = if self.authority.is_tool_degraded(&identity) {
-                Decision::no_match()
-            } else if self.authority.is_tool_pending(&identity) {
+            // A tool with no declared per-tool action is either pending (still discovering) → hold
+            // transiently, or a genuinely unruled tool → ride the coarse allow as before.
+            let decision = if self.authority.is_tool_pending(&identity) {
                 Decision::policy_pending()
             } else {
                 Decision::Allow {
