@@ -1,0 +1,16 @@
+# A tool pack with `-=` as a short flag, beside `-a`, which takes no value, and `-o`, which takes one.
+
+pack    = "equals_flag"
+program = "tool"
+format  = 1
+version = 1
+
+[effects]
+equals = "The command line gives `-=`"
+output = "The command line gives `-o` and a value"
+
+[shell.run]
+usage = "tool run [options]"
+options.equals = { flag = ["-="], adds = ["equals"] }
+options.all    = { flag = ["-a"] }
+options.output = { flag = ["-o"], value = "required", adds = ["output"] }
