@@ -12,6 +12,9 @@ invariants:
 - When you insert a flag that the pack does not declare and that no other word holds, the result
   is `Unmodeled`, or the flag is a field value. The parser cannot read an undeclared flag as an
   option.
+- The same is true when you put an undeclared letter in a short cluster, after letters that take
+  no value in any option table of the pack. After a flag that takes a value, the letters are that
+  value, so the check does not apply there.
 
 ## The bounded run
 
