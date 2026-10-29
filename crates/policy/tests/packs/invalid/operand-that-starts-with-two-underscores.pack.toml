@@ -1,0 +1,10 @@
+# expect: tool pack <file>: `[shell.check]`: field "__entity" starts with `__`, which Box reserves for Cedar record keys
+# A tool pack whose operand takes a record key that Cedar reserves.
+
+pack    = "probe"
+program = "probe"
+format  = 1
+version = 1
+
+[shell.check]
+usage = "probe check <__entity>"

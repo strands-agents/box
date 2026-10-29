@@ -263,6 +263,12 @@ impl ActionGrammar {
                 field: field.name.clone(),
             });
         }
+        if let Some(field) = fields.iter().find(|field| field.name.starts_with("__")) {
+            return Err(PackRefusal::CedarReservedField {
+                place,
+                field: field.name.clone(),
+            });
+        }
         let mut names = BTreeSet::new();
         if let Some(field) = fields.iter().find(|field| !names.insert(&field.name)) {
             return Err(PackRefusal::FieldTaken {

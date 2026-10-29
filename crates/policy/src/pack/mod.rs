@@ -97,6 +97,8 @@ pub(crate) enum PackRefusal {
     ReservedAction { place: Place },
     #[error("{place}: field {field:?} has a name that the schema gives every action")]
     ReservedField { place: Place, field: String },
+    #[error("{place}: field {field:?} starts with `__`, which Box reserves for Cedar record keys")]
+    CedarReservedField { place: Place, field: String },
 }
 
 /// Why Box refuses one option of a tool pack.
