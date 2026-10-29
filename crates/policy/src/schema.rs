@@ -28,12 +28,20 @@ pub(crate) struct ActionSchema {
 
 /// Compose the canonical schema with ordered MCP schema fragments.
 pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, PolicyError> {
+    composed_action_schema(&[], mcp_schemas)
+}
+
+/// Compose the canonical schema with generated tool pack fragments, then ordered MCP fragments.
+pub(crate) fn composed_action_schema(
+    pack_schemas: &[String],
+    mcp_schemas: &[String],
+) -> Result<ActionSchema, PolicyError> {
     for fragment in mcp_schemas {
         crate::mcp_schema::validate_unbound_mcp_schema(fragment)
             .map_err(|error| PolicyError::Schema(error.to_string()))?;
     }
     let mut source = SCHEMA_SRC.to_string();
-    for fragment in mcp_schemas {
+    for fragment in pack_schemas.iter().chain(mcp_schemas) {
         let base = source.trim_end();
         source = format!("{base}\n{fragment}");
     }
@@ -49,7 +57,7 @@ pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, Poli
         .actions()
         .filter(|action| {
             action.type_name().basename() == "Action"
-                && action.type_name().namespace_components().next().is_some()
+                && action.type_name().namespace_components().count() == 1
                 && action.type_name().to_string() != FIXED_ACTION_TYPE
         })
         .cloned()

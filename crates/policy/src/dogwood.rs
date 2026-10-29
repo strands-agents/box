@@ -156,7 +156,7 @@ pub fn event_schema_source() -> &'static str {
     EVENTS_DWSCHEMA
 }
 
-fn service_schema() -> Result<ServiceSchema, PolicyError> {
+pub(crate) fn service_schema() -> Result<ServiceSchema, PolicyError> {
     ServiceSchema::builder()
         .event_schema_str(EVENTS_DWSCHEMA)
         .build()
@@ -585,7 +585,17 @@ pub(crate) fn check_and_expand(
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
     let effective_schema = action_schema(mcp_schemas)?;
+    check_against(source, effective_schema, operator, authored, positions)
+}
 
+/// Parse and validate a bundle against `effective_schema`, keeping the findings of a refusal.
+pub(crate) fn check_against(
+    source: &str,
+    effective_schema: ActionSchema,
+    operator: &Operator,
+    authored: bool,
+    positions: &[usize],
+) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
     let policy_schema = PolicySchema::from_cedarschema_str(&effective_schema.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
 
