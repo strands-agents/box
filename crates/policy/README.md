@@ -379,6 +379,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             path: "/v1/items",
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
+            intercepted: true,
         },
     )
 }
@@ -387,7 +388,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
