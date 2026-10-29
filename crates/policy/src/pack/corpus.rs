@@ -8,20 +8,20 @@ use serde::Deserialize;
 use super::Pack;
 use super::grammar::{FieldValue, Parsed};
 
-const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
+pub(super) const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
 
 /// One `<pack>.corpus.toml` file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Corpus {
-    case: Vec<Case>,
+pub(super) struct Corpus {
+    pub(super) case: Vec<Case>,
 }
 
 /// One `[[case]]`: an argv, and what the shell grammar reads it as.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Case {
-    argv: Vec<String>,
+pub(super) struct Case {
+    pub(super) argv: Vec<String>,
     action: String,
     #[serde(default)]
     fields: toml::Table,
@@ -29,7 +29,7 @@ struct Case {
     effects: BTreeSet<String>,
 }
 
-fn corpus_files() -> Vec<PathBuf> {
+pub(super) fn corpus_files() -> Vec<PathBuf> {
     let directory = Path::new(PACKS).join("corpus");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
@@ -38,6 +38,18 @@ fn corpus_files() -> Vec<PathBuf> {
     paths.sort();
     assert!(!paths.is_empty(), "{} holds no corpus", directory.display());
     paths
+}
+
+/// The pack that the corpus file at `path`, named `<stem>.corpus.toml`, reads against.
+pub(super) fn pack_of(path: &Path, stem: &str) -> PathBuf {
+    let beside = path.with_file_name(format!("{stem}.pack.toml"));
+    if beside.exists() {
+        beside
+    } else {
+        Path::new(PACKS)
+            .join("valid")
+            .join(format!("{stem}.pack.toml"))
+    }
 }
 
 fn field_values(fields: &toml::Table) -> Result<BTreeMap<String, FieldValue>, String> {
@@ -164,15 +176,7 @@ fn every_corpus_case_parses_to_its_action_fields_and_effects() {
             failures.push(format!("{file}: is not named `<pack>.corpus.toml`"));
             continue;
         };
-        let beside = path.with_file_name(format!("{stem}.pack.toml"));
-        let pack_path = if beside.exists() {
-            beside
-        } else {
-            Path::new(PACKS)
-                .join("valid")
-                .join(format!("{stem}.pack.toml"))
-        };
-        let pack = Pack::load(&pack_path).expect("the corpus pack loads");
+        let pack = Pack::load(&pack_of(&path, stem)).expect("the corpus pack loads");
         let grammar = pack.grammar();
         let text = std::fs::read_to_string(&path).expect("the corpus file reads");
         let corpus: Corpus = match toml::from_str(&text) {
