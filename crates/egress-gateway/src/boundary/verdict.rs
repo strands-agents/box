@@ -225,34 +225,17 @@ pub enum MutationTarget {
 /// Why a request or response was denied — a non-secret, log-safe reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DenyReason {
-    /// A host was denied (default-deny allowlist).
-    HostDenied(String),
-    /// A resolved IP was denied (a policy deny).
-    IpDenied(String),
     /// Two mutators tried to edit the same target on one request (fail closed).
     MutationCollision(String),
     /// A credential binding was ambiguous or a phantom mismatched (fail closed).
     Credential(String),
-    /// A generic request control denied the exchange.
-    ControlDenied(String),
-    /// A response breached a configured size/content limit.
-    ResponseLimit(String),
-    /// The policy decision point did not authorize the exchange. Reached through the
-    /// [`EffectInterceptor`](crate::effect::EffectInterceptor) seam, which is the only authorization
-    /// authority the boundary has. Names no host/IP (log-safe) and maps to HTTP 403.
-    NotAuthorized,
 }
 
 impl std::fmt::Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DenyReason::HostDenied(h) => write!(f, "host denied: {h}"),
-            DenyReason::IpDenied(m) => write!(f, "ip denied: {m}"),
             DenyReason::MutationCollision(m) => write!(f, "mutation collision: {m}"),
             DenyReason::Credential(m) => write!(f, "credential denied: {m}"),
-            DenyReason::ControlDenied(m) => write!(f, "control denied: {m}"),
-            DenyReason::ResponseLimit(m) => write!(f, "response limit: {m}"),
-            DenyReason::NotAuthorized => write!(f, "not authorized (default-deny)"),
         }
     }
 }

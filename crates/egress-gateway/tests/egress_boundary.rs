@@ -1466,6 +1466,126 @@ fn framing_ambiguity_is_refused_before_any_upstream_request() {
     assert_still_serving(&handle, host, &upstream, "/after-framing");
 }
 
+/// A relayed response keeps the upstream's header case, and a refusal keeps the lowercase marker.
+#[test]
+fn header_case_is_the_upstreams_or_the_gateways() {
+    let recorder = PlainRecorder::start();
+    recorder.self_test();
+    let port = recorder.port();
+    let request =
+        format!("GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+
+    let policy = RecordingPolicy::permitting_host_at("127.0.0.1", IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let reply = plain_exchange(
+        proxy_port(&start(MitmConfig::default(), policy)),
+        request.as_bytes(),
+    );
+    assert!(reply.contains("\r\nContent-Length: 11\r\n"), "{reply:?}");
+
+    let refused = start(MitmConfig::default(), RecordingPolicy::refuse_all());
+    let reply = plain_exchange(proxy_port(&refused), request.as_bytes());
+    assert!(
+        reply.contains("\r\nx-strands-box-egress: refused\r\n"),
+        "{reply:?}"
+    );
+}
+
+/// A raw `>`, `<`, or `"` in a query, as curl sends `q=stars:>100`, reaches policy and the
+/// upstream as sent on both paths, though hyper's URI parser refuses it.
+#[test]
+fn a_query_that_hyper_refuses_is_judged_and_forwarded_as_sent() {
+    let target = "/search?q=stars:>100&r=\"<a>\"";
+    let judged = vec![Seen::Request {
+        method: "GET".to_string(),
+        path: "/search".to_string(),
+    }];
+
+    let host = "query.test";
+    let upstream = TlsUpstream::start(host);
+    let (handle, policy) = gateway_for(host, &upstream);
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.send_request("GET", target, &[], b"");
+    assert_eq!(client.read_status(), 200);
+    let seen = upstream.last_request();
+    assert!(seen.raw.starts_with(&format!("GET {target} ")), "{seen:?}");
+    assert_eq!(policy.requests(), judged);
+
+    let recorder = PlainRecorder::start();
+    recorder.self_test();
+    let port = recorder.port();
+    let policy = RecordingPolicy::permitting_host_at("127.0.0.1", IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let reply = plain_exchange(
+        proxy_port(&start(MitmConfig::default(), policy.clone())),
+        format!("GET http://127.0.0.1:{port}{target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+            .as_bytes(),
+    );
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
+    assert_eq!(
+        recorder.request_lines(),
+        vec![format!("GET {target} HTTP/1.1")]
+    );
+    assert_eq!(policy.requests(), judged);
+}
+
+/// Blank lines before the request line do not hide its framing: hyper's parser skips them, and so
+/// does the box's own read of the raw head.
+#[test]
+fn framing_ambiguity_after_blank_lines_is_refused() {
+    let host = "blank.test";
+    let upstream = TlsUpstream::start(host);
+    let (handle, policy) = gateway_for(host, &upstream);
+    let port = upstream.port();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_raw(
+        format!(
+            "\r\n\r\nPOST /legit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG"
+        )
+        .as_bytes(),
+    );
+    assert_ne!(
+        client.read_status(),
+        200,
+        "an ambiguous frame is not answered 200"
+    );
+    assert_eq!(
+        upstream.request_count(),
+        0,
+        "no request reached the upstream"
+    );
+    assert!(
+        policy.requests().is_empty(),
+        "no request effect was raised: {:?}",
+        policy.requests()
+    );
+}
+
+/// A CONNECT inside the tunnel is refused before any request effect: the gateway does not nest
+/// tunnels.
+#[test]
+fn a_connect_inside_the_tunnel_is_refused() {
+    let host = "nested.test";
+    let upstream = TlsUpstream::start(host);
+    let (handle, policy) = gateway_for(host, &upstream);
+    let port = upstream.port();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_raw(
+        format!("CONNECT inner.example:443 HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes(),
+    );
+    assert_ne!(client.read_status(), 200, "a nested tunnel is never opened");
+    assert_eq!(
+        upstream.request_count(),
+        0,
+        "no request reached the upstream"
+    );
+    assert!(
+        policy.requests().is_empty(),
+        "no request effect was raised: {:?}",
+        policy.requests()
+    );
+}
+
 /// A second request riding a complete first one, in the same TLS connection, is never forwarded:
 /// the gateway forwards exactly one request per connection, re-framed with its own Content-Length.
 #[test]

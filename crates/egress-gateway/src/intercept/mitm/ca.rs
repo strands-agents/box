@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::error::{ProxyError, Result};
 
 /// The ephemeral session CA: an ECDSA P-256 issuer plus the per-host leaf cache.
-pub(super) struct EphemeralCa {
+pub(crate) struct EphemeralCa {
     /// The issuer used to sign per-host leaves (holds the CA key pair).
     issuer: Issuer<'static, KeyPair>,
     /// The public CA certificate in DER — the trust anchor handed to the workload.
@@ -193,18 +192,10 @@ fn write_public_ca_opened(dir: &Path, file: &std::fs::File, pem: &str) -> Result
     Ok(dir.join("cert.pem"))
 }
 
-/// Set the public CA cert file to owner-read-only (`0o400`) on Unix. A no-op elsewhere.
-#[cfg(unix)]
+/// Set the public CA cert file to owner-read-only (`0o400`).
 fn set_readonly_owner(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
         .map_err(|e| ProxyError::Io(format!("chmod 0o400 {}: {e}", path.display())))
-}
-
-/// Non-Unix fallback: the `0o400` mode is Unix-specific, so this is a no-op.
-#[cfg(not(unix))]
-fn set_readonly_owner(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

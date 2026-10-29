@@ -11,11 +11,11 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 44 names (`src/lib.rs`): 40 unconditional, and 4 behind the default-on
+The façade exports 43 names (`src/lib.rs`): 39 unconditional, and 4 behind the default-on
 `tls-intercept` feature — `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` — which stay
 behind it. `audit::Decision` exits as `AuditDecision`. `normalize_host` and `is_bindable_host` are
 the one host spelling, exported for `policy::spelling`, which refuses a host literal no bound host
-can equal. A 45th name needs a named external caller.
+can equal. A 44th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
@@ -76,8 +76,6 @@ The capability modules carry no authority.
 - `ControlSet`, `Control`, `Cx`, and `Visibility` are gone, because
   [policy is the only authority](../../docs/design/decisions.md#the-authored-policy-is-the-only-decision-authority).
   Read `src/capability/`.
-- Residual: `ProxyError::NotAuthorized`'s doc comment says "Connection-scope Decision Control" and is
-  not live design. `DenyReason::NotAuthorized` is correct.
 
 ## Known naming debt (fact, not a plan)
 
@@ -101,8 +99,8 @@ Conventions: `docs/conventions.md`.
   three spellings if that unwrapping is lost.
 - Keep `Arc<dyn EffectInterceptor>` mandatory in `MitmInterceptor::start` and `start_with_emitter`,
   and never add `start_without_policy()` or an `Option` form.
-- Use `write_trusted_diagnostic` only for static, secret-free, proxy-originated bytes. Upstream bytes
-  always need a `ResponseRelease` permit.
+- Use `WorkloadResponse::refusal` and `WorkloadResponse::bare` only for static, secret-free,
+  proxy-originated bytes. Upstream bytes always need a `ResponseRelease` permit.
 - Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
   `ProxyOnly` kernel pin, the real anti-hijack defence.
 - Report the pre-mutation `workload_path`, which `emit_decision` reads from `DecisionSubject`. Never
@@ -112,8 +110,6 @@ Conventions: `docs/conventions.md`.
 - Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300
   runs. Treat head-buffer guards as security tests, because one added header line leaks a credential
   into freed heap silently.
-- Keep `the_status_line_budget_covers_every_reason_phrase`; `STATUS_LINE_BYTES = 64` is a constant
-  that a longer `reason()` phrase overruns.
 - Never derive `Debug` on `HeaderMap` or `InterceptedRequest`, and never unwrap a value out of
   `Zeroizing`; one `eprintln!` then prints live credentials.
 - Residual: `Target::path` and `Target::query` are plain `String`, so a `UrlPath` or `QueryParam`
@@ -132,14 +128,14 @@ Conventions: `docs/conventions.md`.
 - Decode the key in `strip_query_param`, because the workload picks the spelling and `a%2Fb`, `a%2fb`,
   and `a+b` are one key. Leave a malformed `%` escape verbatim. `AddQueryParam` appends, so keep
   `StripQueryParam` beside it.
-- Keep `read_until_headers_end` byte-at-a-time and unbuffered; a `BufReader` strands the
-  `ClientHello` and breaks TLS termination.
+- Accept TLS on hyper's `Upgraded` stream, which replays the bytes hyper read after the CONNECT. A
+  downcast to the socket must keep `Parts::read_buf`, or the `ClientHello` is lost.
 - Keep `BoundTransport`, and self-connect in `shutdown()` over the bound transport; a `u16`
   deadlocks `Drop`'s `join()` under the AF_UNIX pin, where `env_vars()` omits `HTTP(S)_PROXY`.
 - Keep `MAX_CACHED_LEAVES = 64` and clear the cache on reaching it; each entry holds a leaf key for
   the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
-- Refuse an unframed message on a reusable connection when keep-alive lands. `read_body_to_close`
-  reads to EOF, correct only while the close delimits.
+- Refuse an unframed message on a reusable connection when keep-alive lands. hyper's client reads an
+  unframed reply to EOF, correct only while the close delimits.
 
 ## Change Checklist
 
