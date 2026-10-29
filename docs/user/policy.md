@@ -608,6 +608,48 @@ when { context.input.path like "*/Users/dev/project/*" };
 rule @id("later_home") compares context.input.path with the pattern "*/Users/dev/project/*", which names the operator home after a wildcard; a path under the operator home is spelled ~/…, so the pattern may match nothing
 ```
 
+### A rule that checks `context.input` for two kinds of action
+
+The same field name can mean different things on different actions. On `fs:read`, `path` is a
+file. On `http:request`, `path` is the path part of a URL. So a rule that checks `context.input`
+covers one kind of action, and the error calls that kind a family. This rule checks `path` for a
+file read and for an HTTP request, and it refuses to load:
+
+```text
+@id("no_secrets")
+forbid (principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+```text
+policy reads the input without one action family: rule @id("no_secrets") reads context.input.path under actions of more than one family, and an input attribute means what the action makes it mean; write one rule for each family: [Box::Action::"fs:read"] and [Box::Action::"http:request"]
+```
+
+To fix it, write one rule for each family:
+
+```text
+@id("no_secrets_file")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/secrets.env" };
+
+@id("no_secrets_url")
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+Actions are in the same family when their names start the same way before the `:`. So
+`fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
+can't. Each MCP tool action is a family of its own.
+
+A rule that checks `context.input` and names no action gets the same error. Name the action the
+rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
+`action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
+
+```text
+forbid(principal, action, resource)
+when { action == Box::Action::"fs:read" && context.input.path like "*/secrets.env" };
+```
+
 ### One `@id` on two rules
 
 The duplicate check covers each rule that carries an `@id`:

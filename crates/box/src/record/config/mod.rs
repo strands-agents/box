@@ -2431,6 +2431,29 @@ env = {}
                 .expect("MCP configuration defers complete action-schema validation");
 
             std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
+            );
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == Box::Action::"shell:exec", resource)
+               when { context.input.not_in_the_canonical_schema == "value" };"#,
+            )
+            .expect("restore policy");
+            std::fs::write(
                 &config_path,
                 format!(
                     "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n",

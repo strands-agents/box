@@ -61,6 +61,14 @@ fn refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     }
 }
 
+fn family_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
+    match result {
+        Ok(_) => panic!("a read of the input without one action family must refuse the load"),
+        Err(PolicyStagingError::Policy(PolicyError::InputAcrossFamilies(reason))) => reason,
+        Err(other) => panic!("expected an action-family refusal, got {other}"),
+    }
+}
+
 fn reads(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
     engine
         .decide(
@@ -135,14 +143,18 @@ fn an_absolute_path_under_the_home_is_refused_and_its_home_relative_form_forbids
     assert!(reads(&engine, &home.approved("project/notes.md")));
 }
 
+const EVERY_FS_ACTION: &str = r#"action in [
+            Box::Action::"fs:read", Box::Action::"fs:write",
+            Box::Action::"fs:delete", Box::Action::"fs:move"
+        ]"#;
+
 #[test]
-fn a_forbid_over_every_action_is_judged_too() {
+fn a_forbid_over_every_filesystem_action_is_judged_too() {
     let home = Home::new();
     let absolute = format!(
         r#"{READ_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path == "{}" }};"#,
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path == "{}" }};"#,
         home.canonical.join("project/secrets.env").display()
     );
     let reason = refusal(home.open("broad-absolute", &absolute));
@@ -153,15 +165,43 @@ fn a_forbid_over_every_action_is_judged_too() {
 
     let control = format!(
         r#"{READ_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path == "~/project/secrets.env" }};"#
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path == "~/project/secrets.env" }};"#
     );
     let engine = home
         .open("broad-tilde", &control)
         .expect("the ~ spelling loads");
     assert!(!reads(&engine, &home.approved("project/secrets.env")));
     assert!(reads(&engine, &home.approved("project/notes.md")));
+}
+
+#[test]
+fn a_path_rule_over_every_action_is_refused_at_open() {
+    let home = Home::new();
+    let macro_read = format!(
+        r#"{READ_ALL}
+        def cedar is_secret(?path) {{ ?path like "*/secrets.env" }};
+        @id("macro")
+        forbid(principal, action, resource)
+        when {{ is_secret(context.input.path) }};"#
+    );
+    let reason = family_refusal(home.open("macro", &macro_read));
+    assert!(
+        reason.contains("rule @id(\"macro\") reads context.input.path and constrains no action"),
+        "{reason}"
+    );
+    let broad = format!(
+        r#"{READ_ALL}
+        @id("broad")
+        forbid(principal, action, resource)
+        when {{ context has input && context.input has path
+            && context.input.path == "~/project/secrets.env" }};"#
+    );
+    let reason = family_refusal(home.open("broad", &broad));
+    assert!(
+        reason.contains("rule @id(\"broad\") reads context.input.path and constrains no action"),
+        "{reason}"
+    );
 }
 
 #[test]
@@ -347,46 +387,36 @@ const REQUEST_ALL: &str =
     r#"permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource);"#;
 
 #[test]
-fn an_operation_guard_keeps_a_filesystem_path_rule_off_an_http_request_with_the_same_path() {
-    // `context.input.path` carries a URL path on `http:request` and a filesystem path on
-    // `fs:*`, so a forbid over every action that compares `path` fires on both. Every
-    // filesystem input declares `operation` and no other input does, so `context.input has
-    // operation` is the guard that keeps the rule on the filesystem.
+fn a_filesystem_path_rule_stays_off_an_http_request_with_the_same_path() {
     let home = Home::new();
-    let unguarded = format!(
+    let across = format!(
         r#"{READ_ALL}
         {REQUEST_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path like "*/secrets.env" }};"#
+        forbid(principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+        when {{ context.input.path like "*/secrets.env" }};"#
     );
-    let engine = home
-        .open("unguarded", &unguarded)
-        .expect("the forbid loads");
-    assert!(!reads(&engine, &home.approved("project/secrets.env")));
-    assert!(reads(&engine, &home.approved("project/notes.md")));
+    let reason = family_refusal(home.open("across", &across));
     assert!(
-        !requests(&engine, "/v1/secrets.env"),
-        "the unguarded rule denies a request whose URL path matches the filesystem pattern"
+        reason.contains("write one rule for each family: [Box::Action::\"fs:read\"] and [Box::Action::\"http:request\"]"),
+        "{reason}"
     );
-    assert!(requests(&engine, "/v1/notes"));
 
-    let guarded = format!(
+    let filesystem = format!(
         r#"{READ_ALL}
         {REQUEST_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path && context.input has operation
-            && context.input.path like "*/secrets.env" }};"#
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path like "*/secrets.env" }};"#
     );
     let engine = home
-        .open("guarded", &guarded)
-        .expect("the guarded forbid loads");
+        .open("filesystem", &filesystem)
+        .expect("the filesystem forbid loads");
     assert!(!reads(&engine, &home.approved("project/secrets.env")));
     assert!(reads(&engine, &home.approved("project/notes.md")));
     assert!(
         requests(&engine, "/v1/secrets.env"),
-        "the guard leaves the request to the permit"
+        "the filesystem rule leaves the request to the permit"
     );
+    assert!(requests(&engine, "/v1/notes"));
 }
 
 #[test]

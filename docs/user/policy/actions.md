@@ -30,9 +30,11 @@ A field marked `?` below is optional. Read it behind a guard, as
 `context.input has arg1 && context.input.arg1 == "-rf"`. A rule that reads an optional field with no
 guard refuses to load.
 
-The name `path` appears on two kinds of action: a filesystem path on `fs:*` and a URL path on
-`http:request`. A rule that names both kinds tells them apart with `context.input has operation`,
-because only `fs:*` carries `operation`.
+Some field names mean different things on different actions. `path` is a file on `fs:read` and
+the path part of a URL on `http:request`. So a rule that checks `context.input` covers actions of
+one family: actions whose names start the same way before the `:`, such as `fs:read` and
+`fs:write`. Each MCP tool action is a family of its own. A rule that checks `context.input` for
+`fs:read` and `http:request` together refuses to load, so write one rule for each.
 
 ## The ten actions
 
