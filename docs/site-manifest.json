@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "id": "strands-box",
+    "name": "Strands Box",
+    "status": "preview"
+  },
+  "pages": [
+    {
+      "id": "getting-started",
+      "source": "docs/user/getting-started.md",
+      "slug": "quickstart",
+      "title": "Getting started with Box",
+      "description": "Download Box, configure the Strands CLI, observe a refused write, and permit it with policy.",
+      "nav": {
+        "group": "Overview",
+        "order": 1
+      }
+    },
+    {
+      "id": "tutorial-first-policy",
+      "source": "docs/user/tutorials/first-policy.md",
+      "slug": "guides/write-a-policy",
+      "title": "Write a policy and read what it decided",
+      "description": "Write permit and forbid rules, observe a refusal, and inspect Box decision records.",
+      "nav": {
+        "group": "Guides",
+        "order": 1
+      }
+    },
+    {
+      "id": "shell-policy",
+      "source": "docs/user/shell-policy.md",
+      "slug": "guides/write-shell-policy",
+      "title": "Write policy for shell commands",
+      "description": "Control shell commands, file operations, host programs, and built programs with policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 2
+      }
+    },
+    {
+      "id": "egress",
+      "source": "docs/user/egress.md",
+      "slug": "guides/network-and-credentials",
+      "title": "Egress credential configuration",
+      "description": "Bind credentials to permitted network destinations with `box.toml` configuration.",
+      "nav": {
+        "group": "Guides",
+        "order": 3
+      }
+    },
+    {
+      "id": "mcp",
+      "source": "docs/user/mcp.md",
+      "slug": "guides/add-an-mcp-server",
+      "title": "MCP server configuration",
+      "description": "Configure local stdio and remote HTTP MCP servers for a boxed agent.",
+      "nav": {
+        "group": "Guides",
+        "order": 4
+      }
+    },
+    {
+      "id": "mcp-policy",
+      "source": "docs/user/mcp-policy.md",
+      "slug": "guides/write-mcp-policy",
+      "title": "Write policy for an MCP server",
+      "description": "Permit and restrict MCP server tools and arguments with Dogwood policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 5
+      }
+    },
+    {
+      "id": "telemetry",
+      "source": "docs/user/telemetry.md",
+      "slug": "guides/record-telemetry",
+      "title": "Telemetry",
+      "description": "Configure decision and workload telemetry targets, filters, and records.",
+      "nav": {
+        "group": "Guides",
+        "order": 6
+      }
+    },
+    {
+      "id": "tutorial-strands-sdk-agent",
+      "source": "docs/user/tutorials/strands-sdk-agent.md",
+      "slug": "guides/run-strands-harness",
+      "title": "Run a Strands Agents SDK agent in a box",
+      "description": "Run a Strands Agents SDK agent in Box and control its commands and files with policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 7
+      }
+    },
+    {
+      "id": "tutorial-claude-code",
+      "source": "docs/user/tutorials/claude-code.md",
+      "slug": "guides/run-claude-code",
+      "title": "Run Claude Code in a box",
+      "description": "Run Claude Code with project access routed through Box policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 8
+      }
+    },
+    {
+      "id": "tutorial-codex-cli",
+      "source": "docs/user/tutorials/codex-cli.md",
+      "slug": "guides/run-codex-cli",
+      "title": "Run Codex CLI in a box",
+      "description": "Run Codex CLI with project access routed through Box policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 9
+      }
+    },
+    {
+      "id": "tutorial-pi",
+      "source": "docs/user/tutorials/pi.md",
+      "slug": "guides/run-pi",
+      "title": "Run pi in a box",
+      "description": "Run pi with project access routed through Box policy.",
+      "nav": {
+        "group": "Guides",
+        "order": 10
+      }
+    },
+    {
+      "id": "tutorial-strands-cli-telemetry",
+      "source": "docs/user/tutorials/strands-cli-telemetry.md",
+      "slug": "guides/strands-cli-telemetry",
+      "title": "Collect the Strands CLI's traces and metrics",
+      "description": "Send Strands CLI traces and metrics to the Box records file and inspect them together.",
+      "nav": {
+        "group": "Guides",
+        "order": 11
+      }
+    },
+    {
+      "id": "security",
+      "source": "docs/user/security.md",
+      "slug": "security",
+      "title": "Security: what Box governs, and what you own",
+      "description": "Understand Box enforcement tiers, trust boundaries, operator duties, and policy limitations.",
+      "nav": {
+        "group": "Security",
+        "order": 1
+      }
+    },
+    {
+      "id": "native-filesystem-policy",
+      "source": "docs/user/native-filesystem-policy.md",
+      "slug": "security/native-filesystem-policy",
+      "title": "Experimental native filesystem policy",
+      "description": "Enable and configure the experimental macOS native filesystem policy.",
+      "nav": {
+        "group": "Security",
+        "order": 2
+      }
+    },
+    {
+      "id": "configuration",
+      "source": "docs/user/config.md",
+      "slug": "reference/configuration",
+      "title": "box.toml configuration reference",
+      "description": "Configure every Box input, process, filesystem grant, credential, MCP server, and telemetry target.",
+      "nav": {
+        "group": "Reference",
+        "order": 1
+      }
+    },
+    {
+      "id": "policy",
+      "source": "docs/user/policy.md",
+      "slug": "reference/policy",
+      "title": "Policy",
+      "description": "Understand how Box loads, evaluates, and records Dogwood policy decisions.",
+      "nav": {
+        "group": "Reference",
+        "order": 2
+      }
+    },
+    {
+      "id": "policy-actions",
+      "source": "docs/user/policy/actions.md",
+      "slug": "reference/policy-actions",
+      "title": "Policy action reference",
+      "description": "Look up every Box policy action, its input fields, and its enforcement point.",
+      "nav": {
+        "group": "Reference",
+        "order": 3
+      }
+    },
+    {
+      "id": "shell",
+      "source": "docs/user/shell.md",
+      "slug": "reference/shell",
+      "title": "Strands Shell reference",
+      "description": "Look up shell invocation forms, commands, host programs, policy fields, and exit statuses.",
+      "nav": {
+        "group": "Reference",
+        "order": 4
+      }
+    },
+    {
+      "id": "python",
+      "source": "docs/user/monty.md",
+      "slug": "reference/python",
+      "title": "Python in a box",
+      "description": "Run Python through Monty and control its file and network operations with policy.",
+      "nav": {
+        "group": "Reference",
+        "order": 5
+      }
+    }
+  ]
+}
