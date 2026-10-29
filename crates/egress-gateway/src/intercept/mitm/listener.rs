@@ -13,6 +13,7 @@ use crate::audit::RequestId;
 use super::SharedState;
 use super::connect::{self, ConnectRequest};
 use super::resolve::PinnedDestination;
+use super::serve::{TlsSession, serve_tls};
 use crate::audit::{Decision as AuditDecision, EgressDecision, NetworkAuditEvent};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, off_worker};
 use crate::error::ProxyError;
@@ -208,7 +209,7 @@ async fn route<C: Client>(
 const CONNECT_ACK: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// Handle one CONNECT (HTTPS) connection: run the shared L4 controls, acknowledge, then terminate
-/// TLS and run the L7 legs on a blocking thread.
+/// TLS and serve the exchange on hyper.
 async fn tls_path<C: Client>(
     mut client: C,
     connect: ConnectRequest,
@@ -258,19 +259,19 @@ async fn tls_path<C: Client>(
     // reply reaches history once, on the request permit, as `output.status` of the one
     // `http:request::response` an exchange records.
     //
-    // The gateway would honour a refusal on that leg: `l7::intercept_tls` emits a deny event and
+    // The gateway would honour a refusal on that leg: `serve::serve_tls` audits the refusal and
     // withholds the bytes. The shipped interceptor never issues one.
     //
     // A handshake or pin failure hard-fails (drop), never a downgrade; the connection task
-    // audits the error.
-    let client = client
-        .into_blocking()
-        .map_err(|e| ProxyError::Io(format!("preparing the client socket: {e}")))?;
-    let state = Arc::clone(state);
-    run_blocking(slot, move || {
-        super::l7::intercept_tls(client, upstream, &connect, &state, correlation)
-    })
-    .await
+    // audits the error. This task holds the slot until the exchange ends.
+    let _slot = slot;
+    let session = TlsSession {
+        client,
+        upstream,
+        connect,
+        correlation,
+    };
+    serve_tls(Arc::clone(state), session).await
 }
 
 /// Run a blocking handler on the blocking pool, holding `slot` until it returns.
@@ -357,6 +358,24 @@ fn handle_plain_http(
             return Ok(());
         }
     };
+    // The blocking plain path bounds each upstream read and write by a socket timeout.
+    let deadline = Some(state.config.upstream_read_deadline);
+    if upstream
+        .set_nonblocking(false)
+        .and_then(|()| upstream.set_read_timeout(deadline))
+        .and_then(|()| upstream.set_write_timeout(deadline))
+        .is_err()
+    {
+        let error = OpenUpstreamError::Failed;
+        state.audit.push(NetworkAuditEvent::deny(
+            &connect.host,
+            connect.port,
+            error.audit_reason().to_string(),
+            correlation.clone(),
+        ));
+        error.write_response(&mut writer, &parsed.method);
+        return Ok(());
+    }
     // Run the L7 legs over plaintext, reusing request_leg/response_leg/effects.
     super::l7::forward_plain(
         &mut writer,
@@ -557,9 +576,9 @@ fn open_upstream(
         permit
             .record_outcome(EffectOutcome::Connected(peer))
             .map_err(|_| OpenUpstreamError::Failed)?;
+        // The gateway runtime registers the socket, and the upstream deadline bounds it there.
         upstream
-            .set_read_timeout(Some(state.config.upstream_read_deadline))
-            .and_then(|()| upstream.set_write_timeout(Some(state.config.upstream_read_deadline)))
+            .set_nonblocking(true)
             .map_err(|_| OpenUpstreamError::Failed)?;
         return Ok(upstream);
     }

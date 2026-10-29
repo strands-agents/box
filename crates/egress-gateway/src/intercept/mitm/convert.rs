@@ -141,6 +141,7 @@ where
             "nested CONNECT tunneling is not supported".to_string(),
         ));
     }
+    only_chunked(&parts.headers)?;
     let framed =
         parts.headers.contains_key(CONTENT_LENGTH) || parts.headers.contains_key(TRANSFER_ENCODING);
     let mut headers = header_map_from(&parts.headers);
@@ -176,6 +177,7 @@ where
             "HTTP protocol upgrades are not supported".to_string(),
         ));
     }
+    only_chunked(&parts.headers)?;
     let framed =
         parts.headers.contains_key(CONTENT_LENGTH) || parts.headers.contains_key(TRANSFER_ENCODING);
     let mut headers = header_map_from(&parts.headers);
@@ -195,6 +197,24 @@ where
         headers,
         BodyRef::Bytes(body),
     ))
+}
+
+/// Refuse a message whose transfer codings are anything but `chunked`.
+fn only_chunked(headers: &http::HeaderMap) -> Result<()> {
+    for value in headers.get_all(TRANSFER_ENCODING) {
+        let codings = String::from_utf8_lossy(value.as_bytes());
+        for coding in codings.split(',') {
+            if !coding
+                .trim_matches(|c| c == ' ' || c == '\t')
+                .eq_ignore_ascii_case("chunked")
+            {
+                return Err(ProxyError::Intercept(
+                    "unsupported Transfer-Encoding (only chunked is supported)".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Collect a whole body into one buffer, sized from its declared length, and refuse it when it is

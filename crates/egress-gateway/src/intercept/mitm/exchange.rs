@@ -8,19 +8,22 @@
 //! | [`prepare_response`], [`claim_release`], [`audit_release`] | Serialize, release, and audit the governed response |
 //! | [`record_refusal`], [`Reply`] | Record a refusal with no I/O, and say what the workload gets |
 
-use std::borrow::Cow;
 use std::io;
+use std::sync::Arc;
 
+use bytes::Bytes;
 use zeroize::Zeroizing;
 
 use super::connect::ConnectRequest;
+use super::convert::{UpstreamRequest, Whole, response_out, upstream_request};
 use super::l7::{canonicalize_request_path, reconstruct_target, validate_request_binding};
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
+use super::serve::WriteCount;
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent, RequestId};
-use crate::boundary::{InterceptedRequest, InterceptedResponse};
+use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse};
 use crate::capability::CapabilityContext;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::Result;
@@ -287,32 +290,68 @@ fn classify_mcp(
     Ok(())
 }
 
-/// Serialize the mutated request, with the canonical frame of a remote `resources/read`.
-pub(super) fn prepare_request(exchange: &mut Exchange<'_>) -> Result<Zeroizing<Vec<u8>>> {
-    // The serialized request carries the credential the request leg just attached, so the buffer is
-    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
-    // not `Zeroize`-aware, a known residual).
+/// The canonical frame of a remote `resources/read` whose canonical form differs, which the gateway
+/// forwards in place of the body.
+fn canonical_frame(exchange: &Exchange<'_>) -> Option<Vec<u8>> {
     // Forward the CANONICAL frame, not the raw one. The local door rewrites a
     // `resources/read` uri at ingress so it judges and forwards ONE identity; the remote door must do
     // the same, or a respelling this classifier judged as one identity would be FETCHED as another by
     // the upstream server. Only `resources/read` whose canonical form differs is rewritten; every
     // other frame (and an unparseable body) forwards byte-identical.
-    let forwarded_body: Cow<[u8]> = match &exchange.mcp {
+    match &exchange.mcp {
         Some((_, target)) if matches!(target.identity, McpTargetIdentity::Resource(_)) => {
-            canonicalize_mcp_frame(exchange.request.body.as_bytes()).map_or_else(
-                || Cow::Borrowed(exchange.request.body.as_bytes()),
-                Cow::Owned,
-            )
+            canonicalize_mcp_frame(exchange.request.body.as_bytes())
         }
-        _ => Cow::Borrowed(exchange.request.body.as_bytes()),
+        _ => None,
+    }
+}
+
+/// Build the upstream request from the mutated request, with the canonical frame of a remote
+/// `resources/read`. `writes` learns when hyper takes the body.
+pub(super) fn prepare_request(
+    exchange: &mut Exchange<'_>,
+    state: &SharedState,
+    writes: Arc<WriteCount>,
+) -> Result<UpstreamRequest> {
+    let body = match canonical_frame(exchange) {
+        Some(frame) => frame,
+        // A request to a remote MCP server keeps its body for the JSON-RPC refusal and the catalog
+        // cursor. Nothing reads the body of any other request after this, so it moves.
+        None if state.mcp_server_for(&exchange.connect.host).is_some() => {
+            exchange.request.body.as_bytes().to_vec()
+        }
+        None => match std::mem::take(&mut exchange.request.body) {
+            BodyRef::Bytes(body) => body,
+            BodyRef::Empty => Vec::new(),
+        },
     };
+    exchange.forwarded_bytes = body.len();
+    upstream_request(
+        &exchange.method,
+        &exchange.forward_target,
+        &exchange.request.headers,
+        body,
+        writes,
+    )
+}
+
+/// Serialize the mutated request for the blocking plain-HTTP path, with the canonical frame of a
+/// remote `resources/read`.
+pub(super) fn prepare_request_bytes(exchange: &mut Exchange<'_>) -> Result<Zeroizing<Vec<u8>>> {
+    // The serialized request carries the credential the request leg just attached, so the buffer is
+    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
+    // not `Zeroize`-aware, a known residual).
+    let frame = canonical_frame(exchange);
+    let forwarded_body = frame
+        .as_deref()
+        .unwrap_or_else(|| exchange.request.body.as_bytes());
     let mut prepared = Zeroizing::new(Vec::new());
     http1::write_request(
         &mut *prepared,
         &exchange.method,
         &exchange.forward_target,
         &exchange.request.headers,
-        &forwarded_body,
+        forwarded_body,
     )?;
     exchange.forwarded_bytes = forwarded_body.len();
     Ok(prepared)
@@ -444,8 +483,28 @@ fn stage_mcp_catalog(
     Ok(())
 }
 
-/// Serialize the governed response, after every response phase.
+/// Build the governed response, after every response phase. The body moves into it; `version` is
+/// the version of the request.
 pub(super) fn prepare_response(
+    exchange: &Exchange<'_>,
+    response: &mut InterceptedResponse,
+    version: http::Version,
+) -> Result<http::Response<Whole>> {
+    let body = match std::mem::take(&mut response.body) {
+        BodyRef::Bytes(body) => Bytes::from(body),
+        BodyRef::Empty => Bytes::new(),
+    };
+    response_out(
+        &exchange.method,
+        version,
+        response.status,
+        &response.headers,
+        body,
+    )
+}
+
+/// Serialize the governed response for the blocking plain-HTTP path, after every response phase.
+pub(super) fn prepare_response_bytes(
     exchange: &Exchange<'_>,
     response: &InterceptedResponse,
 ) -> Result<Vec<u8>> {
@@ -460,10 +519,11 @@ pub(super) fn prepare_response(
     Ok(prepared)
 }
 
-/// Claim the release of the governed response.
+/// Claim the release of the governed response of `status` with `body_bytes` of body.
 pub(super) fn claim_release(
     exchange: &Exchange<'_>,
-    response: &InterceptedResponse,
+    status: u16,
+    body_bytes: usize,
     state: &SharedState,
 ) -> std::result::Result<ClaimedEffectPermit, Refusal> {
     let attempt = EffectAttempt::ResponseRelease {
@@ -471,8 +531,8 @@ pub(super) fn claim_release(
         port: exchange.connect.port,
         method: &exchange.method,
         path: &exchange.workload_path,
-        status: response.status,
-        body_bytes: response.body.as_bytes().len(),
+        status,
+        body_bytes,
     };
     claim_effect(state, &attempt).map_err(|error| Refusal {
         reason: format!("response release interception failed: {error}"),

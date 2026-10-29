@@ -1,15 +1,631 @@
-//! The count of what each stream of an exchange accepted, and the outcome of each permit that
-//! the count gives.
+//! The hyper drivers of one connection: the server toward the workload, and the client toward the
+//! upstream.
+//!
+//! | Part | Does |
+//! |---|---|
+//! | [`serve_tls`] | Accept the workload's TLS with the minted leaf, then serve one exchange on hyper |
+//! | `Session` | Run one request: intake, the request phases and the decision, the round trip, the release |
+//! | `round_trip` | Send the decided request over the pinned socket, and read the whole reply |
+//! | [`WriteCount`], `Counted` | Count the bytes that a stream accepted, for the outcome of each permit |
+//!
+//! Each block of synchronous phases runs in one [`off_worker`] call with no `.await` inside it, so
+//! a slow decision, credential fetch, or record stalls only its own exchange, and a decision and the
+//! record that reports it share one thread.
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use bytes::Bytes;
+use http::{Request, Response, Version};
+use hyper::body::Incoming;
+use hyper_util::rt::TokioIo;
+use rustls::pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
 use tokio::sync::watch;
+use tokio::time::Instant;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use crate::effect::EffectOutcome;
+use super::connect::ConnectRequest;
+use super::convert::{self, CLOSED_EARLY, UpstreamRequest, Whole, error_text};
+use super::deadline::Deadline;
+use super::exchange::{
+    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, audit_release,
+    claim_release, decide_request, prepare_request, prepare_response, record_refusal,
+};
+use super::l7::{split_target, validate_request_binding};
+use super::{SharedState, tls};
+use crate::audit::{NetworkAuditEvent, RequestId};
+use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse, Target};
+use crate::effect::{ClaimedEffectPermit, EffectOutcome, off_worker};
+use crate::error::{ProxyError, Result};
+
+/// The largest read buffer of one hyper connection, which bounds one head to 64 KiB as the old
+/// reader did.
+const MAX_BUF_BYTES: usize = 64 * 1024;
+
+/// The most header lines in one head, as the old reader allowed.
+const MAX_HEADERS: usize = 64;
+
+/// One CONNECT tunnel, after its upstream is open and its `200` is written.
+pub(super) struct TlsSession<C> {
+    /// The raw client stream, before the TLS handshake.
+    pub(super) client: C,
+    /// The pinned upstream socket, connected, with its `Connect` outcome recorded.
+    pub(super) upstream: std::net::TcpStream,
+    pub(super) connect: ConnectRequest,
+    pub(super) correlation: RequestId,
+}
+
+/// Terminate the workload's TLS with the leaf minted for the CONNECT host, and serve one exchange.
+/// The connection task holds the slot.
+pub(super) async fn serve_tls<C>(state: Arc<SharedState>, session: TlsSession<C>) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let ca = state
+        .ca
+        .as_ref()
+        .ok_or_else(|| ProxyError::Intercept("no ephemeral CA (tls-intercept off)".to_string()))?;
+    let server_config =
+        tls::server_config_for_host(ca, &session.connect.host, state.config.enable_h2)?;
+    let client = TlsAcceptor::from(Arc::new(server_config))
+        .accept(session.client)
+        .await
+        .map_err(|e| ProxyError::Io(format!("client TLS handshake: {}", error_text(&e))))?;
+    let upstream = TcpStream::from_std(session.upstream)
+        .map_err(|e| ProxyError::Io(format!("registering the upstream socket: {e}")))?;
+    let session = Session::new(
+        state,
+        Route::Tunnel {
+            connect: session.connect,
+            correlation: session.correlation,
+            upstream: Mutex::new(Some(upstream)),
+        },
+    );
+    session.serve(client).await
+}
+
+/// What a connection carries.
+enum Route {
+    /// A CONNECT tunnel: its admitted authority, and the upstream socket that its one request uses.
+    Tunnel {
+        connect: ConnectRequest,
+        correlation: RequestId,
+        upstream: Mutex<Option<TcpStream>>,
+    },
+}
+
+/// One served connection, and the state that its service shares with its end.
+struct Session {
+    state: Arc<SharedState>,
+    route: Route,
+    /// What the client stream accepted.
+    client_writes: Arc<WriteCount>,
+    /// The release that waits until hyper has written the governed response.
+    pending: Mutex<Option<PendingRelease>>,
+    /// Why the service ended the exchange, for the audit line.
+    failure: Mutex<Option<ProxyError>>,
+    /// Whether a request head arrived.
+    requested: AtomicBool,
+}
+
+/// A claimed release, and the client write count when it was claimed.
+struct PendingRelease {
+    permit: ClaimedEffectPermit,
+    start: usize,
+}
+
+/// The error that the service gives hyper. The real error waits in [`Session::failure`].
+#[derive(Debug)]
+struct Ended;
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the exchange ended")
+    }
+}
+
+impl std::error::Error for Ended {}
+
+/// The future of one call of the service.
+type Answer = Pin<Box<dyn Future<Output = std::result::Result<Response<Whole>, Ended>> + Send>>;
+
+impl Session {
+    fn new(state: Arc<SharedState>, route: Route) -> Arc<Self> {
+        Arc::new(Self {
+            state,
+            route,
+            client_writes: WriteCount::new(),
+            pending: Mutex::new(None),
+            failure: Mutex::new(None),
+            requested: AtomicBool::new(false),
+        })
+    }
+
+    /// Serve the connection on hyper, then record the outcome of the release.
+    async fn serve<C>(self: Arc<Self>, client: C) -> Result<()>
+    where
+        C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let client = Counted::new(client, Arc::clone(&self.client_writes));
+        let session = Arc::clone(&self);
+        let service = hyper::service::service_fn(move |request| -> Answer {
+            let session = Arc::clone(&session);
+            Box::pin(async move { session.answer(request).await })
+        });
+        let served = server_builder()
+            .serve_connection(TokioIo::new(client), service)
+            .without_shutdown()
+            .await;
+        self.finish(served).await
+    }
+
+    /// Answer one request, and keep the reason when the exchange ends without a reply.
+    async fn answer(
+        &self,
+        request: Request<Incoming>,
+    ) -> std::result::Result<Response<Whole>, Ended> {
+        self.requested.store(true, Ordering::Relaxed);
+        let answered = match &self.route {
+            Route::Tunnel {
+                connect,
+                correlation,
+                upstream,
+            } => self.tunnel(request, connect, correlation, upstream).await,
+        };
+        answered.map_err(|error| {
+            *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+            Ended
+        })
+    }
+
+    /// Record the outcome of the release once hyper has written the response, then close.
+    async fn finish<I: AsyncWrite + Unpin, S>(
+        &self,
+        served: hyper::Result<hyper::server::conn::http1::Parts<TokioIo<I>, S>>,
+    ) -> Result<()> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(release) = pending {
+            let outcome =
+                release_outcome(self.client_writes.snapshot(), release.start, served.is_ok());
+            off_worker(|| release.permit.record_outcome(outcome)).map_err(|error| {
+                ProxyError::Io(format!(
+                    "recording governed response outcome after I/O: {error}"
+                ))
+            })?;
+        }
+        let failure = self
+            .failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        match served {
+            Ok(parts) => {
+                // `close_notify`, then the end of the write side.
+                let _ = parts.io.into_inner().shutdown().await;
+                if self.requested.load(Ordering::Relaxed) {
+                    Ok(())
+                } else {
+                    Err(ProxyError::Intercept(format!(
+                        "{CLOSED_EARLY} before HTTP head"
+                    )))
+                }
+            }
+            // hyper answered the head itself, before any decision.
+            Err(error) if error.is_parse() => Err(ProxyError::Intercept(format!(
+                "parsing request: {}",
+                error_text(&error)
+            ))),
+            Err(error) => Err(ProxyError::Io(format!(
+                "serving the client: {}",
+                error_text(&error)
+            ))),
+        }
+    }
+
+    /// Run the one request of a CONNECT tunnel.
+    async fn tunnel(
+        &self,
+        request: Request<Incoming>,
+        connect: &ConnectRequest,
+        correlation: &RequestId,
+        upstream: &Mutex<Option<TcpStream>>,
+    ) -> Result<Response<Whole>> {
+        let state = &*self.state;
+        let inbound =
+            convert::request_in(request, state.config.response_limits.max_body_bytes).await?;
+        let version = inbound.version;
+        // The name is converted before any decision, so a host that cannot be one fails first.
+        let name = ServerName::try_from(connect.host.clone()).map_err(|_| {
+            ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
+        })?;
+        let correlation = correlation.clone().with_headers(&inbound.headers);
+        // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
+        if let Err(error) =
+            validate_request_binding(connect, &inbound.method, &inbound.target, &inbound.headers)
+        {
+            let subject = Subject {
+                host: &connect.host,
+                port: connect.port,
+                method: &inbound.method,
+                path: &inbound.target,
+                correlation: &correlation,
+            };
+            off_worker(|| record_refusal(state, &subject, &error.to_string()));
+            return Ok(convert::diagnostic_response(
+                &inbound.method,
+                version,
+                error.http_status(),
+                Bytes::from_static(b"request authority rejected"),
+            ));
+        }
+        let mut target = Target::new(connect.host.clone(), connect.port);
+        (target.path, target.query) = split_target(&inbound.target);
+        let request = InterceptedRequest {
+            target,
+            method: Some(inbound.method),
+            headers: inbound.headers,
+            body: BodyRef::Bytes(inbound.body),
+            advisory_note: None,
+        };
+        // TLS was terminated to see this request, so it stays bound to the CONNECT authority.
+        let exchange = Exchange::new(
+            connect,
+            Binding::ConnectAuthority,
+            true,
+            correlation,
+            request,
+            state,
+        );
+        let upstream = upstream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| ProxyError::Intercept("a tunnel carries one request".to_string()))?;
+        self.forward(exchange, version, upstream, Hop::Tls(name))
+            .await
+    }
+
+    /// Decide the request, send it, record its outcome, and release the governed response.
+    async fn forward(
+        &self,
+        mut exchange: Exchange<'_>,
+        version: Version,
+        upstream: TcpStream,
+        hop: Hop,
+    ) -> Result<Response<Whole>> {
+        let state = &*self.state;
+        // No upstream read or write starts once the upstream deadline has passed since here.
+        let end = Instant::now() + state.config.upstream_read_deadline;
+        let writes = WriteCount::new();
+        let (permit, request) =
+            match off_worker(|| decide(&mut exchange, state, version, Arc::clone(&writes)))? {
+                Decided::Forward(permit, request) => (permit, request),
+                Decided::Answer(response) => return Ok(response),
+            };
+        let trip = round_trip(
+            state,
+            upstream,
+            hop,
+            request,
+            &exchange.method,
+            Arc::clone(&writes),
+            end,
+        )
+        .await;
+        let sent = writes.snapshot();
+        let outcome = request_outcome(sent, trip.status);
+        off_worker(|| {
+            permit.record_outcome(outcome).map_err(|error| {
+                let after = if trip.reply.is_ok() {
+                    "the reply"
+                } else {
+                    "a failed reply"
+                };
+                ProxyError::Io(format!(
+                    "recording upstream request outcome after {after}: {error}"
+                ))
+            })
+        })?;
+        // A reply to a request that did not leave whole is never released.
+        let reply = match (sent.flushed, trip.reply) {
+            (true, reply) => reply,
+            (false, Err(error)) => Err(error),
+            (false, Ok(_)) => Err(ProxyError::Io(format!(
+                "delivering upstream request: {}",
+                io::Error::from(sent.error.unwrap_or(io::ErrorKind::Other))
+            ))),
+        };
+        let response = reply?;
+        off_worker(|| self.release(&mut exchange, response, version))
+    }
+
+    /// Run the response phases, build the governed response, and claim its release.
+    fn release(
+        &self,
+        exchange: &mut Exchange<'_>,
+        mut response: InterceptedResponse,
+        version: Version,
+    ) -> Result<Response<Whole>> {
+        let state = &*self.state;
+        for phase in RESPONSE_PHASES {
+            if let Err(refusal) = phase(exchange, &mut response, state) {
+                return Ok(withhold(exchange, refusal, state, version));
+            }
+        }
+        let (status, body_bytes) = (response.status, response.body.as_bytes().len());
+        // Build only after response controls and leakback scrubbing have finished, then claim the
+        // release immediately before hyper writes the governed bytes to the workload.
+        let governed = prepare_response(exchange, &mut response, version)?;
+        let permit = match claim_release(exchange, status, body_bytes, state) {
+            Ok(permit) => permit,
+            Err(refusal) => return Ok(withhold(exchange, refusal, state, version)),
+        };
+        audit_release(exchange, state);
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingRelease {
+            permit,
+            start: self.client_writes.snapshot().accepted,
+        });
+        Ok(governed)
+    }
+}
+
+/// What the request phases and the decision leave.
+enum Decided {
+    /// The permit, and the request to send.
+    Forward(ClaimedEffectPermit, UpstreamRequest),
+    /// A refusal, already recorded, and its reply.
+    Answer(Response<Whole>),
+}
+
+/// Run the request phases, build the upstream request, then claim and record `http:request`.
+fn decide(
+    exchange: &mut Exchange<'_>,
+    state: &SharedState,
+    version: Version,
+    writes: Arc<WriteCount>,
+) -> Result<Decided> {
+    for phase in REQUEST_PHASES {
+        if let Err(refusal) = phase(exchange, state) {
+            return Ok(Decided::Answer(refuse(exchange, refusal, state, version)));
+        }
+    }
+    // Build the fully mutated request before claiming its effect permit. A mutation can leave a
+    // target or a header value that HTTP cannot carry, such as a spliced secret with a space: the
+    // request is refused with a record, and no byte of it leaves. The error text holds no peer or
+    // secret byte.
+    let request = match prepare_request(exchange, state, writes) {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal = Refusal {
+                reason: error.to_string(),
+                reply: Reply::Diagnostic {
+                    status: 502,
+                    body: b"the request cannot be sent upstream",
+                },
+            };
+            return Ok(Decided::Answer(refuse(exchange, refusal, state, version)));
+        }
+    };
+    Ok(match decide_request(exchange, state) {
+        Ok(permit) => Decided::Forward(permit, request),
+        Err(reply) => Decided::Answer(reply_response(
+            &exchange.method,
+            version,
+            reply,
+            Some(exchange.request.body.as_bytes()),
+        )),
+    })
+}
+
+/// Record a refusal of the request, and return the reply to the workload.
+fn refuse(
+    exchange: &Exchange<'_>,
+    refusal: Refusal,
+    state: &SharedState,
+    version: Version,
+) -> Response<Whole> {
+    record_refusal(state, &exchange.subject(), &refusal.reason);
+    reply_response(
+        &exchange.method,
+        version,
+        refusal.reply,
+        Some(exchange.request.body.as_bytes()),
+    )
+}
+
+/// Withhold a reply that a response phase or the release refused: the audit log gets the refusal,
+/// and no decision is emitted.
+fn withhold(
+    exchange: &Exchange<'_>,
+    refusal: Refusal,
+    state: &SharedState,
+    version: Version,
+) -> Response<Whole> {
+    let subject = exchange.subject();
+    state.audit.push(NetworkAuditEvent::deny(
+        subject.host,
+        subject.port,
+        refusal.reason,
+        subject.correlation.clone(),
+    ));
+    reply_response(subject.method, version, refusal.reply, None)
+}
+
+/// The reply of a refusal; `mcp_request` is the request body, for a JSON-RPC refusal.
+fn reply_response(
+    request_method: &str,
+    version: Version,
+    reply: Reply,
+    mcp_request: Option<&[u8]>,
+) -> Response<Whole> {
+    match reply {
+        Reply::Diagnostic { status, body } => {
+            convert::diagnostic_response(request_method, version, status, Bytes::from_static(body))
+        }
+        Reply::Interceptor { error, mcp } => convert::interceptor_response(
+            request_method,
+            version,
+            &error,
+            mcp_request.filter(|_| mcp),
+        ),
+    }
+}
+
+/// The hyper server toward the workload: one exchange, with no bound on the time of a head.
+fn server_builder() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        // The client socket has no timeout, so hyper's default head timeout is off.
+        .header_read_timeout(None)
+        // One exchange per connection, and every reply carries `Connection: close`.
+        .keep_alive(false)
+        // A client that closes its write side after its request still gets the reply.
+        .half_close(true)
+        .title_case_headers(true)
+        .auto_date_header(false)
+        .max_headers(MAX_HEADERS)
+        .max_buf_size(MAX_BUF_BYTES);
+    builder
+}
+
+/// The hyper client toward the upstream, for one request.
+fn client_builder() -> hyper::client::conn::http1::Builder {
+    let mut builder = hyper::client::conn::http1::Builder::new();
+    builder
+        .title_case_headers(true)
+        .max_headers(MAX_HEADERS)
+        .max_buf_size(MAX_BUF_BYTES);
+    builder
+}
+
+/// How the request reaches the upstream.
+enum Hop {
+    /// Over TLS to the CONNECT host, which the upstream certificate must name.
+    Tls(ServerName<'static>),
+}
+
+/// The end of one upstream round trip.
+struct Trip {
+    /// The status of the reply head, once one arrived.
+    status: Option<u16>,
+    /// The whole reply, or why it did not arrive.
+    reply: Result<InterceptedResponse>,
+}
+
+/// Send `request` over the pinned socket and read the whole reply.
+///
+/// Each read and write of the upstream socket waits at most the upstream deadline, and none starts
+/// after `end`. The TLS handshake starts here, after the request decision, so no upstream byte
+/// leaves before it.
+async fn round_trip(
+    state: &SharedState,
+    upstream: TcpStream,
+    hop: Hop,
+    request: UpstreamRequest,
+    method: &str,
+    writes: Arc<WriteCount>,
+    end: Instant,
+) -> Trip {
+    let upstream = Deadline::new(upstream, state.config.upstream_read_deadline, end);
+    let max = state.config.response_limits.max_body_bytes;
+    match hop {
+        Hop::Tls(name) => {
+            let connector = TlsConnector::from(Arc::clone(&state.upstream_config));
+            match connector.connect(name, upstream).await {
+                Ok(tls) => send(tls, request, method, max, writes).await,
+                Err(error) => {
+                    writes.failed(error.kind(), false);
+                    Trip {
+                        status: None,
+                        reply: Err(ProxyError::Io(format!(
+                            "delivering upstream request: {}",
+                            error_text(&error)
+                        ))),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Send `request` on `stream` with the hyper client, and read the whole reply.
+async fn send<S>(
+    stream: S,
+    request: UpstreamRequest,
+    method: &str,
+    max: usize,
+    writes: Arc<WriteCount>,
+) -> Trip
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(Counted::new(stream, Arc::clone(&writes)));
+    let (mut sender, connection) = match client_builder().handshake(io).await {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            return Trip {
+                status: None,
+                reply: Err(upstream_error(&error)),
+            };
+        }
+    };
+    // The connection runs on its own task, so it keeps writing while this task waits in a seam
+    // call, and it ends with the exchange.
+    let mut connection = AbortOnDrop(tokio::spawn(connection));
+    let sent = sender.send_request(request.into_inner()).await;
+    drop(sender);
+    let trip = match sent {
+        Ok(response) => Trip {
+            status: Some(response.status().as_u16()),
+            reply: convert::response_in(response, method, max).await,
+        },
+        Err(error) => Trip {
+            status: None,
+            reply: Err(upstream_error(&error)),
+        },
+    };
+    // hyper can read the reply before it has written the whole request. The outcome waits until
+    // the request has left, or its send has failed.
+    tokio::select! {
+        () = writes.settled() => {}
+        _ = &mut connection.0 => {}
+    }
+    trip
+}
+
+/// The error of a failed upstream exchange: a reply that the gateway refuses, an upstream that
+/// closed early, or a failed read or write.
+fn upstream_error(error: &hyper::Error) -> ProxyError {
+    if error.is_parse() {
+        ProxyError::Intercept(format!("parsing response: {}", error_text(error)))
+    } else if error.is_incomplete_message() {
+        ProxyError::Intercept(format!("{CLOSED_EARLY} before the reply ended"))
+    } else {
+        ProxyError::Io(format!("upstream exchange: {}", error_text(error)))
+    }
+}
+
+/// A task that is aborted when this value drops.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// The outcome of the request permit, from what the upstream stream accepted.
 fn request_outcome(sent: Writes, status: Option<u16>) -> EffectOutcome {

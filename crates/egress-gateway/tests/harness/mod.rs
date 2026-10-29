@@ -45,6 +45,8 @@ enum Reply {
     Silent,
     Deaf,
     Sip(Duration),
+    Early(Arc<[u8]>),
+    EarlyThenDeaf(Arc<[u8]>),
 }
 
 pub struct TlsUpstream {
@@ -111,6 +113,19 @@ impl TlsUpstream {
     /// the peer makes progresses while the whole request outlasts a deadline.
     pub fn start_sipping(host: &str, interval: Duration) -> Self {
         Self::start_serving(host, Reply::Sip(interval), None)
+    }
+
+    /// Start a TLS upstream that answers with `response` as soon as it has read a request head, and
+    /// then reads the whole body that the head announces, as an upstream that refuses an upload
+    /// early does.
+    pub fn start_answering_early(host: &str, response: &'static [u8]) -> Self {
+        Self::start_serving(host, Reply::Early(Arc::from(response)), None)
+    }
+
+    /// Start a TLS upstream that answers with `response` as soon as it has read a request head, and
+    /// then never reads again, so the rest of the request body never leaves the peer.
+    pub fn start_answering_early_then_deaf(host: &str, response: &'static [u8]) -> Self {
+        Self::start_serving(host, Reply::EarlyThenDeaf(Arc::from(response)), None)
     }
 
     /// Start a TLS upstream that returns the supplied static HTTP response, and calls `arrived` when
@@ -191,6 +206,29 @@ impl TlsUpstream {
                         }
                         return;
                     }
+                    if let Reply::EarlyThenDeaf(response) = &reply {
+                        let _ = read_head(&mut tls);
+                        let _ = tls.write_all(response);
+                        let _ = tls.flush();
+                        let mut probe = [0u8; 1];
+                        while matches!(tls.sock.peek(&mut probe), Ok(n) if n > 0) {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        return;
+                    }
+                    if let Reply::Early(response) = &reply {
+                        let head = read_head(&mut tls);
+                        let _ = tls.write_all(response);
+                        let _ = tls.flush();
+                        let mut body = vec![0u8; content_length(&head)];
+                        if tls.read_exact(&mut body).is_err() {
+                            body.clear();
+                        }
+                        seen.lock().unwrap().push(SeenRequest {
+                            raw: format!("{head}{}", String::from_utf8_lossy(&body)),
+                        });
+                        return;
+                    }
                     // Read one request head (+ small body) and record it. A bare TLS connection that
                     // closes without sending a request head (e.g. a proxy that connected upstream but
                     // then blocked the request) is NOT counted — only a real request line is.
@@ -214,7 +252,10 @@ impl TlsUpstream {
                                 let mut sink = [0u8; 1024];
                                 while matches!(tls.read(&mut sink), Ok(n) if n > 0) {}
                             }
-                            Reply::Deaf | Reply::Sip(_) => {}
+                            Reply::Deaf
+                            | Reply::Sip(_)
+                            | Reply::Early(_)
+                            | Reply::EarlyThenDeaf(_) => {}
                         }
                     }
                 });
@@ -400,6 +441,15 @@ impl WorkloadClient {
         tls.flush().unwrap();
     }
 
+    /// Send a TLS close_notify and shut down the write side, as a client that half-closes after
+    /// its request does. Reads still work.
+    pub fn close_write(&mut self) {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        tls.conn.send_close_notify();
+        tls.flush().unwrap();
+        tls.sock.shutdown(std::net::Shutdown::Write).unwrap();
+    }
+
     /// Drop the TCP connection to the proxy without a TLS close_notify, as a killed client does.
     pub fn abort(self) {
         if let Some(tls) = self.tls {
@@ -476,21 +526,22 @@ fn read_until_blank_line(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// Read an HTTP head + Content-Length body from a TLS stream (upstream side), returning the raw text.
-fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
+/// Read an HTTP head from a stream one byte at a time (bounded), returning the raw text.
+fn read_head<S: Read>(stream: &mut S) -> String {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
-    // Head.
     while stream.read(&mut byte).unwrap_or(0) == 1 {
         buf.push(byte[0]);
         if buf.ends_with(b"\r\n\r\n") || buf.len() > 64 * 1024 {
             break;
         }
     }
-    let head = String::from_utf8_lossy(&buf).into_owned();
-    // Body per Content-Length.
-    let len = head
-        .split("\r\n")
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// The `Content-Length` that a raw head names, or 0.
+fn content_length(head: &str) -> usize {
+    head.split("\r\n")
         .find_map(|l| {
             let (n, v) = l.split_once(':')?;
             n.trim()
@@ -498,7 +549,13 @@ fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
                 .then(|| v.trim().parse::<usize>().ok())
                 .flatten()
         })
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+/// Read an HTTP head + Content-Length body from a TLS stream (upstream side), returning the raw text.
+fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
+    let head = read_head(stream);
+    let len = content_length(&head);
     let mut body = vec![0u8; len];
     if len > 0 {
         let _ = stream.read_exact(&mut body);

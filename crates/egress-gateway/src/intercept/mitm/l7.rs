@@ -1,115 +1,27 @@
-//! The L7 interception path: terminate TLS, run the request/response legs, forward.
+//! The blocking plain-HTTP exchange, and the request checks that every exchange shares.
 
 use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audit::RequestId;
-use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
 use super::exchange::{
-    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, Subject, audit_release,
-    claim_release, decide_request, prepare_request, prepare_response, record_refusal,
+    Binding, Exchange, REQUEST_PHASES, RESPONSE_PHASES, Refusal, Reply, audit_release,
+    claim_release, decide_request, prepare_request_bytes, prepare_response_bytes, record_refusal,
 };
-use super::{SharedState, http1, tls};
+use super::{SharedState, http1};
 use crate::audit::NetworkAuditEvent;
 use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
 use crate::effect::{ClaimedEffectPermit, EffectOutcome};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{mcp_denial_response, normalize_path};
 
-/// Terminate the client's TLS, run the L7 legs, and forward to the pinned upstream.
+/// Run the phases of one plain-HTTP exchange over an already-open client writer and upstream stream.
 ///
-/// A thin transport wrapper: it does the TLS-specific setup (present a per-host leaf, open the
-/// upstream TLS), reads the request, checks the CONNECT binding, then hands the shared request and
-/// response legs to [`run_l7_legs`].
-pub(super) fn intercept_tls<C: Read + Write>(
-    client: C,
-    upstream: TcpStream,
-    connect: &ConnectRequest,
-    state: &SharedState,
-    correlation: RequestId,
-) -> Result<()> {
-    let ca = state
-        .ca
-        .as_ref()
-        .ok_or_else(|| ProxyError::Intercept("no ephemeral CA (tls-intercept off)".to_string()))?;
-
-    // --- Server side: present a per-host leaf to the workload ---
-    let server_config = tls::server_config_for_host(ca, &connect.host, state.config.enable_h2)?;
-    let server_conn = ServerConnection::new(Arc::new(server_config))
-        .map_err(|e| ProxyError::Intercept(format!("server TLS init: {e}")))?;
-    // Wrap the client TLS stream in a BufReader so the HTTP head is read line-buffered (not one
-    // syscall per byte). Writes go through `get_mut()` to the underlying stream.
-    let mut client_tls = BufReader::new(StreamOwned::new(server_conn, client));
-
-    // --- Request leg: read plaintext, then run the shared legs ---
-    let parsed = http1::read_request(&mut client_tls, state.config.response_limits.max_body_bytes)?;
-
-    // --- Client side: connect to the pinned upstream over the additive trust bundle ---
-    // The listener already opened this exact pinned socket under the Connect lifecycle. A TLS
-    // handshake failure here is a hard-fail drop, never a second socket attempt.
-    let mut upstream_tls = BufReader::new(start_upstream_tls(
-        &connect.host,
-        Bounded::new(upstream, state.config.upstream_read_deadline),
-        state,
-    )?);
-    let correlation = correlation.with_headers(&parsed.headers);
-    // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
-    if let Err(error) =
-        validate_request_binding(connect, &parsed.method, &parsed.target, &parsed.headers)
-    {
-        let subject = Subject {
-            host: &connect.host,
-            port: connect.port,
-            method: &parsed.method,
-            path: &parsed.target,
-            correlation: &correlation,
-        };
-        record_refusal(state, &subject, &error.to_string());
-        write_trusted_diagnostic(
-            client_tls.get_mut(),
-            &parsed.method,
-            error.http_status(),
-            b"request authority rejected",
-        );
-        return Ok(());
-    }
-    let mut target = Target::new(connect.host.clone(), connect.port);
-    let (path, query) = split_target(&parsed.target);
-    target.path = path;
-    target.query = query;
-
-    // Move the parsed fields into the boundary request — `parsed` is dead after this, so cloning the
-    // (potentially large) body/headers would be a wasted full copy on every request.
-    let req = InterceptedRequest {
-        target,
-        method: Some(parsed.method),
-        headers: parsed.headers,
-        body: BodyRef::Bytes(parsed.body),
-        advisory_note: None,
-    };
-
-    // TLS was terminated to see this request, so it stays bound to the CONNECT authority.
-    let exchange = Exchange::new(
-        connect,
-        Binding::ConnectAuthority,
-        true,
-        correlation,
-        req,
-        state,
-    );
-    run_l7_legs(exchange, &mut upstream_tls, client_tls.get_mut(), state)
-}
-
-/// Run the phases of one exchange over an already-open client writer and upstream stream.
-///
-/// Both the TLS ([`intercept_tls`]) and plain-HTTP ([`forward_plain`]) paths converge here after
-/// their transport-specific setup: `upstream` is the buffered upstream, and `client_writer` the sink
-/// for diagnostics and the governed response. Every control (request/response legs, effect
-/// lifecycle, audit) fires identically for both.
+/// `upstream` is the buffered upstream, and `client_writer` the sink for diagnostics and the
+/// governed response.
 fn run_l7_legs<S, CW>(
     mut exchange: Exchange<'_>,
     upstream: &mut BufReader<S>,
@@ -127,7 +39,7 @@ where
         }
     }
     // Serialize the fully mutated request before claiming its effect permit.
-    let prepared_request = prepare_request(&mut exchange)?;
+    let prepared_request = prepare_request_bytes(&mut exchange)?;
     let request_permit = match decide_request(&exchange, state) {
         Ok(permit) => permit,
         Err(reply) => {
@@ -173,8 +85,13 @@ where
 
     // Serialize only after response controls and leakback scrubbing have finished, then claim the
     // release immediately before the governed bytes are delivered to the workload.
-    let prepared_response = prepare_response(&exchange, &response)?;
-    let response_permit = match claim_release(&exchange, &response, state) {
+    let prepared_response = prepare_response_bytes(&exchange, &response)?;
+    let response_permit = match claim_release(
+        &exchange,
+        response.status,
+        response.body.as_bytes().len(),
+        state,
+    ) {
         Ok(permit) => permit,
         Err(refusal) => {
             let subject = exchange.subject();
@@ -283,11 +200,11 @@ fn write_reply<W: Write>(
 
 /// Forward a plain-HTTP (non-TLS) exchange to an already-open plaintext upstream.
 ///
-/// A thin transport wrapper mirroring [`intercept_tls`] without any TLS: the request was already
-/// read (`parsed`) and `origin_target` is its origin-form target (`/path?query`) from the absolute
-/// URL. It builds the boundary request and hands the shared legs to [`run_l7_legs`], which
-/// canonicalizes the path and refuses a credential on it. Plain HTTP has no CONNECT authority to bind
-/// against, so the post-mutation re-check does nothing.
+/// A thin transport wrapper: the request was already read (`parsed`) and `origin_target` is its
+/// origin-form target (`/path?query`) from the absolute URL. It builds the boundary request and
+/// hands the shared legs to [`run_l7_legs`], which canonicalizes the path and refuses a credential
+/// on it. Plain HTTP has no CONNECT authority to bind against, so the post-mutation re-check does
+/// nothing.
 pub(super) fn forward_plain(
     client_writer: &mut TcpStream,
     upstream: TcpStream,
@@ -332,21 +249,6 @@ pub(super) fn forward_plain(
     // Plain HTTP was never encrypted, so it is not TLS-intercepted and has no authority to bind.
     let exchange = Exchange::new(connect, Binding::None, false, correlation, req, state);
     run_l7_legs(exchange, &mut upstream_buf, client_writer, state)
-}
-
-/// Wrap the already-open pinned upstream socket in the additive TLS trust bundle.
-fn start_upstream_tls<S: Read + Write>(
-    host: &str,
-    tcp: S,
-    state: &SharedState,
-) -> Result<StreamOwned<ClientConnection, S>> {
-    let server_name = host
-        .to_string()
-        .try_into()
-        .map_err(|_| ProxyError::UpstreamConnect(format!("invalid upstream host {host}")))?;
-    let conn = ClientConnection::new(state.upstream_config.clone(), server_name)
-        .map_err(|e| ProxyError::Intercept(format!("upstream TLS init: {e}")))?;
-    Ok(StreamOwned::new(conn, tcp))
 }
 
 /// An upstream stream whose reads and writes fail once the exchange's deadline has passed.
@@ -519,7 +421,7 @@ pub(super) fn canonicalize_request_path(path: &str) -> std::result::Result<Strin
 }
 
 /// Split an origin-form request target into `(path, query)`.
-fn split_target(target: &str) -> (String, String) {
+pub(super) fn split_target(target: &str) -> (String, String) {
     match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (target.to_string(), String::new()),
