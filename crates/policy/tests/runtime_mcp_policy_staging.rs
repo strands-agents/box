@@ -786,12 +786,13 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
     };
 
     let authority = staged(sources.clone(), &path);
-    assert!(matches!(
-        authority
-            .stage_mcp_schema("bad", generated("other", "read", "path", "integer"))
-            .expect("schema rejection is not terminal"),
-        SchemaStage::Rejected { .. }
-    ));
+    let SchemaStage::Rejected { reason } = authority
+        .stage_mcp_schema("bad", generated("other", "read", "path", "integer"))
+        .expect("schema rejection is not terminal")
+    else {
+        panic!("a schema for another namespace is rejected");
+    };
+    assert!(reason.contains("requires namespace"), "{reason}");
     let rejected_arguments = json!({"path": 7});
     assert!(matches!(
         authority.decide(
@@ -926,12 +927,13 @@ fn discovering_staging_revalidates_every_ready_candidate() {
             authority_ready: false,
         }
     );
-    assert!(matches!(
-        authority
-            .stage_mcp_schema("beta", generated("gamma", "read", "path", "string"))
-            .expect("candidate rejection is not terminal"),
-        SchemaStage::Rejected { .. }
-    ));
+    let SchemaStage::Rejected { reason } = authority
+        .stage_mcp_schema("alpha", generated("alpha", "read", "path", "integer"))
+        .expect("candidate rejection is not terminal")
+    else {
+        panic!("a schema that conflicts with a ready candidate is rejected");
+    };
+    assert!(reason.contains("fails schema validation"), "{reason}");
     assert_eq!(
         authority
             .stage_mcp_schema("missing", generated("missing", "never", "query", "string"))
