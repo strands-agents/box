@@ -417,7 +417,7 @@ jobs:
       CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
       CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
       CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
-      NOTARY_API_KEY_SECRET: ${{ vars.NOTARY_API_KEY_SECRET }}
+      NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
     steps:
       - name: Check approved test commits
         if: inputs.premerge_signing_test == true
@@ -464,7 +464,7 @@ jobs:
             --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
             --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
             --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
-            --notary-key-secret "$NOTARY_API_KEY_SECRET"
+            --notary-secret "$NOTARY_CREDENTIAL_SECRET"
       - name: Retain signing evidence
         if: always()
         uses: actions/upload-artifact@v7

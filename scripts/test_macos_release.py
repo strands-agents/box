@@ -165,31 +165,83 @@ class MacOSReleaseTests(unittest.TestCase):
     KEY = "-----BEGIN PRIVATE KEY-----\nMIGT\n-----END PRIVATE KEY-----\n"
     SUBMISSION = "2efe2717-52ef-43a5-96dc-0797e4ca1041"
 
-    def test_notary_key_requires_a_key_id_and_a_private_key(self):
+    def test_notary_credential_requires_a_key_id_and_a_private_key(self):
         valid = {"key_id": "ABCDE12345", "private_key": self.KEY}
-        self.assertEqual(release.notary_key(json.dumps(valid)), ("ABCDE12345", self.KEY))
+        self.assertEqual(release.notary_credential(json.dumps(valid)),
+                         ("api-key", "ABCDE12345", self.KEY))
         for secret in ["", "not json", "[]", json.dumps({"private_key": self.KEY}),
                        json.dumps({**valid, "key_id": "short"}),
                        json.dumps({**valid, "key_id": "abcde12345"}),
                        json.dumps({"key_id": "ABCDE12345"}),
                        json.dumps({**valid, "private_key": "app-specific-password"})]:
             with self.subTest(secret=secret), self.assertRaises(ValueError):
-                release.notary_key(secret)
+                release.notary_credential(secret)
+
+    def test_notary_credential_accepts_an_apple_id_with_an_app_specific_password(self):
+        valid = {"apple_id": "notary@example.com", "app_specific_password": "abcd-efgh-ijkl-mnop"}
+        self.assertEqual(release.notary_credential(json.dumps(valid)),
+                         ("apple-id", "notary@example.com", "abcd-efgh-ijkl-mnop"))
+        for secret in [
+            {"apple_id": "notary@example.com"},
+            {"app_specific_password": "abcd-efgh-ijkl-mnop"},
+            {**valid, "apple_id": "notary"},
+            {**valid, "apple_id": "-notary@example.com"},
+            {**valid, "apple_id": "two words@example.com"},
+            {**valid, "app_specific_password": "the account password"},
+            {**valid, "app_specific_password": "ABCD-EFGH-IJKL-MNOP"},
+            {**valid, "app_specific_password": "abcd-efgh-ijkl"},
+            {**valid, "app_specific_password": ["abcd-efgh-ijkl-mnop"]},
+            {**valid, "key_id": "ABCDE12345", "private_key": self.KEY},
+            {**valid, "key_id": "ABCDE12345"},
+        ]:
+            with self.subTest(secret=secret), self.assertRaises(ValueError):
+                release.notary_credential(json.dumps(secret))
 
     def test_api_key_file_is_private_and_removed_after_use(self):
-        with release.notary_auth(key=("ABCDE12345", self.KEY)) as auth:
-            path = Path(auth[1])
-            self.assertEqual(auth, ["--key", str(path), "--key-id", "ABCDE12345"])
+        credential = ("api-key", "ABCDE12345", self.KEY)
+        with release.notary_auth(credential=credential, team="ABCDE12345") as auth:
+            path = Path(auth.options[1])
+            self.assertEqual(auth.options, ["--key", str(path), "--key-id", "ABCDE12345"])
+            self.assertIsNone(auth.password)
             self.assertEqual(path.read_text(), self.KEY)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertFalse(path.exists())
         with self.assertRaises(RuntimeError):
-            with release.notary_auth(key=("ABCDE12345", self.KEY)) as auth:
-                path = Path(auth[1])
+            with release.notary_auth(credential=credential, team="ABCDE12345") as auth:
+                path = Path(auth.options[1])
                 raise RuntimeError
         self.assertFalse(path.exists())
         with release.notary_auth("local-profile") as auth:
-            self.assertEqual(auth, ["--keychain-profile", "local-profile"])
+            self.assertEqual(auth.options, ["--keychain-profile", "local-profile"])
+
+    def test_app_specific_password_goes_only_to_standard_input_and_is_masked(self):
+        credential = ("apple-id", "notary@example.com", "abcd-efgh-ijkl-mnop")
+        calls = []
+
+        def run(command, **options):
+            calls.append((command, options))
+            return subprocess.CompletedProcess(
+                command, 1, "", "Password for notary@example.com: Error: 401 for notary@example.com")
+
+        output = io.StringIO()
+        with patch.dict(release.os.environ, {"GITHUB_ACTIONS": "true"}), \
+                patch("sys.stdout", output), \
+                patch.object(release.subprocess, "run", side_effect=run):
+            with release.notary_auth(credential=credential, team="ABCDE12345") as auth:
+                result = release.notarytool(auth, "history", "--output-format", "json")
+        command, options = calls[0]
+        self.assertEqual(command, ["xcrun", "notarytool", "history", "--output-format", "json",
+                                   "--apple-id", "notary@example.com", "--team-id", "ABCDE12345"])
+        self.assertNotIn("abcd-efgh-ijkl-mnop", " ".join(command))
+        self.assertEqual(options["input"], "abcd-efgh-ijkl-mnop\n")
+        self.assertTrue(options["start_new_session"])
+        self.assertEqual(result.stderr, "Error: 401 for <apple-id>")
+        self.assertEqual(output.getvalue().splitlines(), [
+            "::add-mask::notary@example.com", "::add-mask::abcd-efgh-ijkl-mnop"])
+        calls.clear()
+        with patch.object(release.subprocess, "run", side_effect=run):
+            release.notarytool(release.NotaryAuth(["--keychain-profile", "p"]), "history")
+        self.assertNotIn("input", calls[0][1])
 
     def notarize(self, submission, staple_failures=0):
         calls = []
@@ -203,7 +255,7 @@ class MacOSReleaseTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, int(attempts <= staple_failures), "", "")
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        auth = ["--keychain-profile", "test"]
+        auth = release.NotaryAuth(["--keychain-profile", "test"])
         with patch.object(release.subprocess, "run", side_effect=run), \
                 patch.object(release.time, "sleep"):
             try:
@@ -228,6 +280,30 @@ class MacOSReleaseTests(unittest.TestCase):
                 result, calls = self.notarize(json.dumps({"id": self.SUBMISSION, "status": status}))
                 self.assertIsInstance(result, ValueError)
                 self.assertNotIn(["xcrun", "stapler", "staple"], [call[:3] for call in calls])
+
+    def test_notarization_keeps_the_apple_id_and_password_out_of_saved_evidence(self):
+        auth = release.NotaryAuth(["--apple-id", "notary@example.com", "--team-id", "ABCDE12345"],
+                                  "abcd-efgh-ijkl-mnop", "notary@example.com")
+        calls = []
+
+        def run(command, **options):
+            calls.append((command, options))
+            if command[:3] == ["xcrun", "notarytool", "submit"]:
+                return subprocess.CompletedProcess(command, 1, "", (
+                    "Password for notary@example.com: Error: abcd-efgh-ijkl-mnop "
+                    "was refused for notary@example.com"))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch.object(release.subprocess, "run", side_effect=run), \
+                self.assertRaises(ValueError) as raised:
+            release.notarize(self.root / "Box.app", auth, self.root / "evidence")
+        saved = (self.root / "evidence/submission.json").read_text()
+        for value in ("notary@example.com", "abcd-efgh-ijkl-mnop"):
+            self.assertNotIn(value, saved)
+            self.assertNotIn(value, str(raised.exception))
+        submit = next(options for command, options in calls
+                      if command[:3] == ["xcrun", "notarytool", "submit"])
+        self.assertEqual(submit["input"], "abcd-efgh-ijkl-mnop\n")
 
     def test_notarization_requires_a_submission_id(self):
         for output in ["", "not json", "[]", json.dumps({"message": "Invalid credentials"}),
@@ -273,11 +349,11 @@ class MacOSReleaseTests(unittest.TestCase):
                 "--work", str(self.root / "work"), "--version", "0.1.1", "--source-sha", "a" * 40]
         for extra, code in [
             ([], 2),
-            (["--notary-key-secret", "arn:aws:secretsmanager:x", "--notary-keychain-profile", "p"], 2),
-            (["--notary-key-secret", "my-secret"], 1),
-            (["--notary-key-secret", "arn:aws:secretsmanager:"], 1),
-            (["--notary-key-secret", "arn:aws:secretsmanager:us-west-2:123456789012:other:x"], 1),
-            (["--notary-key-secret", ""], 1),
+            (["--notary-secret", "arn:aws:secretsmanager:x", "--notary-keychain-profile", "p"], 2),
+            (["--notary-secret", "my-secret"], 1),
+            (["--notary-secret", "arn:aws:secretsmanager:"], 1),
+            (["--notary-secret", "arn:aws:secretsmanager:us-west-2:123456789012:other:x"], 1),
+            (["--notary-secret", ""], 1),
             (["--notary-keychain-profile", ""], 1),
         ]:
             with self.subTest(extra=extra):
@@ -390,13 +466,13 @@ class WorkflowGateTests(unittest.TestCase):
             self.assertIn("inputs.dry_run != true &&", condition)
             self.assertIn("inputs.premerge_signing_test != true &&", condition)
 
-    def test_signing_notarizes_with_the_environment_api_key_secret(self):
+    def test_signing_notarizes_with_the_environment_credential_secret(self):
         from test_release_source import WORKFLOW, workflow_command
 
         job = WORKFLOW.read_text().split("\n  sign-macos:\n", 1)[1].split("\n  verify-macos:\n", 1)[0]
-        self.assertIn("NOTARY_API_KEY_SECRET: ${{ vars.NOTARY_API_KEY_SECRET }}", job)
+        self.assertIn("NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}", job)
         command = workflow_command("Sign, notarize, and staple the application")
-        self.assertIn('--notary-key-secret "$NOTARY_API_KEY_SECRET"', command)
+        self.assertIn('--notary-secret "$NOTARY_CREDENTIAL_SECRET"', command)
         self.assertNotIn("--notary-keychain-profile", command)
 
     def test_inspection_refuses_a_macos_package_without_a_stapled_ticket(self):

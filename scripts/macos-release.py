@@ -16,6 +16,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import typing
 from urllib.parse import urlsplit
 import uuid
 import zipfile
@@ -31,6 +32,8 @@ exec "$root/Box.app/Contents/MacOS/box" "$@"
 NOTARY_TIMEOUT = "30m"
 SUBMISSION_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 SECRET_ARN = r"arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+"
+APPLE_ID = r"[A-Za-z0-9][^@\s]*@[^@\s]+\.[^@\s]+"
+APP_SPECIFIC_PASSWORD = r"[a-z0-9]{4}(?:-[a-z0-9]{4}){3}"
 
 
 def require(condition, message):
@@ -189,41 +192,76 @@ def verify(app, team, profile_name, evidence):
     })
 
 
-def notary_key(secret):
+class NotaryAuth(typing.NamedTuple):
+    options: list
+    password: typing.Optional[str] = None
+    apple_id: typing.Optional[str] = None
+
+
+def notary_credential(secret):
     try:
         value = json.loads(secret)
     except ValueError:
         value = None
     require(isinstance(value, dict), "Notarization secret is not a JSON object")
+    apple = {"apple_id", "app_specific_password"} & value.keys()
+    require(not (apple and {"key_id", "private_key"} & value.keys()),
+            "Notarization secret holds both an API key and an Apple ID")
+    if apple:
+        apple_id, password = value.get("apple_id"), value.get("app_specific_password")
+        require(isinstance(apple_id, str) and re.fullmatch(APPLE_ID, apple_id),
+                "Invalid notarization Apple ID")
+        require(isinstance(password, str) and re.fullmatch(APP_SPECIFIC_PASSWORD, password),
+                "Invalid app-specific password")
+        return "apple-id", apple_id, password
     key_id, key = value.get("key_id"), value.get("private_key")
     require(isinstance(key_id, str) and re.fullmatch(r"[A-Z0-9]{10,}", key_id),
             "Invalid notarization key ID")
     require(isinstance(key, str) and key.strip().startswith("-----BEGIN PRIVATE KEY-----")
             and key.strip().endswith("-----END PRIVATE KEY-----"),
             "Invalid notarization private key")
-    return key_id, key
+    return "api-key", key_id, key
 
 
 @contextlib.contextmanager
-def notary_auth(profile=None, key=None):
+def notary_auth(profile=None, credential=None, team=None):
     if profile:
-        yield ["--keychain-profile", profile]
+        yield NotaryAuth(["--keychain-profile", profile])
+        return
+    kind, identity, secret = credential
+    if kind == "apple-id":
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"::add-mask::{identity}\n::add-mask::{secret}", flush=True)
+        yield NotaryAuth(["--apple-id", identity, "--team-id", team], secret, identity)
         return
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "notary.p8"
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
-            stream.write(key[1])
-        yield ["--key", str(path), "--key-id", key[0]]
+            stream.write(secret)
+        yield NotaryAuth(["--key", str(path), "--key-id", identity])
+
+
+def notarytool(auth, *arguments):
+    # The password goes on standard input, never in an argument list. A new session has no
+    # terminal, so notarytool reads standard input instead of prompting on a terminal.
+    options = {"input": auth.password + "\n", "start_new_session": True} if auth.password else {}
+    result = subprocess.run(["xcrun", "notarytool", *arguments, *auth.options],
+                            capture_output=True, text=True, **options)
+    if auth.apple_id:
+        # Keep the prompt, the password, and the Apple ID out of logs and saved evidence.
+        result.stdout, result.stderr = (
+            text.replace(f"Password for {auth.apple_id}: ", "").replace(auth.password, "<password>")
+            .replace(auth.apple_id, "<apple-id>")
+            for text in (result.stdout, result.stderr))
+    return result
 
 
 def notarize(app, auth, evidence):
     evidence.mkdir(parents=True, exist_ok=True)
     archive = evidence / "Box.zip"
     subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(archive)], check=True)
-    submitted = subprocess.run(
-        ["xcrun", "notarytool", "submit", str(archive), *auth, "--wait",
-         "--timeout", NOTARY_TIMEOUT, "--output-format", "json"],
-        capture_output=True, text=True)
+    submitted = notarytool(auth, "submit", str(archive), "--wait",
+                           "--timeout", NOTARY_TIMEOUT, "--output-format", "json")
     try:
         submission = json.loads(submitted.stdout)
     except ValueError:
@@ -235,8 +273,7 @@ def notarize(app, auth, evidence):
     require(re.fullmatch(SUBMISSION_ID, identifier), "Notarization submission failed: "
             + str(submission.get("message") or submitted.stderr or submitted.stdout)[-500:])
     log = evidence / "log.json"
-    if subprocess.run(["xcrun", "notarytool", "log", identifier, *auth, str(log)],
-                      capture_output=True).returncode:
+    if notarytool(auth, "log", identifier, str(log)).returncode:
         print(f"Could not download the notarization log for {identifier}", flush=True)
     status = submission.get("status")
     if status != "Accepted" and log.exists():
@@ -348,15 +385,16 @@ def release(args):
     work = args.work.resolve()
     work.mkdir()
     signer = Signer()
-    key = None
-    if args.notary_key_secret:
-        region = args.notary_key_secret.split(":")[3]
+    credential = None
+    if args.notary_secret:
+        region = args.notary_secret.split(":")[3]
         secret = signer.session.client("secretsmanager", region_name=region).get_secret_value(
-            SecretId=args.notary_key_secret)
-        key = notary_key(secret.get("SecretString", ""))
-    with notary_auth(args.notary_keychain_profile, key) as auth:
-        checked = subprocess.run(["xcrun", "notarytool", "history", *auth,
-                                  "--output-format", "json"], capture_output=True, text=True)
+            SecretId=args.notary_secret)
+        credential = notary_credential(secret.get("SecretString", ""))
+        print("Notarization credential: " + ("an Apple ID with an app-specific password"
+              if credential[0] == "apple-id" else "an App Store Connect API key"), flush=True)
+    with notary_auth(args.notary_keychain_profile, credential, signer.team) as auth:
+        checked = notarytool(auth, "history", "--output-format", "json")
     require(checked.returncode == 0,
             f"Notarization credentials were refused: {(checked.stderr or checked.stdout)[-500:]}")
     binaries = work / "binaries"
@@ -379,7 +417,7 @@ def release(args):
     for name in BINARIES[1:]:
         require(digest(binaries / name) == digest(app / "Contents/MacOS" / name),
                 "Application signing changed a helper")
-    with notary_auth(args.notary_keychain_profile, key) as auth:
+    with notary_auth(args.notary_keychain_profile, credential, signer.team) as auth:
         submission = notarize(app, auth, work / "notarization")
     verify_notarization(app, work / "verification")
     stage = work / "package"
@@ -403,8 +441,9 @@ if __name__ == "__main__":
     sign.add_argument("--version", required=True)
     sign.add_argument("--source-sha", required=True)
     notary = sign.add_mutually_exclusive_group(required=True)
-    notary.add_argument("--notary-key-secret",
-                        help="ARN of a Secrets Manager secret that holds an App Store Connect API key")
+    notary.add_argument("--notary-secret",
+                        help="ARN of a Secrets Manager secret that holds an App Store Connect API key, "
+                             "or an Apple ID and an app-specific password")
     notary.add_argument("--notary-keychain-profile",
                         help="notarytool keychain profile for a local run")
     check = sub.add_parser("verify")
@@ -414,7 +453,7 @@ if __name__ == "__main__":
     if args.command == "sign":
         require(re.fullmatch(r"[0-9a-f]{40}", args.source_sha), "Expected a full source SHA")
         require(bool(args.notary_keychain_profile)
-                or re.fullmatch(SECRET_ARN, args.notary_key_secret or ""),
+                or re.fullmatch(SECRET_ARN, args.notary_secret or ""),
                 "Expected a notarization secret ARN or keychain profile")
         release(args)
     else:
