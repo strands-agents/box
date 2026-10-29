@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::model::{
     ActionName, EffectChanges, EffectName, OptionValue, Pack, ShellAction, ShellOption,
 };
-use super::usage::{Separator, Usage, UsageFault};
+use super::usage::{Separator, Usage};
+use super::{PackRefusal, Place};
 
 /// What the shell grammar made of one command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,11 +98,23 @@ pub(super) enum FieldSource {
 
 impl ShellGrammar {
     /// Compile the usage line of each shell action in `pack`.
-    pub(crate) fn compile(pack: &Pack) -> Result<Self, UsageFault> {
+    pub(crate) fn compile(pack: &Pack) -> Result<Self, PackRefusal> {
+        let mut spellings: BTreeMap<Vec<String>, String> = BTreeMap::new();
+        for (name, action) in &pack.actions {
+            for alias in &action.aliases {
+                spellings.insert(alias.clone(), name.as_str().to_string());
+            }
+        }
         let anywhere = OptionTable::of(&pack.global_options, |option| option.anywhere);
         let mut actions = Vec::new();
         for (name, action) in &pack.actions {
-            actions.push(ActionGrammar::compile(name, action, pack, &anywhere)?);
+            actions.push(ActionGrammar::compile(
+                name,
+                action,
+                pack,
+                &anywhere,
+                &mut spellings,
+            )?);
         }
         Ok(Self {
             globals: OptionTable::of(&pack.global_options, |_| true),
@@ -117,8 +130,56 @@ impl ActionGrammar {
         action: &ShellAction,
         pack: &Pack,
         anywhere: &OptionTable,
-    ) -> Result<Self, UsageFault> {
-        let usage = Usage::read(&action.usage, &pack.program)?;
+        spellings: &mut BTreeMap<Vec<String>, String>,
+    ) -> Result<Self, PackRefusal> {
+        let place = Place::Action(name.as_str().to_string());
+        let usage =
+            Usage::read(&action.usage, &pack.program).map_err(|fault| PackRefusal::BadUsage {
+                place: place.clone(),
+                fault,
+            })?;
+        if let Some(other) = spellings.insert(usage.words.clone(), name.as_str().to_string()) {
+            return Err(PackRefusal::SpellingTaken {
+                place,
+                spelling: usage.words.join(" "),
+                other: Box::new(Place::Action(other)),
+            });
+        }
+        if !action.options.is_empty() && !usage.options {
+            return Err(PackRefusal::OptionsNotInUsage { place });
+        }
+        if usage.globals {
+            for (option, shell_option) in &action.options {
+                if let Some((flag, global)) = shell_option
+                    .flags
+                    .iter()
+                    .find_map(|flag| anywhere.flags.get(flag).map(|slot| (flag, slot)))
+                {
+                    return Err(PackRefusal::FlagTaken {
+                        place: Place::ActionOption {
+                            action: name.as_str().to_string(),
+                            option: option.clone(),
+                        },
+                        flag: flag.clone(),
+                        other: Box::new(Place::GlobalOption(global.field.clone())),
+                    });
+                }
+            }
+        }
+        let operand_place = |operand: &str| Place::Operand {
+            action: name.as_str().to_string(),
+            operand: operand.to_string(),
+        };
+        if let Some(operand) = action
+            .operands
+            .keys()
+            .find(|operand| !usage.operands.iter().any(|slot| &slot.name == *operand))
+        {
+            return Err(PackRefusal::OperandNotInUsage {
+                place: operand_place(operand),
+            });
+        }
+
         let mut fields = Vec::new();
         if usage.globals {
             fields.extend(pack.global_options.iter().map(option_field));
@@ -128,6 +189,12 @@ impl ActionGrammar {
         for (index, placeholder) in usage.operands.iter().enumerate() {
             let declared = action.operands.get(&placeholder.name);
             let rest = declared.is_some_and(|operand| operand.rest);
+            let alone = usage.operands.len() == 1 && placeholder.variadic;
+            if rest && (!alone || matches!(usage.separator, Separator::Required(_))) {
+                return Err(PackRefusal::BadRest {
+                    place: operand_place(&placeholder.name),
+                });
+            }
             let changes = declared.map(|operand| operand.effects.clone());
             fields.push(Field {
                 name: placeholder.name.clone(),
@@ -149,6 +216,13 @@ impl ActionGrammar {
                 name: toolchain.clone(),
                 kind: FieldKind::String,
                 source: FieldSource::Toolchain,
+            });
+        }
+        let mut names = BTreeSet::new();
+        if let Some(field) = fields.iter().find(|field| !names.insert(&field.name)) {
+            return Err(PackRefusal::FieldTaken {
+                place,
+                field: field.name.clone(),
             });
         }
 

@@ -121,7 +121,9 @@ fn declared_by(parsed: &Parsed, pack: &Pack) -> bool {
             action, effects, ..
         } => {
             pack.actions.contains_key(action)
-                && effects.iter().all(|effect| pack.effects.contains(effect))
+                && effects
+                    .iter()
+                    .all(|effect| pack.effects.contains_key(effect))
         }
         Parsed::Unmodeled => true,
     }
