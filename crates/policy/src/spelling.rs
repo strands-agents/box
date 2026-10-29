@@ -239,7 +239,7 @@ fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Opt
     };
     let mut families: Vec<(String, Vec<String>)> = Vec::new();
     for uid in &uids {
-        let family = family(uid);
+        let family = input_family(uid);
         match families.iter_mut().find(|(known, _)| *known == family) {
             Some((_, actions)) => actions.push(uid.to_string()),
             None => families.push((family, vec![uid.to_string()])),
@@ -260,7 +260,7 @@ fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Opt
 }
 
 /// The prefix before `:` of a `Box::Action`, or the whole action for any other.
-fn family(uid: &EntityUid) -> String {
+fn input_family(uid: &EntityUid) -> String {
     let id = uid.id().escaped();
     if uid.type_name().to_string() == BOX_ACTION_TYPE
         && let Some((prefix, _)) = id.split_once(':')
