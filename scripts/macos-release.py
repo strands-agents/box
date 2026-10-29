@@ -230,8 +230,6 @@ def notary_auth(profile=None, credential=None, team=None):
         return
     kind, identity, secret = credential
     if kind == "apple-id":
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            print(f"::add-mask::{identity}\n::add-mask::{secret}", flush=True)
         yield NotaryAuth(["--apple-id", identity, "--team-id", team], secret, identity)
         return
     with tempfile.TemporaryDirectory() as directory:

@@ -133,8 +133,8 @@ Before the first signing request, the job confirms that Apple accepts the notari
 A refused credential stops the run before any signing.
 The job writes an API key to a temporary file that only its user can read, and removes the file after use.
 It gives an app-specific password to `notarytool` on standard input, not as a command argument.
-It masks the Apple ID and the password in the job log.
-It also removes them from the `notarytool` output that the job saves as evidence.
+It does not print the Apple ID or the password.
+It removes both from the `notarytool` output that the job reports in errors or saves as evidence.
 After the signing checks, the job puts `Box.app` in a zip archive and submits the archive to Apple's notary service.
 It waits up to 30 minutes for the result, and continues only when Apple accepts the submission.
 Apple then issues a notarization ticket, which is a signed record of the accepted submission.

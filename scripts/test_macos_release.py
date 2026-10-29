@@ -214,7 +214,7 @@ class MacOSReleaseTests(unittest.TestCase):
         with release.notary_auth("local-profile") as auth:
             self.assertEqual(auth.options, ["--keychain-profile", "local-profile"])
 
-    def test_app_specific_password_goes_only_to_standard_input_and_is_masked(self):
+    def test_app_specific_password_goes_only_to_standard_input_and_is_never_printed(self):
         credential = ("apple-id", "notary@example.com", "abcd-efgh-ijkl-mnop")
         calls = []
 
@@ -236,8 +236,7 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertEqual(options["input"], "abcd-efgh-ijkl-mnop\n")
         self.assertTrue(options["start_new_session"])
         self.assertEqual(result.stderr, "Error: 401 for <apple-id>")
-        self.assertEqual(output.getvalue().splitlines(), [
-            "::add-mask::notary@example.com", "::add-mask::abcd-efgh-ijkl-mnop"])
+        self.assertEqual(output.getvalue(), "")
         calls.clear()
         with patch.object(release.subprocess, "run", side_effect=run):
             release.notarytool(release.NotaryAuth(["--keychain-profile", "p"]), "history")
