@@ -2,6 +2,8 @@
 
 mod ca;
 mod connect;
+mod convert;
+mod deadline;
 mod diagnostic;
 mod exchange;
 mod handle;
@@ -12,6 +14,7 @@ mod request_leg;
 mod resolve;
 mod response_leg;
 mod runtime;
+mod serve;
 mod tls;
 
 use std::net::SocketAddr;

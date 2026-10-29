@@ -307,7 +307,7 @@ fn explicit_body_framing(headers: &HeaderMap) -> Result<Option<BodyFraming>> {
 }
 
 /// Parse the header names nominated by all `Connection` fields.
-fn connection_nominated_headers(headers: &HeaderMap) -> Result<Vec<String>> {
+pub(super) fn connection_nominated_headers(headers: &HeaderMap) -> Result<Vec<String>> {
     let mut nominated = Vec::new();
     for (_, value) in headers
         .iter()
@@ -327,7 +327,7 @@ fn connection_nominated_headers(headers: &HeaderMap) -> Result<Vec<String>> {
 }
 
 /// Whether a header describes only the current transport hop.
-fn is_hop_by_hop_header(name: &str, nominated: &[String]) -> bool {
+pub(super) fn is_hop_by_hop_header(name: &str, nominated: &[String]) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "connection"
@@ -345,7 +345,7 @@ fn is_hop_by_hop_header(name: &str, nominated: &[String]) -> bool {
 }
 
 /// Remove hop-by-hop fields before controls or credential signing inspect the message.
-fn strip_hop_by_hop_headers(headers: &mut HeaderMap) -> Result<()> {
+pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) -> Result<()> {
     let nominated = connection_nominated_headers(headers)?;
     for name in [
         "connection",
@@ -515,7 +515,7 @@ fn read_body_to_close<R: BufRead>(stream: &mut R, max: usize) -> Result<Vec<u8>>
 
 /// How the request method and response status constrain response payload framing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResponseBodyMode {
+pub(super) enum ResponseBodyMode {
     /// The response carries a regular payload.
     Payload,
     /// The response has no wire payload but may retain representation-length metadata.
@@ -524,7 +524,7 @@ enum ResponseBodyMode {
     Forbidden,
 }
 
-fn response_body_mode(request_method: &str, status: u16) -> ResponseBodyMode {
+pub(super) fn response_body_mode(request_method: &str, status: u16) -> ResponseBodyMode {
     if (100..200).contains(&status)
         || status == 204
         || (request_method.eq_ignore_ascii_case("CONNECT") && (200..300).contains(&status))
@@ -946,7 +946,7 @@ pub(super) fn write_response<W: Write>(
 }
 
 /// A minimal reason phrase for a status code (only the ones the proxy itself emits need be exact).
-fn reason(status: u16) -> &'static str {
+pub(super) fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         403 => "Forbidden",

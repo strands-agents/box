@@ -23,6 +23,13 @@ tls-intercept = [
     "dep:ring",
     "dep:rcgen",
     "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http",
+    "dep:http-body",
+    "dep:http-body-util",
+    "dep:bytes",
 ]
 
 [dependencies]
@@ -68,6 +75,20 @@ rcgen = { version = "0.14", optional = true, default-features = false, features 
 # The gateway's own multi-thread runtime: the accept loop, the connection slots, the stop signal,
 # and the first head of each connection.
 tokio = { version = "1", optional = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# TLS on the gateway runtime, on both legs. The default features pull `aws-lc-rs`, which is not in
+# `Cargo.lock`; `ring` matches `rustls` above.
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring"] }
+# The HTTP/1.1 server toward the workload and the client toward the upstream. The `tracing` feature
+# stays off, so hyper never logs a head.
+hyper = { version = "1", optional = true, features = ["client", "http1", "server"] }
+# The tokio adapter (`TokioIo`) that hyper needs on the gateway runtime.
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+# Body frames (`BodyExt::frame`), for the body collection on both legs.
+http-body-util = { version = "0.1", optional = true }
+# The owners of the forwarded header values and target, which are wiped on drop.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 # The full-interception E2E stands up a real TLS upstream and a real TLS workload client (both
