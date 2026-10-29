@@ -166,6 +166,7 @@ impl Drop for Collector {
 impl Collector {
     pub(crate) fn start(config: TelemetryConfig) -> Result<Self> {
         config.validate()?;
+        let operator: Arc<[(String, String)]> = config.resource_attributes()?.into();
         let box_name = config.box_name().to_string();
         let run_id = RandomIdGenerator::default().new_trace_id().to_string();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -175,7 +176,8 @@ impl Collector {
         let port = inbound.port();
 
         // One exporter per target, shared by both lanes.
-        let mut logs = SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id));
+        let mut logs =
+            SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id, &operator));
         let mut relays = crate::receive::Relays::default();
         let mut accepts = [false; Signal::SLOTS];
         for target in config.targets() {
@@ -225,6 +227,7 @@ impl Collector {
         let receiving = tokio::spawn(inbound.serve_forever(
             box_name.clone(),
             run_id,
+            Arc::clone(&operator),
             relays,
             Arc::clone(&dropped),
         ));
@@ -368,8 +371,16 @@ impl Collector {
 }
 
 /// The resource every record from one producer carries.
-fn resource(box_name: &str, run_id: &str) -> Resource {
-    Resource::builder()
+fn resource(box_name: &str, run_id: &str, operator: &[(String, String)]) -> Resource {
+    Resource::builder_empty()
+        .with_detector(Box::new(
+            opentelemetry_sdk::resource::TelemetryResourceDetector,
+        ))
+        .with_attributes(
+            operator
+                .iter()
+                .map(|(key, value)| opentelemetry::KeyValue::new(key.clone(), value.clone())),
+        )
         .with_service_name(SERVICE)
         .with_attribute(opentelemetry::KeyValue::new(
             BOX_ATTRIBUTE,
@@ -858,6 +869,84 @@ mod tests {
             text.contains(SOURCE_BOX),
             "the record names its producer: {text}"
         );
+    }
+
+    /// Every resource in a records file, as `(key, string value)` pairs.
+    fn resources(text: &str) -> Vec<Vec<(String, String)>> {
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let batch: serde_json::Value = serde_json::from_str(line).unwrap();
+            for lane in ["resourceLogs", "resourceSpans"] {
+                for resource in batch[lane].as_array().into_iter().flatten() {
+                    found.push(
+                        resource["resource"]["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|kv| {
+                                (
+                                    kv["key"].as_str().unwrap().to_string(),
+                                    kv["value"]["stringValue"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        found
+    }
+
+    #[tokio::test]
+    async fn operator_attributes_stamp_the_boxs_own_records() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(
+            file_config(&path).with_resource_attributes("tenant.id=acme,conversation.id=c-42"),
+        )
+        .expect("open");
+        collector.record(DecisionRecord::deny(
+            "fs:read",
+            "~/no",
+            "rule-1",
+            "forbidden",
+        ));
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the records");
+        let found = resources(&text);
+        assert!(!found.is_empty(), "{text}");
+        for resource in found {
+            let value = |key: &str| {
+                resource
+                    .iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(value("tenant.id"), ["acme"], "{resource:?}");
+            assert_eq!(value("conversation.id"), ["c-42"], "{resource:?}");
+            assert_eq!(value("service.name"), [SERVICE], "{resource:?}");
+            assert_eq!(value(BOX_ATTRIBUTE), ["demo"], "{resource:?}");
+            assert_eq!(value(SOURCE_ATTRIBUTE), [SOURCE_BOX], "{resource:?}");
+            assert!(
+                resource.iter().any(|(k, _)| k == "telemetry.sdk.name"),
+                "the SDK's own keys stay: {resource:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_operator_attribute_opens_no_collector() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let refused = Collector::start(
+            file_config(&path).with_resource_attributes("strands.box.source=agent"),
+        );
+        assert!(refused.is_err());
     }
 
     #[tokio::test]
