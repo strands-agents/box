@@ -258,6 +258,70 @@ permit(principal, action == alpha::Action::"write", resource);
     );
 }
 
+/// A first listing can fail for a reason that does not repeat: a timeout, a truncated page, or a
+/// closed connection. Discovery completes and the server degrades. A later listing then stages its
+/// schema and the complete bundle installs, so the per-tool rules enforce. The degraded mark must
+/// not outlive that, because it would keep refusing a tool whose rule is live.
+#[test]
+fn a_complete_bundle_after_completion_clears_the_degraded_mark() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "relist.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["alpha".to_string()],
+        "the first listing never staged, so the server degrades"
+    );
+    assert_eq!(
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("the later listing is not a terminal fault"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        },
+        "the later listing completes the bundle"
+    );
+
+    let forbidden = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({"path": "/workspace/secret"}),
+    );
+    assert!(
+        !forbidden.is_allow(),
+        "the installed forbid must refuse the path it names: {forbidden:?}"
+    );
+
+    let permitted = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({"path": "/workspace/input"}),
+    );
+    assert!(
+        permitted.is_allow(),
+        "a path the forbid does not name must stay allowed, not refused by a stale mark: \
+         {permitted:?}"
+    );
+}
+
 #[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient

@@ -50,10 +50,11 @@ struct LiveAuthority {
     /// a `tools/call` naming one of these is held with a transient `PolicyPending`. Empty
     /// when `Ready`.
     pending_tools: BTreeSet<(String, String)>,
-    /// The `(namespace, tool)` typed actions whose schema will never stage — the server's
+    /// The `(namespace, tool)` typed actions whose schema has not staged and whose server's
     /// `tools/list` was denied, so discovery finished without it. A `tools/call` naming one
     /// is denied fail-closed in any state, so a hardcoded call cannot ride the coarse `mcp:call`
-    /// permit with its argument constraint unenforced. Empty until `finish_mcp_discovery` degrades.
+    /// permit with its argument constraint unenforced. Empty until `finish_mcp_discovery`
+    /// degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
 }
 
@@ -240,6 +241,9 @@ impl Authority {
         proposed.mark_all_ready();
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
+        // The replacement set validated against the schemas this run discovered, so every rule it
+        // holds enforces and the previous set's degraded entries no longer describe anything.
+        live.degraded_tools = BTreeSet::new();
         drop(live);
         *proposal_guard = Some(proposed);
         Ok(())
@@ -282,6 +286,10 @@ impl Authority {
                         *proposal_guard = Some(proposed);
                         live.readiness = Readiness::Ready;
                         live.pending_tools = BTreeSet::new();
+                        // Every rule in the complete bundle now enforces, so no tool is left
+                        // without the schema its rule needs. A degraded entry from an earlier
+                        // listing would deny a tool whose rule is live.
+                        live.degraded_tools = BTreeSet::new();
                         Ok(SchemaStage::Accepted {
                             authority_ready: true,
                         })

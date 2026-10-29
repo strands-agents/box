@@ -1282,4 +1282,46 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             "the refused reload validated before the live lock, so the previous policy serves"
         );
     }
+
+    /// A reload replaces the authored set in full, so a degraded mark the previous set left
+    /// describes nothing. A tool that the replacement set names no rule for rides the coarse
+    /// grant, as any unruled tool does.
+    #[test]
+    fn a_reload_clears_a_degraded_mark_the_previous_set_left() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+
+        let coarse = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+                        when { context.input.server == "alpha" };"#;
+        let with_typed_rule = source(&format!(
+            r#"{coarse}
+               permit(principal, action == alpha::Action::"read", resource);"#
+        ));
+        let engine = PolicyEngine::open_staged(&Operator::unanchored(), with_typed_rule, &path)
+            .expect("the typed rule opens staged");
+        assert_eq!(
+            engine
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["alpha".to_string()],
+            "the typed rule never staged, so its server degrades"
+        );
+
+        engine
+            .reload(&source(coarse))
+            .expect("a set naming no typed rule reloads");
+
+        let decision = engine.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &serde_json::json!({"path": "/workspace/input"}),
+        );
+        assert!(
+            decision.is_allow(),
+            "the replacement set constrains no tool, so the call rides the coarse grant: \
+             {decision:?}"
+        );
+    }
 }
