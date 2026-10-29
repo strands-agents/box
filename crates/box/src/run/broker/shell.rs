@@ -99,7 +99,7 @@ impl ShellSpec {
 
     pub(super) fn backend(&self) -> io::Result<Arc<dyn strands_shell::os::Kernel>> {
         use strands_shell::vfs_config::{BindEntry, BindMode, VfsConfig, build_vfs};
-        use strands_shell::vfs_kernel::{EgressProxy, VfsKernel};
+        use strands_shell::vfs_kernel::VfsKernel;
 
         let config = VfsConfig {
             bind: self
@@ -119,14 +119,8 @@ impl ShellSpec {
         vfs.max_file_size = SHELL_MAX_FILE_SIZE;
         vfs.max_inodes = SHELL_MAX_INODES;
         let mut backend = VfsKernel::new(vfs);
-        backend.network_enabled = self.egress.is_some();
-        backend.egress_proxy = self.egress.as_ref().map(|egress| EgressProxy {
-            target: egress.proxy_target.clone(),
-            ca_pem: egress.ca_pem.as_ref().clone(),
-            // A refusal the gateway originates must reach a command as a refusal, not as the
-            // origin's answer.
-            refusal_header: Some(egress_gateway::PROXY_ORIGIN_HEADER.to_string()),
-        });
+        // `CallKernel` sends HTTP through the gateway, so the vendored client never dials.
+        backend.network_enabled = false;
         backend.script_interpreter = Some(self.script_interpreter());
         backend.host_spawner = self.host_spawner.clone();
         Ok(Arc::new(backend))
@@ -181,17 +175,17 @@ impl ShellSpec {
         // With no gateway the network stays off — a fail-closed refusal, never a direct dial
         // around the only governed route the box has.
         let builder = match &self.egress {
-            Some(egress) => builder
-                // Named before the proxy, which reads it: a refusal the gateway originates must
-                // reach a command as a refusal, not as the origin's answer.
-                .egress_refusal_header(egress_gateway::PROXY_ORIGIN_HEADER)
-                .egress_proxy_pem(egress.proxy_target.clone(), egress.ca_pem.as_ref().clone())?,
+            Some(egress) => {
+                super::kernel::verify_gateway_ca(egress)?;
+                builder
+            }
             None => builder.disable_network(),
         };
         let mut shell = builder
             .kernel(Arc::new(super::kernel::CallKernel::new(
                 backend,
                 recorder.request_context(),
+                self.egress.clone(),
             )))
             .build()?;
         verify_direct_binds(&shell, &binds)?;

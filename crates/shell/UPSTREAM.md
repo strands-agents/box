@@ -531,10 +531,8 @@ after its path read.
 
 This exists so `strands-box` can route the hosted Shell's egress through its one governed
 boundary rather than adding a second network authority inside the Shell
-([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). It is
-plausibly upstream-worthy — proxy support is a general sandbox feature — rather than
-divergence for local convenience, and it changes no existing behaviour when the option is
-absent.
+([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). Box no longer uses `egress_proxy`: its own kernel wrapper sends the Shell's HTTP. Box will not
+propose it upstream, and it changes no existing behaviour when the option is absent.
 
 
 ## 2026-08-20 — additive: `Kernel::run_script` forwards a script to an embedder interpreter

@@ -719,6 +719,32 @@ cannot narrow another permit; beside a conditioned permit for the same action it
 inert only for the requests that permit admits; and alone it loads, because it is then a widening and
 not a cap.
 
+<a id="a-rule-that-reads-the-input-names-one-action-family"></a>
+### A rule that reads `context.input` names actions of one family
+
+An input attribute means what the action makes it mean: `path` is a filesystem path on `fs:*` and a
+URL path on `http:request`, and `host` is a destination on `net:connect` and any argument a
+generated tool action declares. So the load refuses a rule that reads `context.input` and does not
+constrain its action to one family, and names the actions to write. A read is one in a `when` or
+`unless` condition; a `when temporal` clause names its own action, so the check does not look inside
+it. A family is the prefix before
+`:` in a `Box::Action` name (`fs`, `shell`, `net`, `http`, `mcp`), and each generated tool action
+is a family of its own. The check needs no action schema, so it runs before strict validation and
+before a box with an MCP server stages a tool schema: a rule that reads the input across a tool
+action and another family is refused, not parked until discovery, and a rule scoped to one tool
+action loads. This is wider than
+[refusing a rule that cannot fire](#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns):
+it refuses a rule that is ambiguously authored, not one proven inert, so it refuses some rules that
+fire correctly today. Three alternatives lost. Judging the literal under an unconstrained scope
+refused a valid rule that compared a tool argument, and the spelling it suggested changed what the
+rule matched. A warning scrolls past the startup disclosure and does not stop the run, and no
+shipped policy has this shape. The schema
+cannot decide it, because it records a type and not a meaning, and `path` is a `String` on both
+`fs:*` and `http:request`. The cost: a rule that reads the input across families must be split into
+one rule per family, even `net:connect` with `http:request` on `host`, where the meaning agrees. The
+rule starts strict because loosening it later loads every policy that loads today, and tightening it
+would refuse some. A blanket `permit` or `forbid` with no condition still loads.
+
 <a id="the-enforced-surface-is-the-whole-vocabulary"></a>
 ### The enforced surface is the whole vocabulary, so there are no harness actions and no risk tags
 
@@ -1385,15 +1411,24 @@ path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that
 carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
-### The Shell's outbound HTTP goes through the box's egress gateway
+### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
 
-The Shell builds no HTTP client of its own. It dials the box's egress gateway on loopback and trusts the
-gateway's interception CA. The gateway stays the one authority for `net:connect` and `http:request`, so
-a Shell `curl` becomes one more source of decisions that the gateway already raises. A direct client
-would be a second unaudited route to an effect the gateway governs. The Shell resolves no credential and
-attaches no secret, and it runs its network off-switch before any transport. A build-time check fails
-the build if a network client appears in the Shell sources outside the two sanctioned files, but that
-check is a lint and not a guarantee.
+Box owns the Shell's HTTP step. `CallKernel::http_request` does not hand a request to the vendored
+backend: it refuses every request when the box has no gateway, runs the private-address floor, and
+sends the request with its own client. That client dials the box's egress gateway on loopback, trusts
+only the gateway's interception CA, and follows no redirect, so each `curl -L` hop is a new request
+through the wrapper. It ignores `curl -k`. The backend keeps its own network off, so the vendored
+client can't dial even if a call skips the wrapper. The gateway stays the one authority for
+`net:connect` and `http:request`, and the Shell resolves no credential and attaches no secret.
+
+The alternative was proxy fields on the vendored `VfsKernel`, set through `ShellBuilder::egress_proxy`.
+Upstream Shell doesn't have that feature and Box won't propose it, and the builder calls did nothing
+once Box supplied its own kernel.
+
+The cost: the wrapper governs only what reaches the kernel's HTTP step. A future Shell network command
+that builds its own client would skip it. A test in `shell_egress_client_guard.rs` fails if a client
+is built in the Shell sources outside `vfs_kernel.rs` and `shell.rs`, but that check is a lint and not
+a guarantee.
 
 <a id="a-gateway-refusal-never-reports-success"></a>
 ### A gateway refusal never reaches the workload as a successful response
@@ -1401,11 +1436,11 @@ check is a lint and not a guarantee.
 The gateway forges the origin's leaf certificate when it intercepts a request, so a refusal it writes
 inside its own tunnel would reach the Shell as an ordinary HTTP status, and `curl` exits 0 for any
 status unless the caller passes `-f`. The gateway therefore marks each response it writes itself with a
-header, and the Shell turns such a response into a permission-denied error, so `curl` prints one
-reason line and exits 1. The marker is not authorization: the gateway already refused, and the marker
-only says who wrote the refusal. `a_gateway_refusal_exits_non_zero_and_is_not_rendered` pins it.
+header, and Box's kernel wrapper turns such a response into a permission-denied error, so `curl`
+prints one reason line and exits 1. The marker is not authorization: the gateway already refused, and
+the marker only says who wrote the refusal. `kernel.rs::a_marked_refusal_fails_curl` pins it.
 
-**The conversion is the Shell's alone, and Monty does not have it.** A Monty `fetch` builds its own
+**The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds its own
 client and never reads the marker, so a denied request reaches the script as an ordinary response
 carrying a `403` status. A script that does not check the status reads a refusal as an answer. That is
 an open residual rather than a closed case.

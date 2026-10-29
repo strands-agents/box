@@ -11,7 +11,7 @@ use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
-    validate_canonical_policy_set,
+    refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
 use crate::schema::{ActionIdentity, GovernedBox};
 use crate::spelling::{Operator, PolicyWarning};
@@ -131,6 +131,7 @@ impl Authority {
             pending: BTreeMap::new(),
         };
         let complete = proposal.complete_policy_set();
+        refuse_input_across_families_before_discovery(&complete).map_err(Refused::into_error)?;
         let (readiness, pending_tools, warnings) =
             match validate_canonical_policy_set(&complete, &[], operator, &[]) {
                 Ok((effective_schema, warnings)) => {
@@ -142,6 +143,7 @@ impl Authority {
                 }
                 Err(
                     inert @ (PolicyError::Spelling(_)
+                    | PolicyError::InputAcrossFamilies(_)
                     | PolicyError::SharedRuleId(_)
                     | PolicyError::ReservedAction(_)
                     | PolicyError::InertTemporalPermit(_)),
@@ -735,6 +737,8 @@ pub(super) fn check_staged(
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
     };
+    refuse_input_across_families_before_discovery(&proposal.complete_policy_set())
+        .map_err(|refused| unlocated(refused.findings))?;
     match check_canonical_policy_set(&proposal.complete_policy_set(), &[], operator, &[]) {
         Ok((_, warnings)) => return Ok((warnings, Vec::new())),
         Err(refused) if is_inert(&refused.error) => return Err(unlocated(refused.findings)),
@@ -772,6 +776,7 @@ fn is_inert(error: &PolicyError) -> bool {
     matches!(
         error,
         PolicyError::Spelling(_)
+            | PolicyError::InputAcrossFamilies(_)
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)

@@ -7,7 +7,7 @@ use std::sync::Arc;
 mod authority;
 
 use crate::check::{Finding, PolicyCheck};
-use crate::dogwood::{DogwoodEngine, check_and_expand, parse_policy_source};
+use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
 use crate::schema::GovernedBox;
 use crate::{
     Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
@@ -230,13 +230,14 @@ impl PolicyEngine {
         }
     }
 
-    /// Validate syntax, macro expansion, and provider use without an action schema.
+    /// Validate syntax, macro expansion, provider use, and that a rule reading `context.input`
+    /// names one action family, without an action schema.
     ///
     /// A `tools/list`-denied-plus-typed-rule policy is NOT refused here:
     /// it loads, and `finish_mcp_discovery` degrades that one server at run rather than blocking
     /// the whole box.
     pub fn validate_staged(sources: &[Policy]) -> Result<(), PolicyError> {
-        parse_policy_source(&authored(sources)).map(|_| ())
+        validate_staged_source(&authored(sources))
     }
 
     /// Propose one generated MCP action-schema fragment.

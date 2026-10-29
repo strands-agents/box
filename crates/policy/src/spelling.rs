@@ -202,14 +202,80 @@ pub(crate) fn names_only_reserved_action(policy: &Policy) -> bool {
         })
 }
 
-/// The action family a rule's scope names.
+/// Refuse a rule that reads `context.input` and does not constrain its action to one family
+/// (docs/design/decisions.md#a-rule-that-reads-the-input-names-one-action-family).
+pub(crate) fn refuse_input_across_families(
+    policies: &PolicySet,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<(), Refused> {
+    for policy in policies.policies() {
+        let rule = rule_name(policy);
+        let est = policy.to_json().map_err(|error| {
+            PolicyError::Schema(format!("{rule} cannot be inspected at load: {error}"))
+        })?;
+        if let Some(text) = input_across_families(policy, &rule, &est["conditions"]) {
+            let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+            return Err(Refused::new(
+                PolicyError::InputAcrossFamilies(text.clone()),
+                vec![crate::check::Finding::new(text).with_rules(rules)],
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Option<String> {
+    let read = input_read(conditions)?;
+    let uids = match policy.action_constraint() {
+        ActionConstraint::Any => {
+            return Some(format!(
+                "{rule} reads {read} and constrains no action, and an input attribute means what \
+                 the action makes it mean; name the action the rule is for, or actions of one \
+                 family, which share the prefix before \":\" as fs:read and fs:write do"
+            ));
+        }
+        ActionConstraint::Eq(uid) => vec![uid],
+        ActionConstraint::In(uids) => uids,
+    };
+    let mut families: Vec<(String, Vec<String>)> = Vec::new();
+    for uid in &uids {
+        let family = input_family(uid);
+        match families.iter_mut().find(|(known, _)| *known == family) {
+            Some((_, actions)) => actions.push(uid.to_string()),
+            None => families.push((family, vec![uid.to_string()])),
+        }
+    }
+    if families.len() < 2 {
+        return None;
+    }
+    let scopes: Vec<String> = families
+        .iter()
+        .map(|(_, actions)| format!("[{}]", actions.join(", ")))
+        .collect();
+    Some(format!(
+        "{rule} reads {read} under actions of more than one family, and an input attribute \
+         means what the action makes it mean; write one rule for each family: {}",
+        scopes.join(" and ")
+    ))
+}
+
+/// The prefix before `:` of a `Box::Action`, or the whole action for any other.
+fn input_family(uid: &EntityUid) -> String {
+    let id = uid.id().escaped();
+    if uid.type_name().to_string() == BOX_ACTION_TYPE
+        && let Some((prefix, _)) = id.split_once(':')
+    {
+        return prefix.to_string();
+    }
+    uid.to_string()
+}
+
+/// The judged family a rule's scope names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
     Filesystem,
     Shell,
     Network,
-    /// Unconstrained, or more than one family, so `path` may be a URL path.
-    Unscoped,
 }
 
 /// Which judgements apply to one attribute under one scope.
@@ -219,11 +285,11 @@ struct Checks {
 }
 
 impl Scope {
-    /// The scope of `policy`, or `None` when it names an action outside `Box::Action` or only
-    /// actions of no judged family.
+    /// The scope of `policy`, or `None` when it constrains no action, or names an action outside
+    /// `Box::Action` or of no judged family.
     fn of(policy: &Policy) -> Option<Self> {
         let uids = match policy.action_constraint() {
-            ActionConstraint::Any => return Some(Self::Unscoped),
+            ActionConstraint::Any => return None,
             ActionConstraint::Eq(uid) => vec![uid],
             ActionConstraint::In(uids) => uids,
         };
@@ -233,16 +299,10 @@ impl Scope {
         {
             return None;
         }
-        let families: Vec<Option<Self>> = uids.iter().map(Self::family).collect();
-        let first = (*families.first()?)?;
-        if families.iter().all(|family| family.is_none()) {
-            return None;
-        }
-        Some(if families.iter().all(|family| *family == Some(first)) {
-            first
-        } else {
-            Self::Unscoped
-        })
+        let first = Self::family(uids.first()?)?;
+        uids.iter()
+            .all(|uid| Self::family(uid) == Some(first))
+            .then_some(first)
     }
 
     fn family(uid: &EntityUid) -> Option<Self> {
@@ -262,9 +322,6 @@ impl Scope {
         match (self, attribute) {
             (Self::Filesystem, PATH) | (Self::Shell, PROGRAM | PROGRAM_PATH) => Some(Checks {
                 trailing_slash: true,
-            }),
-            (Self::Unscoped, PATH | PROGRAM_PATH | PROGRAM) => Some(Checks {
-                trailing_slash: false,
             }),
             (Self::Network, HOST) => Some(Checks {
                 trailing_slash: false,
@@ -568,11 +625,40 @@ fn input_attribute(node: &Value) -> Option<String> {
     if ![PATH, PROGRAM_PATH, PROGRAM, HOST].contains(&attribute) {
         return None;
     }
-    let input = access.get("left")?.get(".")?;
-    if input.get("attr")?.as_str()? != "input" {
-        return None;
+    is_context_input(access.get("left")?).then(|| attribute.to_string())
+}
+
+/// The first read of `context.input` in `node`: `context.input.<attribute>` when it names one.
+fn input_read(node: &Value) -> Option<String> {
+    match node {
+        Value::Array(items) => items.iter().find_map(input_read),
+        Value::Object(fields) => {
+            for operator in [".", "has"] {
+                if let Some(access) = fields.get(operator)
+                    && access.get("left").is_some_and(is_context_input)
+                    && let Some(attribute) = access.get("attr").and_then(Value::as_str)
+                {
+                    return Some(format!("context.input.{attribute}"));
+                }
+            }
+            if is_context_input(node) {
+                return Some("context.input".to_string());
+            }
+            fields.values().find_map(input_read)
+        }
+        _ => None,
     }
-    (input.get("left")?.get("Var")?.as_str()? == "context").then(|| attribute.to_string())
+}
+
+fn is_context_input(node: &Value) -> bool {
+    node.get(".").is_some_and(|access| {
+        access.get("attr").and_then(Value::as_str) == Some("input")
+            && access
+                .get("left")
+                .and_then(|left| left.get("Var"))
+                .and_then(Value::as_str)
+                == Some("context")
+    })
 }
 
 fn string_value(node: &Value) -> Option<String> {
@@ -607,6 +693,12 @@ mod tests {
     /// A raw Cedar parse; `tests/path_spelling.rs` covers the Dogwood lowering.
     fn parsed(source: &str) -> PolicySet {
         source.parse().expect("the policy parses")
+    }
+
+    /// The scope refusal, then the spelling judge, in load order.
+    fn judge(policies: &PolicySet, operator: &Operator) -> Result<Vec<PolicyWarning>, PolicyError> {
+        refuse_input_across_families(policies, &|_| None).map_err(Refused::into_error)?;
+        super::judge(policies, operator)
     }
 
     fn anchored() -> Operator {
@@ -802,48 +894,92 @@ mod tests {
     }
 
     #[test]
-    fn an_unconstrained_scope_judges_the_home_and_warns_on_the_program_but_not_a_url_slash() {
-        let broad_forbid = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has path
-                && context.input.path == "/Users/me/project/secrets.env" };"#,
-        );
-        assert!(judge(&broad_forbid, &anchored()).is_err());
+    fn an_input_read_under_no_action_is_refused_and_names_the_actions_to_write() {
+        for read in [
+            r#"context.input.path == "/etc/hosts""#,
+            r#"context.input.program == "git""#,
+            r#"context.input.program_path == "/usr/bin/git""#,
+            r#"context.input.host == "api.example.com""#,
+            r#"context.input.server == "demo""#,
+            r#"context.input.operation == Box::FsReadOperation::"read_content""#,
+            "context has input && context.input has path",
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("broad") forbid(principal, action, resource) when {{ {read} }};"#
+            ));
+            let error = judge(&policies, &anchored()).unwrap_err().to_string();
+            assert!(
+                error.contains("rule @id(\"broad\") reads context.input."),
+                "{read}: {error}"
+            );
+            assert!(error.contains("constrains no action"), "{read}: {error}");
+            assert!(
+                error.contains("name the action the rule is for"),
+                "{read}: {error}"
+            );
+        }
+    }
 
-        let broad_program = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has program
-                && context.input.program == "/usr/bin/curl" };"#,
-        );
-        assert_eq!(
-            judge(&broad_program, &anchored()).expect("a warning").len(),
-            1
-        );
+    #[test]
+    fn an_input_read_across_families_is_refused_whatever_the_order() {
+        for actions in [
+            r#"Box::Action::"fs:read", Box::Action::"http:request""#,
+            r#"Box::Action::"http:request", Box::Action::"fs:read""#,
+            r#"Box::Action::"net:connect", Box::Action::"http:request""#,
+            r#"Box::Action::"fs:read", Box::Action::"mcp:call""#,
+            r#"Box::Action::"mcp:call", Box::Action::"fs:read""#,
+            r#"Box::Action::"shell:spawn", Box::Action::"fs:read""#,
+        ] {
+            let policies = parsed(&format!(
+                r#"permit(principal, action in [{actions}], resource)
+                when {{ context.input has path }};"#
+            ));
+            let error = judge(&policies, &anchored()).unwrap_err().to_string();
+            assert!(
+                error.contains("reads context.input.path under actions of more than one family"),
+                "{actions}: {error}"
+            );
+        }
 
+        let grouped = parsed(
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect", Box::Action::"fs:write"], resource)
+            when { context.input.path == "/v1/" };"#,
+        );
+        let error = judge(&grouped, &anchored()).unwrap_err().to_string();
+        assert!(
+            error.ends_with(
+                r#"write one rule for each family: [Box::Action::"fs:read", Box::Action::"fs:write"] and [Box::Action::"net:connect"]"#
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_reads_no_input_or_names_one_family_loads() {
+        for source in [
+            "permit(principal, action, resource);",
+            "forbid(principal, action, resource);",
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect"], resource);"#,
+            r#"forbid(principal, action, resource) when { context has input };"#,
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write", Box::Action::"fs:other"], resource)
+               when { context.input.path == "/etc/hosts" };"#,
+            r#"permit(principal, action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"], resource)
+               when { context.input.program == "git" };"#,
+            r#"permit(principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "demo" };"#,
+        ] {
+            assert!(judge(&parsed(source), &anchored()).is_ok(), "{source}");
+        }
+    }
+
+    /// A URL path is not judged as a filesystem path.
+    #[test]
+    fn a_network_scope_does_not_judge_a_url_path() {
         let url = parsed(
             r#"permit(principal, action == Box::Action::"http:request", resource)
             when { context.input.path == "/v1/models/" || context.input.path == "/Users/me/api" };"#,
         );
         assert!(judge(&url, &anchored()).is_ok());
-
-        let network_only = parsed(
-            r#"permit(principal, action in [Box::Action::"http:request", Box::Action::"net:connect"], resource)
-            when { context.input has path && context.input.path == "/Users/me/api" };"#,
-        );
-        assert!(judge(&network_only, &anchored()).is_ok());
-
-        let mixed = parsed(
-            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
-            when { context.input.path == "/v1/" };"#,
-        );
-        assert!(judge(&mixed, &anchored()).is_ok());
-
-        let baseline_shape = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has path
-                && context.input.path like "*/.strands-box/mcp-schemas/*" };"#,
-        );
-        assert!(judge(&baseline_shape, &anchored()).is_ok());
     }
 
     #[test]
@@ -858,7 +994,8 @@ mod tests {
             r#"permit(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
             when { context.input.path == "/Users/me/tool-argument" };"#,
         );
-        assert!(judge(&mixed, &anchored()).is_ok());
+        let error = judge(&mixed, &anchored()).unwrap_err().to_string();
+        assert!(error.contains("more than one family"), "{error}");
     }
 
     #[test]
@@ -1009,16 +1146,16 @@ mod tests {
         assert!(judge(&reversed, &Operator::unanchored()).is_err());
 
         let set = parsed(
-            r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"http:request"], resource)
+            r#"forbid(principal, action == Box::Action::"http:request", resource)
             when { ["api.example.com", "API.Other.com"].contains(context.input.host) };"#,
         );
         assert!(judge(&set, &Operator::unanchored()).is_err());
     }
 
-    /// Under an unconstrained action, `host` may be the argument of a generated MCP tool action
-    /// rather than a destination, so no host literal is judged there.
+    /// A host literal is judged only as a destination, so a rule that does not name its action
+    /// is refused for the scope and is never told to respell a tool argument.
     #[test]
-    fn an_unconstrained_action_judges_no_host_literal() {
+    fn a_host_literal_under_no_action_is_refused_for_its_scope_and_not_its_spelling() {
         for literal in [
             "API.Example.com",
             "PROD",
@@ -1030,9 +1167,22 @@ mod tests {
                 when {{ context has input && context.input has host
                     && context.input.host == "{literal}" }};"#
             ));
+            let error = judge(&broad, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
             assert!(
-                judge(&broad, &Operator::unanchored()).is_ok(),
-                "{literal:?} may be a tool argument under an unconstrained action"
+                error.contains("constrains no action"),
+                "{literal:?}: {error}"
+            );
+            assert!(!error.contains("lowercase"), "{literal:?}: {error}");
+
+            let tool = parsed(&format!(
+                r#"forbid(principal, action == alpha::Action::"deploy", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&tool, &Operator::unanchored()).is_ok(),
+                "{literal:?} is a tool argument under a tool action"
             );
         }
 
@@ -1040,7 +1190,10 @@ mod tests {
             r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"fs:read"], resource)
             when { context.input.host == "API.Example.com" };"#,
         );
-        assert!(judge(&mixed, &Operator::unanchored()).is_ok());
+        let error = judge(&mixed, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than one family"), "{error}");
     }
 
     /// A refusal never names a spelling that is itself unreachable, so the unreachable byte is
