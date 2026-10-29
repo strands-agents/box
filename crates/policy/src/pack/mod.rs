@@ -224,14 +224,7 @@ mod tests {
                     continue;
                 }
                 let expected = expected_message(&text);
-                let loaded = Pack::load(&path)
-                    .and_then(|pack| {
-                        grammar::ShellGrammar::compile(&pack).map_err(|refusal| PackError {
-                            origin: path.clone(),
-                            refusal: Box::new(refusal),
-                        })
-                    })
-                    .map_err(|error| operator_message(&error, &path));
+                let loaded = Pack::load(&path).map_err(|error| operator_message(&error, &path));
                 let failure = match (valid, expected, loaded) {
                     (true, None, Ok(_)) => continue,
                     (true, Some(_), _) => "a valid pack carries a `# expect:` line".to_string(),

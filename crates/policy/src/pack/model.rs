@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use super::format::{OperandSpec, OptionSpec, PackFile, ShellActionSpec, ValueSpec, WhenSpec};
+use super::grammar::ShellGrammar;
 use super::{OptionFault, PackRefusal, Place};
 use crate::schema::cedar_identifier;
 
@@ -43,6 +44,7 @@ pub(crate) struct Pack {
     pub(super) effects: BTreeMap<EffectName, String>,
     pub(super) global_options: BTreeMap<String, ShellOption>,
     pub(super) actions: BTreeMap<ActionName, ShellAction>,
+    grammar: ShellGrammar,
 }
 
 /// One `[shell.<action>]` table.
@@ -149,6 +151,7 @@ impl Pack {
             }
             actions.insert(ActionName(name), action);
         }
+        let grammar = ShellGrammar::compile(&file.program, &global_options, &actions)?;
         Ok(Self {
             name: file.pack,
             version,
@@ -156,7 +159,13 @@ impl Pack {
             effects,
             global_options,
             actions,
+            grammar,
         })
+    }
+
+    /// The shell grammar compiled from the usage lines of this pack.
+    pub(crate) fn grammar(&self) -> &ShellGrammar {
+        &self.grammar
     }
 }
 
@@ -439,7 +448,7 @@ options.config = { flag = "-c", value = "required", repeated = true, adds = ["ov
 options.directory = { flag = "-C", value = "many", anywhere = true }
 
 [shell.push]
-usage = "git [global options] push [options] [<remote> [<refspec>...]]"
+usage = "git [global options] push [options] [<refspec>...]"
 aliases = ["send"]
 adds = ["network"]
 options.lease = { flag = ["--force-with-lease"], value = "optional", like = ["*:*", "*"], when = [{ like = "*", adds = ["force_push"], removes = ["network"] }] }
@@ -469,6 +478,67 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             }],
             ..changes(&["+*"], &["force_push"], &["network"])
         };
+        let global_options = BTreeMap::from([
+            (
+                "config".to_string(),
+                option(
+                    &["-c"],
+                    OptionValue::Required,
+                    true,
+                    false,
+                    changes(&[], &["override_config"], &[]),
+                ),
+            ),
+            (
+                "directory".to_string(),
+                option(
+                    &["-C"],
+                    OptionValue::Many,
+                    false,
+                    true,
+                    changes(&[], &[], &[]),
+                ),
+            ),
+        ]);
+        let actions = BTreeMap::from([(
+            ActionName("push".to_string()),
+            ShellAction {
+                usage: "git [global options] push [options] [<refspec>...]".to_string(),
+                aliases: vec![strings(&["send"])],
+                adds: effects(&["network"]),
+                options: BTreeMap::from([
+                    (
+                        "dry_run".to_string(),
+                        option(
+                            &["-n", "--dry-run"],
+                            OptionValue::None,
+                            false,
+                            false,
+                            changes(&[], &[], &["force_push"]),
+                        ),
+                    ),
+                    (
+                        "lease".to_string(),
+                        option(
+                            &["--force-with-lease"],
+                            OptionValue::Optional,
+                            false,
+                            false,
+                            lease,
+                        ),
+                    ),
+                ]),
+                operands: BTreeMap::from([(
+                    "refspec".to_string(),
+                    Operand {
+                        rest: true,
+                        effects: refspec,
+                    },
+                )]),
+            },
+        )]);
+        let grammar = ShellGrammar::compile("git", &global_options, &actions)
+            .expect("the expected pack compiles");
         let expected = Pack {
             name: "git".to_string(),
             version: 2,
@@ -484,66 +554,9 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
                 ]
                 .map(|(name, description)| (EffectName(name.to_string()), description.to_string())),
             ),
-            global_options: BTreeMap::from([
-                (
-                    "config".to_string(),
-                    option(
-                        &["-c"],
-                        OptionValue::Required,
-                        true,
-                        false,
-                        changes(&[], &["override_config"], &[]),
-                    ),
-                ),
-                (
-                    "directory".to_string(),
-                    option(
-                        &["-C"],
-                        OptionValue::Many,
-                        false,
-                        true,
-                        changes(&[], &[], &[]),
-                    ),
-                ),
-            ]),
-            actions: BTreeMap::from([(
-                ActionName("push".to_string()),
-                ShellAction {
-                    usage: "git [global options] push [options] [<remote> [<refspec>...]]"
-                        .to_string(),
-                    aliases: vec![strings(&["send"])],
-                    adds: effects(&["network"]),
-                    options: BTreeMap::from([
-                        (
-                            "dry_run".to_string(),
-                            option(
-                                &["-n", "--dry-run"],
-                                OptionValue::None,
-                                false,
-                                false,
-                                changes(&[], &[], &["force_push"]),
-                            ),
-                        ),
-                        (
-                            "lease".to_string(),
-                            option(
-                                &["--force-with-lease"],
-                                OptionValue::Optional,
-                                false,
-                                false,
-                                lease,
-                            ),
-                        ),
-                    ]),
-                    operands: BTreeMap::from([(
-                        "refspec".to_string(),
-                        Operand {
-                            rest: true,
-                            effects: refspec,
-                        },
-                    )]),
-                },
-            )]),
+            global_options,
+            actions,
+            grammar,
         };
 
         assert_eq!(Pack::parse(text).expect("the pack loads"), expected);

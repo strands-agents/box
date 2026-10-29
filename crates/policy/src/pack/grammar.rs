@@ -2,9 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{
-    ActionName, EffectChanges, EffectName, OptionValue, Pack, ShellAction, ShellOption,
-};
+use super::model::{ActionName, EffectChanges, EffectName, OptionValue, ShellAction, ShellOption};
 use super::usage::{Separator, Usage};
 use super::{PackRefusal, Place};
 
@@ -28,6 +26,7 @@ pub(crate) enum FieldValue {
 }
 
 /// Every shell action of one pack, compiled from its usage lines.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(crate) struct ShellGrammar {
     pub(super) globals: OptionTable,
@@ -36,6 +35,7 @@ pub(crate) struct ShellGrammar {
 }
 
 /// The grammar of one shell action.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(super) struct ActionGrammar {
     pub(super) name: ActionName,
@@ -51,12 +51,14 @@ pub(super) struct ActionGrammar {
 }
 
 /// The options that one position of a command line accepts, by flag.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone, Default)]
 pub(super) struct OptionTable {
     pub(super) flags: BTreeMap<String, OptionSlot>,
 }
 
 /// One option as a command line reads it.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone)]
 pub(super) struct OptionSlot {
     pub(super) field: String,
@@ -65,6 +67,7 @@ pub(super) struct OptionSlot {
 }
 
 /// One operand position of a usage line.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(super) struct OperandSlot {
     pub(super) required: bool,
@@ -73,6 +76,7 @@ pub(super) struct OperandSlot {
 }
 
 /// One field of an action, and where its value comes from.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(super) struct Field {
     pub(super) name: String,
@@ -89,6 +93,7 @@ pub(super) enum FieldKind {
 }
 
 /// Where the value of a field comes from.
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(super) enum FieldSource {
     Option(EffectChanges),
@@ -97,29 +102,34 @@ pub(super) enum FieldSource {
 }
 
 impl ShellGrammar {
-    /// Compile the usage line of each shell action in `pack`.
-    pub(crate) fn compile(pack: &Pack) -> Result<Self, PackRefusal> {
+    /// Compile the usage line of each shell action of a pack for `program`.
+    pub(super) fn compile(
+        program: &str,
+        global_options: &BTreeMap<String, ShellOption>,
+        actions: &BTreeMap<ActionName, ShellAction>,
+    ) -> Result<Self, PackRefusal> {
         let mut spellings: BTreeMap<Vec<String>, String> = BTreeMap::new();
-        for (name, action) in &pack.actions {
+        for (name, action) in actions {
             for alias in &action.aliases {
                 spellings.insert(alias.clone(), name.as_str().to_string());
             }
         }
-        let anywhere = OptionTable::of(&pack.global_options, |option| option.anywhere);
-        let mut actions = Vec::new();
-        for (name, action) in &pack.actions {
-            actions.push(ActionGrammar::compile(
+        let anywhere = OptionTable::of(global_options, |option| option.anywhere);
+        let mut compiled = Vec::new();
+        for (name, action) in actions {
+            compiled.push(ActionGrammar::compile(
                 name,
                 action,
-                pack,
+                program,
+                global_options,
                 &anywhere,
                 &mut spellings,
             )?);
         }
         Ok(Self {
-            globals: OptionTable::of(&pack.global_options, |_| true),
-            toolchain: actions.iter().any(|action| action.toolchain.is_some()),
-            actions,
+            globals: OptionTable::of(global_options, |_| true),
+            toolchain: compiled.iter().any(|action| action.toolchain.is_some()),
+            actions: compiled,
         })
     }
 }
@@ -128,16 +138,16 @@ impl ActionGrammar {
     fn compile(
         name: &ActionName,
         action: &ShellAction,
-        pack: &Pack,
+        program: &str,
+        global_options: &BTreeMap<String, ShellOption>,
         anywhere: &OptionTable,
         spellings: &mut BTreeMap<Vec<String>, String>,
     ) -> Result<Self, PackRefusal> {
         let place = Place::Action(name.as_str().to_string());
-        let usage =
-            Usage::read(&action.usage, &pack.program).map_err(|fault| PackRefusal::BadUsage {
-                place: place.clone(),
-                fault,
-            })?;
+        let usage = Usage::read(&action.usage, program).map_err(|fault| PackRefusal::BadUsage {
+            place: place.clone(),
+            fault,
+        })?;
         if let Some(other) = spellings.insert(usage.words.clone(), name.as_str().to_string()) {
             return Err(PackRefusal::SpellingTaken {
                 place,
@@ -182,7 +192,7 @@ impl ActionGrammar {
 
         let mut fields = Vec::new();
         if usage.globals {
-            fields.extend(pack.global_options.iter().map(option_field));
+            fields.extend(global_options.iter().map(option_field));
         }
         fields.extend(action.options.iter().map(option_field));
         let mut operands = Vec::new();

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::Pack;
-use super::grammar::{FieldValue, Parsed, ShellGrammar};
+use super::grammar::{FieldValue, Parsed};
 
 const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
 
@@ -173,7 +173,7 @@ fn every_corpus_case_parses_to_its_action_fields_and_effects() {
                 .join(format!("{stem}.pack.toml"))
         };
         let pack = Pack::load(&pack_path).expect("the corpus pack loads");
-        let grammar = ShellGrammar::compile(&pack).expect("the corpus pack compiles");
+        let grammar = pack.grammar();
         let text = std::fs::read_to_string(&path).expect("the corpus file reads");
         let corpus: Corpus = match toml::from_str(&text) {
             Ok(corpus) => corpus,
