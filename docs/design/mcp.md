@@ -47,6 +47,17 @@ Two actions decide MCP requests, and a rule can narrow either one.
 the method, and the item. `tool`, `prompt`, and `uri` are present only on the method that carries
 them, so a rule tests them with `has` first.
 
+**A `file`, `http`, or `https` resource URI reaches a rule in one canonical form**, so two
+spellings of one resource can't get two decisions. The scheme and the host are lowercased, a
+trailing dot on the host is dropped, percent-escapes of unreserved characters are decoded, `.` and
+`..` and empty path segments are resolved, a default port is dropped, and `file:/x` and
+`file://localhost/x` both become `file:///x`. A fragment is dropped, because a fragment never
+reaches the server. An empty query is dropped; a query with content is kept as written, because a
+credential can live there. A URI under any other scheme is left exactly as the workload wrote it.
+The server is then sent the canonical form, so it reads the resource the rule decided on. Write
+each `uri` literal in that form: a rule compares text exactly, so a literal in any other spelling
+never matches.
+
 **A per-tool action is generated** for each tool a server lists. It's decided only for a
 `tools/call`, after `mcp:call` allows the call. A rule on it can refuse the whole tool, or only the
 calls whose arguments match a condition.
