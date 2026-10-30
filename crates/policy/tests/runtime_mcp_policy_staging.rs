@@ -304,8 +304,16 @@ when { context.input.env == "prod" };
         "deploy",
         &json!({"env": "prod"}),
     );
+    // Not merely "not allowed": the refusal is terminal, not the transient hold a pending tool
+    // takes, because no later schema can make this rule enforceable.
     assert!(
-        !decision.is_allow(),
+        matches!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
         "the refinement must deny a degraded tool whose action the schema declares: {decision:?}"
     );
 }

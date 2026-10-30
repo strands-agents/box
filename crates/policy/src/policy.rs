@@ -338,9 +338,9 @@ impl PolicyEngine {
     /// The per-tool refinement for one `tools/call`.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
-    /// the coarse grant) or when no rule forbids it; returns `Deny` on a degraded or pending tool,
-    /// an explicit `forbid`, or an evaluation fault. `arguments` is the raw `params.arguments`,
-    /// typed against the composed schema by the engine's request gate (`context_for`'s `from_json`).
+    /// the coarse grant) or when no rule forbids it; a tool the authority holds degraded or
+    /// pending, an explicit `forbid`, and an evaluation fault each return `Deny`. `arguments` is the
+    /// raw `params.arguments`, typed against the composed schema by the engine's request gate.
     pub fn refine_tool_call(
         &self,
         governed: &GovernedBox,

@@ -459,12 +459,8 @@ impl Authority {
         }
     }
 
-    /// The fail-closed refusal a degraded tool call takes before any rule is consulted, or `None`
-    /// when the tool is not degraded.
-    ///
-    /// A degraded tool is one whose server's `tools/list` was denied, so its schema never staged
-    /// and its argument constraint can never be enforced. A poisoned lock fails closed as an
-    /// internal fault.
+    /// The refusal a tool in `degraded_tools` takes before any rule is consulted, or `None` when
+    /// the tool is not in that set.
     pub(super) fn degraded_refusal(&self, identity: &ActionIdentity) -> Option<Decision> {
         let ActionIdentity::McpTool { namespace, tool } = identity else {
             return None;
