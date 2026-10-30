@@ -23,9 +23,11 @@ pub(crate) enum PackCoverage<'a> {
     Unmodeled(&'a Pack),
 }
 
-/// Why Box refuses one binding.
+/// Why Box refuses the installed packs or one binding.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum BindingRefusal {
+    #[error("two installed tool packs are named {pack:?}")]
+    NamedTwice { pack: String },
     #[error("no installed tool pack is named {pack:?}")]
     UnknownPack { pack: String },
     #[error("{program_path} is bound to tool pack {bound:?}, so it cannot also bind {pack:?}")]
@@ -37,11 +39,20 @@ pub(crate) enum BindingRefusal {
 }
 
 impl PackBindings {
-    pub(crate) fn new(packs: Vec<Pack>) -> Self {
-        Self {
+    pub(crate) fn new(packs: Vec<Pack>) -> Result<Self, BindingRefusal> {
+        let mut seen = BTreeMap::<&str, usize>::new();
+        for pack in &packs {
+            *seen.entry(pack.name.as_str()).or_default() += 1;
+        }
+        if let Some((pack, _)) = seen.into_iter().find(|&(_, count)| count > 1) {
+            return Err(BindingRefusal::NamedTwice {
+                pack: pack.to_string(),
+            });
+        }
+        Ok(Self {
             packs,
             ..Self::default()
-        }
+        })
     }
 
     /// Declare that a `[tool]` runs the file at `program_path` under the name `name`.
@@ -110,6 +121,16 @@ mod tests {
             .collect()
     }
 
+    fn version(pack: &str, version: u32) -> Pack {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/valid");
+        let text =
+            std::fs::read_to_string(corpus.join(format!("{pack}.pack.toml"))).expect("a pack");
+        let text = text.replacen("version = 1", &format!("version = {version}"), 1);
+        let pack = Pack::parse(&text).expect("a pack");
+        assert_eq!(pack.version, version, "{pack:?} carries the version");
+        pack
+    }
+
     fn answer(coverage: Option<PackCoverage<'_>>) -> Option<(&'static str, String)> {
         coverage.map(|coverage| match coverage {
             PackCoverage::Parsed(pack) => ("parsed", pack.name.clone()),
@@ -127,7 +148,7 @@ mod tests {
 
     #[test]
     fn each_spawn_resolves_by_its_program_file_and_its_called_name() {
-        let mut bindings = PackBindings::new(installed(&["git", "cargo"]));
+        let mut bindings = PackBindings::new(installed(&["git", "cargo"])).expect("distinct packs");
         bindings.bind(GIT, "git", "git").expect("git binds");
         bindings.declare(CARGO, "rustc");
         bindings.bind(CARGO, "cargo", "cargo").expect("cargo binds");
@@ -199,7 +220,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_name_on_a_file_that_no_pack_binds_stays_a_spawn() {
-        let mut bindings = PackBindings::new(installed(&["git"]));
+        let mut bindings = PackBindings::new(installed(&["git"])).expect("distinct packs");
         bindings.declare(MISE, "node");
 
         for (case, name) in [
@@ -215,7 +236,7 @@ mod tests {
 
     #[test]
     fn a_binding_that_names_no_installed_pack_or_a_second_pack_on_one_file_is_refused() {
-        let mut bindings = PackBindings::new(installed(&["git", "cargo"]));
+        let mut bindings = PackBindings::new(installed(&["git", "cargo"])).expect("distinct packs");
         bindings.bind(GIT, "git", "git").expect("git binds");
         bindings.bind(CARGO, "cargo", "cargo").expect("cargo binds");
         bindings
@@ -290,6 +311,37 @@ mod tests {
                 answer(bindings.coverage(program_path, name)),
                 expected,
                 "{case}: {program_path} called as {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_installed_packs_with_one_name_are_refused_in_any_order() {
+        let (git, cargo) = (|v| version("git", v), |v| version("cargo", v));
+        for (case, packs, named) in [
+            ("one version twice", vec![git(1), git(1)], "git"),
+            ("v1, then v2", vec![git(1), git(2)], "git"),
+            ("v2, then v1", vec![git(2), git(1)], "git"),
+            ("around another pack", vec![git(2), cargo(1), git(1)], "git"),
+            ("before another pack", vec![git(1), git(2), cargo(1)], "git"),
+            ("after another pack", vec![cargo(1), git(1), git(2)], "git"),
+            (
+                "two names, cargo first",
+                vec![cargo(1), git(1), git(2), cargo(2)],
+                "cargo",
+            ),
+            (
+                "two names, git first",
+                vec![git(1), git(2), cargo(1), cargo(2)],
+                "cargo",
+            ),
+        ] {
+            assert_eq!(
+                PackBindings::new(packs).map(|_| ()),
+                Err(BindingRefusal::NamedTwice {
+                    pack: named.to_string()
+                }),
+                "{case}"
             );
         }
     }
