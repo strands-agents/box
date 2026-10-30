@@ -1900,6 +1900,167 @@ mod tests {
         );
     }
 
+    fn write_executable_page_through_proc_mem(path: &std::ffi::CStr) -> i32 {
+        // SAFETY: this creates one private page in the child process.
+        let executable = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if executable == libc::MAP_FAILED {
+            return 60;
+        }
+        // SAFETY: path is NUL-terminated, and the returned descriptor is closed below.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return 0;
+        }
+        let byte: [u8; 1] = [0x7f];
+        // SAFETY: the descriptor and buffer are valid. The offset is the mapped page address.
+        let written = unsafe {
+            libc::pwrite(
+                fd,
+                byte.as_ptr().cast(),
+                byte.len(),
+                executable as usize as libc::off_t,
+            )
+        };
+        // SAFETY: fd was returned by open in this process.
+        unsafe { libc::close(fd) };
+        if written == byte.len() as isize {
+            61
+        } else {
+            0
+        }
+    }
+
+    fn route_to_c_string(route: &str) -> std::ffi::CString {
+        std::ffi::CString::new(route).expect("proc route contains no NUL")
+    }
+
+    fn proc_mem_route_status(route: &str) -> i32 {
+        let path = route_to_c_string(route);
+        write_executable_page_through_proc_mem(&path)
+    }
+
+    fn proc_mem_child_route_status() -> i32 {
+        // SAFETY: the child tests only its own memory and exits immediately.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return 70;
+        }
+        if child == 0 {
+            let code = proc_mem_route_status("/proc/self/mem");
+            // SAFETY: terminating the child process.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            71
+        }
+    }
+
+    fn proc_mem_fd_route_status() -> i32 {
+        let mem = route_to_c_string("/proc/self/mem");
+        // SAFETY: path is NUL-terminated, and the descriptor is closed below when opened.
+        let fd = unsafe { libc::open(mem.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return 0;
+        }
+        let route = route_to_c_string(&format!("/proc/self/fd/{fd}"));
+        let status = write_executable_page_through_proc_mem(&route);
+        // SAFETY: fd was returned by open in this process.
+        unsafe { libc::close(fd) };
+        status
+    }
+
+    /// `/proc/*/mem` must not bypass the executable-memory syscall rules.
+    #[test]
+    fn proc_mem_cannot_write_executable_memory() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+
+        // SAFETY: the child applies containment and exits. It does not return into test code.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+
+        if child == 0 {
+            let backend = NamespaceBackend::with_probe_result(true);
+            if backend.apply(&acceptable(), None, None, None).is_err() {
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(50) };
+            }
+
+            let mut code = 0;
+            for route in [
+                "/proc/self/mem",
+                "/proc/thread-self/mem",
+                "/proc/self/root/proc/self/mem",
+            ] {
+                code = code.max(proc_mem_route_status(route));
+            }
+            let pid_route = format!("/proc/{}/mem", std::process::id());
+            code = code.max(proc_mem_route_status(&pid_route));
+            let task_route = format!(
+                "/proc/self/task/{}/mem",
+                // SAFETY: gettid takes no arguments and returns this thread's id.
+                unsafe { libc::syscall(libc::SYS_gettid) }
+            );
+            code = code.max(proc_mem_route_status(&task_route));
+            code = code.max(proc_mem_fd_route_status());
+            code = code.max(proc_mem_child_route_status());
+
+            let mut direct: i32 = 7;
+            let before = direct;
+            direct = 42;
+            if before != 7 || direct != 42 {
+                code = code.max(62);
+            }
+            // SAFETY: this creates one plain writable page in the child process.
+            let writable = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if writable == libc::MAP_FAILED {
+                code = code.max(63);
+            }
+
+            // SAFETY: terminating the workload with the verdict.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(
+            libc::WIFEXITED(status),
+            "contained child did not exit cleanly"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "50 = apply failed, 60 = read-execute mapping failed, 61 = proc mem wrote an executable page, 62 = direct memory write failed, 63 = writable memory failed, 70/71 = child route did not run"
+        );
+    }
+
     /// `Blocked` — the DEFAULT network mode — actually blocks, at the kernel.
     #[test]
     fn blocked_mode_leaves_no_route_at_all() {
