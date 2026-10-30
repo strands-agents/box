@@ -672,8 +672,8 @@ refuse to load:
   the quad. So each of those could never fire. RFC 6052 writes a NAT64 address that way and RFC 6145
   writes a translated one as `::ffff:0:` and a quad, which is why this mistake is easy to reach for.
   Write the hexadecimal groups, as `64:ff9b::a9fe:*`, or compare `ip4` to name the address it
-  carries. A pattern that opens with a wildcard is not refused, because what the wildcard admits
-  cannot be listed.
+  carries. A pattern whose wildcard could cover the rest of `::ffff:` is not refused, such as
+  `ip6 like "::*169.254.*"`, because what that wildcard admits cannot be listed.
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
 address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so

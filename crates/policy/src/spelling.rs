@@ -582,6 +582,12 @@ fn mapped_quad(elements: &[PatternElement]) -> bool {
         Some((PatternElement::Literal(text), rest)) => (text, rest),
         None => return false,
     };
+    // A head that stops inside "::ffff:" leaves the rest of it to the wildcard that follows.
+    if "::ffff:".starts_with(head.as_str())
+        && matches!(rest.first(), Some(PatternElement::Wildcard))
+    {
+        return true;
+    }
     head.strip_prefix("::ffff:").is_some_and(quad)
         && rest.iter().all(|element| match element {
             PatternElement::Literal(text) => quad(text),
@@ -1758,7 +1764,15 @@ mod tests {
 
     #[test]
     fn an_ipv6_pattern_that_can_reach_a_dotted_quad_loads() {
-        for pattern in ["::ffff:169.254.*", "::ffff:*.254", "*169.254.*"] {
+        for pattern in [
+            "::ffff:169.254.*",
+            "::ffff:*.254",
+            "*169.254.*",
+            "::*169.254.*",
+            "::ff*169.254.*",
+            "::ffff*.254",
+            "::ffff:0*169.254.*",
+        ] {
             let policies = parsed(&format!(
                 r#"@id("pattern")
                 forbid(principal, action == Box::Action::"net:connect", resource)
