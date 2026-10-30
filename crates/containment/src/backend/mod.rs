@@ -16,10 +16,6 @@ pub(crate) trait ContainmentBackend: Send + Sync + std::fmt::Debug {
     fn validate_config(&self, config: &ContainmentConfig) -> Result<(), ContainmentError>;
 
     /// Apply this backend's enforcement to the current process, irreversibly.
-    ///
-    /// `confirm_fd`, when present, is the setup-status pipe's write end: on Linux the reaper writes
-    /// one "reached exec" byte to it once containment is up, so a long-lived leaf whose pipe never
-    /// EOFs during setup is still confirmed. macOS ignores it (a successful `exec` EOFs the pipe).
     fn apply(
         &self,
         config: &ContainmentConfig,

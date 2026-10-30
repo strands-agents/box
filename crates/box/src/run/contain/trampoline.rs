@@ -87,8 +87,15 @@ impl Trampoline {
     /// Build a trampoline whose setup status is already complete.
     #[cfg(all(test, unix))]
     pub(crate) fn testing_complete() -> Result<Self, BoxError> {
-        let [reader, writer] =
+        let [reader, mut writer] =
             close_on_exec_pipe().map_err(|source| TrampolineError::StatusPipe { source })?;
+        #[cfg(target_os = "linux")]
+        writer
+            .write_all(&[REAPER_READY_BYTE])
+            .map_err(|source| TrampolineError::StatusRead { source })?;
+        writer
+            .write_all(&[SETUP_COMPLETE_BYTE])
+            .map_err(|source| TrampolineError::StatusRead { source })?;
         drop(writer);
         Ok(Self {
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -270,8 +277,16 @@ fn locate() -> Result<PathBuf, BoxError> {
             path: PathBuf::from(HELPER_NAME),
             source,
         })?;
-    let helper = current
-        .parent()
+    let directory = current.parent();
+    #[cfg(test)]
+    let directory = directory.map(|directory| {
+        if directory.file_name() == Some(std::ffi::OsStr::new("deps")) {
+            directory.parent().unwrap_or(directory)
+        } else {
+            directory
+        }
+    });
+    let helper = directory
         .map(|directory| directory.join(HELPER_NAME))
         .ok_or_else(|| TrampolineError::NotExecutable {
             path: current.clone(),
@@ -733,13 +748,14 @@ fn reader_contains_marker(reader: &mut File, marker: &[u8]) -> std::io::Result<b
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// The setup-status pipe: one byte, so a setup failure is not a workload exit.
+// The setup-status pipe keeps setup failures separate from workload exits.
 
 #[cfg(unix)]
-/// The status byte the reaper writes once containment is up and the workload is about to run — the
-/// explicit "reached exec" signal for a long-lived leaf whose pipe never EOFs during setup. Must
-/// stay distinct from every `SetupStage` failure byte (`1..=5`). Mirrored by the trampoline's writer.
-const SETUP_SUCCESS_BYTE: u8 = 0;
+/// The trampoline completed preparation and will attempt executable launch.
+const SETUP_COMPLETE_BYTE: u8 = 128;
+
+#[cfg(target_os = "linux")]
+const REAPER_READY_BYTE: u8 = 6;
 
 struct SetupStatusPipe {
     reader: File,
@@ -787,19 +803,27 @@ impl SetupStatusPipe {
 
     #[cfg(unix)]
     fn read_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        // Read exactly one status byte, not to EOF. A long-lived leaf (a contained streaming MCP
-        // server) keeps a writer copy open in the reaper for its whole life, so the pipe never EOFs
-        // during setup — waiting for EOF would hang. So the reaper writes an explicit success byte
-        // (`0`) once containment is up; a failure writes its stage byte (`1..=5`); and a bare EOF
-        // (no byte, writer closed at a successful `exec`) still means success, as macOS and the
-        // buffered path have always signalled it.
-        let mut byte = [0u8; 1];
-        let read = std::io::Read::read(&mut self.reader, &mut byte)
-            .map_err(|source| TrampolineError::StatusRead { source })?;
-        match (read, byte[0]) {
-            // EOF with nothing written, or the explicit success marker: containment reached exec.
-            (0, _) | (_, SETUP_SUCCESS_BYTE) => Ok(None),
-            (_, stage) => SetupStage::decode(stage).map(Some),
+        let mut complete = false;
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut reaper_ready = !cfg!(target_os = "linux");
+        loop {
+            let mut byte = [0u8; 1];
+            let read = match self.reader.read(&mut byte) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.map_err(|source| TrampolineError::StatusRead { source })?,
+            };
+            match (read, byte[0]) {
+                (0, _) if complete && reaper_ready => return Ok(None),
+                (0, _) => {
+                    return Err(TrampolineError::StatusProtocol {
+                        reason: "channel closed before setup completion".into(),
+                    });
+                }
+                (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
+                #[cfg(target_os = "linux")]
+                (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
+                (_, stage) => return SetupStage::decode(stage).map(Some),
+            }
         }
     }
 
@@ -1170,16 +1194,115 @@ mod tests {
 
     // ── The setup-status pipe ──────────────────────────────────────────────────
 
-    /// Silence means the workload ran: whatever status came back is authentically
-    /// the workload's.
     #[test]
-    fn no_status_byte_means_the_workload_ran() {
+    fn closure_without_setup_completion_is_a_protocol_failure() {
         let mut command = Command::new("/bin/true");
         let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
         pipe.writer.take();
 
-        assert_eq!(pipe.read_failure().unwrap(), None);
+        assert!(matches!(
+            pipe.read_failure(),
+            Err(TrampolineError::StatusProtocol { .. })
+        ));
+    }
+
+    #[test]
+    fn setup_completion_does_not_hide_a_later_exec_failure() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        pipe.writer
+            .as_mut()
+            .unwrap()
+            .write_all(&[SETUP_COMPLETE_BYTE, 5])
+            .unwrap();
+        pipe.writer.take();
+        assert_eq!(pipe.read_failure().unwrap(), Some(SetupStage::Exec));
+    }
+
+    #[test]
+    fn setup_completion_waits_for_all_setup_writers_to_close() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        let mut writer = pipe.writer.take().unwrap();
+        writer.write_all(&[SETUP_COMPLETE_BYTE]).unwrap();
+        #[cfg(target_os = "linux")]
+        writer.write_all(&[REAPER_READY_BYTE]).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sent.send(pipe.read_failure()).unwrap());
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(writer);
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            None
+        );
+        reader.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setup_completion_requires_both_workload_and_reaper() {
+        for bytes in [&[128][..], &[6][..], &[6, 6][..], &[128, 6, 6][..]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(bytes).unwrap();
+            pipe.writer.take();
+            assert!(matches!(
+                pipe.read_failure(),
+                Err(TrampolineError::StatusProtocol { .. })
+            ));
+        }
+        for bytes in [[128, 6], [6, 128]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(&bytes).unwrap();
+            pipe.writer.take();
+            assert_eq!(pipe.read_failure().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn setup_completion_rejects_the_legacy_marker_without_waiting_for_closure() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        let mut writer = pipe.writer.take().unwrap();
+        writer.write_all(&[0]).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sent.send(pipe.read_failure()).unwrap());
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(writer);
+        reader.join().unwrap();
+        assert!(matches!(
+            result.unwrap(),
+            Err(TrampolineError::StatusProtocol { .. })
+        ));
+    }
+
+    #[test]
+    fn setup_completion_rejects_duplicate_or_unknown_markers() {
+        for bytes in [&[128, 128][..], &[128, 99][..], &[99, 128][..]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(bytes).unwrap();
+            #[cfg(target_os = "linux")]
+            pipe.writer
+                .as_mut()
+                .unwrap()
+                .write_all(&[REAPER_READY_BYTE])
+                .unwrap();
+            pipe.writer.take();
+            assert!(matches!(
+                pipe.read_failure(),
+                Err(TrampolineError::StatusProtocol { .. })
+            ));
+        }
     }
 
     /// One byte means containment failed at that stage, and the box reports the

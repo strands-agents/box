@@ -50,6 +50,19 @@ the file on disk afterwards changes nothing, and it checks the digest before it 
 Then it locks itself down and turns into the target program, keeping only the environment that
 `strands-box` built for it. The target starts already contained and can't undo it.
 
+The setup-status channel separates setup failures from workload exit codes. The trampoline reports
+completed preparation only after the sandbox, target environment, and working directory are ready.
+It keeps the failure channel open through the executable launch attempt. Box waits for channel
+closure and reports any failure stage, including a launch failure after the preparation marker.
+On Linux, the namespace reaper sends a separate completion marker after its own setup.
+Box requires both markers. The launcher and reaper close their copies before they wait for workload exit.
+A long-lived workload therefore cannot keep the setup reader blocked through those copies.
+
+Channel closure before all required preparation markers is a protocol failure. Closure after that marker
+means preparation completed without a reported launch failure. It does not prove application readiness
+or successful executable launch: abrupt death between the marker and the launch closes the channel too.
+The same status reader serves buffered and streaming execution. It rejects the obsolete completion marker immediately, so an old helper cannot retain a streaming setup wait.
+
 The trampoline doesn't decide anything itself. Whether a process gets the agent's rules or the rules
 for a tool's or local MCP server's sandbox is written in the configuration, and `strands-box` writes
 that.

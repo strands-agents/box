@@ -1287,6 +1287,101 @@ mod tests {
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
 
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
+        use crate::run::contain::supervise::LeafBox;
+        for streaming in [false, true] {
+            for (environment, expected) in [(true, "target environment"), (false, "target exec")] {
+                let fixture = Fixture::new();
+                let mut spec = fixture.spec();
+                spec.command.push("printf WORKLOAD_RAN".into());
+                let mut boundary = fixture.translate_full(
+                    &spec,
+                    "[tool.test]",
+                    RuntimeReach::Leaf,
+                    EgressMode::Native,
+                );
+                if environment {
+                    boundary.target_environment = "{".into();
+                } else {
+                    boundary.executable = "/setup-reporting-missing".into();
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    if streaming {
+                        LeafBox::spawn_streaming(boundary, &fixture.root)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        LeafBox::run(boundary, &fixture.root).await.map(|_| ())
+                    }
+                })
+                .await
+                .expect("setup must finish");
+                let error = result
+                    .expect_err("a setup failure must not become a workload result")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("containment setup failed during {expected}")),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
+        use crate::run::contain::supervise::LeafBox;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for code in [0, 3, 4, 5, 42] {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.command.push(format!("printf BUFFER_OK; exit {code}"));
+            let boundary = fixture.translate_full(
+                &spec,
+                "[tool.test]",
+                RuntimeReach::Leaf,
+                EgressMode::Native,
+            );
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                LeafBox::run(boundary, &fixture.root),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(output.status, code);
+            assert_eq!(output.stdout, b"BUFFER_OK");
+        }
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec();
+        spec.command
+            .push("read value; printf '%s' \"$value\"; exit 5".into());
+        let boundary =
+            fixture.translate_full(&spec, "[tool.test]", RuntimeReach::Leaf, EgressMode::Native);
+        let leaf = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            LeafBox::spawn_streaming(boundary, &fixture.root),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut parts = leaf.into_parts().expect("live streams");
+        assert!(parts.child.try_wait().unwrap().is_none());
+        parts.stdin.write_all(b"STREAM_OK\n").await.unwrap();
+        let mut output = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            parts.stdout.read_to_end(&mut output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parts.child.wait().await.unwrap().code(), Some(5));
+        assert_eq!(output, b"STREAM_OK");
+    }
+
     /// One operator home holding a box root, a project, and the trees the specs below name.
     struct Fixture {
         operator: tempfile::TempDir,
