@@ -1324,4 +1324,46 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
              {decision:?}"
         );
     }
+
+    /// The reload clear sits after the validation and the commit, so a reload that cannot install
+    /// keeps the mark. A tool whose rule still cannot load stays refused.
+    #[test]
+    fn a_reload_that_cannot_install_keeps_a_degraded_mark() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+
+        let coarse = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+                        when { context.input.server == "alpha" };"#;
+        let with_typed_rule = source(&format!(
+            r#"{coarse}
+               permit(principal, action == alpha::Action::"read", resource);"#
+        ));
+        let engine =
+            PolicyEngine::open_staged(&Operator::unanchored(), with_typed_rule.clone(), &path)
+                .expect("the typed rule opens staged");
+        assert_eq!(
+            engine
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["alpha".to_string()],
+            "the typed rule never staged, so its server degrades"
+        );
+
+        // alpha's schema never staged, so a set that still names its typed action cannot validate.
+        engine
+            .reload(&with_typed_rule)
+            .expect_err("a set naming an unstageable typed rule is refused");
+
+        let decision = engine.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &serde_json::json!({"path": "/workspace/input"}),
+        );
+        assert!(
+            !decision.is_allow(),
+            "the refused reload installed nothing, so the tool stays refused: {decision:?}"
+        );
+    }
 }
