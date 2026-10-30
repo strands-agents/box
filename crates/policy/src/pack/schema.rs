@@ -158,6 +158,9 @@ mod tests {
             .collect()
     }
 
+    const GROUP_PREDICATE: &str =
+        r#"a temporal predicate names the action group Tool::git::Action::"*""#;
+
     fn load(source: &str, packs: &[Pack], mcp_schemas: &[String]) -> Result<(), String> {
         validate_with_packs(source, packs, mcp_schemas, &Operator::unanchored())
             .map(|_| ())
@@ -332,6 +335,92 @@ mod tests {
                    };"#,
                 None,
             ),
+            (
+                "a temporal response predicate over the group is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal { formerly within 1h Tool::git::Action::"*"::response{} };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a temporal request predicate over the group is refused",
+                vec![git()],
+                r#"@id("after_any_git")
+                   forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal { formerly within 1h Tool::git::Action::"*"::request{} };"#,
+                Some(
+                    r#"rule @id("after_any_git") (rule 1): a temporal predicate names the action group Tool::git::Action::"*""#,
+                ),
+            ),
+            (
+                "a temporal predicate over the group of a v2 pack is refused",
+                vec![at_version("git-push-commit-status", 2)],
+                r#"forbid (principal, action == Tool::git::v2::Action::"push", resource)
+                   when temporal { formerly within 1h Tool::git::v2::Action::"*"::response{} };"#,
+                Some(r#"names the action group Tool::git::v2::Action::"*""#),
+            ),
+            (
+                "a group predicate under a negation is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   unless temporal { !(formerly within 1h Tool::git::Action::"*"::response{}) };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a group predicate inside a count is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal {
+                       exists (total: Long). (
+                           (count for (t: Timepoint). where (
+                               formerly within 1h (Tool::git::Action::"*"::request{} && tp(t))
+                           )) == total && total >= 3
+                       )
+                   };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a group predicate on the right of since is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal {
+                       !Tool::git::Action::"status"::request{} since within 1h
+                           Tool::git::Action::"*"::response{}
+                   };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a group predicate on the left of since is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal {
+                       !Tool::git::Action::"*"::request{} since within 1h
+                           Tool::git::Action::"status"::response{}
+                   };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a group predicate under previous is refused",
+                vec![git()],
+                r#"forbid (principal, action == Tool::git::Action::"push", resource)
+                   when temporal { previous within 1h Tool::git::Action::"*"::response{} };"#,
+                Some(GROUP_PREDICATE),
+            ),
+            (
+                "a rule scoped to the group with a temporal predicate over a member loads",
+                vec![git(), cargo()],
+                r#"forbid (principal, action in Tool::git::Action::"*", resource)
+                   unless temporal {
+                       formerly within 10m Tool::cargo::Action::"test"::response{ output.status: 0 }
+                   };"#,
+                None,
+            ),
+            (
+                "a rule scoped to the group with no temporal clause loads",
+                vec![git()],
+                r#"forbid (principal, action in Tool::git::Action::"*", resource);"#,
+                None,
+            ),
         ];
         let mut failures = Vec::new();
         for (name, packs, source, refused) in cases {
@@ -346,6 +435,39 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_group_predicate_is_refused_with_the_rule_the_group_and_the_reason() {
+        let source = r#"@id("push_after_any_git")
+            forbid (principal, action == Tool::git::Action::"push", resource)
+            when temporal { formerly within 1h Tool::git::Action::"*"::response{} };"#;
+
+        let error = validate_with_packs(source, &[valid("git")], &[], &Operator::unanchored())
+            .expect_err("a group predicate is refused");
+
+        assert!(
+            matches!(&error, PolicyError::UnsupportedClause(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "policy uses an unsupported clause: rule @id(\"push_after_any_git\") (rule 1): a \
+             temporal predicate names the action group Tool::git::Action::\"*\"; the history \
+             records each member action and never the group, so the predicate cannot match; \
+             write one predicate for each member action"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_names_one_group_twice_has_one_finding() {
+        let source = r#"forbid (principal, action == Tool::git::Action::"push", resource)
+            when temporal { formerly within 1h Tool::git::Action::"*"::response{} }
+            when temporal { formerly within 1h Tool::git::Action::"*"::request{} };"#;
+
+        let error = load(source, &[valid("git")], &[]).expect_err("a group predicate is refused");
+
+        assert_eq!(error.matches(GROUP_PREDICATE).count(), 1, "{error}");
     }
 
     #[test]
