@@ -77,7 +77,7 @@ unconstructible.
 Every connection is decided twice through `EffectInterceptor`: on the host before resolution, and
 on each resolved, pinned address before its socket opens. The gateway holds no destination deny
 list of its own. A metadata or link-local address is refused by a policy `forbid` on
-`context.input.ip`.
+`context.input.ip4` or `context.input.ip6`, one clause per address family.
 
 ## Credential Mutators
 

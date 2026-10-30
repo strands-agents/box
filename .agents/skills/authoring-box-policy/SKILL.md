@@ -78,7 +78,7 @@ The actions are a closed set. A policy names one; it cannot add one. The last co
 | Action | `context.input` fields |
 |---|---|
 | `fs:read` / `fs:write` / `fs:delete` / `fs:move` / `fs:other` | `path: String`, `operation: Fs<Kind>Operation` |
-| `net:connect` | `host: String`, `ip?: ipaddr`, `port: Long` |
+| `net:connect` | `host: String`, `ip4?: String`, `ip6?: String`, `port: Long`. `ip4` is the dotted quad, present for an IPv4 destination and for an IPv6 one carrying an IPv4 address; `ip6` is the compressed lowercase wire form, absent for an IPv4 destination. There is no `ip`, and a rule that names it refuses to load. Guard each separately |
 | `http:request` | `host`, `port`, `method`, `path` (a **URL** path), `body_bytes: Long`, `intercepted: Bool`; the reply's `status: Long` is on `output`, matched as `::response{ output.status: 500 }` in a temporal predicate |
 | `shell:exec` | `command`, `program`, `arg1?`, `arg2?`, `arg_count: Long`, `cwd`; the exit `status: Long` is on `output`, matched as `::response{ output.status: 0 }` in a temporal predicate (a signal reports 128 plus its number, a permitted binary that cannot start reports 126, a command with no reported status reports -1, and a background `&` command records its status when it ends) |
 | `shell:spawn` | the `shell:exec` fields plus `program_path: String`, and the same `output.status`. The workload can set a `shell:exec` status (a shell function of the same name does it), so a precondition on a host binary's success reads `shell:spawn` and pins `program_path` |

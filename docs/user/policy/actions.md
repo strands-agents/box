@@ -106,11 +106,18 @@ Each outbound call is two decisions, both of which must permit.
 |---|---|---|
 | `host` | String | The destination host. |
 | `port` | Long | The destination port. |
-| `ip?` | String | The IP address the gateway connects to, as text, such as `"203.0.113.7"`. |
+| `ip4?` | String | The IPv4 address the gateway connects to, as a dotted quad, such as `"203.0.113.7"`. Present for an IPv4 destination, and for an IPv6 destination that carries an IPv4 address in a wrapping Box recognises. |
+| `ip6?` | String | The IPv6 address the gateway connects to, as text, compressed and in lowercase, such as `"64:ff9b::cb00:7107"`. Present for every IPv6 destination, and absent for an IPv4 one. |
 
-Compare `ip` as a String behind a guard, as
-`context.input has ip && context.input.ip == "203.0.113.7"`. An `ipaddr` comparison refuses to load
-with `the types String and ipaddr are not compatible`.
+Both are absent before resolution, on the decision for the host. A destination that arrives wrapped
+carries both: dialling `64:ff9b::cb00:7107` gives `ip4 = "203.0.113.7"` and
+`ip6 = "64:ff9b::cb00:7107"`. A plain IPv4 destination carries `ip4` alone, because one IPv4 address
+has many IPv6 encodings and there is no single IPv6 form to report.
+
+Compare either as a String behind its own guard, as
+`context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to load
+with `expected ipaddr but saw String`. There is no `ip`: a rule that names it refuses to load and the
+refusal names both replacements.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 
