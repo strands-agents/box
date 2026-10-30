@@ -611,7 +611,10 @@ form does not cover the dotted quad. Three more address spellings each get their
 A `like` pattern that holds a wildcard is not judged, because the addresses a wildcard admits
 cannot be listed. So `context.input.ip like "169.254.*"` loads as written. Write a pattern against
 the spelling a decision reads: `like "fe8*"` reaches an `fe80::` address, and `like "64:ff9b::*"`
-reaches nothing, because an address on that prefix reads as its dotted quad.
+no longer reaches an address on `64:ff9b::/96`, because each of those reads as its dotted quad. It
+still reaches an address outside that prefix whose spelling starts the same way, such as
+`64:ff9b::1:a9fe:a9fe`. So read such a pattern in both directions: a `forbid` written that way stops
+covering the `/96`, and a `permit` written that way keeps granting what is left.
 
 Two IPv6 encodings of an IPv4 address are **not** read as the dotted quad, and for those an
 IPv6-form rule is the only one that works: the NAT64 local-use prefix `64:ff9b:1::/48`, and a NAT64
