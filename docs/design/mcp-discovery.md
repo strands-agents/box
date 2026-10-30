@@ -72,8 +72,9 @@ refused, or never connects adds no commit.
 
 While the engine is `Discovering`, the committed rules decide each request ([discovery serves the
 schema-independent subset](decisions.md#discovery-serves-the-schema-independent-subset)). A tool
-call whose per-tool rule still waits is refused as pending. A call to a tool of a degraded server,
-one whose per-tool rule can never load, is refused.
+call whose per-tool rule still waits is refused as pending. A call to a tool that an inert rule
+decides, on a server whose per-tool rule can never load, is refused. Both holds are per tool: a call
+to a tool that no waiting rule decides is decided by the rules that did load.
 
 ## How a server is discovered
 
@@ -187,6 +188,13 @@ http servers. The gateway reports only when `box.toml` declares an http server. 
 reports, the coordinator finishes discovery once. A per-tool rule that still hasn't validated
 belongs to a server that will never stage, so that server is degraded, stderr names it, and the
 engine becomes `Ready` for the rest of the run.
+
+Box names a server from the tools the inert rules decide, which is the same set it holds calls for.
+A rule that only reads a tool from history decides no call to it, so that reference degrades no
+server ([a server whose discovery a policy denies degrades
+alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). The gap is a rule
+whose head is the coarse `mcp:call` and whose only tool name is a history reference: it decides no
+typed tool, so the set is empty, and the rule stays inert with nothing on stderr to say so.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays

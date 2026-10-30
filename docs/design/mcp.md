@@ -216,10 +216,20 @@ Each server is then in one of four states:
 |---|---|---|
 | Ready | Its tool list was accepted, and its tools are callable. | Enforced from the moment its schema staged. |
 | No tools | Policy refused its `tools/list`, so it has zero tools. | It has none. |
-| Degraded | Policy refused its `tools/list`, so it has zero tools, and each call to one of its tools is refused. | A rule names its tools, and it can never load. stderr names the server ([a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
+| Degraded | Policy refused its `tools/list`, so it has zero tools, and a call to a tool that one of those rules decides is refused. | A rule decides one of its tools, and it can never load. stderr names the server ([a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
 | Failed | Box couldn't read or stage its tool list. | Never enforced. stderr names the step that failed. |
 
 The engine is then `Ready` for the rest of the run, and every rule that can load has.
+
+The refusal on a degraded server is per tool, not per server. Box holds back exactly the tools that
+an inert rule decides, so a call to another tool of the same server is still decided by the rules
+that did load — usually the coarse `mcp:call` permit. A rule that only reads a tool from history
+decides no call to it, so that tool is not held and its own server does not degrade.
+
+One shape gets no diagnostic. When an inert rule's head is the coarse `mcp:call` and the only tool
+name it spells is a history reference, Box names no tool and no server, so stderr reports nothing
+and the rule ships inert and silent. A rule in that shape decides every tool call, which this
+per-tool hold cannot express.
 
 ## How Box decides a tool call
 
