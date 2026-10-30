@@ -622,10 +622,15 @@ impl ProposalState {
 
     /// Whether a candidate names a per-tool action. A rule over the fixed vocabulary alone cannot
     /// become valid when a tool schema stages, so its load error is a refusal and not a pending state.
+    /// A history reference counts, because a rule that only reads one still waits for that schema.
     fn names_a_typed_action(&self, ordinal: usize) -> bool {
         let mut typed = BTreeSet::new();
         if let Some(candidate) = self.candidates.get(ordinal) {
-            collect_typed_actions(&candidate.expanded_source, &mut typed);
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Named,
+                &mut typed,
+            );
         }
         !typed.is_empty()
     }
@@ -673,23 +678,44 @@ fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
         .collect())
 }
 
-/// The pending typed `(namespace, tool)` pairs a proposal still needs a discovered schema for,
-/// from each pending rule's decoded head and from a scan of its rendered text.
+/// The typed `(namespace, tool)` pairs whose calls a proposal holds back, from each pending rule's
+/// decoded head and from a scan of its rendered text. A tool that a pending rule only reads from
+/// history is left out: that rule decides no call to it, so holding it would refuse a healthy
+/// server's tool over another rule's mistake
+/// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
         if let Some(candidate) = proposal.candidates.get(ordinal) {
             out.extend(candidate.head_tools.iter().cloned());
-            collect_typed_actions(&candidate.expanded_source, &mut out);
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Skipped,
+                &mut out,
+            );
         }
     }
     out
 }
 
+/// Whether a scan keeps the tool names that only a `when temporal` history reference spells.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryReferences {
+    /// Keep them: such a rule still needs that tool's schema before it can load.
+    Named,
+    /// Drop them: such a rule reads that tool's history and decides no call to it.
+    Skipped,
+}
+
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
-/// excluding the fixed `Box::Action` vocabulary, including one that only a condition or a
-/// `when temporal` predicate names. A name arrives in the spelling the render gave it.
-fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
+/// excluding the fixed `Box::Action` vocabulary, including one that only a condition names, and
+/// treating a `when temporal` history reference as `references` says. A name arrives in the
+/// spelling the render gave it.
+fn collect_typed_actions(
+    source: &str,
+    references: HistoryReferences,
+    out: &mut BTreeSet<(String, String)>,
+) {
     const MARKER: &str = "::Action::\"";
     let mut rest = source;
     while let Some(pos) = rest.find(MARKER) {
@@ -704,10 +730,14 @@ fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
         let after = &rest[pos + MARKER.len()..];
         match after.find('"') {
             Some(end) => {
-                if !namespace.is_empty() && namespace != "Box" {
+                rest = &after[end + 1..];
+                // A name that `::` follows is an event a `when temporal` predicate reads
+                // (`::request{`, `::response{`, `::error{`), and not an action the rule decides.
+                let history = rest.starts_with("::");
+                let keep = !history || references == HistoryReferences::Named;
+                if keep && !namespace.is_empty() && namespace != "Box" {
                     out.insert((namespace, after[..end].to_string()));
                 }
-                rest = &after[end + 1..];
             }
             None => break,
         }

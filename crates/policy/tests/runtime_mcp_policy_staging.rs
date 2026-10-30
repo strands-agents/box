@@ -382,6 +382,156 @@ forbid(principal, action, resource) when { action == srv::Action::"read" };
     );
 }
 
+/// A pending rule reads one server's tool from history and decides another server's tool. The hold
+/// and the degradation must reach the server the rule decides, and must leave the other alone.
+#[test]
+fn a_server_a_pending_rule_only_reads_from_history_is_neither_held_nor_degraded() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "approval.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+@id("deploy-needs-approval")
+forbid(principal, action == alpha::Action::"deploy", resource)
+unless temporal {
+    formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } )
+};
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    let call = |server: &str, tool: &str, arguments: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &arguments,
+        )
+    };
+
+    assert!(
+        matches!(
+            call("alpha", "deploy", json!({"target": "prod"})),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "the tool the pending rule decides must be held"
+    );
+    assert!(
+        call("beta", "approve", json!({"id": "x"})).is_allow(),
+        "the tool the pending rule only reads from history must not be held"
+    );
+
+    assert_eq!(
+        authority
+            .stage_mcp_schema("beta", generated("beta", "approve", "id", "string"))
+            .expect("beta stages"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        },
+        "beta's schema arrives, and the rule still waits for alpha's"
+    );
+    assert!(
+        call("beta", "approve", json!({"id": "x"})).is_allow(),
+        "a fully discovered server's tool must not be held by another server's pending rule"
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["alpha".to_string()],
+        "only the server whose schema never arrived degrades"
+    );
+    assert!(
+        matches!(
+            call("alpha", "deploy", json!({"target": "prod"})),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the degraded server's tool stays denied fail-closed"
+    );
+    assert!(
+        call("beta", "approve", json!({"id": "x"})).is_allow(),
+        "the healthy server's tool must not be refused"
+    );
+}
+
+/// One pending rule both decides a tool and reads another tool of the same server from history.
+/// The hold must cover the tool it decides and must not grow to the tool it only reads.
+#[test]
+fn a_pending_rule_holds_the_tool_it_decides_and_not_the_tool_it_reads() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "review.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == svc::Action::"push", resource)
+when { context.input.branch == "main" }
+unless temporal {
+    formerly within 600s ( svc::Action::"review"::response{ input.id: _ } )
+};
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    let call = |tool: &str, arguments: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "svc",
+            tool,
+            &arguments,
+        )
+    };
+
+    assert!(
+        matches!(
+            call("push", json!({"branch": "main"})),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "the tool the pending rule decides must be held"
+    );
+    assert!(
+        call("review", json!({"id": "x"})).is_allow(),
+        "the tool the same rule only reads from history must not be held"
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["svc".to_string()],
+        "the server whose typed rule never staged degrades"
+    );
+    assert!(
+        matches!(
+            call("push", json!({"branch": "main"})),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the degraded hold must cover the tool the rule decides"
+    );
+    assert!(
+        call("review", json!({"id": "x"})).is_allow(),
+        "the degraded hold must not cover the tool the rule only reads"
+    );
+}
+
 /// The hold above is transient: once the schema stages, an argument-constrained rule over a
 /// quote-bearing tool name decides the call itself.
 #[test]
