@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // macOS only, as CN-D-01. The companion measurement: the deny refuses the CREATE inside a writable
 // tree, so the workload cannot bring the denied path into being, and the host sees no file.
 det_case! {
-    name: cn_d_02,
+    name: when_agent_creates_a_future_denied_path_then_creation_is_refused,
     id:   "CN-D-02",
     platforms: [Macos],
     desc: "Deny: a denied path that does not exist yet cannot be created from inside its writable tree",

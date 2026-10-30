@@ -6,7 +6,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `123`, `X=42`, `TESTOK`, and
 // `NOFILE` all returned.
 det_case! {
-    name: sh_hp_7,
+    name: when_shell_runs_control_flow_and_variables_then_results_match_expected_shell_behavior,
     id:   "SH-HP-7",
     desc: "Happy path: control flow and variables (for/export/test/if) behave as in bash",
     run: |b| {

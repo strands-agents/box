@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // macOS only: the Linux namespace backend has no lowering for `list`, and the box refuses the
 // entry by name at load, so the fixture writes the entry on macOS alone.
 det_case! {
-    name: cn_l_01,
+    name: when_macos_agent_has_list_only_grant_then_names_are_visible_and_contents_are_unreadable,
     id:   "CN-L-01",
     platforms: [Macos],
     desc: "List: a listed tree enumerates its entries and a content read of one of them is refused",

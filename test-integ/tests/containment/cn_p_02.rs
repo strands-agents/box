@@ -9,7 +9,7 @@ use strands_det_harness::det_case;
 //
 // macOS-only: there is no Linux counterpart in the shared tree.
 det_case! {
-    name: cn_p_02,
+    name: when_macos_agent_queries_system_values_then_only_granted_names_answer,
     id:   "CN-P-02",
     platforms: [Macos],
     desc: "sysctl census: granted names answer; unnamed sysctls stay refused with errno 1",

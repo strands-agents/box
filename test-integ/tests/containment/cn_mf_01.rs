@@ -66,7 +66,7 @@ fn read_through_server(b: &BoxFixture, grant: &Path, paths: &[&Path]) -> (Vec<St
 }
 
 det_case! {
-    name: cn_mf_01,
+    name: when_tool_server_reads_files_then_own_grant_reads_and_ungranted_secret_stays_hidden,
     id:   "CN-MF-01",
     platforms: [Linux, Macos],
     desc: "MCP leaf filesystem: a stdio MCP server's own read of a planted secret outside its [mcp.x.filesystem] lists is refused and yields no bytes, while a file under its read list returns its content",

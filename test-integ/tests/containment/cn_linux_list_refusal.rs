@@ -2,7 +2,7 @@ use strands_det_harness::{det_case, sh_quote};
 
 // Current Linux limitation: revisit list-only grants when Landlock support is integrated and validated.
 det_case! {
-    name: cn_linux_list_refusal,
+    name: when_linux_grant_is_list_only_then_startup_is_refused_before_workload_runs,
     id: "CN-LINUX-LIST",
     platforms: [Linux],
     desc: "Linux refuses a list-only grant before the workload runs, while a read grant exposes the same directory",

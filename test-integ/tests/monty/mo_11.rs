@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // control runs first through the hosted Shell. No process is ever asked for: a host CPython (which
 // has `subprocess`) would either run `id` or fail some other way, and neither passes here.
 det_case! {
-    name: mo_11,
+    name: when_monty_imports_subprocess_then_module_is_unavailable_and_nothing_spawns,
     id:   "MO-11",
     desc: "Monty sandbox: 'import subprocess' is unavailable in Monty (ModuleNotFoundError), so nothing is spawned",
     run: |b| {

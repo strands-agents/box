@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): request 1 printed
 // `SET=SESSION1`; request 2 printed `GOT=[]`.
 det_case! {
-    name: sh_sec_9,
+    name: when_shell_sets_variable_in_one_request_then_next_request_does_not_inherit_it,
     id:   "SH-SEC-9",
     desc: "Security: Shell state does not persist across requests (a var set in one is gone in the next)",
     run: |b| {

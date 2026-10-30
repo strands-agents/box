@@ -12,7 +12,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `python --version` reported Monty,
 // a shell:exec on `python` was journaled, and `PYA=9`/`PY3=9` returned.
 det_case! {
-    name: sh_scr_python,
+    name: when_shell_invokes_python_or_python3_then_monty_computes_result,
     id:   "SH-SCR-PY",
     desc: "Script route: python and python3 both forward to Monty (identity + mediated route pinned) and compute",
     run: |b| {

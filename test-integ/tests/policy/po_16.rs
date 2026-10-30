@@ -28,7 +28,7 @@ use strands_det_harness::egress::{
 // containment: a crash would fail closed for the workload, and the assertions here are about what
 // reached the destination.
 det_case! {
-    name: po_16,
+    name: when_proxy_receives_aborted_or_ambiguous_requests_then_no_extra_request_reaches_recorder,
     id:   "PO-16",
     desc: "Proxy robustness from the native route: an aborted upload, a CL+TE frame carrying a second request, and a request riding a complete one deliver nothing extra to a live host recorder, and the gateway keeps serving",
     run: |b| {

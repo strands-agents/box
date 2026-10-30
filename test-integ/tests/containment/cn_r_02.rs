@@ -299,7 +299,7 @@ fn the_refusal_oracle_admits_only_the_named_denials() {
 }
 
 det_case! {
-    name: cn_r_02,
+    name: when_agent_renames_or_replaces_denied_file_then_host_bytes_and_inode_stay_unchanged,
     id:   "CN-R-02",
     desc: "Deny leaf: the agent's own rename(2) cannot move an existing denied file to a permitted name nor move a permitted file over it (Linux EBUSY, macOS EPERM); an ordinary rename works; the host sees the denied bytes and inode unchanged",
     run: |b| {

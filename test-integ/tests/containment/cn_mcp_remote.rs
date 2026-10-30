@@ -120,7 +120,7 @@ fn assert_refused(reply: &(u64, Value), rule: Option<&str>, out: &str) {
 }
 
 det_case! {
-    name: cn_mcp_remote,
+    name: when_remote_tool_calls_cross_gateway_then_server_tool_argument_and_budget_rules_hold,
     id:   "CN-MR-01",
     platforms: [Linux, Macos],
     desc: "Remote MCP door: an HTTP MCP server the agent calls through the gateway meets mcp:call — a server permit, a tool-name forbid, a tool-argument forbid, default-deny, and a temporal cap each hold, and a refused frame never reaches the origin",

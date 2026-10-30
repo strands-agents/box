@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // A stat keeps the real size and file type, and reports `nlink` 1 and, for a file a non-root host
 // user owns, `uid` and `gid` 0.
 det_case! {
-    name: mo_stat,
+    name: when_monty_stats_hard_linked_file_then_size_and_type_are_real_and_identity_fields_are_normalized,
     id:   "MO-STAT",
     desc: "Metadata: stat of a hard-linked file reports its real size with nlink normalized to 1 and uid and gid to 0, and is_dir and is_file report the real type",
     run: |b| {

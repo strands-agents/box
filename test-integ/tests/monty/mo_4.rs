@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // the sentinel printed, then
 // `PermissionError: policy denied this operation [default-deny] … (Permission denied: '/etc/shadow')`.
 det_case! {
-    name: mo_4,
+    name: when_monty_reads_shadow_file_without_permit_then_policy_refuses_and_journals_read,
     id:   "MO-4",
     desc: "Monty default-deny: open('/etc/shadow') with no fs:read permit is refused by policy and journaled",
     run: |b| {

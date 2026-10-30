@@ -5,7 +5,7 @@ use strands_det_harness::{det_case, sh_quote};
 // runner is `lash`. A statement that is still open at end of a sourced file is reported at the line
 // where it starts, with status 1.
 det_case! {
-    name: sh_source_status,
+    name: when_script_or_sourced_file_cannot_parse_then_error_names_file_and_line_with_status_one,
     id:   "SH-SOURCE-STATUS",
     desc: "lash <file> stops at a statement that cannot parse, names its file and line, and returns 1; an unclosed quote at end of a sourced file is reported at its start line with status 1",
     run: |b| {

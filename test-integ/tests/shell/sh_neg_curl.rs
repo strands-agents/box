@@ -6,7 +6,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `no URL`/`RC=2` and
 // `invalid option`/`RC=1`, no `effect denied`.
 det_case! {
-    name: sh_neg_curl,
+    name: when_shell_curl_arguments_are_invalid_then_usage_error_is_distinct_from_policy_denial,
     id:   "SH-NEG-CURL",
     desc: "Negative: curl usage errors (no URL, unknown flag) are usage errors, not policy denials",
     run: |b| {

@@ -36,7 +36,7 @@ fn host_endpoint() -> (String, TcpListener) {
 }
 
 det_case! {
-    name: cn_ne_04,
+    name: when_tool_disables_egress_containment_then_direct_network_works_and_native_egress_is_recorded,
     id:   "CN-NE-04",
     platforms: [Linux, Macos],
     desc: "A [tool.x.network] contain_egress=false tool reaches an un-proxied host endpoint and records egress:native, while the same tool with no network table or contain_egress=true cannot and records none",

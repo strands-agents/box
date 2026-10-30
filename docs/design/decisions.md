@@ -1290,7 +1290,7 @@ Enumerating every helper or build output would prevent toolchains from selecting
 
 The cost is that a tool can execute code it changes within its writable grants, while the agent retains its existing execution restrictions.
 Linux keeps automatic temporary mounts, refused paths, and protected files non-executable.
-`cn_x_04` tests execution and library loading from tool output, with agent denials on both platforms.
+`CN-X-04` tests execution and library loading from tool output, with agent denials on both platforms.
 
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade

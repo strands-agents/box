@@ -9,7 +9,7 @@ const PROBE: &str = include_str!("../probes/fs_probe.rs");
 include!("../probes/probe_lines.rs");
 
 det_case! {
-    name: cn_t_08,
+    name: when_tool_uses_file_grants_then_deny_list_and_single_file_write_boundaries_hold,
     id:   "CN-T-08",
     desc: "Tool deny, list, write_file: a denied file in a read tree yields no bytes while its sibling reads; a list tree enumerates and its content is refused (macOS; refused at load on Linux); write_file writes its file and no neighbour",
     run: |b| {

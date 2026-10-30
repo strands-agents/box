@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // direct `python3` alias (not the Shell path — that is MO-2 / SH-SCR-PY). Measured green on macOS
 // 2026-09-22 (cargo test --test monty): python3 identified as Monty, `42`.
 det_case! {
-    name: mo_1,
+    name: when_python_alias_receives_source_then_monty_returns_computed_value,
     id:   "MO-1",
     desc: "Direct alias: python3 -c forwards its source to Monty and returns the computed value",
     run: |b| {

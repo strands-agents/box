@@ -7,7 +7,7 @@ use strands_det_harness::{det_case, user_home};
 // redirect is used rather than `cat`, so the probe measures the boundary and not the exec of a
 // coreutil.
 det_case! {
-    name: cn_h_01,
+    name: when_agent_reads_home_files_then_only_listed_files_are_readable,
     id:   "CN-H-01",
     desc: "Operator home: a listed file reads through the agent's own syscall and an unlisted sibling under HOME does not",
     run: |b| {

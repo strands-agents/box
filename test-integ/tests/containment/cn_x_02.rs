@@ -25,7 +25,7 @@ use strands_det_harness::det_case;
 // refusal spelling. The old form wrote a script, ignored a failed `chmod`, and read an ordinary
 // mode-0644 denial as the boundary; it passed under a box that contained nothing.
 det_case! {
-    name: cn_x_02,
+    name: when_agent_executes_binary_then_exec_grant_is_required_even_for_identical_bytes,
     id:   "CN-X-02",
     desc: "Exec is a grant: the agent's own execve runs a host-prepared 0755 binary only under its exec entry; the same bytes in the writable-only workspace, and without the entry, are refused",
     run: |b| {

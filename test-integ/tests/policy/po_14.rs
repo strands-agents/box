@@ -26,7 +26,7 @@ use strands_det_harness::{Platform, det_case};
 // control must be the bare `502` and the resolver spellings are Declared, never counted. On Linux
 // the resolver is glibc and the control is required to pass.
 det_case! {
-    name: po_14,
+    name: when_native_request_uses_alternate_metadata_address_then_it_is_refused_or_independently_unresolvable,
     id:   "PO-14",
     desc: "Address spellings from the native route: every literal and inet_aton spelling of 169.254.169.254 is refused by a policy forbid on context.input.ip or independently declared unresolvable, while the decimal spelling of a permitted loopback recorder reaches it",
     run: |b| {

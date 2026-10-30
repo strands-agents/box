@@ -66,7 +66,7 @@ with a **snake_case** filename (Rust module names can't contain hyphens):
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_y_05,                 // a snake_case Rust fn name (match the file)
+    name: when_program_has_no_spawn_permit_then_execution_is_refused,
     id:   "CN-Y-05",               // the case id (appears in verdict.json — keep the hyphens)
     // platforms: [Linux],         // optional: a platform-specific case records SKIP elsewhere
     desc: "One-line description of what must be refused",
@@ -78,6 +78,11 @@ det_case! {
     }
 }
 ```
+
+Name the test function `when_<condition>_then_<expected_outcome>`. Keep the case ID
+and filename stable; the function name does not need to match the filename. Cargo
+output includes both the file module and the readable function name. A filter such
+as `cn_y_05` still selects the case through its module name.
 
 Never `return` early from the body to skip a platform: declare `platforms:` instead.
 A body that launches no workload or makes no `RunResult` assertion is recorded as

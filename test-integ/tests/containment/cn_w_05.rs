@@ -36,7 +36,7 @@ fn with_git(text: String, shell: &Path, helpers: &Path, read_only: &Path) -> Str
 }
 
 det_case! {
-    name: cn_w_05,
+    name: when_git_is_declared_as_tool_then_commit_and_hook_run_but_direct_agent_hook_is_refused,
     id:   "CN-W-05",
     platforms: [Linux],
     desc: "Git commits through a declared tool and executes its commit hook; removing the tool or executing its hook as the agent is refused",

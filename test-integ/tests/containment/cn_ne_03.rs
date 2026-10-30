@@ -64,7 +64,7 @@ fn native_records(lines: &[String]) -> Vec<&String> {
 }
 
 det_case! {
-    name: cn_ne_03,
+    name: when_native_network_tool_server_starts_then_one_native_egress_record_names_it,
     id:   "CN-NE-03",
     platforms: [Linux, Macos],
     desc: "Native-egress telemetry: a started contain_egress=false MCP server writes one egress:native record naming it to records.jsonl; a started gateway server writes none; a native-egress server refused at start writes none",

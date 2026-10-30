@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `command not found` and
 // `RC=127` returned, with no `effect denied` marker.
 det_case! {
-    name: sh_neg_2,
+    name: when_shell_command_is_unknown_then_status_is_127_without_policy_denial,
     id:   "SH-NEG-2",
     desc: "Negative: an unknown command is a not-found (127), never a policy denial",
     run: |b| {

@@ -105,7 +105,7 @@ fn assert_refused(output: &str, forbidden_result: &str) {
 }
 
 det_case! {
-    name: cn_mcp_tool_cap,
+    name: when_tool_server_call_budget_is_two_then_first_two_calls_pass_and_third_is_refused,
     id:   "CN-MT-02",
     platforms: [Linux, Macos],
     desc: "MCP tool rate cap: a temporal forbid on a contained MCP leaf's tools/call admits the first two calls in its window and refuses the third by its @id",

@@ -9,7 +9,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test monty): journaled fs:write+fs:read on
 // `f.txt`, `READ=MONTY_FS` and `MKDIR_OK` returned.
 det_case! {
-    name: mo_3,
+    name: when_monty_writes_reads_or_creates_directory_then_each_effect_is_policy_checked,
     id:   "MO-3",
     desc: "Governed fs effect: a Monty script writes, reads back, and mkdirs under the box home, each judged",
     run: |b| {

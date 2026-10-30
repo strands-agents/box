@@ -4,7 +4,7 @@ use strands_det_harness::det_case;
 // permit and refused by the self-defense floor, which the journal names. The host-side effect
 // is the proof: the policy file's bytes are unchanged after the run.
 det_case! {
-    name: po_4b,
+    name: when_shell_has_broad_write_permit_then_own_policy_stays_unchanged,
     id:   "PO-4b",
     desc: "Self-defense: the Shell writing .strands-box/policy.dw under a broad fs:write permit is refused by the reach floor and the file is unchanged",
     run: |b| {

@@ -54,7 +54,7 @@ fn stage_linker_library(gcc: &Path, name: &str, directory: &Path) {
 }
 
 det_case! {
-    name: cn_w_06,
+    name: when_cargo_uses_supported_grants_then_build_script_runs_and_agent_execution_stays_refused,
     id: "CN-W-06",
     platforms: [Linux],
     desc: "Cargo compiles and runs a build script and generated output through supported grants; agent execution and ungranted access remain refused",

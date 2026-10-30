@@ -9,7 +9,7 @@ use strands_det_harness::{AUTHORITY_REFUSAL, PROTECTED_CONFIG_MARKER, det_case};
 // startup disclosure repeats the section names, so "[agent]" is not evidence of a leak.
 // (The native bash's own read of the same file is CN-W-07's subject: the kernel view.)
 det_case! {
-    name: po_4a,
+    name: when_shell_has_broad_read_permit_then_own_box_configuration_stays_unreadable,
     id:   "PO-4a",
     desc: "Self-defense: the Shell reading .strands-box/box.toml under a broad fs:read permit is refused by the reach floor as an authority source",
     run: |b| {

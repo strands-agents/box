@@ -4,7 +4,7 @@ const PROBE: &str = include_str!("../probes/fs_probe.rs");
 include!("../probes/probe_lines.rs");
 
 det_case! {
-    name: cn_linux_metadata_visibility,
+    name: when_linux_file_has_no_read_grant_then_agent_and_tool_cannot_see_metadata_or_contents,
     id: "CN-LINUX-METADATA",
     platforms: [Linux],
     desc: "Linux hides ungranted file metadata and contents from both agent and tool, while explicit read grants expose the same file",

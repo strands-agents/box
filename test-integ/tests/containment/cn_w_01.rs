@@ -5,7 +5,7 @@ use strands_det_harness::{det_case, user_home};
 // The agent writes, reads back, and appends a project file through its own syscalls, and the
 // startup disclosure names the workspace grants, the operator home as HOME, and PATH.
 det_case! {
-    name: cn_w_01,
+    name: when_agent_edits_granted_project_file_then_reads_and_writes_work_and_grants_are_disclosed,
     id:   "CN-W-01",
     desc: "Workload act 1: write, read, and edit a project file; the disclosure names the grants, HOME, and PATH",
     run: |b| {

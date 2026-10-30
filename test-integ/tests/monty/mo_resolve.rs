@@ -2,7 +2,7 @@ use strands_det_harness::det_case;
 
 // Path.resolve and Path.absolute are refused as unsupported calls and return no path.
 det_case! {
-    name: mo_resolve,
+    name: when_monty_resolves_absolute_paths_then_operation_is_unsupported_and_no_host_path_leaks,
     id:   "MO-RESOLVE",
     desc: "No path leak: Path.resolve and Path.absolute raise RuntimeError as unsupported and return no host path",
     run: |b| {

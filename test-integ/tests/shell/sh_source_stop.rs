@@ -5,7 +5,7 @@ use strands_det_harness::{det_case, sh_quote};
 // decision. The error names the file and the line where the statement starts, and `.` returns 1.
 // The file ends with an unclosed quote: a loop that consumes to end of file reports that quote.
 det_case! {
-    name: sh_source_stop,
+    name: when_sourced_statement_cannot_parse_then_earlier_lines_run_and_later_lines_never_reach_policy,
     id:   "SH-SOURCE-STOP",
     desc: "source stops at a statement that cannot parse: earlier lines run, later lines never reach policy, the error names the file and line 3, and the status is 1",
     run: |b| {

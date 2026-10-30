@@ -11,7 +11,7 @@ const PROBE: &str = include_str!("../probes/fs_probe.rs");
 include!("../probes/probe_lines.rs");
 
 det_case! {
-    name: cn_t_05,
+    name: when_macos_tool_queries_home_metadata_then_config_is_visible_but_credentials_and_private_state_stay_hidden,
     id:   "CN-T-05",
     platforms: [Macos],
     desc: "Leaf discovery: from a tool leaf, stat of a planted ~/.det-disc/cfg answers and its read is refused, while stat of ~/.aws and of <box_dir>/private is refused; the agent's own stat of cfg is refused",

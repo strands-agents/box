@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): journaled fs:move default-deny,
 // `MVRC` nonzero, `LS=0` (no destination).
 det_case! {
-    name: sh_hp_5c,
+    name: when_shell_has_no_move_permit_then_rename_is_refused_and_destination_is_absent,
     id:   "SH-HP-5C",
     desc: "Effect refusal: mv with no fs:move grant is default-denied and creates no destination",
     run: |b| {

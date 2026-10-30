@@ -2,7 +2,7 @@ use strands_det_harness::det_case;
 
 // An enumeration returns each entry under the path the script named, and no host path.
 det_case! {
-    name: mo_iter,
+    name: when_monty_lists_directory_then_entries_use_requested_path_and_no_absolute_host_path_leaks,
     id:   "MO-ITER",
     desc: "Enumeration: Path.iterdir returns entries under the named path and no absolute host path, and the listing is judged",
     run: |b| {

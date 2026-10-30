@@ -135,7 +135,7 @@ fn the_native_linux_run_answers_its_own_families() {
 }
 
 det_case! {
-    name: cn_fs_01,
+    name: when_agent_renames_own_authority_sources_then_moves_fail_and_host_sources_stay_unchanged,
     id:   "CN-FS-01",
     desc: "Own authority: the agent's own rename(2) cannot move the workspace's .strands-box (Linux EBUSY, macOS EPERM), move its policy.dw out, or move a permitted file over it; an ordinary directory rename works; the loaded sources are unchanged on the host",
     run: |b| {

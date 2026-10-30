@@ -25,7 +25,7 @@ use strands_det_harness::egress::{
 // This measures the gateway path from inside the cage. It does not measure the kernel: a direct
 // (non-proxied) connect from the workload is CN-N-03's subject.
 det_case! {
-    name: po_13,
+    name: when_native_request_uses_proxy_then_permitted_recorder_is_reached_and_denied_recorder_gets_nothing,
     id:   "PO-13",
     desc: "Gateway from the native route: a permitted loopback destination is reached through $HTTP_PROXY and a policy-denied one is refused by the authority's 403 Forbidden naming the target; a live host recorder at the denied destination records nothing",
     run: |b| {

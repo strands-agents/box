@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // has nowhere to put its state. The box must say which key is missing and start nothing: a
 // configuration this incomplete must not reach a workload.
 det_case! {
-    name: cn_b_01,
+    name: when_box_directory_setting_is_missing_then_configuration_is_refused_by_key,
     id:   "CN-B-01",
     desc: "A configuration naming no box_dir is refused at load, by the key's own name",
     run: |b| {

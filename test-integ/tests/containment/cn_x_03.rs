@@ -1,7 +1,7 @@
 use strands_det_harness::{Platform, det_case};
 
 det_case! {
-    name: cn_x_03,
+    name: when_agent_loads_library_from_write_root_then_mapping_is_refused_but_approved_runtime_copy_loads,
     id:   "CN-X-03",
     platforms: [Macos, Linux],
     desc: "Write-xor-exec: a loadable library copied into the write root cannot be mapped executable, although the same bytes load from the approved runtime directory",

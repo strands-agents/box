@@ -2,7 +2,7 @@ use crate::phase3 as support;
 use strands_det_harness::{Platform, det_case};
 
 det_case! {
-    name: cn_t_01,
+    name: when_tool_reads_files_then_own_grant_works_and_agent_grant_is_not_inherited,
     id: "CN-T-01",
     desc: "A named tool reads its own grant and cannot inherit the agent's file grant",
     run: |b| {

@@ -23,7 +23,7 @@ const DENIED_CONTENT: &str = "TL_DENIED_CONTENT";
 // every `RunResult` assertion on a mediated run reads its entry proof from the DEFAULT destination,
 // which a declared target replaces.
 det_case! {
-    name: tl_f_05,
+    name: when_telemetry_target_includes_only_denials_then_permits_and_control_records_are_absent,
     id:   "TL-F-05",
     desc: "A target declaring include = [\"deny\"] receives every refusal and no permit, and no control-plane record",
     run: |b| {

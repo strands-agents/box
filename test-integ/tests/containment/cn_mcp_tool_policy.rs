@@ -105,7 +105,7 @@ fn assert_refused(output: &str, forbidden_result: &str) {
 }
 
 det_case! {
-    name: cn_mcp_tool_policy,
+    name: when_tool_server_call_matches_name_or_argument_forbid_then_only_matching_calls_are_refused,
     id:   "CN-MT-01",
     platforms: [Linux, Macos],
     desc: "MCP tool policy: a contained MCP leaf's tools/call is gated per tool — the coarse server permit admits every tool, a forbid on the tool name refuses that tool alone, and a forbid on an integer or a string argument value refuses only the calls whose argument matches",

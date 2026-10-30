@@ -3,7 +3,7 @@ use strands_det_harness::det_case;
 // Under an `fs:move` permit, a rename onto a new name performs, and a rename onto an existing file is
 // refused by the baseline's `no_deletes` forbid.
 det_case! {
-    name: mo_mv_replace,
+    name: when_monty_renames_to_existing_file_then_replacement_is_refused_and_both_contents_remain,
     id:   "MO-MV-REPLACE",
     desc: "Replacing rename: under an fs:move permit, Path.rename to a new name performs and onto an existing file is refused by no_deletes; both files keep their content",
     run: |b| {

@@ -2,7 +2,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_i_08,
+    name: when_agent_signals_a_live_host_process_then_host_signal_counter_stays_unchanged,
     id: "CN-I-08",
     desc: "A native handled signal cannot change a live owned host marker's signal counter",
     run: |b| {

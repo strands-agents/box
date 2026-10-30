@@ -93,7 +93,7 @@ fn phantom_of<'a>(out: &'a str, prefix: &str) -> &'a str {
 }
 
 det_case! {
-    name: cn_me_02,
+    name: when_tools_receive_credential_placeholders_then_real_secrets_stay_hidden_and_plaintext_route_is_refused,
     id:   "CN-ME-02",
     platforms: [Linux, Macos],
     desc: "Leaf phantoms: a tool leaf and a stdio MCP leaf each hold the env:// route's phantom and never the real secret; each reaches an unrouted recorder through the gateway, and the gateway refuses their plaintext request to the route, so its recorder receives no byte",

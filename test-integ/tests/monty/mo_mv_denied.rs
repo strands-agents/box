@@ -2,7 +2,7 @@ use strands_det_harness::det_case;
 
 // The baseline names no `fs:move`, so a rename is default-denied and moves nothing.
 det_case! {
-    name: mo_mv_denied,
+    name: when_monty_has_no_move_permit_then_rename_is_refused_and_source_remains,
     id:   "MO-MV-DENIED",
     desc: "Rename refusal: Path.rename with no fs:move permit is default-denied; the source stays and no destination appears",
     run: |b| {

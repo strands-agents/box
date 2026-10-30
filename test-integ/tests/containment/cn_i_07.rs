@@ -36,7 +36,7 @@ fn main() {
 "#;
 
 det_case! {
-    name: cn_i_07,
+    name: when_agent_checks_a_live_host_process_with_signal_zero_then_access_is_refused,
     id:   "CN-I-07",
     desc: "Process isolation: a native probe in the box cannot signal a foreign host process (signal 0 answers ESRCH or EPERM, never success)",
     run: |b| {

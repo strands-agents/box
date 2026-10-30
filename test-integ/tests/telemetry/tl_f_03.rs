@@ -26,7 +26,7 @@ const DECISION_KEYS: [&str; 7] = [
 // reads `~/…`, which is what makes an authored rule hold in every clone. `/etc/hosts` is outside
 // that home, so it reads verbatim — both sides of one rule, in one case.
 det_case! {
-    name: tl_f_03,
+    name: when_policy_permits_or_denies_then_record_contains_resource_cause_rule_and_decision_attributes,
     id:   "TL-F-03",
     desc: "A permit and a deny each carry the whole decision attribute set, with the reported resource, the cause and the rule",
     run: |b| {

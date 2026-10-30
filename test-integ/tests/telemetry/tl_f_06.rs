@@ -18,7 +18,7 @@ const REMOTE_PARENT_FLAGS: u64 = 0x300;
 //     root, which is local, so a control span that set 0x300 made a viewer draw the box's own
 //     children as if a remote caller had sent them.
 det_case! {
-    name: tl_f_06,
+    name: when_box_records_spans_then_each_run_has_one_control_trace_and_local_parentage,
     id:   "TL-F-06",
     desc: "Each record arrives beside its span, one run's control plane is one trace with one root, and no control child claims a remote parent",
     run: |b| {

@@ -16,7 +16,7 @@ when temporal {
 };"#;
 
 det_case! {
-    name: sh_temporal_shared,
+    name: when_shell_and_monty_share_directory_budget_then_exhaustion_refuses_both_across_runs,
     id:   "SH-TEMPORAL-SHARED",
     desc: "Shared budget: in one run, a Shell mkdir and a Monty mkdir spend a create_dir budget of two and the next Shell mkdir is refused; a Monty mkdir in the next run is refused too",
     run: |b| {

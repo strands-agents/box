@@ -6,7 +6,7 @@ use strands_det_harness::det_case;
 // on the file, the entry, and the directory, `rm` prints the policy message naming the forbid and
 // exits 1 (`-f` quiets only a missing operand), and the file, the directory, and its entry remain.
 det_case! {
-    name: sh_neg_rm,
+    name: when_shell_forces_file_or_directory_deletion_then_policy_refuses_and_entries_remain,
     id:   "SH-NEG-RM",
     desc: "Delete refusal: rm -f and rm -rf under the fixture's forbid fs:delete exit 1 with the policy message naming the forbid, and the file and the directory remain",
     run: |b| {

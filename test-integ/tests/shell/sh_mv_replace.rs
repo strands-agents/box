@@ -3,7 +3,7 @@ use strands_det_harness::det_case;
 // Under an `fs:move` permit, a `mv` onto a new name performs, and a `mv` onto an existing file is
 // refused by the baseline's `no_deletes` forbid.
 det_case! {
-    name: sh_mv_replace,
+    name: when_shell_moves_onto_existing_file_then_replacement_is_refused_and_both_contents_remain,
     id:   "SH-MV-REPLACE",
     desc: "Replacing mv: under an fs:move permit, mv to a new name performs and onto an existing file is refused by no_deletes; both files keep their content",
     run: |b| {

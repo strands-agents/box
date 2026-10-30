@@ -6,7 +6,7 @@ use strands_det_harness::det_case;
 // nested command was judged and performed.
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `A1` and `A2` both returned.
 det_case! {
-    name: sh_hp_8,
+    name: when_shell_find_exec_matches_files_then_each_nested_command_is_policy_checked_and_runs,
     id:   "SH-HP-8",
     desc: "Happy path: find -exec runs a nested command per match, each judged and performed",
     run: |b| {

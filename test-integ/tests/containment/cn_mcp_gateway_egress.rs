@@ -112,7 +112,7 @@ fn call_reach(b: &BoxFixture, url: &str) -> (String, RunResult) {
 }
 
 det_case! {
-    name: cn_mcp_gateway_egress,
+    name: when_tool_server_uses_gateway_then_only_policy_permitted_recorder_receives_requests,
     id:   "CN-ME-01",
     platforms: [Linux, Macos],
     desc: "Gateway-mediated MCP egress: a default (gateway) proxy-aware MCP leaf reaches a policy-permitted loopback recorder through the gateway and is refused at a policy-denied one by the authority's 403; the denied recorder is never contacted",

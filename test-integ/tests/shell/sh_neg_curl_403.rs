@@ -9,7 +9,7 @@ use strands_det_harness::det_case;
 // floor refuses every loopback and private address before the gateway, so the denied host is a
 // public one, and a runner with no route to it records an ERROR, not a FAIL.
 det_case! {
-    name: sh_neg_curl_403,
+    name: when_shell_curl_request_is_denied_after_connect_then_status_is_one_and_refusal_names_target,
     id:   "SH-NEG-CURL-403",
     desc: "Gateway policy 403: the Shell's curl to a connect-permitted, request-denied public host exits 1 with the http:request refusal naming the target on stderr and prints no body",
     run: |b| {

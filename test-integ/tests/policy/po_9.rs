@@ -10,7 +10,7 @@ use strands_det_harness::det_case;
 // it did not. From the NATIVE bash the same `git` would be a plain exec the kernel view decides,
 // with no gate involved (see CN-R-01).
 det_case! {
-    name: po_9,
+    name: when_shell_runs_git_without_spawn_permit_then_status_is_126_and_git_never_runs,
     id:   "PO-9",
     desc: "Shell gate: with no shell:spawn permit, 'git status' in the hosted Shell is refused at the broker (status 126) and git never runs",
     run: |b| {

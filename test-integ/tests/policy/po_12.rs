@@ -11,7 +11,7 @@ use strands_det_harness::{SsrfFloor, det_case, judge_ssrf_probe};
 // `judge_ssrf_probe` names each.
 // Only options the Shell's curl implements are used (`-s`, `-S`, `-w`).
 det_case! {
-    name: po_12,
+    name: when_shell_curl_has_broad_request_permit_then_instance_metadata_service_stays_unreachable,
     id:   "PO-12",
     desc: "SSRF floor: a broad http:request permit still cannot reach 169.254.169.254 (IMDS) from the Shell's curl; the refusal is the Shell kernel floor's words",
     run: |b| {

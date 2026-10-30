@@ -109,7 +109,7 @@ fn free_port_pair(primary: IpAddr) -> (u16, u16) {
 }
 
 det_case! {
-    name: cn_n_03,
+    name: when_agent_binds_listeners_then_host_cannot_reach_tcp_and_unix_socket_requires_write_grant,
     id:   "CN-N-03",
     desc: "Inbound bind: a TCP listener inside the box is unreachable from the host (Linux) or refused (macOS); a UNIX socket binds only inside a write grant",
     run: |b| {

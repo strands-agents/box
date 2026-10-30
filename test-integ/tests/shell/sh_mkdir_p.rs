@@ -6,7 +6,7 @@ use strands_det_harness::{det_case, sh_quote};
 // Below an ungranted parent the builtin is refused by default-deny on the target it was asked to
 // create, never on an ancestor, and nothing is created above the grant.
 det_case! {
-    name: sh_mkdir_p,
+    name: when_shell_creates_nested_directories_then_granted_paths_work_and_ungranted_target_creates_nothing,
     id:   "SH-MKDIR-P",
     desc: "mkdir -p: a relative and an absolute path below the workspace grant create every level with no error; a path below an ungranted parent is default-denied on the target, not an ancestor, and creates nothing",
     run: |b| {

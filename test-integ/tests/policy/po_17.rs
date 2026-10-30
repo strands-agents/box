@@ -14,7 +14,7 @@ use strands_det_harness::egress::{
 // permitted host is refused by the authority's `403 Forbidden` naming the rule, and the recorder
 // records no connection. The forbid does not load where `ip` is not a string.
 det_case! {
-    name: po_17,
+    name: when_hostname_resolves_to_forbidden_addresses_then_gateway_refuses_same_previously_permitted_host,
     id:   "PO-17",
     desc: "Pinned address: a permitted host that resolves to 127.0.0.1 and ::1 is reached, and the same host is refused by a forbid on context.input.ip for those addresses; the recorder sees only the first request",
     run: |b| {
