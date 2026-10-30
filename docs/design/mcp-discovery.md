@@ -192,9 +192,12 @@ engine becomes `Ready` for the rest of the run.
 Box names a server from the tools the inert rules decide, which is the same set it holds calls for.
 A rule that only reads a tool from history decides no call to it, so that reference degrades no
 server ([a server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). The gap is a rule
-whose head is the coarse `mcp:call` and whose only tool name is a history reference: it decides no
-typed tool, so the set is empty, and the rule stays inert with nothing on stderr to say so.
+alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). Two shapes defeat
+that naming. A rule whose head is the coarse `mcp:call` and whose only tool name is a history
+reference decides no typed tool, so the set is empty and the rule stays inert with nothing on stderr
+to say so. A rule that decides a tool on an accepted server and reads the denied server's tool from
+history puts only the accepted server in the set, so stderr names the healthy server and leaves out
+the denied one.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays

@@ -226,10 +226,21 @@ an inert rule decides, so a call to another tool of the same server is still dec
 that did load — usually the coarse `mcp:call` permit. A rule that only reads a tool from history
 decides no call to it, so that tool is not held and its own server does not degrade.
 
-One shape gets no diagnostic. When an inert rule's head is the coarse `mcp:call` and the only tool
-name it spells is a history reference, Box names no tool and no server, so stderr reports nothing
-and the rule ships inert and silent. A rule in that shape decides every tool call, which this
-per-tool hold cannot express.
+Two shapes defeat the diagnostic, because Box names a server from the tools the inert rules decide
+and a history reference decides nothing.
+
+- **Nothing is named.** When an inert rule's head is the coarse `mcp:call` and the only tool name it
+  spells is a history reference, the set is empty, so stderr reports nothing and the rule ships
+  inert and silent. A rule in that shape decides every tool call, which this per-tool hold cannot
+  express.
+- **The wrong server is named.** When an inert rule decides a tool on a server whose `tools/list`
+  was accepted, and reads a tool on the denied server from history, the set holds only the accepted
+  server. stderr then names the healthy server and leaves out the one that was denied, which points
+  an operator at the wrong server.
+
+A third gap sits beneath both: a tool that the degraded set holds is still callable once its own
+schema staged, because the tool-list check answers before the degraded check. So the inert rule's
+own tool rides the coarse permit after discovery completes.
 
 ## How Box decides a tool call
 
