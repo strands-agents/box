@@ -28,7 +28,8 @@ impl Pack {
 
     /// The Cedar schema fragment that declares the actions and effects of this pack.
     ///
-    /// A pack that declares no effect has no `Effect` type and no `effects` field.
+    /// A pack that declares no effect has no `Effect` type and no `effects` field, and `unmodeled`
+    /// is outside the `"*"` group.
     pub(crate) fn schema(&self) -> String {
         let mut schema = String::new();
         let _ = writeln!(schema, "namespace {} {{", self.namespace());
@@ -63,10 +64,15 @@ impl Pack {
                     FieldKind::Set => write!(record, ", {name:?}: Set<String>"),
                 };
             }
+            let group = if action == UNMODELED_ACTION {
+                String::new()
+            } else {
+                format!(" in [{ALL_ACTIONS:?}]")
+            };
             let _ = writeln!(schema, "  type {action}Input = {{ {record} }};");
             let _ = writeln!(
                 schema,
-                "  action {action:?} in [{ALL_ACTIONS:?}] appliesTo {{ principal: [Box::Agent], \
+                "  action {action:?}{group} appliesTo {{ principal: [Box::Agent], \
                  resource: [Box::Resource], context: {{ input: {action}Input, output?: Output }} }};"
             );
         }
@@ -282,11 +288,31 @@ mod tests {
                 None,
             ),
             (
-                "every action of a pack is in its group, and unmodeled is too",
+                "unmodeled takes its own permit",
                 vec![git()],
-                r#"permit (principal, action in Tool::git::Action::"*", resource)
-                   when { action == Tool::git::Action::"unmodeled" };"#,
+                r#"permit (principal, action == Tool::git::Action::"unmodeled", resource);"#,
                 None,
+            ),
+            (
+                "a rule over two actions of one pack reads their input",
+                vec![git()],
+                r#"forbid (principal, action in [Tool::git::Action::"push", Tool::git::Action::"commit"], resource)
+                   when { context.input.cwd == "/work" && context.input.effects.contains(Tool::git::Effect::"skip_hooks") };"#,
+                None,
+            ),
+            (
+                "a rule over a pack action and a Box action that reads their input is refused",
+                vec![git()],
+                r#"forbid (principal, action in [Tool::git::Action::"push", Box::Action::"shell:spawn"], resource)
+                   when { context.input.cwd == "/work" };"#,
+                Some(r#"under actions of more than one family"#),
+            ),
+            (
+                "a rule over v1 and v2 of one pack that reads their input is refused",
+                vec![git(), at_version("git-push-commit-status", 2)],
+                r#"forbid (principal, action in [Tool::git::Action::"push", Tool::git::v2::Action::"push"], resource)
+                   when { context.input.cwd == "/work" };"#,
+                Some(r#"under actions of more than one family"#),
             ),
             (
                 "a pack that declares no effect has no effects field",
@@ -346,6 +372,52 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn every_action_of_a_pack_is_in_its_group_and_unmodeled_is_not() {
+        let pack = valid("git-push-commit-status");
+        let schema =
+            pack_action_schema(std::slice::from_ref(&pack), &[]).expect("the schema composes");
+        let entities = schema
+            .cedar
+            .action_entities()
+            .expect("the action entities build");
+        let group: cedar_policy::EntityUid =
+            r#"Tool::git::Action::"*""#.parse().expect("the group parses");
+        let mut members = Vec::new();
+        for action in ["commit", "push", "status", UNMODELED_ACTION] {
+            let uid: cedar_policy::EntityUid = format!(r#"Tool::git::Action::"{action}""#)
+                .parse()
+                .expect("the action parses");
+            let ancestors: Vec<_> = entities
+                .ancestors(&uid)
+                .expect("the action exists")
+                .collect();
+            if ancestors.contains(&&group) {
+                members.push(action);
+            }
+        }
+
+        assert_eq!(members, ["commit", "push", "status"]);
+    }
+
+    #[test]
+    fn two_tools_of_an_mcp_server_labelled_tool_are_two_input_families() {
+        const TOOLS: &str = r#"{"result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+            {"name": "write", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+        ]}}"#;
+        let mcp = generate_mcp_schema("Tool", TOOLS).expect("the MCP schema generates");
+        let source = r#"forbid (principal, action in [Tool::Action::"read", Tool::Action::"write"], resource)
+                        when { context.input.path == "/etc/passwd" };"#;
+        let error = load(source, &[valid("git")], std::slice::from_ref(&mcp))
+            .expect_err("a rule over two MCP tools that reads their input is refused");
+
+        assert!(
+            error.contains("under actions of more than one family"),
+            "{error}"
+        );
     }
 
     #[test]

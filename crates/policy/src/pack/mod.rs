@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub(crate) use model::Pack;
+pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;
 
 /// The pack file formats this Box reads.
