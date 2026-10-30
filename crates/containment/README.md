@@ -60,9 +60,11 @@ localhost port that already exists. The Linux namespace launcher **refuses**
 that nothing can accept on.
 
 The third argument, `confirm_fd`, is an optional setup-status pipe writer.
-The Linux reaper writes a status byte when the filesystem view is ready.
-The supervisor uses that byte to confirm startup before a long-lived workload exits.
-macOS ignores this argument because successful `exec` closes the status pipe.
+The Linux launcher preserves it in the workload and reports namespace setup failures through it.
+The reaper writes byte `6` after its own setup completes.
+Its waiting processes then close their copies.
+The macOS backend leaves this descriptor to the trampoline.
+The trampoline owns the completion protocol described below.
 
 The fourth argument, `native_filesystem_handoff`, reserves an optional Unix stream
 for native filesystem registration. This preparation does not implement that registration.
@@ -271,6 +273,18 @@ The first three flags are required, and each may appear only once.
 names an inherited descriptor for compact pre-exec failure reporting, and must
 not be `0`, `1`, or `2`. `--relay-control-fd` carries the workload's egress
 listener back to the box, and is Linux-only.
+
+Byte `128` reports completed preparation.
+Failure bytes `1` through `5` report configuration read, configuration validation, apply, environment decode, or executable launch failure.
+The trampoline writes `128` after apply, environment decode, and working-directory selection, immediately before its executable launch attempt.
+A launch failure can therefore produce `128, 5`. The supervisor requires both completion markers on Linux, waits for channel closure, and lets a failure byte override completion.
+Channel closure without all required markers is a protocol failure. A successful executable launch closes the workload's descriptor through `FD_CLOEXEC`.
+
+The completion marker confirms preparation, not successful executable launch or application readiness.
+A process killed between the marker and the executable launch can also close the channel without a failure byte.
+The pipe cannot distinguish that interval from a successful executable launch.
+The reader rejects the obsolete completion byte `0` immediately, so mixed helper versions cannot retain a streaming setup wait.
+Buffered execution still reports the process outcome. Streaming users must use their application protocol to establish application readiness.
 
 The digest and target-environment carrier are supervisor-owned internal launch
 metadata, not `ContainmentConfig` fields or user policy.

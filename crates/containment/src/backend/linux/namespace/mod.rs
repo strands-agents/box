@@ -209,6 +209,7 @@ impl ContainmentBackend for NamespaceBackend {
         // The PID namespace must exist *before* the view is built, because mounting a fresh `/proc`
         // requires the caller to be inside the PID namespace that procfs will describe.
         let mut keep = vec![0, 1, 2];
+        keep.extend(confirm_fd);
         {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
@@ -369,17 +370,12 @@ fn enter_namespaces_using(
     Ok(())
 }
 
-/// Enter a PID namespace as its second process, with a reaper at PID 1.
-/// The status byte the reaper writes to `confirm_fd` once the mount view is up and the workload is
-/// about to run — the explicit "reached exec" signal for a long-lived leaf whose status pipe never
-/// EOFs during setup. Must match the supervisor's `SETUP_SUCCESS_BYTE`, and stay distinct from every
-/// `SetupStage` failure byte (`1..=5`).
-const EXEC_CONFIRM_BYTE: u8 = 0;
-/// The failure byte for a mount-view build failure, matching the supervisor's `SetupStage::Apply`.
+/// The setup failure byte for namespace construction.
 const APPLY_FAILURE_BYTE: u8 = 3;
+/// The namespace reaper completed its own setup.
+const REAPER_READY_BYTE: u8 = 6;
 
-/// Write one status byte to `confirm_fd`, ignoring `EINTR`. Best-effort: a lost byte only costs the
-/// supervisor its early signal, and the process's own exit still reports the outcome.
+/// Report setup status through the inherited descriptor.
 fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
     let Some(fd) = confirm_fd else { return };
     loop {
@@ -391,6 +387,20 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
             continue;
         }
         return;
+    }
+}
+
+/// Release a supervisor's copy while the workload retains the failure channel.
+fn close_confirm_descriptor(descriptor: Option<std::os::fd::RawFd>) {
+    if let Some(descriptor) = descriptor {
+        // SAFETY: this process owns its inherited copy of the descriptor.
+        if unsafe { libc::close(descriptor) } == -1
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+        {
+            write_confirm_byte(Some(descriptor), APPLY_FAILURE_BYTE);
+            // SAFETY: an unclosed setup writer must not survive into the wait loop.
+            unsafe { libc::_exit(127) };
+        }
     }
 }
 
@@ -439,10 +449,12 @@ fn establish_pid_namespace_and_reaper(
     if reaper > 0 {
         drop(reaper_control);
         if !reaper::confirm_parent_death(&parent_control) {
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             // SAFETY: the identifier names this process's unreaped child.
             unsafe { libc::kill(reaper, libc::SIGKILL) };
         }
         drop(parent_control);
+        close_confirm_descriptor(confirm_fd);
         // The original caller.
         let code = reaper_exit_code(|status| {
             // SAFETY: waiting on this process's own child.
@@ -459,6 +471,7 @@ fn establish_pid_namespace_and_reaper(
     // Namespace PID 1.
     drop(parent_control);
     if !reaper::arm_parent_death(&reaper_control) {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: no workload can start without a live launcher.
         unsafe { libc::_exit(127) };
     }
@@ -467,23 +480,17 @@ fn establish_pid_namespace_and_reaper(
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
         eprintln!("strands-box: namespace reaper could not build the view: {error}");
-        // Signal the failure to the supervisor rather than leaving it to read a bare EOF, which it
-        // treats as success. Best-effort, before PID 1 exits and tears down the namespace.
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.
         unsafe { libc::_exit(127) };
     }
 
-    // The mount view is up and the workload is about to run: signal "reached exec" now. A long-lived
-    // leaf (a streaming MCP server) never lets the status pipe EOF during its life — the reaper and
-    // the waiter both hold the writer — so the supervisor must be told explicitly, not by EOF.
-    write_confirm_byte(confirm_fd, EXEC_CONFIRM_BYTE);
-
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
     if let Err(error) = authority::close_inherited_descriptors(keep) {
         eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: as above.
         unsafe { libc::_exit(127) };
     }
@@ -491,6 +498,7 @@ fn establish_pid_namespace_and_reaper(
     // Fork the workload.
     let workload = unsafe { libc::fork() };
     if workload == -1 {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the correct
         // response to being unable to start the workload at all.
         unsafe { libc::_exit(126) };
@@ -501,6 +509,7 @@ fn establish_pid_namespace_and_reaper(
         let dropped = authority::drop_all_capabilities();
         let locked = authority::set_no_new_privileges();
         if dropped.is_err() || locked.is_err() {
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             eprintln!(
                 "strands-box: namespace reaper could not drop its own authority \
                  ({dropped:?}, {locked:?}); killing the namespace rather than \
@@ -510,6 +519,9 @@ fn establish_pid_namespace_and_reaper(
             // the exact escape this closes.
             unsafe { libc::_exit(127) };
         }
+
+        write_confirm_byte(confirm_fd, REAPER_READY_BYTE);
+        close_confirm_descriptor(confirm_fd);
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
@@ -2495,14 +2507,13 @@ mod tests {
             .expect("the leaf filters compile from the network alone");
     }
 
-    /// The reaper writes the exec-confirm byte before the workload runs, and the apply-failure byte when the view fails.
+    /// The workload retains the status writer, and the reaper reports view failures.
     #[test]
-    fn the_reaper_writes_the_exec_confirm_byte_and_a_failure_byte() {
+    fn the_workload_retains_the_status_writer_and_the_reaper_reports_failures() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
         }
-        assert_eq!(EXEC_CONFIRM_BYTE, 0, "this crate's exec-confirm byte value");
         assert_eq!(
             APPLY_FAILURE_BYTE, 3,
             "this crate's apply-failure byte value"
@@ -2525,7 +2536,7 @@ mod tests {
             .expect("write protection");
 
         for (label, config, expected_bytes, expected_status) in [
-            ("view built", &builds, vec![EXEC_CONFIRM_BYTE], 0),
+            ("view built", &builds, vec![REAPER_READY_BYTE, 42], 0),
             ("view failed", &fails, vec![APPLY_FAILURE_BYTE], 127),
         ] {
             let mut pipe = [-1; 2];
@@ -2551,6 +2562,7 @@ mod tests {
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };
                 }
+                write_confirm_byte(Some(writer), 42);
                 // SAFETY: the workload exits at once.
                 unsafe { libc::_exit(0) };
             }
@@ -2579,6 +2591,7 @@ mod tests {
                 expected_status,
                 "{label}: wrong exit status (50 = apply returned an error before the reaper ran)"
             );
+            received.sort_unstable();
             assert_eq!(received, expected_bytes, "{label}: wrong status bytes");
         }
     }

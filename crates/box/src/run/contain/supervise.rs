@@ -763,12 +763,7 @@ impl LeafBox {
         })
     }
 
-    /// Spawn a host binary in a leaf box with long-lived piped stdin and stdout, for a streaming
-    /// session — a contained stdio MCP server, which speaks JSON-RPC over those pipes for its whole
-    /// lifetime rather than running to completion. Containment is confirmed to have reached `exec`
-    /// (via the trampoline's status pipe) BEFORE the live streams are handed back, so a containment
-    /// setup failure surfaces as [`TrampolineError::SetupFailed`] here and is never mistaken for a
-    /// broken MCP protocol later.
+    /// Return live streams after setup completes without a reported executable launch failure.
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -802,11 +797,7 @@ impl LeafBox {
         let stdout = group.child_mut().stdout.take();
         let mut stderr = group.child_mut().stderr.take();
 
-        // Confirm containment reached `exec`. `setup_failure` reads one status byte: `0` or EOF is
-        // success — the reaper writes `0` once the mount view is up, and macOS and the buffered path
-        // signal by EOF at exec — and any other byte names the failure stage. It blocks on the pipe,
-        // so it runs on a blocking task, not the async runtime. The trampoline is dropped there: its
-        // job ends once exec is confirmed; the boundary and relays are what the running server retains.
+        // The reader waits for completed preparation and channel closure, or a reported failure.
         let setup = tokio::task::spawn_blocking(move || {
             let mut trampoline = trampoline;
             trampoline.close_setup_writer();
@@ -832,9 +823,7 @@ impl LeafBox {
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 
-        // Containment reached `exec`: the workload owns stderr now. Drain it to nowhere for the
-        // server's life so a chatty server never blocks on a full pipe. The task ends on its own when
-        // the child exits — `kill_on_drop` closes the pipe, so the copy reaches EOF and returns.
+        // Drain stderr so a running server cannot block on a full pipe.
         if let Some(mut stderr) = stderr {
             tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
