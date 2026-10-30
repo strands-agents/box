@@ -78,6 +78,10 @@ fn staged(sources: Vec<Policy>, history: &Path) -> PolicyEngine {
         .expect("the staged policy opens")
 }
 
+fn staged_engine(text: &str, history: &Path) -> PolicyEngine {
+    staged(vec![source("staged.dw", text)], history)
+}
+
 #[test]
 fn a_canonical_bundle_is_ready_without_an_mcp_schema() {
     let history = tempfile::tempdir().expect("history directory");
@@ -553,6 +557,95 @@ when { context.input.server == "srv" };"#;
             "both must deny the call fail-closed once the server degrades"
         );
     }
+}
+
+/// stderr must name every server whose catalog never arrived, and no server whose catalog did. The
+/// tools a rule decides answer which calls to hold, and they are the wrong answer to this question:
+/// a rule waits for each server it names, including one it only reads from history.
+#[test]
+fn discovery_names_each_server_whose_catalog_never_arrived_and_no_other() {
+    // Each case is one pending rule. `staged` is the server whose catalog arrives, and `expected`
+    // is what stderr must name.
+    for (rule, staged, expected) in [
+        // The rule decides a denied server's tool and reads a healthy server's from history.
+        (
+            r#"forbid(principal, action == alpha::Action::"deploy", resource)
+unless temporal { formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } ) };"#,
+            Some(("beta", "approve", "id")),
+            vec!["alpha"],
+        ),
+        // The mirror: the rule decides a healthy server's tool and reads a denied server's.
+        (
+            r#"forbid(principal, action == beta::Action::"ship", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            Some(("beta", "ship", "id")),
+            vec!["alpha"],
+        ),
+        // The only tool name a coarse-headed rule spells is the history reference.
+        (
+            r#"forbid(principal, action == Box::Action::"mcp:call", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            None,
+            vec!["alpha"],
+        ),
+        // The head names an action of another family, so it decides no tool call at all.
+        (
+            r#"forbid(principal, action == Box::Action::"shell:exec", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            None,
+            vec!["alpha"],
+        ),
+        // The head constrains no action.
+        (
+            r#"forbid(principal, action, resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            None,
+            vec!["alpha"],
+        ),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged_engine(
+            &format!("permit(principal, action == Box::Action::\"mcp:call\", resource);\n{rule}\n"),
+            &history.path().join("dogwood.redb"),
+        );
+        if let Some((server, tool, field)) = staged {
+            authority
+                .stage_mcp_schema(server, generated(server, tool, field, "string"))
+                .expect("the healthy server stages");
+        }
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completes"),
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "stderr must name each server whose catalog never arrived, for rule: {rule}"
+        );
+    }
+}
+
+/// A server name that is not a Cedar identifier reaches a rule as a normalized namespace. stderr
+/// must not name such a server once its catalog arrives, although the two spellings differ.
+#[test]
+fn a_staged_server_whose_name_needs_normalizing_is_not_named() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged_engine(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == my_srv::Action::"read", resource)
+unless temporal { formerly within 600s ( other::Action::"fetch"::response{ input.url: _ } ) };
+"#,
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("my-srv", generated("my-srv", "read", "path", "string"))
+        .expect("the hyphenated server stages");
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["other".to_string()],
+        "a staged server must not be named, and the server with no catalog must be"
+    );
 }
 
 /// A pending rule reads one server's tool from history and decides another server's tool. The hold

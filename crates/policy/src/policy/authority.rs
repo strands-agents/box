@@ -15,7 +15,7 @@ use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
-use crate::schema::{ActionIdentity, GovernedBox, mcp_tool_action};
+use crate::schema::{ActionIdentity, GovernedBox, mcp_action_namespace, mcp_tool_action};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
 
@@ -334,8 +334,12 @@ impl Authority {
     /// Every door has drained, so a candidate still pending means its server's `tools/list` was
     /// denied and its schema will never arrive. Rather than fatally refuse the whole box, the still
     /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
-    /// schema-independent subset becomes the final `Ready` authority, and the degraded server
-    /// namespaces are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    /// schema-independent subset becomes the final `Ready` authority, and the servers whose catalog
+    /// never arrived are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    ///
+    /// The tools held and the servers named answer different questions, so they come from different
+    /// scans: a rule decides no call to a tool it only reads from history, and yet it still waits
+    /// for that server's catalog.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -353,13 +357,13 @@ impl Authority {
             .as_ref()
             .map(pending_typed_tools)
             .unwrap_or_default();
-        live.degraded_tools = degraded.clone();
+        live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
-        let servers: BTreeSet<String> = degraded
-            .into_iter()
-            .map(|(namespace, _)| namespace)
-            .collect();
+        let servers = proposal
+            .as_ref()
+            .map(servers_without_a_catalog)
+            .unwrap_or_default();
         Ok(servers.into_iter().collect())
     }
 
@@ -698,6 +702,34 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
         }
     }
     out
+}
+
+/// The namespaces of the servers that a proposal still needs a catalog for: every server a pending
+/// rule names, including through a history reference, less every server whose schema staged. A rule
+/// stays pending until each server it names stages, so what is left is exactly the servers whose
+/// catalog never arrived.
+fn servers_without_a_catalog(proposal: &ProposalState) -> BTreeSet<String> {
+    let staged: BTreeSet<String> = proposal
+        .schemas
+        .keys()
+        .map(|server| mcp_action_namespace(server))
+        .collect();
+    let mut named = BTreeSet::new();
+    for &ordinal in proposal.pending.keys() {
+        if let Some(candidate) = proposal.candidates.get(ordinal) {
+            named.extend(candidate.head_tools.iter().cloned());
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Named,
+                &mut named,
+            );
+        }
+    }
+    named
+        .into_iter()
+        .map(|(namespace, _)| namespace)
+        .filter(|namespace| !staged.contains(namespace))
+        .collect()
 }
 
 /// Whether a scan keeps the tool names that only a `when temporal` history reference spells.

@@ -224,23 +224,19 @@ The engine is then `Ready` for the rest of the run, and every rule that can load
 The refusal on a degraded server is per tool, not per server. Box holds back exactly the tools that
 an inert rule decides, so a call to another tool of the same server is still decided by the rules
 that did load — usually the coarse `mcp:call` permit. A rule that only reads a tool from history
-decides no call to it, so that tool is not held and its own server does not degrade.
+decides no call to it, so that tool is not held.
 
-Two shapes defeat the diagnostic, because Box names a server from the tools the inert rules decide
-and a history reference decides nothing.
+**Which tools are held and which servers are named are different questions, and Box answers them
+separately.** It holds the tools an inert rule decides. It names the servers that rule waits for,
+which is every server the rule mentions — through its head, a condition, or a history reference —
+less the servers whose catalog arrived. A rule waits for each server it names, so what is left is
+exactly the servers whose catalog never came. One rule can therefore hold a tool on one server and
+name a different server, and that is the honest pair: the held tool is the one the rule constrains,
+and the named server is the one to fix.
 
-- **Nothing is named.** When an inert rule's head is the coarse `mcp:call` and the only tool name it
-  spells is a history reference, the set is empty, so stderr reports nothing and the rule ships
-  inert and silent. A rule in that shape decides every tool call, which this per-tool hold cannot
-  express.
-- **The wrong server is named.** When an inert rule decides a tool on a server whose `tools/list`
-  was accepted, and reads a tool on the denied server from history, the set holds only the accepted
-  server. stderr then names the healthy server and leaves out the one that was denied, which points
-  an operator at the wrong server.
-
-A third gap sits beneath both: a tool that the degraded set holds is still callable once its own
-schema staged, because the tool-list check answers before the degraded check. So the inert rule's
-own tool rides the coarse permit after discovery completes.
+One limit remains. A rule that constrains every tool call, because its head is the coarse
+`mcp:call` or it names no action at all, cannot be expressed as a set of tools. stderr names the
+server it waits for, so the operator learns the rule is inert, but no call is held on its behalf.
 
 ## How Box decides a tool call
 
