@@ -360,7 +360,11 @@ jobs:
             echo "::error::Linux startup accepted a missing configuration."
             exit 1
           fi
-          grep -Fq "$RUNNER_TEMP/missing-linux-config.toml" <<< "$output"
+          if ! grep -Fq "$RUNNER_TEMP/missing-linux-config.toml" <<< "$output"; then
+            echo "::error::Linux startup did not reach configuration validation without an opt-in."
+            printf '%s\n' "$output"
+            exit 1
+          fi
           # This named profile permits user namespaces for the disposable test container.
           cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
           abi <abi/4.0>,
