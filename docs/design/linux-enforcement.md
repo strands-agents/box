@@ -117,6 +117,17 @@ It refuses every `pkey_mprotect` request.
 A runtime that compiles code during execution can fail under these restrictions.
 Tool execution from writable files does not remove these memory restrictions.
 
+## Terminal controls
+
+The filter refuses `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` requests through `ioctl`.
+These requests can inject terminal input, paste console selections, or replace the terminal's line discipline.
+The line discipline controls how the kernel processes terminal input.
+The filter compares the low 32 bits of each request, as the kernel does.
+Nonzero upper bits do not bypass the restriction.
+
+Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
+This restriction does not isolate every terminal operation or restore arbitrary terminal settings after workload exit.
+
 ## Network access
 
 With gateway networking enabled, the Linux sandbox has a private network namespace without external routes.

@@ -606,8 +606,8 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         name: "ioctl",
         number: libc::SYS_ioctl,
         disposition: Disposition::ArgumentScoped,
-        reason: "terminal input injection can feed commands to the operator's shell \
-                 through an inherited terminal",
+        reason: "terminal requests can inject input or change the line discipline \
+                 of an inherited terminal",
     },
     MediatedSyscall {
         name: "setuid",
@@ -871,20 +871,22 @@ impl SyscallPolicy {
 }
 
 fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    Ok(vec![
-        SeccompRule::new(vec![
-            // Linux interprets the ioctl request as an unsigned int. Match its low
-            // 32 bits so nonzero upper bits cannot bypass the refusal.
-            SeccompCondition::new(
-                1,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::Eq,
-                u64::from(libc::TIOCSTI as u32),
-            )
-            .map_err(filter_error)?,
-        ])
-        .map_err(filter_error)?,
-    ])
+    [libc::TIOCSTI, libc::TIOCLINUX, libc::TIOCSETD]
+        .into_iter()
+        .map(|request| {
+            SeccompRule::new(vec![
+                // Linux interprets the ioctl request as an unsigned 32-bit integer.
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    u64::from(request as u32),
+                )
+                .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)
+        })
+        .collect()
 }
 
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1536,3 +1538,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod terminal_tests;
