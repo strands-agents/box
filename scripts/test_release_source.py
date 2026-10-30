@@ -151,22 +151,26 @@ class ReleaseSourceTests(unittest.TestCase):
 
 class ReleaseBundleTests(unittest.TestCase):
     def test_published_assets_and_prerelease_state_must_match_the_channel(self):
-        for preview, metadata_preview, linux_asset, success in [
-            (False, False, False, True),
-            (True, True, True, True),
-            (True, False, True, False),
-            (False, True, False, False),
-            (False, False, True, False),
-            (True, True, False, False),
+        for preview, metadata_preview, linux_asset, extra_asset, success in [
+            (False, False, True, False, True),
+            (True, True, True, False, True),
+            (True, False, True, False, False),
+            (False, True, True, False, False),
+            (False, False, False, False, False),
+            (True, True, False, False, False),
+            (False, False, True, True, False),
+            (True, True, True, True, False),
         ]:
             with self.subTest(
-                preview=preview, metadata=metadata_preview, linux=linux_asset
+                preview=preview, metadata=metadata_preview, linux=linux_asset, extra=extra_asset
             ), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
                 names = ["SHA256SUMS.txt", f"box-{tag}-aarch64-apple-darwin.tar.gz"]
                 if linux_asset:
                     names.append(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz")
+                if extra_asset:
+                    names.append(f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz")
                 gh = root / "gh"
                 gh.write_text(
                     '#!/bin/sh\ncase "$*" in\n'
@@ -178,7 +182,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 sleep.write_text("#!/bin/sh\nexit 0\n")
                 sleep.chmod(0o755)
                 result = subprocess.run(
-                    ["bash", "-c", workflow_command("Poll the release for its tag and assets")],
+                    ["bash", "--noprofile", "--norc", "-c", workflow_command("Poll the release for its tag and assets")],
                     cwd=root,
                     env={
                         **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
@@ -228,16 +232,26 @@ class ReleaseBundleTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 release = root / "release"
-                expected = {f"box-{tag}-aarch64-apple-darwin.tar.gz", "SHA256SUMS.txt"}
-                if preview:
-                    expected.add(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz")
+                expected = {
+                    f"box-{tag}-aarch64-apple-darwin.tar.gz",
+                    f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz",
+                    "SHA256SUMS.txt",
+                }
                 self.assertEqual({path.name for path in release.iterdir()}, expected)
                 checksums = (release / "SHA256SUMS.txt").read_text()
-                self.assertEqual(len(checksums.splitlines()), 2 if preview else 1)
+                self.assertEqual(len(checksums.splitlines()), 2)
+                verified = subprocess.run(
+                    ["sha256sum", "--check", "SHA256SUMS.txt"], cwd=release,
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
                 body = (root / "body.md").read_text()
-                self.assertEqual("EXPERIMENTAL_LINUX_SUPPORT=TRUE" in body, preview)
+                self.assertIn("EXPERIMENTAL_LINUX_SUPPORT=TRUE", body)
+                self.assertIn(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz", body)
+                self.assertIn("sha256sum --check box-linux.sha256", body)
+                self.assertEqual("## Linux ARM64" in body, not preview)
                 self.assertEqual("## Experimental Linux preview" in body, preview)
-                # A Linux asset must fail stable inspection, even after collection.
+                # Unqualified architectures must fail inspection in both channels.
                 extra = release / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz"
                 extra.write_bytes(b"unexpected")
                 result = subprocess.run(
