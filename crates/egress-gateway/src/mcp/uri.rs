@@ -28,14 +28,13 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
         return Ok(uri.to_string()); // opaque / custom scheme — never touch
     }
 
-    // Split off `#fragment` then `?query`, kept verbatim (a literal or credential may live there, and
-    // canonicalizing the path must not touch them — mirrors the egress query handling).
-    let (before_fragment, fragment) = match rest.split_once('#') {
-        Some((before, fragment)) => (before, Some(fragment)),
-        None => (rest, None),
-    };
+    // Split off `#fragment`, which drops: RFC 3986 §3.5 separates it before dereference, so it
+    // never reaches the server and names no resource of its own. Then split off `?query`, where an
+    // empty query is no query, so a bare `?` drops with it. A non-empty query stays verbatim,
+    // because a literal or credential may live there — mirrors the egress query handling.
+    let before_fragment = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (hierarchical, query) = match before_fragment.split_once('?') {
-        Some((hierarchical, query)) => (hierarchical, Some(query)),
+        Some((hierarchical, query)) => (hierarchical, (!query.is_empty()).then_some(query)),
         None => (before_fragment, None),
     };
 
@@ -50,8 +49,14 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
         (None, hierarchical)
     } else {
         // An opaque hier-part under a scheme we would otherwise normalize (e.g. `file:etc`); leaving
-        // it verbatim is safer than guessing where a path begins.
-        return Ok(uri.to_string());
+        // it verbatim is safer than guessing where a path begins. The scheme and the delimiters are
+        // not the path, so they fold here as they do above.
+        let mut out = format!("{scheme}:{hierarchical}");
+        if let Some(query) = query {
+            out.push('?');
+            out.push_str(query);
+        }
+        return Ok(out);
     };
 
     // Decode unreserved octets, collapse empty path segments (`//` resolves to `/` on common
@@ -77,8 +82,10 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     // `http:///etc/passwd` invents an empty authority and changes the URI's meaning.
     let has_authority = match authority {
         // Normalize first, unconditionally; decide the local-authority case on the normalized
-        // form, not the raw string. Catches every spelling of "this machine" (case, trailing dot,
-        // percent-encoding, loopback IP literals), not just the one exact string `localhost`.
+        // form, not the raw string. Catches the spellings of "this machine" that normalization
+        // folds (case, trailing dot, percent-encoding, loopback IP literals), not just the one
+        // exact string `localhost`. A spelling normalization leaves alone, such as an empty port
+        // or `[::0001]`, is a residual.
         Some(auth) => {
             let normalized = normalize_authority(auth, &scheme);
             if scheme == "file" && is_local_file_authority(&normalized) {
@@ -106,10 +113,6 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     if let Some(query) = query {
         out.push('?');
         out.push_str(query);
-    }
-    if let Some(fragment) = fragment {
-        out.push('#');
-        out.push_str(fragment);
     }
     Ok(out)
 }
@@ -271,7 +274,7 @@ pub(crate) fn normalize_path(path: &str) -> Result<String, String> {
 #[cfg(test)]
 pub(crate) fn generated_spellings() -> Vec<String> {
     const ALPHABET: &[&str] = &[
-        "%", "2", "5", "e", "E", "3", "6", "7", "f", "g", "/", ".", "a", "é",
+        "%", "2", "5", "e", "E", "3", "6", "7", "f", "g", "/", ".", "a", "é", "#", "?", ":",
     ];
     let mut spellings = vec![String::new()];
     let mut frontier = vec![String::new()];
@@ -334,6 +337,8 @@ mod tests {
             "http://h/",
             "https://%41b.",
             "file:/",
+            "file:",
+            "FILE:",
         ] {
             for spelling in generated_spellings() {
                 if let Ok(once) = super::canonicalize_resource_uri(&format!("{prefix}{spelling}")) {
@@ -489,13 +494,66 @@ mod tests {
         }
     }
 
-    /// The query and fragment ride through untouched; only the path is canonicalized.
+    /// A non-empty query rides through untouched; only the path is canonicalized.
     #[test]
-    fn query_and_fragment_are_preserved() {
+    fn a_non_empty_query_is_preserved() {
         assert_eq!(
-            canonicalize_resource_uri("file:///a/../b?x=%2e#f=%2e"),
-            "file:///b?x=%2e#f=%2e"
+            canonicalize_resource_uri("file:///a/../b?x=%2e"),
+            "file:///b?x=%2e"
         );
+    }
+
+    /// A fragment and an empty query give a resource no second identity.
+    #[test]
+    fn a_fragment_or_an_empty_query_names_no_second_resource() {
+        let canonical = "file:///home/op/project/.env";
+        for uri in [
+            "file:///home/op/project/.env",
+            "file:///home/op/project/.env#",
+            "file:///home/op/project/.env?",
+            "file:///home/op/project/.env?#",
+            "file:///home/op/project/.env#x",
+            "file:///home/op/project/.env#?a=1",
+            "file:/home/op/project/.env#x",
+            "file://localhost/home/op/project/.env?",
+        ] {
+            assert_eq!(canonicalize_resource_uri(uri), canonical, "{uri}");
+        }
+        // A non-empty query still names a different request, so it survives the fold.
+        assert_eq!(
+            canonicalize_resource_uri("https://h/a?b=1#f"),
+            "https://h/a?b=1"
+        );
+        assert_eq!(canonicalize_resource_uri("https://h/a?"), "https://h/a");
+        assert_eq!(canonicalize_resource_uri("https://h/a#"), "https://h/a");
+        // An authority with no path still gains its `/` once the delimiters are gone.
+        assert_eq!(canonicalize_resource_uri("http://h#f"), "http://h/");
+    }
+
+    /// The fold reaches the opaque hier-part too, which returns before the path is canonicalized.
+    #[test]
+    fn an_opaque_hier_part_folds_its_fragment_and_empty_query() {
+        for uri in ["file:etc/passwd#", "file:etc/passwd?", "FILE:etc/passwd#x"] {
+            assert_eq!(
+                canonicalize_resource_uri(uri),
+                "file:etc/passwd",
+                "{uri}: the delimiters drop, and the scheme lowercases as it does elsewhere"
+            );
+        }
+        assert_eq!(
+            canonicalize_resource_uri("file:etc/passwd?a=1"),
+            "file:etc/passwd?a=1",
+            "a non-empty query is still not the path, and still rides through"
+        );
+    }
+
+    /// The forwarded frame carries the same identity the decision used.
+    #[test]
+    fn the_forwarded_frame_loses_the_fragment_the_decision_dropped() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///home/op/.env#x"}}"#;
+        let rewritten = canonicalize_frame_uri(raw.as_bytes()).expect("the uri is rewritten");
+        let parsed: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(parsed["params"]["uri"], "file:///home/op/.env");
     }
 
     /// The frame rewrite replaces only `params.uri`, and leaves a uri-free frame byte-identical.

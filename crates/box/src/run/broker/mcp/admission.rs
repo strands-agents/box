@@ -814,6 +814,41 @@ mod tests {
         );
     }
 
+    /// An **exact** uri `forbid` holds when the workload appends one delimiter the server resolves
+    /// away.
+    #[test]
+    fn an_appended_delimiter_cannot_dodge_an_exact_uri_forbid() {
+        let guards_env = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "file:///home/op/.env" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            "file:///home/op/.env",
+            "file:///home/op/.env#",
+            "file:///home/op/.env?",
+            "file:///home/op/.env#x",
+            "file:///home/op/.env?#",
+        ] {
+            assert!(
+                call(&guards_env, &read(spelling)).is_err(),
+                "an appended delimiter must not dodge the forbid: {spelling}"
+            );
+        }
+        assert_eq!(
+            call(&guards_env, &read("file:///home/op/.env.example")).expect("permitted"),
+            Some("file:///home/op/.env.example".to_string()),
+            "a sibling the forbid does not name still reads"
+        );
+    }
+
     /// **A `notifications/` frame carrying an `id` is decided, not waved through.**
     ///
     /// The prefix is admitted undecided because a notification gets no reply, so the client learns
