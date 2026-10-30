@@ -8,6 +8,7 @@ fn request() -> Args {
     Args {
         config: "/containment-unit-absent-config".into(),
         config_fd: None,
+        container_lifetime_fd: None,
         config_sha256: [0; 32],
         target_env_json: "{}".into(),
         setup_status_fd: None,

@@ -8,7 +8,7 @@ use seccompiler::{
 };
 
 use crate::error::ContainmentError;
-use crate::model::Network;
+use crate::model::{BackendOverride, Network};
 
 use super::MECHANISM;
 
@@ -760,30 +760,57 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     },
 ];
 
-/// The two filters for one containment request.
+/// The filters for one containment request.
 #[derive(Debug)]
 pub(crate) struct SyscallFilters {
     pub(crate) permit: BpfProgram,
+    pub(crate) unavailable_copy_operations: BpfProgram,
     pub(crate) restrictions: BpfProgram,
 }
 
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
-pub(crate) struct SyscallPolicy;
+pub(crate) struct SyscallPolicy {
+    container: bool,
+}
 
 impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
-        Self
+        Self { container: false }
     }
 
-    /// Compile both filters before containment starts.
+    /// Select the permits for the chosen backend.
+    pub(crate) fn with_backend(mut self, backend: &BackendOverride) -> Self {
+        self.container = matches!(backend, BackendOverride::LinuxContainer);
+        self
+    }
+
+    /// Compile every filter before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
-        let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        let mut permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        if self.container {
+            add_container_permits(&mut permit_rules)?;
+        }
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
             SeccompAction::Allow,
+        )?;
+
+        // These optimizations remain refused. ENOSYS lets libc/libuv use their
+        // ordinary read/write fallback, which remains subject to the same view
+        // and descriptor rules. Returning EPERM instead aborts supported copies.
+        // Install this after the permit filter: equal-priority ERRNO decisions
+        // use the most recently installed filter's errno. The final restriction
+        // filter then forbids further seccomp installation as before.
+        let unavailable_copy_operations = compile_filter(
+            [libc::SYS_sendfile, libc::SYS_copy_file_range]
+                .into_iter()
+                .map(|number| (number, Vec::new()))
+                .collect(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::ENOSYS as u32),
         )?;
 
         let mut rules: BTreeMap<libc::c_long, Vec<SeccompRule>> = BTreeMap::new();
@@ -806,6 +833,7 @@ impl SyscallPolicy {
 
         Ok(SyscallFilters {
             permit,
+            unavailable_copy_operations,
             restrictions,
         })
     }
@@ -933,6 +961,55 @@ fn build_permit_rules(
         ));
     }
     Ok(rules)
+}
+
+fn add_container_permits(
+    rules: &mut BTreeMap<libc::c_long, Vec<SeccompRule>>,
+) -> Result<(), ContainmentError> {
+    // The mount view already bounds ordinary renameat. Its no-replace variant
+    // preserves that reach while adding an atomic collision check. Do not admit
+    // exchange, whiteout, or unknown renameat2 modes through this permit.
+    insert_permitted_scoped(
+        rules,
+        "renameat2",
+        libc::SYS_renameat2,
+        vec![
+            SeccompRule::new(vec![
+                SeccompCondition::new(
+                    4,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Eq,
+                    u64::from(libc::RENAME_NOREPLACE),
+                )
+                .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)?,
+        ],
+    )?;
+    // Like the existing tgkill permit, child termination cannot cross the PID
+    // namespace. Preserve PID 1 and refuse namespace-wide broadcast by name.
+    insert_permitted_scoped(
+        rules,
+        "kill",
+        libc::SYS_kill,
+        vec![
+            SeccompRule::new(vec![
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 0)
+                    .map_err(filter_error)?,
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 1)
+                    .map_err(filter_error)?,
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    u32::MAX as u64,
+                )
+                .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)?,
+        ],
+    )?;
+    Ok(())
 }
 
 fn insert_permitted_scoped(

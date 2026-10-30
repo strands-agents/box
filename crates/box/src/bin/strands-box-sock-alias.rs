@@ -74,13 +74,61 @@ fn main() -> ExitCode {
 /// Close every descriptor above stdio before doing anything else.
 #[cfg(unix)]
 fn close_inherited_descriptors() -> io::Result<()> {
-    let maximum = unsafe { libc::getdtablesize() };
-    if maximum < 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        // The limit is a ceiling, not the number of open descriptors. Container
+        // limits can exceed a billion; sweeping that range delays every shell
+        // invocation. Close the complete range, including descriptors above a
+        // subsequently lowered limit, before creating the async runtime.
+        // SAFETY: flags zero closes only this process's non-stdio descriptors.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(error);
+        }
+        close_proc_descriptors()
     }
-    for descriptor in (libc::STDERR_FILENO + 1)..maximum {
-        // SAFETY: close only receives a descriptor number. EBADF means the
-        // descriptor was already closed, which is the desired state.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let maximum = unsafe { libc::getdtablesize() };
+        if maximum < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for descriptor in (libc::STDERR_FILENO + 1)..maximum {
+            // SAFETY: close only receives a descriptor number. EBADF means the
+            // descriptor was already closed, which is the desired state.
+            if unsafe { libc::close(descriptor) } == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EBADF) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn close_proc_descriptors() -> io::Result<()> {
+    // This runs before any threads exist. Finish enumeration (and close its
+    // directory descriptor) before closing the snapshot. No new descriptors
+    // are opened in the loop; an already-closed entry is harmless.
+    let descriptors = std::fs::read_dir("/proc/self/fd")?
+        .map(|entry| {
+            entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+                .ok_or_else(|| io::Error::other("invalid proc descriptor entry"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    for descriptor in descriptors
+        .into_iter()
+        .filter(|fd| *fd > libc::STDERR_FILENO)
+    {
+        // SAFETY: each number came from this process's descriptor directory.
         if unsafe { libc::close(descriptor) } == -1 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::EBADF) {
@@ -468,6 +516,58 @@ mod tests {
     // REMOVED: `the_python_alias_names_match_the_layouts`.
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn both_linux_cleanup_paths_close_descriptors_above_a_lowered_limit() {
+        for cleanup in [close_inherited_descriptors, close_proc_descriptors] {
+            // SAFETY: the child owns all mutations and exits without returning.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0);
+            if child == 0 {
+                use std::os::fd::AsRawFd;
+                let file = std::fs::File::open("/dev/null").unwrap();
+                // SAFETY: duplicate an owned descriptor, then lower only this child's soft limit.
+                unsafe {
+                    let high = libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 128);
+                    if high < 128 {
+                        libc::_exit(10);
+                    }
+                    let mut limit: libc::rlimit = std::mem::zeroed();
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                        libc::_exit(11);
+                    }
+                    limit.rlim_cur = 64;
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        libc::_exit(12);
+                    }
+                    if cleanup().is_err() {
+                        libc::_exit(13);
+                    }
+                    if libc::fcntl(high, libc::F_GETFD) != -1
+                        || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+                    {
+                        libc::_exit(14);
+                    }
+                    for stdio in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+                        if libc::fcntl(stdio, libc::F_GETFD) == -1 {
+                            libc::_exit(15);
+                        }
+                    }
+                    libc::_exit(0);
+                }
+            }
+            let mut status = 0;
+            // SAFETY: wait only for the child created above.
+            assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+            assert!(libc::WIFEXITED(status));
+            assert_eq!(
+                libc::WEXITSTATUS(status),
+                0,
+                "non-stdio descriptors must all close"
+            );
+        }
+    }
 
     /// **The alias names no harness, and it reads no vendor variable.** `TRACEPARENT` and
     /// `TRACESTATE` are the only two names this image knows, because every harness spells those the

@@ -768,6 +768,8 @@ pub enum BackendOverride {
     /// No backend-specific overrides — use each backend's defaults.
     #[default]
     None,
+    /// Linux launcher started as the sole process in a private container PID namespace.
+    LinuxContainer,
     /// macOS Seatbelt backend.
     Seatbelt {
         /// Whether Seatbelt extension tokens are enabled.

@@ -159,6 +159,10 @@ Two properties of that table carry the design:
   `context.input.server`. The command's program names the executable alias, so the
   two values are not interchangeable.
 
+Linux ARM64 can opt into `experimental-features.container-agent` for an agent
+launched in its own container PID namespace. See the [container agent guide](../../docs/user/container-agent.md)
+for its prerequisites and refusal conditions. This mode does not support hosted tools or MCP servers.
+
 ## Policy
 
 A Dogwood file — conventionally `.dw` — over fixed Box actions and generated MCP tool actions.

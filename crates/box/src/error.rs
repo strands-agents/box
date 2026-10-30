@@ -201,6 +201,10 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
+    #[error(
+        "container-agent requires Linux ARM64, one agent, and no hosted tool or MCP declarations"
+    )]
+    ContainerAgentConfiguration,
     #[cfg(target_os = "linux")]
     #[error("Linux support is experimental. Set EXPERIMENTAL_LINUX_SUPPORT=TRUE to enable it.")]
     ExperimentalLinuxSupport,

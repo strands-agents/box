@@ -90,6 +90,8 @@ Production use still requires further review and tests for those failures.
 
 Configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 Any explicit process override requires record version 23.
+Selecting [container agent mode](container-agent.md) requires version 24, regardless
+of the native filesystem policy setting.
 Older binaries refuse unsupported versions rather than silently losing the selection.
 
 To disable the experiment, change the global setting to `false`.

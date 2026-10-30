@@ -1,6 +1,7 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
+mod container;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
@@ -57,7 +58,7 @@ impl ContainmentBackend for NamespaceBackend {
         // A wrong-mechanism override is a caller error, not a hint: it names a
         // backend whose semantics this one does not implement.
         match config.backend_override() {
-            BackendOverride::None => {}
+            BackendOverride::None | BackendOverride::LinuxContainer => {}
             other => {
                 return Err(ContainmentError::UnsupportedCapability {
                     capability: format!("backend override {other:?}"),
@@ -143,7 +144,9 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Same for the filter: a request whose filter will not compile must fail
         // here, not after the mount view is live.
-        syscall::SyscallPolicy::for_config(config.network()).compile()?;
+        syscall::SyscallPolicy::for_config(config.network())
+            .with_backend(config.backend_override())
+            .compile()?;
 
         Ok(())
     }
@@ -161,8 +164,13 @@ impl ContainmentBackend for NamespaceBackend {
         require_no_configured_devices(config)?;
 
         // Build the plan and compile both filters before anything irreversible.
+        if matches!(config.backend_override(), &BackendOverride::LinuxContainer) {
+            container::require_private_init()?;
+        }
         let view = view::MountView::plan(config)?;
-        let filters = syscall::SyscallPolicy::for_config(config.network()).compile()?;
+        let filters = syscall::SyscallPolicy::for_config(config.network())
+            .with_backend(config.backend_override())
+            .compile()?;
 
         // --- From here every step is irreversible for this process.
 
@@ -213,7 +221,11 @@ impl ContainmentBackend for NamespaceBackend {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
-        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        if matches!(config.backend_override(), &BackendOverride::LinuxContainer) {
+            run_reaper(&view, &keep, confirm_fd, config.container_lifetime_fd())?;
+        } else {
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        }
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -284,6 +296,11 @@ fn is_device_mode(mode: libc::mode_t) -> bool {
 fn install_syscall_filters(filters: &syscall::SyscallFilters) -> Result<(), ContainmentError> {
     seccompiler::apply_filter(&filters.permit).map_err(|source| {
         apply_failure(format!("installing the namespace permit filter: {source}"))
+    })?;
+    seccompiler::apply_filter(&filters.unavailable_copy_operations).map_err(|source| {
+        apply_failure(format!(
+            "installing unavailable copy operations filter: {source}"
+        ))
     })?;
     seccompiler::apply_filter(&filters.restrictions).map_err(|source| {
         apply_failure(format!(
@@ -463,6 +480,15 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(127) };
     }
     drop(reaper_control);
+    run_reaper(view, keep, confirm_fd, None)
+}
+
+fn run_reaper(
+    view: &view::MountView,
+    keep: &[libc::c_int],
+    confirm_fd: Option<std::os::fd::RawFd>,
+    lifetime_fd: Option<std::os::fd::RawFd>,
+) -> Result<(), ContainmentError> {
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
@@ -482,7 +508,9 @@ fn establish_pid_namespace_and_reaper(
 
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
-    if let Err(error) = authority::close_inherited_descriptors(keep) {
+    let mut reaper_keep = keep.to_vec();
+    reaper_keep.extend(lifetime_fd);
+    if let Err(error) = authority::close_inherited_descriptors(&reaper_keep) {
         eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
         // SAFETY: as above.
         unsafe { libc::_exit(127) };
@@ -513,12 +541,20 @@ fn establish_pid_namespace_and_reaper(
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
-        let code = reaper::supervise(workload);
+        let code = if let Some(descriptor) = lifetime_fd {
+            reaper::supervise_container(workload, descriptor)
+        } else {
+            reaper::supervise(workload)
+        };
         // SAFETY: terminating namespace PID 1.
         unsafe { libc::_exit(code) };
     }
 
     // The workload process — the only one that returns `Ok`.
+    if let Some(descriptor) = lifetime_fd {
+        // SAFETY: only the reaper retains the supervisor channel.
+        unsafe { libc::close(descriptor) };
+    }
     Ok(())
 }
 
@@ -1304,6 +1340,190 @@ mod tests {
             "the probe child must exit normally rather than be signalled"
         );
         libc::WEXITSTATUS(status)
+    }
+
+    #[test]
+    fn ordinary_namespace_keeps_container_compatibility_calls_refused() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        let exit = in_filtered_child(&filters, || {
+            // SAFETY: invalid descriptors and empty paths cannot change files.
+            let rename = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    -1,
+                    c"".as_ptr(),
+                    -1,
+                    c"".as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if rename != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+                return 1;
+            }
+            // SAFETY: the invalid descriptor cannot receive data.
+            let receive =
+                unsafe { libc::syscall(libc::SYS_recvmsg, -1, 0, libc::MSG_CMSG_CLOEXEC) };
+            if receive != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+            {
+                return 3;
+            }
+            // SAFETY: signal zero never delivers a signal.
+            if unsafe { libc::kill(libc::getpid(), 0) } != -1
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+            {
+                return 2;
+            }
+            0
+        });
+        assert_eq!(
+            exit, 0,
+            "ordinary namespaces must retain their original refusal"
+        );
+    }
+
+    #[test]
+    fn optimized_copy_calls_remain_unavailable_for_read_write_fallbacks() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        let exit = in_filtered_child(&filters, || {
+            // Invalid descriptors would produce EBADF if either call reached
+            // the kernel. Both must instead remain denied with ENOSYS.
+            for number in [libc::SYS_sendfile, libc::SYS_copy_file_range] {
+                // SAFETY: all descriptor arguments are invalid; pointer and
+                // length arguments are zero and never dereferenced.
+                let result = unsafe { libc::syscall(number, -1, 0, -1, 0, 0, 0) };
+                if result != -1
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
+                {
+                    return 1;
+                }
+            }
+            0
+        });
+        assert_eq!(exit, 0, "copy optimizations must not execute");
+    }
+
+    #[test]
+    fn no_replace_rename_preserves_collisions_and_refuses_other_modes() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        std::fs::write(&source, b"new").expect("source");
+        let source_c = std::ffi::CString::new(source.as_os_str().as_encoded_bytes()).unwrap();
+        let target_c = std::ffi::CString::new(target.as_os_str().as_encoded_bytes()).unwrap();
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .with_backend(&BackendOverride::LinuxContainer)
+            .compile()
+            .unwrap();
+        let exit = in_filtered_child(&filters, || {
+            let rename = |flags: u32| {
+                // SAFETY: both path buffers remain live and NUL-terminated.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        libc::AT_FDCWD,
+                        source_c.as_ptr(),
+                        libc::AT_FDCWD,
+                        target_c.as_ptr(),
+                        flags,
+                    )
+                }
+            };
+            for flags in [
+                0,
+                libc::RENAME_EXCHANGE,
+                libc::RENAME_WHITEOUT,
+                libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE,
+                u32::MAX,
+            ] {
+                if rename(flags) != -1
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                {
+                    return 1;
+                }
+            }
+            if rename(libc::RENAME_NOREPLACE) != 0 {
+                return 2;
+            }
+            if std::fs::write(&source, b"collision").is_err() {
+                return 3;
+            }
+            if rename(libc::RENAME_NOREPLACE) != -1
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+            {
+                return 4;
+            }
+            0
+        });
+        assert_eq!(exit, 0, "only no-replace publication may run");
+        assert_eq!(std::fs::read(target).unwrap(), b"new");
+        assert_eq!(std::fs::read(source).unwrap(), b"collision");
+    }
+
+    #[test]
+    fn container_receive_cannot_import_descriptors() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .with_backend(&BackendOverride::LinuxContainer)
+            .compile()
+            .unwrap();
+        let exit = in_filtered_child(&filters, || {
+            for flags in [0, libc::MSG_CMSG_CLOEXEC] {
+                // SAFETY: an invalid descriptor cannot receive a message.
+                if unsafe { libc::recvmsg(-1, std::ptr::null_mut(), flags) } != -1
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                {
+                    return 1;
+                }
+            }
+            0
+        });
+        assert_eq!(exit, 0, "CLOEXEC must not bypass descriptor import refusal");
+    }
+
+    #[test]
+    fn child_termination_does_not_admit_init_or_broadcast_targets() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .with_backend(&BackendOverride::LinuxContainer)
+            .compile()
+            .unwrap();
+        let exit = in_filtered_child(&filters, || {
+            for target in [0, 1, -1] {
+                // SAFETY: signal zero never delivers a signal, even on a filter regression.
+                if unsafe { libc::kill(target, 0) } != -1
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                {
+                    return 1;
+                }
+            }
+            // SAFETY: this probe owns and waits on the forked child.
+            let child = unsafe { libc::fork() };
+            if child < 0 {
+                return 2;
+            }
+            if child == 0 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                // SAFETY: terminate without returning into the test harness.
+                unsafe { libc::_exit(4) };
+            }
+            // SAFETY: signal and wait concern only this probe's child.
+            unsafe {
+                if libc::kill(child, libc::SIGTERM) != 0 {
+                    return 3;
+                }
+                let mut status = 0;
+                if libc::waitpid(child, &mut status, 0) != child
+                    || !libc::WIFSIGNALED(status)
+                    || libc::WTERMSIG(status) != libc::SIGTERM
+                {
+                    return 4;
+                }
+            }
+            0
+        });
+        assert_eq!(exit, 0, "owned child termination must still work");
     }
 
     #[test]

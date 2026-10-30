@@ -22,6 +22,8 @@ type Result<T> = std::result::Result<T, ContainmentError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainmentConfig {
+    #[serde(skip)]
+    container_lifetime_fd: Option<std::os::fd::RawFd>,
     paths: Vec<PathGrant>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
@@ -80,6 +82,7 @@ impl ContainmentConfig {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            container_lifetime_fd: None,
             paths: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
@@ -93,6 +96,18 @@ impl ContainmentConfig {
             broad_exec: false,
             runtime_services: false,
         }
+    }
+
+    /// Attach a borrowed supervisor channel that the container reaper keeps outside the workload.
+    #[must_use]
+    pub fn with_container_lifetime_fd(mut self, descriptor: std::os::fd::RawFd) -> Self {
+        self.container_lifetime_fd = Some(descriptor);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn container_lifetime_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.container_lifetime_fd
     }
 
     /// State the home this caller resolved its `~/`-relative grants against, as an absolute path.

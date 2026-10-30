@@ -197,6 +197,7 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
+    container_socket: Option<PathBuf>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
@@ -278,6 +279,14 @@ impl Boundary {
         let stored = site.stored;
         let attachment = site.attachment;
         let table = launch.table;
+        let container_socket = if stored.experimental_features.container_agent {
+            if table != "[agent]" {
+                return Err(ConfigError::ContainerAgentConfiguration.into());
+            }
+            Some(layout.root().join("private/container.sock"))
+        } else {
+            None
+        };
 
         let operator_home = crate::record::layout::operator_home_directory()?;
         let declared_home = spec.env.get("HOME").map(PathBuf::from);
@@ -660,6 +669,10 @@ impl Boundary {
 
         // The digest covers the exact bytes written, so the trampoline verifies what this process
         // produced rather than whatever is at the path by the time it reads.
+        if container_socket.is_some() {
+            containment =
+                containment.with_backend_override(containment::BackendOverride::LinuxContainer);
+        }
         let config_json = containment.to_json()?;
         let containment_digest = Sha256::digest(config_json.as_bytes())
             .iter()
@@ -688,6 +701,7 @@ impl Boundary {
             native_filesystem_policy: spec
                 .native_filesystem_policy
                 .unwrap_or(site.stored.experimental_features.native_filesystem_policy),
+            container_socket,
             working_directory,
             executable: executable_path,
             program_identity,
@@ -743,6 +757,10 @@ impl Boundary {
         file.seek(std::io::SeekFrom::Start(0))
             .expect("the config descriptor rewinds");
         text
+    }
+
+    pub(crate) fn container_socket(&self) -> Option<&Path> {
+        self.container_socket.as_deref()
     }
 
     pub(crate) fn containment_digest(&self) -> &str {

@@ -3,6 +3,72 @@
 /// The exit status a caller should use when the workload was signalled.
 const SIGNAL_EXIT_BASE: i32 = 128;
 
+pub(super) fn supervise_container(workload: libc::pid_t, descriptor: libc::c_int) -> i32 {
+    WORKLOAD_PID.store(workload, std::sync::atomic::Ordering::Relaxed);
+    install_forwarding_handlers();
+    loop {
+        let mut status = 0;
+        // SAFETY: the reaper waits only on its own children.
+        let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if reaped == workload {
+            let code: i32 = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                SIGNAL_EXIT_BASE + libc::WTERMSIG(status)
+            } else {
+                125
+            };
+            let bytes = code.to_be_bytes();
+            // SAFETY: the channel and four-byte buffer remain valid.
+            unsafe {
+                libc::send(
+                    descriptor,
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            return code;
+        }
+        if reaped < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return 125;
+        }
+        let mut poll = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll receives one initialized pollfd.
+        let result = unsafe { libc::poll(&mut poll, 1, 50) };
+        if result < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return 125;
+        }
+        if result > 0 {
+            let mut signal = 0_u8;
+            // SAFETY: the buffer holds one byte.
+            let read = unsafe {
+                libc::recv(
+                    descriptor,
+                    (&mut signal as *mut u8).cast(),
+                    1,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if read != 1 {
+                return 125;
+            }
+            if ![libc::SIGTERM as u8, libc::SIGINT as u8].contains(&signal) {
+                return 125;
+            }
+            // SAFETY: the PID names the contained child.
+            unsafe { libc::kill(workload, i32::from(signal)) };
+        }
+    }
+}
+
 /// Arm termination with the launcher before acknowledging readiness.
 pub(super) fn arm_parent_death(control: &std::os::unix::net::UnixStream) -> bool {
     // SAFETY: prctl takes scalar arguments for the parent-death signal.

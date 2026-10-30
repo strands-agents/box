@@ -80,7 +80,7 @@ The file carries nine keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
+| `[experimental-features]` | table | Optional native filesystem policy checks and container agent mode. Disabled by default. |
 
 The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
@@ -120,6 +120,10 @@ The default is `false`. Unknown feature names are errors.
 Signed macOS releases include the adapter, but leave it disabled until you select it.
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
+
+The Linux ARM64 `container-agent = true` setting selects a container-provided PID
+namespace for the agent. See [container agent mode](container-agent.md) for the
+required process, procfs, and installer boundaries. It refuses hosted tools and MCP servers.
 
 ## `[agent]` and `[tool.<name>]`
 

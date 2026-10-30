@@ -12,6 +12,8 @@ use std::process::ExitCode;
 // The parsed-args layer is pure and platform-independent, so it lives outside any
 // `cfg` gate and is unit-tested on every target.
 mod args;
+#[cfg(target_os = "linux")]
+mod container_transport;
 use args::Args;
 
 #[cfg(all(test, target_os = "linux"))]
@@ -42,6 +44,16 @@ fn main() -> ExitCode {
     std::hint::black_box(&EXECUTABLE_IDENTITY_MARKER);
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    if let Some(result) = container_transport::dispatch(&raw) {
+        return match result {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("container launch: {error}");
+                ExitCode::from(125)
+            }
+        };
+    }
     let args = match Args::parse(raw.iter().cloned()) {
         Ok(a) => a,
         Err(args::ParseError::HelpRequested) => {
@@ -84,6 +96,7 @@ fn run(args: &Args) -> ExitCode {
         args.relay_control_fd,
         args.config_fd,
         args.launch_gate_fd,
+        args.container_lifetime_fd,
     ]
     .into_iter()
     .flatten()
@@ -237,13 +250,26 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
             format_args!("config is not valid UTF-8: {error}"),
         )
     })?;
-    let config = ContainmentConfig::from_json(config_json).map_err(|error| {
+    let mut config = ContainmentConfig::from_json(config_json).map_err(|error| {
         setup_status.fail(
             SetupStage::ConfigValidation,
             2,
             format_args!("cannot load config: {error}"),
         )
     })?;
+    if let Some(descriptor) = args.container_lifetime_fd {
+        if !matches!(
+            config.backend_override(),
+            containment::BackendOverride::LinuxContainer
+        ) {
+            return Err(setup_status.fail(
+                SetupStage::ConfigValidation,
+                2,
+                format_args!("container lifetime requires the container backend"),
+            ));
+        }
+        config = config.with_container_lifetime_fd(descriptor);
+    }
     disclose_warnings(&config, &mut std::io::stderr());
 
     // Detection, backend selection, refusal, and apply are one unskippable operation.
@@ -571,6 +597,7 @@ mod tests {
         Args {
             config: path.to_owned(),
             config_fd: None,
+            container_lifetime_fd: None,
             config_sha256: [0; 32],
             target_env_json: "{}".into(),
             setup_status_fd: None,
@@ -778,6 +805,7 @@ mod tests {
         std::fs::write(&path, expected).expect("write config");
         let args = Args {
             launch_gate_fd: None,
+            container_lifetime_fd: None,
             config: path.clone(),
             config_fd: None,
             config_sha256: [0; 32],
@@ -804,6 +832,7 @@ mod tests {
         std::fs::write(&path, b"replacement").expect("replacement config");
         let args = Args {
             launch_gate_fd: None,
+            container_lifetime_fd: None,
             config: path.clone(),
             config_fd: Some(descriptor),
             config_sha256: [0; 32],

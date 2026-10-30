@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub(super) struct Args {
     /// Private channel that holds the workload until its parent completes launch setup.
     pub(super) launch_gate_fd: Option<i32>,
+    pub(super) container_lifetime_fd: Option<i32>,
     /// Path to serialized [`containment::ContainmentConfig`] JSON.
     pub(super) config: PathBuf,
     /// Optional inherited descriptor for the serialized config.
@@ -40,6 +41,7 @@ impl Args {
     /// Parse an argv iterator (already skipping `argv[0]`).
     pub(super) fn parse(argv: impl IntoIterator<Item = String>) -> Result<Self, ParseError> {
         let mut launch_gate_fd = None;
+        let mut container_lifetime_fd = None;
         let mut config = None;
         let mut config_fd = None;
         let mut config_sha256 = None;
@@ -57,6 +59,22 @@ impl Args {
                     break;
                 }
                 "--help" | "-h" => return Err(ParseError::HelpRequested),
+                "--container-lifetime-fd" => {
+                    let value = take_value(&mut argv, "--container-lifetime-fd")?;
+                    let descriptor = value.parse::<i32>().map_err(|_| {
+                        ParseError::Invalid("invalid container lifetime descriptor".into())
+                    })?;
+                    if descriptor <= 2 {
+                        return Err(ParseError::Invalid(
+                            "container lifetime must not use standard streams".into(),
+                        ));
+                    }
+                    set_once(
+                        &mut container_lifetime_fd,
+                        descriptor,
+                        "--container-lifetime-fd",
+                    )?;
+                }
                 "--config" => {
                     set_once(
                         &mut config,
@@ -153,6 +171,7 @@ impl Args {
             .ok_or_else(|| ParseError::Invalid("--target-env-json is required".to_string()))?;
         Ok(Args {
             launch_gate_fd,
+            container_lifetime_fd,
             config,
             config_fd,
             config_sha256,

@@ -576,18 +576,21 @@ pub(crate) const RECORD_VERSION: u32 = 21;
 /// Version 22 prevents older builds from resuming a box without its selected enforcement.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
+const CONTAINER_RECORD_VERSION: u32 = 24;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct ExperimentalFeatures {
     #[serde(default)]
+    pub(crate) container_agent: bool,
+    #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy
+        !self.native_filesystem_policy && !self.container_agent
     }
 
     fn record_version(&self) -> u32 {
@@ -617,6 +620,9 @@ fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
 ) -> u32 {
+    if features.container_agent {
+        return CONTAINER_RECORD_VERSION;
+    }
     if specs
         .into_iter()
         .any(|spec| spec.native_filesystem_policy.is_some())
@@ -853,6 +859,7 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            CONTAINER_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1172,6 +1179,14 @@ impl ConfigFile {
     /// Reject a config no run could honor, before anything is stored.
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
+        if self.experimental_features.container_agent
+            && (!cfg!(all(target_os = "linux", target_arch = "aarch64"))
+                || self.agent.is_none()
+                || !self.tool.is_empty()
+                || !self.mcp.is_empty())
+        {
+            return Err(ConfigError::ContainerAgentConfiguration);
+        }
         BoxName::parse(&self.name)?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
@@ -1913,7 +1928,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, CONTAINER_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

@@ -443,3 +443,23 @@ policy decision covers.
 
 For the request path, read [Policy](policy.md). For the three binaries and where each one runs, read
 [Binaries](binaries.md).
+
+## Linux container agent boundary
+
+The optional [container agent mode](../user/container-agent.md) uses the runtime-provided
+private PID namespace and its masked procfs. The launcher checks its initial PID,
+UID, capabilities, process count, and thread count before creating the other
+namespaces. The trusted Box supervisor stays outside that namespace. A private
+Unix socket admits one same-UID peer, at most eight descriptors, and a launch
+frame of at most 64 KiB. The socket is removed before the workload starts.
+
+The PID 1 reaper owns the lifetime connection and exits if the supervisor is
+lost. The kernel then terminates the namespace. The workload retains the static
+seccomp restrictions and receives no descriptor-import permission. Container mode
+adds no-replace rename and namespace-bounded signal operations as specified in
+the guide. This mode depends on the installer providing an isolated container;
+it does not make a shared PID namespace safe.
+
+Both Linux backends return `ENOSYS` for `sendfile` and `copy_file_range`. These
+calls remain blocked. The result lets libraries use their ordinary read/write
+copy path, which is still subject to the same filesystem and syscall boundary.

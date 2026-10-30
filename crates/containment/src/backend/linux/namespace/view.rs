@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::config::ContainmentConfig;
 use crate::error::ContainmentError;
-use crate::model::{ObjectIdentity, ObjectPin, Operation, Scope};
+use crate::model::{BackendOverride, ObjectIdentity, ObjectPin, Operation, Scope};
 
 use super::MECHANISM;
 use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
@@ -103,11 +103,16 @@ impl MountView {
         // A fresh `/proc` is what makes the PID namespace visible as isolation rather than merely
         // present: without it the workload reads the host's procfs and sees every process on the
         // machine.
+        let container = matches!(config.backend_override(), BackendOverride::LinuxContainer);
         entries.push(MountEntry {
-            source: None,
+            source: container.then(|| PathBuf::from("/proc")),
             target: PathBuf::from("/proc"),
-            kind: MountKind::Fresh { fstype: "proc" },
-            writable: true,
+            kind: if container {
+                MountKind::Bind
+            } else {
+                MountKind::Fresh { fstype: "proc" }
+            },
+            writable: !container,
             executable: false,
             origin: MountOrigin::Scaffold,
         });

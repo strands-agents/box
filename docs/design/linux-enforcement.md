@@ -26,7 +26,9 @@ flowchart LR
 
 The user namespace maps the surrounding OS identity to the workload identity.
 The mount namespace holds the restricted filesystem view.
-The process namespace gives the workload its own process identifiers and a fresh `/proc`.
+The default backend creates a private process namespace and a fresh `/proc`.
+The opt-in [container agent backend](../user/container-agent.md) uses the container's
+private process namespace and preserves its masked `/proc` as a read-only bind.
 Separate namespaces also isolate system identity and interprocess communication.
 The [network exception](#network-access) changes only the network namespace choice.
 
