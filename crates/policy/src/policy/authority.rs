@@ -459,19 +459,18 @@ impl Authority {
         }
     }
 
-    /// Whether a tool call names a degraded typed action — one whose server's `tools/list` was
-    /// denied so its schema never staged. Such a call is denied fail-closed at the per-tool
-    /// gate, so it cannot ride the coarse allow with its argument constraint unenforceable. A
-    /// poisoned lock fails closed (degraded).
-    pub(super) fn is_tool_degraded(&self, identity: &ActionIdentity) -> bool {
+    /// The refusal a tool in `degraded_tools` takes before any rule is consulted, or `None` when
+    /// the tool is not in that set.
+    pub(super) fn degraded_refusal(&self, identity: &ActionIdentity) -> Option<Decision> {
         let ActionIdentity::McpTool { namespace, tool } = identity else {
-            return false;
+            return None;
         };
         match self.live.lock() {
             Ok(live) => live
                 .degraded_tools
-                .contains(&(namespace.clone(), tool.clone())),
-            Err(_) => true,
+                .contains(&(namespace.clone(), tool.clone()))
+                .then(Decision::no_match),
+            Err(_) => Some(Decision::internal_fault()),
         }
     }
 

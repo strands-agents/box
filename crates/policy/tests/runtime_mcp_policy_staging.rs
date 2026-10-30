@@ -258,6 +258,66 @@ permit(principal, action == alpha::Action::"write", resource);
     );
 }
 
+/// A server that declares a tool but names its arguments differently from the operator's rule
+/// leaves that rule unable to stage, so the tool degrades while the committed schema still
+/// declares its action. The refinement must still deny the call. The coarse `mcp:call` permit
+/// gives an unruled tool its allow, and that allow must not reach a degraded tool.
+#[test]
+fn a_degraded_tool_whose_action_is_declared_is_denied_through_the_refinement() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "renamed.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+forbid(principal, action == alpha::Action::"deploy", resource)
+when { context.input.env == "prod" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    // The server declares `deploy`, so the committed schema names the action, but it calls the
+    // property `target`, so the `env` forbid cannot stage.
+    assert_eq!(
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "deploy", "target", "string"))
+            .expect("the renamed schema is not a terminal fault"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        },
+        "the forbid cannot stage against the renamed property, so the bundle stays incomplete"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["alpha".to_string()],
+        "the tool whose rule never staged degrades its server"
+    );
+
+    let decision = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "deploy",
+        &json!({"env": "prod"}),
+    );
+    // Not merely "not allowed": the refusal is terminal, not the transient hold a pending tool
+    // takes, because no later schema can make this rule enforceable.
+    assert!(
+        matches!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the refinement must deny a degraded tool whose action the schema declares: {decision:?}"
+    );
+}
+
 #[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient
