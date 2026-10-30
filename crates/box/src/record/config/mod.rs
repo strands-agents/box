@@ -454,6 +454,7 @@ impl RunContract {
                         .iter()
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
+                    &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 box_id: root.box_id().to_string(),
@@ -576,6 +577,8 @@ pub(crate) const RECORD_VERSION: u32 = 21;
 /// Version 22 prevents older builds from resuming a box without its selected enforcement.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
+/// Version 24 adds `alias` to a stdio MCP server, and a record holds it only when a server sets one.
+const MCP_ALIAS_RECORD_VERSION: u32 = 24;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,8 +619,16 @@ impl ExperimentalFeatures {
 fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
+    servers: &[mcp::McpServer],
 ) -> u32 {
-    if specs
+    if servers.iter().any(|server| {
+        server
+            .alias
+            .as_deref()
+            .is_some_and(|alias| alias != server.program())
+    }) {
+        MCP_ALIAS_RECORD_VERSION
+    } else if specs
         .into_iter()
         .any(|spec| spec.native_filesystem_policy.is_some())
     {
@@ -853,6 +864,7 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            MCP_ALIAS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -873,6 +885,7 @@ impl Record {
                 .iter()
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
+            &record.mcp,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1913,7 +1926,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MCP_ALIAS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2594,6 +2607,116 @@ env = {}
                 .into_request(&root)
                 .map(|request| request.record)
         })
+    }
+
+    /// The record's text from `version` through the end of its `[[mcp]]` tables, with the
+    /// per-run box identity and directory removed.
+    fn mcp_record_text(record: &Record) -> String {
+        record
+            .to_toml()
+            .expect("the record serializes")
+            .lines()
+            .filter(|line| !line.starts_with("box_id") && !line.starts_with("box_dir"))
+            .filter(|line| !line.starts_with("policy ="))
+            .take_while(|line| !line.starts_with("[contained_mcp"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A configuration without `alias` stores the record it stored before the key existed.
+    #[test]
+    fn a_configuration_without_an_alias_stores_an_unchanged_record() {
+        let record = record_from_config(
+            "[mcp.fetch]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\", \"--stdio\"]\n\
+             [mcp.issues]\ntype = \"stdio\"\ncommand = [\"issues-mcp\"]\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(record.version, RECORD_VERSION);
+        assert_eq!(
+            mcp_record_text(&record),
+            "version = 21\nname = \"codex\"\n\n[[mcp]]\nname = \"fetch\"\n\
+             command = [\n    \"mcp-server-fetch\",\n    \"--stdio\",\n]\n\n[[mcp]]\n\
+             name = \"issues\"\ncommand = [\"issues-mcp\"]\n"
+        );
+    }
+
+    /// An alias selects version 24 whatever the filesystem policy selection is.
+    #[test]
+    fn an_alias_selects_its_record_version_over_every_other_selection() {
+        let aliased = [mcp::McpServer {
+            name: "github".to_string(),
+            alias: Some("github-mcp".to_string()),
+            command: vec!["npx".to_string()],
+        }];
+        let mut overridden = agent(&["/bin/true"]);
+        overridden.native_filesystem_policy = Some(true);
+        let enabled = ExperimentalFeatures {
+            native_filesystem_policy: true,
+        };
+        for features in [ExperimentalFeatures::default(), enabled] {
+            assert_eq!(
+                process_record_version(&features, std::iter::once(&overridden), &aliased),
+                MCP_ALIAS_RECORD_VERSION
+            );
+            assert_eq!(
+                process_record_version(&features, std::iter::empty(), &aliased),
+                MCP_ALIAS_RECORD_VERSION
+            );
+        }
+        assert_eq!(
+            process_record_version(&ExperimentalFeatures::default(), std::iter::empty(), &[]),
+            RECORD_VERSION
+        );
+    }
+
+    /// An alias equal to its program changes nothing, so the record is the one without it.
+    #[test]
+    fn an_alias_equal_to_its_program_stores_the_record_without_it() {
+        let record = record_from_config(
+            "[mcp.fetch]\ntype = \"stdio\"\nalias = \"mcp-server-fetch\"\n\
+             command = [\"mcp-server-fetch\", \"--stdio\"]\n\
+             [mcp.issues]\ntype = \"stdio\"\ncommand = [\"issues-mcp\"]\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(record.version, RECORD_VERSION);
+        assert_eq!(record.mcp[0].alias, None);
+        let same = [mcp::McpServer {
+            name: "fetch".to_string(),
+            alias: Some("npx".to_string()),
+            command: vec!["npx".to_string()],
+        }];
+        assert_eq!(
+            process_record_version(&ExperimentalFeatures::default(), std::iter::empty(), &same),
+            RECORD_VERSION
+        );
+    }
+
+    /// A configuration with an alias stores it, under the record version that carries it.
+    #[test]
+    fn a_configuration_with_an_alias_stores_it_under_its_own_record_version() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"stdio\"\nalias = \"github-mcp\"\ncommand = [\"npx\"]\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(record.version, MCP_ALIAS_RECORD_VERSION);
+        assert_eq!(record.mcp[0].alias.as_deref(), Some("github-mcp"));
+        let text = record.to_toml().expect("the record serializes");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).expect("the record reads back"),
+            record
+        );
+
+        let mut stale = record.clone();
+        stale.version = RECORD_VERSION;
+        let refusal = Record::parse(
+            &stale.to_toml().expect("the record serializes"),
+            Path::new("record.toml"),
+        )
+        .expect_err("an alias under an older version is refused");
+        assert!(
+            matches!(refusal, ConfigError::RecordVersion { .. }),
+            "{refusal}"
+        );
     }
 
     /// A name shared between `[egress.foo]` and `[mcp.foo] type = "http"` is not a collision: the two

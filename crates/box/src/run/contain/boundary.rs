@@ -1329,18 +1329,22 @@ mod tests {
             let mcp = vec![
                 McpServer {
                     name: "alpha".to_string(),
+                    alias: None,
                     command: vec!["alpha-mcp".to_string()],
                 },
                 McpServer {
                     name: "beta".to_string(),
+                    alias: None,
                     command: vec!["beta-mcp".to_string()],
                 },
                 McpServer {
                     name: "memory".to_string(),
+                    alias: None,
                     command: vec!["node".to_string()],
                 },
                 McpServer {
                     name: "github-local".to_string(),
+                    alias: None,
                     command: vec!["github-mcp-server".to_string()],
                 },
             ];
@@ -4188,6 +4192,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
         let server = McpServer {
             name: "gamma".to_string(),
+            alias: None,
             command: vec!["gamma-mcp".to_string()],
         };
         let alias = fixture

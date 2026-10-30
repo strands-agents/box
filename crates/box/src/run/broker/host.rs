@@ -1741,6 +1741,7 @@ done"#;
         .expect("MCP schema generates");
         let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
             name: "test-mcp".to_string(),
+            alias: None,
             command,
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
@@ -3033,6 +3034,7 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"PrivateSearch","inp
 while test ! -e "$1"; do sleep 0.01; done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
                 name: "test-mcp".to_string(),
+                alias: None,
                 command: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
@@ -3339,6 +3341,7 @@ done"#,
             );
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
                 name: "test-mcp".to_string(),
+                alias: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string(), script],
             }]);
             let database = tempfile::tempdir().expect("policy database");
@@ -3491,6 +3494,7 @@ esac
 done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
                 name: "test-mcp".to_string(),
+                alias: None,
                 command: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),

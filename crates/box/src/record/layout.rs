@@ -96,7 +96,7 @@ const ALIAS_STAMP_FILE: &str = "alias-image.stamp";
 pub(crate) const ALIAS_IMAGE_FILE: &str = ".alias-image";
 
 /// Where a replacement image is written before it is renamed over [`ALIAS_IMAGE_FILE`].
-const ALIAS_IMAGE_PENDING_FILE: &str = ".alias-image.pending";
+pub(crate) const ALIAS_IMAGE_PENDING_FILE: &str = ".alias-image.pending";
 
 /// The lock that serializes `configure` against itself and against `start`.
 const LOCK_FILE: &str = ".lock";
@@ -525,7 +525,7 @@ impl BoxRoot {
             .collect()
     }
 
-    /// Every Python alias path, one per name a harness might resolve.
+    /// Every MCP alias path, one per declared stdio server.
     pub(crate) fn mcp_aliases(
         &self,
         servers: &[crate::record::config::mcp::McpServer],
@@ -533,7 +533,7 @@ impl BoxRoot {
         let directory = self.bin_directory();
         servers
             .iter()
-            .map(|server| directory.join(server.program()))
+            .map(|server| directory.join(server.alias_name()))
             .collect()
     }
 

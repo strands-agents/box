@@ -65,7 +65,8 @@ only Box program inside the box, and it has no power of its own: it can't open t
 can't serve requests.
 
 `strands-box` puts the alias in the box directory's `bin/` under the names `zsh`, `bash`, `sh`,
-`python3`, and `python`, plus the program name of each MCP server the box declares. `bin/`
+`python3`, and `python`, plus one name for each MCP server the box declares: its `alias`, or its
+program when it has no `alias`. `bin/`
 comes first on the agent's `PATH`, so when the harness runs `zsh`, it gets the alias. The sandbox for a
 tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter or MCP server the
 request is for. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the
@@ -89,7 +90,7 @@ protocol code, and the broker refuses a request with a different protocol versio
 |---|---|---|---|
 | `strands-box` | Outside every box, as the box's trusted process | The operator, as `box run` | The whole run |
 | `strands-box-contain-trampoline` | Outside the box, until it contains itself and becomes its target | `strands-box`, once for each contained process | Until it becomes its target |
-| `strands-box-sock-alias` | Inside the box | The workload, as `zsh`, `bash`, `sh`, `python3`, `python`, or an MCP program name | One shell or Python command, or one MCP connection |
+| `strands-box-sock-alias` | Inside the box | The workload, as `zsh`, `bash`, `sh`, `python3`, `python`, or an MCP server's alias name | One shell or Python command, or one MCP connection |
 
 ```mermaid
 flowchart TD

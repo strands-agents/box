@@ -188,7 +188,7 @@ Every route the workload has ends at the same engine:
 flowchart TD
     subgraph agentbox["the agent's sandbox"]
         agent["agent"]
-        alias["alias, as zsh, bash, sh, python3, python, or an MCP program name"]
+        alias["alias, as zsh, bash, sh, python3, python, or an MCP alias name"]
     end
     subgraph trusted["the box's trusted process, strands-box run"]
         broker["broker"]

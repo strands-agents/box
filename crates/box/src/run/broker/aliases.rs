@@ -14,7 +14,7 @@ use crate::record::layout::{ALIAS_IMAGE_FILE, BoxRoot};
 use crate::run::lock::Lock;
 
 /// The installed image's filename, which must sit beside the box executable.
-const ALIAS_IMAGE_NAME: &str = "strands-box-sock-alias";
+pub(crate) const ALIAS_IMAGE_NAME: &str = "strands-box-sock-alias";
 
 /// Place one alias per conventional shell name in the box's `bin/`.
 ///
@@ -227,6 +227,7 @@ mod tests {
     fn declared(name: &str) -> crate::record::config::mcp::McpServer {
         crate::record::config::mcp::McpServer {
             name: name.to_string(),
+            alias: None,
             command: vec![name.to_string()],
         }
     }
@@ -413,6 +414,30 @@ mod tests {
         for alias in layout.shell_aliases() {
             assert!(alias.exists(), "{} stays", alias.display());
         }
+    }
+
+    /// **A server with `alias` is placed under that name, and its program gets no alias.**
+    #[test]
+    fn an_aliased_server_is_placed_under_its_alias_and_not_its_program() {
+        let (layout, owner, installed, _home) = fixture(b"image one");
+        let servers = ["github", "filesystem"].map(|name| crate::record::config::mcp::McpServer {
+            name: name.to_string(),
+            alias: Some(format!("{name}-mcp")),
+            command: vec!["npx".to_string(), "-y".to_string()],
+        });
+        materialize_from(&layout, &servers, &installed, &owner).expect("the aliases are placed");
+
+        let bin = layout.bin_directory();
+        assert!(bin.join("github-mcp").is_file());
+        assert!(bin.join("filesystem-mcp").is_file());
+        assert!(
+            !bin.join("npx").exists(),
+            "the agent's own `npx` must not be shadowed by a server alias"
+        );
+        assert_eq!(
+            layout.mcp_aliases(&servers),
+            [bin.join("github-mcp"), bin.join("filesystem-mcp")]
+        );
     }
 
     #[test]

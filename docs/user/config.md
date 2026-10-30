@@ -386,7 +386,8 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | Key | Type | Meaning |
 |---|---|---|
 | `type` | string | `stdio` or `http`. |
-| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/`; the rest are its arguments, fixed here. |
+| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/` unless `alias` is set; the rest are its arguments, fixed here. |
+| `alias` | string | For `stdio`: the name of the server's alias in the box's `bin/`, which the harness runs. It defaults to the program. Two servers that start through one launcher, such as `npx`, each need one. `http` entries refuse this field. |
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |

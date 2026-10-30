@@ -18,7 +18,7 @@ pub(crate) fn admit_server<'a>(
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "no MCP server declares the program {alias:?} in box.toml, so the box placed no \
+                "no MCP server declares the alias {alias:?} in box.toml, so the box placed no \
                  alias for it"
             ),
         )
@@ -167,10 +167,12 @@ mod tests {
         let servers = vec![
             McpServer {
                 name: "issues-mcp".to_string(),
+                alias: None,
                 command: vec!["issues-mcp".to_string()],
             },
             McpServer {
                 name: "aws-mcp".to_string(),
+                alias: None,
                 command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
             },
         ];
@@ -257,7 +259,7 @@ mod tests {
                 .expect_err("a program the file does not declare must be refused")
                 .to_string();
             assert!(
-                refusal.contains("no MCP server declares the program"),
+                refusal.contains("no MCP server declares the alias"),
                 "{undeclared:?} must be refused as undeclared: {refusal}"
             );
         }

@@ -8,8 +8,8 @@
 //! `run` process starts the program an entry names outside containment.
 //!
 //! Two namespaces answer different questions. `name` is the policy identity a rule reads as
-//! `context.input.server`. `program` is what the harness executes, so the alias in `bin/` carries
-//! it. A client can execute `uvx` while the policy identifies the server as `aws-mcp`.
+//! `context.input.server`. The alias is what the harness executes: `alias` when the entry sets it,
+//! and `program` otherwise. A client can execute `uvx` while the policy identifies the server as `aws-mcp`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -26,8 +26,8 @@ use crate::record::config::process::{ContainedMcp, Filesystem, NetworkConfig, Pr
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum McpEntry {
-    /// A local MCP server. Element 0 of `command` is the program and names the alias in `bin/`;
-    /// the rest are its arguments, fixed here so the agent cannot choose them.
+    /// A local MCP server. Element 0 of `command` is the program, and it names the alias in `bin/`
+    /// when `alias` is absent; the rest are its arguments, fixed here so the agent cannot choose them.
     ///
     /// Every stdio server is contained — that is not optional. The grant fields below are the
     /// server's reach; an entry that declares none runs on the leaf baseline alone (its command's
@@ -41,6 +41,9 @@ pub(crate) enum McpEntry {
             skip_serializing_if = "Option::is_none"
         )]
         native_filesystem_policy: Option<bool>,
+        /// The name of the server's alias in `bin/`, when it is not the program's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
         /// What to start.
         command: Vec<String>,
         /// The initial working directory.
@@ -81,21 +84,30 @@ pub(crate) struct HttpMcp {
 
 /// One declared server, with the name the operator keyed it under folded in. Identity only: a
 /// server's containment, if any, is carried beside this in `Record::contained_mcp` so this type
-/// stays what a rule matches — a name and a program — and every consumer of it is unchanged.
+/// stays what a rule matches (a name, an alias, and a program), and every consumer of it is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServer {
     /// What this server is called: the name a rule reads as `context.input.server`.
     pub(crate) name: String,
 
-    /// What to start. Element 0 names the alias in `bin/`.
+    /// The name of the server's alias in `bin/`, when it is not the program's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) alias: Option<String>,
+
+    /// What to start.
     pub(crate) command: Vec<String>,
 }
 
 impl McpServer {
-    /// The program to start, which is the name its alias takes in `bin/`.
+    /// The program to start.
     pub(crate) fn program(&self) -> &str {
         self.command.first().map_or("", String::as_str)
+    }
+
+    /// The name its alias takes in `bin/`.
+    pub(crate) fn alias_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or_else(|| self.program())
     }
 
     /// Its arguments, fixed by the operator's file.
@@ -116,6 +128,7 @@ pub(crate) fn contained_specs(
         .filter_map(|(name, entry)| match entry {
             McpEntry::Stdio {
                 native_filesystem_policy,
+                alias: _,
                 command,
                 workspace,
                 env,
@@ -148,8 +161,9 @@ pub(crate) fn partition(
     let mut http = Vec::new();
     for (name, entry) in entries {
         match entry {
-            McpEntry::Stdio { command, .. } => stdio.push(McpServer {
+            McpEntry::Stdio { alias, command, .. } => stdio.push(McpServer {
                 name: name.clone(),
+                alias: alias.clone(),
                 command: command.clone(),
             }),
             McpEntry::Http {
@@ -163,6 +177,11 @@ pub(crate) fn partition(
         }
     }
     validate_authored(&stdio)?;
+    for server in &mut stdio {
+        if server.alias.as_deref() == Some(server.program()) {
+            server.alias = None;
+        }
+    }
     Ok((stdio, http))
 }
 
@@ -173,9 +192,9 @@ pub(crate) fn from_entries(
     Ok(partition(entries)?.0)
 }
 
-/// The server an alias selects, keyed by the program the alias is named for.
-pub(crate) fn for_alias<'a>(servers: &'a [McpServer], program: &str) -> Option<&'a McpServer> {
-    servers.iter().find(|server| server.program() == program)
+/// The server an alias selects, keyed by the name the alias takes.
+pub(crate) fn for_alias<'a>(servers: &'a [McpServer], alias: &str) -> Option<&'a McpServer> {
+    servers.iter().find(|server| server.alias_name() == alias)
 }
 
 /// Refuse a declared server set no run could honor.
@@ -183,7 +202,8 @@ pub(crate) fn validate_authored(servers: &[McpServer]) -> Result<(), ConfigError
     // Two namespaces, two sets. One shared set would let a `name` collide with an unrelated
     // `program`.
     let mut names = BTreeSet::new();
-    let mut programs = BTreeSet::new();
+    let mut aliases = BTreeMap::new();
+    let mut folded = BTreeMap::new();
     for server in servers {
         let refuse = |reason: String| {
             Err(ConfigError::Mcp {
@@ -197,8 +217,22 @@ pub(crate) fn validate_authored(servers: &[McpServer]) -> Result<(), ConfigError
         if !names.insert(server.name.as_str()) {
             return refuse(SHARED_NAME.to_string());
         }
-        if !programs.insert(server.program()) {
-            return refuse(SHARED_PROGRAM.to_string());
+        let is_program = server.alias.is_none();
+        let mut collision = aliases.insert(server.alias_name(), is_program);
+        // A case-insensitive volume finds `bin/NPX` for `npx`, so an alias collides in any case.
+        if let Some(earlier_is_program) =
+            folded.insert(server.alias_name().to_lowercase(), is_program)
+            && !(is_program && earlier_is_program)
+        {
+            collision = collision.or(Some(earlier_is_program));
+        }
+        if let Some(earlier_is_program) = collision {
+            let reason = match (server.alias.is_some(), earlier_is_program) {
+                (true, _) => SHARED_ALIAS,
+                (false, true) => SHARED_PROGRAM,
+                (false, false) => PROGRAM_TAKEN_BY_ALIAS,
+            };
+            return refuse(reason.to_string());
         }
     }
     Ok(())
@@ -210,7 +244,17 @@ const SHARED_NAME: &str = "two entries share this `name`; one name is one identi
 
 /// Why two entries may not share one `program`.
 const SHARED_PROGRAM: &str = "two entries share this `program`; the alias is named for the program, \
-                              so both would want one path in `bin/` and only one could be placed";
+                              so both would want one path in `bin/` and only one could be placed; \
+                              set `alias` on the entries to let them share one program";
+
+/// Why an entry without `alias` may not have a program that another entry's `alias` takes.
+const PROGRAM_TAKEN_BY_ALIAS: &str = "this entry sets no `alias`, so its alias is named for its \
+                                      `program`, and another entry's `alias` already takes that \
+                                      name; set `alias` on this entry to name its alias apart";
+
+/// Why an entry's `alias` may not take a name another entry's alias already takes.
+const SHARED_ALIAS: &str = "another entry's `alias` or `program` already takes this `alias`; each \
+                            alias is one path in `bin/`, and only one could be placed";
 
 /// Why the box cannot represent `server` on its own terms, or `None` when it can.
 fn unrepresentable(server: &McpServer) -> Option<String> {
@@ -232,35 +276,93 @@ fn unrepresentable(server: &McpServer) -> Option<String> {
              may hold only letters, digits, '.', '_', and '-'"
         ));
     }
-    // `program` becomes a filename in `bin/`, so the filename rules follow it rather than `name`.
-    if let Some(character) = server
-        .program()
+    match &server.alias {
+        None => unplaceable("program", server.program()),
+        Some(alias) if alias.is_empty() => reason("`alias` is empty, so no alias could be placed"),
+        Some(alias) => unstartable(server.program()).or_else(|| unplaceable("alias", alias)),
+    }
+}
+
+/// The names the box keeps in `bin/` for its own alias image.
+const RESERVED_BIN_NAMES: [&str; 3] = [
+    crate::run::broker::aliases::ALIAS_IMAGE_NAME,
+    crate::record::layout::ALIAS_IMAGE_FILE,
+    crate::record::layout::ALIAS_IMAGE_PENDING_FILE,
+];
+
+/// Why `program`, on an entry whose `alias` names its alias, is refused, or `None` when it is not.
+fn unstartable(program: &str) -> Option<String> {
+    if let Some(character) = program
         .chars()
         .find(|character| !crate::record::config::nameable(*character))
     {
         return Some(format!(
-            "`program` contains {character:?}; it becomes a filename on the agent's PATH, so it \
+            "`program` contains {character:?}; a server's program may hold only letters, digits, \
+             '.', '_', and '-', with or without `alias`"
+        ));
+    }
+    if program == "." || program == ".." {
+        return Some(
+            "`program` is `.` or `..`, which names a directory rather than a program".to_string(),
+        );
+    }
+    if crate::run::broker::protocol::SHELL_ALIAS_NAMES.contains(&program)
+        || crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(&program)
+    {
+        return Some(
+            "`program` is one of the box's interpreter names; the box does not yet admit an \
+             interpreter as an MCP server's program, with or without `alias`"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Why `value`, the entry's `key`, cannot be a filename in `bin/`, or `None` when it can.
+fn unplaceable(key: &str, value: &str) -> Option<String> {
+    if let Some(character) = value
+        .chars()
+        .find(|character| !crate::record::config::nameable(*character))
+    {
+        return Some(format!(
+            "`{key}` contains {character:?}; it becomes a filename on the agent's PATH, so it \
              may hold only letters, digits, '.', '_', and '-'"
         ));
     }
     // `.` and `..` pass the character set and are not filenames. Each already exists in `bin/`, so
     // the failure used to arrive later as "link the Shell alias: File exists".
-    if server.program() == "." || server.program() == ".." {
-        return reason(
-            "`program` is `.` or `..`, which names a directory rather than a program; the alias \
-             for it could not be placed",
-        );
+    if value == "." || value == ".." {
+        return Some(format!(
+            "`{key}` is `.` or `..`, which names a directory rather than a program; the alias \
+             for it could not be placed"
+        ));
+    }
+    // An alias is compared without case, because a case-insensitive volume finds `bin/Zsh` for
+    // `zsh`. A program keeps its exact comparison.
+    let taken = |names: &[&str]| {
+        names.iter().any(|name| {
+            if key == "alias" {
+                name.eq_ignore_ascii_case(value)
+            } else {
+                *name == value
+            }
+        })
+    };
+    if key == "alias" && taken(&RESERVED_BIN_NAMES) {
+        return Some(format!(
+            "`alias` is {value:?}, a name the box reserves in `bin/` for its own alias image"
+        ));
     }
     // The alias image picks the interpreter from `argv[0]`, so a program called `zsh` gets
     // `bin/zsh` routed to the Shell.
-    if crate::run::broker::protocol::SHELL_ALIAS_NAMES.contains(&server.program())
-        || crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(&server.program())
+    if taken(&crate::run::broker::protocol::SHELL_ALIAS_NAMES)
+        || taken(&crate::run::broker::protocol::PYTHON_ALIAS_NAMES)
     {
-        return reason(
-            "`program` is one of the box's own interpreter aliases; the alias image selects the \
+        return Some(format!(
+            "`{key}` is one of the box's own interpreter aliases; the alias image selects the \
              interpreter from its own name, so this server would be routed to the shell or the \
-             Python runtime and could never be reached",
-        );
+             Python runtime and could never be reached"
+        ));
     }
     None
 }
@@ -351,6 +453,286 @@ mod tests {
         assert!(
             text.contains("program"),
             "the refusal must name the colliding key, got: {text}"
+        );
+    }
+
+    /// Two servers that share one launcher each take their own alias, and each alias selects its own
+    /// server, while the launcher itself selects none.
+    #[test]
+    fn two_servers_sharing_npx_load_through_their_aliases() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "github"
+            alias = "github-mcp"
+            command = ["npx", "-y", "@modelcontextprotocol/server-github"]
+
+            [[server]]
+            name = "filesystem"
+            alias = "filesystem-mcp"
+            command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv"]
+            "#,
+        )
+        .expect("two servers with their own aliases may share a program");
+
+        let github = for_alias(&file, "github-mcp").expect("the alias selects its server");
+        assert_eq!(github.name, "github");
+        assert_eq!(
+            github.program(),
+            "npx",
+            "the server still starts from `command`"
+        );
+        assert_eq!(
+            github.arguments(),
+            ["-y", "@modelcontextprotocol/server-github"]
+        );
+        let filesystem = for_alias(&file, "filesystem-mcp").expect("the alias selects its server");
+        assert_eq!(filesystem.name, "filesystem");
+        assert_eq!(filesystem.program(), "npx");
+        assert!(
+            for_alias(&file, "npx").is_none(),
+            "a server with an alias places no alias for its program, so the agent's own `npx` \
+             selects nothing"
+        );
+    }
+
+    /// A server with an alias may share its program with a server that has none, because only the
+    /// server without one is named for the program.
+    #[test]
+    fn an_aliased_server_shares_its_program_with_an_unaliased_one() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "plain"
+            command = ["uvx", "plain-mcp"]
+
+            [[server]]
+            name = "named"
+            alias = "named-mcp"
+            command = ["uvx", "named-mcp"]
+            "#,
+        )
+        .expect("one program alias and one named alias do not collide");
+        assert_eq!(
+            for_alias(&file, "uvx").expect("program alias").name,
+            "plain"
+        );
+        assert_eq!(
+            for_alias(&file, "named-mcp").expect("named alias").name,
+            "named"
+        );
+    }
+
+    /// An alias that another server's alias or program already takes wants the same path in `bin/`.
+    #[test]
+    fn an_alias_that_collides_with_another_alias_or_program_is_refused() {
+        for (first, second, reason) in [
+            (
+                "alias = \"shared\"\ncommand = [\"npx\"]",
+                "alias = \"shared\"\ncommand = [\"uvx\"]",
+                SHARED_ALIAS,
+            ),
+            (
+                "command = [\"shared\"]",
+                "alias = \"shared\"\ncommand = [\"npx\"]",
+                SHARED_ALIAS,
+            ),
+            (
+                "alias = \"shared\"\ncommand = [\"npx\"]",
+                "command = [\"shared\"]",
+                PROGRAM_TAKEN_BY_ALIAS,
+            ),
+        ] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"one\"\n{first}\n[[server]]\nname = \"two\"\n{second}\n"
+            ))
+            .expect_err("two servers cannot share one alias path");
+            let text = error.to_string();
+            assert!(
+                text.contains("\"two\"") && text.contains(reason),
+                "the refusal names the second server and why: {text}"
+            );
+        }
+    }
+
+    /// Two servers without an alias that share a program keep the program refusal.
+    #[test]
+    fn two_unaliased_servers_sharing_a_program_keep_the_program_refusal() {
+        let error = parse(
+            "[[server]]\nname = \"one\"\ncommand = [\"npx\"]\n\
+             [[server]]\nname = \"two\"\ncommand = [\"npx\"]\n",
+        )
+        .expect_err("two servers cannot share one program alias");
+        let text = error.to_string();
+        assert!(text.contains(SHARED_PROGRAM), "{text}");
+        assert!(
+            text.contains("set `alias`"),
+            "the refusal names the key that lets servers share a program: {text}"
+        );
+    }
+
+    /// A name the box keeps in `bin/` for itself is refused as an alias, in any case.
+    #[test]
+    fn a_reserved_bin_name_is_refused_as_an_alias() {
+        for reserved in [
+            "strands-box-sock-alias",
+            ".alias-image",
+            ".alias-image.pending",
+            "Strands-Box-Sock-Alias",
+            ".Alias-Image",
+        ] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"x\"\nalias = {reserved:?}\ncommand = [\"npx\"]"
+            ))
+            .expect_err("a reserved name is refused");
+            assert!(
+                error.to_string().contains("reserves"),
+                "{reserved:?} must be refused as reserved: {error}"
+            );
+        }
+    }
+
+    /// An alias is compared without case, because a case-insensitive volume finds `bin/NPX` for
+    /// `npx`.
+    #[test]
+    fn an_alias_is_compared_without_case() {
+        let error = parse(
+            "[[server]]\nname = \"one\"\ncommand = [\"npx\"]\n\
+             [[server]]\nname = \"two\"\nalias = \"NPX\"\ncommand = [\"uvx\"]\n",
+        )
+        .expect_err("`NPX` and `npx` are one path on a case-insensitive volume");
+        assert!(error.to_string().contains(SHARED_ALIAS), "{error}");
+
+        let error = parse(
+            "[[server]]\nname = \"one\"\nalias = \"Github-MCP\"\ncommand = [\"npx\"]\n\
+             [[server]]\nname = \"two\"\ncommand = [\"github-mcp\"]\n",
+        )
+        .expect_err("a program that differs from an alias only in case is refused");
+        assert!(
+            error.to_string().contains(PROGRAM_TAKEN_BY_ALIAS),
+            "{error}"
+        );
+
+        for taken in ["Python3", "ZSH", "Sh"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"x\"\nalias = {taken:?}\ncommand = [\"npx\"]"
+            ))
+            .expect_err("an interpreter name in another case is refused");
+            assert!(
+                error.to_string().contains("interpreter aliases"),
+                "{taken:?}: {error}"
+            );
+        }
+    }
+
+    /// The program of a server with an alias names no file in `bin/`, so its refusal says no such
+    /// thing.
+    #[test]
+    fn an_aliased_servers_program_refusal_does_not_name_the_path() {
+        let error = parse("[[server]]\nname = \"x\"\nalias = \"x-mcp\"\ncommand = [\"a b\"]")
+            .expect_err("the program character set stands");
+        let text = error.to_string();
+        assert!(text.contains("`program` contains"), "{text}");
+        assert!(!text.contains("agent's PATH"), "{text}");
+    }
+
+    /// An alias outside the rules is refused through the `[mcp.<name>]` tables, as `box.toml` holds them.
+    #[test]
+    fn a_table_alias_outside_the_rules_is_refused_through_partition() {
+        for alias in ["zsh", "", "a/b"] {
+            let map = entries(&format!(
+                "[mcp.github]\ntype = \"stdio\"\nalias = {alias:?}\ncommand = [\"npx\"]"
+            ));
+            let error = partition(&map).err().expect("the alias is refused");
+            let text = error.to_string();
+            assert!(
+                text.contains("\"github\"") && text.contains("`alias`"),
+                "{alias:?}: {text}"
+            );
+        }
+    }
+
+    /// An alias becomes a filename on the agent's PATH, so it takes the program's character set.
+    #[test]
+    fn an_alias_outside_the_character_set_is_refused() {
+        for alias in ["has space", "a/b", "tab\t", "sémantic", "", ".", ".."] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"x\"\nalias = {alias:?}\ncommand = [\"npx\"]"
+            ))
+            .expect_err("an alias that cannot be a filename is refused");
+            assert!(
+                error.to_string().contains("`alias`"),
+                "{alias:?} must be refused by key: {error}"
+            );
+        }
+    }
+
+    /// An alias named for an interpreter would be routed to the shell or Monty.
+    #[test]
+    fn an_alias_that_collides_with_an_interpreter_alias_is_refused() {
+        for taken in ["zsh", "bash", "sh", "python3", "python"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"x\"\nalias = {taken:?}\ncommand = [\"npx\"]"
+            ))
+            .expect_err("an interpreter alias name must be refused");
+            let text = error.to_string();
+            assert!(
+                text.contains("`alias`") && text.contains("interpreter aliases"),
+                "{taken:?} must be refused for colliding with an alias: {text}"
+            );
+        }
+    }
+
+    /// An alias does not lift the refusal of an interpreter as the program.
+    #[test]
+    fn an_alias_does_not_admit_an_interpreter_program() {
+        let error = parse(
+            "[[server]]\nname = \"x\"\nalias = \"x-mcp\"\ncommand = [\"python3\", \"-m\", \"x\"]",
+        )
+        .expect_err("the program rule stands");
+        let text = error.to_string();
+        assert!(
+            text.contains("does not yet admit an interpreter as an MCP server's program"),
+            "{text}"
+        );
+        assert!(!text.contains("could never be reached"), "{text}");
+    }
+
+    /// The alias is a stdio key: an http table refuses it as unknown.
+    #[test]
+    fn an_http_entry_refuses_an_alias() {
+        let error = entry(
+            "[mcp.github]\ntype = \"http\"\nalias = \"github-mcp\"\n\
+             destinations = [\"api.githubcopilot.com\"]",
+        )
+        .expect_err("an http server has no alias");
+        assert!(error.to_string().contains("alias"), "{error}");
+    }
+
+    /// A stdio entry carries its alias into the record, and an entry without one carries none.
+    #[test]
+    fn a_stdio_alias_reaches_the_server_record() {
+        let map = entries(
+            "[mcp.github]\ntype = \"stdio\"\nalias = \"github-mcp\"\ncommand = [\"npx\"]\n\
+             [mcp.fetch]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]",
+        );
+        let (servers, _) = partition(&map).expect("the tables load");
+        let github = servers
+            .iter()
+            .find(|server| server.name == "github")
+            .unwrap();
+        assert_eq!(github.alias.as_deref(), Some("github-mcp"));
+        assert_eq!(github.alias_name(), "github-mcp");
+        let fetch = servers
+            .iter()
+            .find(|server| server.name == "fetch")
+            .unwrap();
+        assert_eq!(fetch.alias, None);
+        assert_eq!(fetch.alias_name(), "mcp-server-fetch");
+        assert_eq!(
+            contained_specs(&map)["github"].spec.command,
+            ["npx"],
+            "the leaf starts from `command`, not from the alias"
         );
     }
 
@@ -474,6 +856,7 @@ mod tests {
             parsed,
             McpEntry::Stdio {
                 native_filesystem_policy: None,
+                alias: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,
                 env: BTreeMap::new(),

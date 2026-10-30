@@ -821,6 +821,7 @@ mod tests {
     async fn discovery_timeout_stops_and_reaps_the_server_before_returning() {
         let admitted = McpServer {
             name: "silent-server".to_string(),
+            alias: None,
             command: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
@@ -909,6 +910,7 @@ done
         );
         let admitted = McpServer {
             name: "fake".to_string(),
+            alias: None,
             command,
         };
         let page_bytes = pages
@@ -942,6 +944,7 @@ done
     async fn non_reading_server() -> (RunningMcpServer, tokio::process::ChildStdout) {
         let admitted = McpServer {
             name: "non-reading-server".to_string(),
+            alias: None,
             command: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
@@ -980,6 +983,7 @@ done
     async fn running_over_cat() -> RunningMcpServer {
         let admitted = McpServer {
             name: "echo-server".to_string(),
+            alias: None,
             command: vec!["cat".to_string()],
         };
         let (running, _stdout) =
@@ -997,6 +1001,7 @@ done
         ] {
             let admitted = McpServer {
                 name: "frame-boundary".to_string(),
+                alias: None,
                 command: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
@@ -1031,6 +1036,7 @@ done
 
         let admitted = McpServer {
             name: "buffered-server".to_string(),
+            alias: None,
             command: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),

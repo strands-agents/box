@@ -110,6 +110,8 @@ pub struct Server<'a> {
     pub behavior: DiscoveryBehavior,
     executable: &'a str,
     arguments: Vec<String>,
+    /// `Some(name)` emits `alias = name`, and the server's markers take that name.
+    alias: Option<&'a str>,
     /// `Some(false)` emits `[mcp.<name>.network] contain_egress = false` (native egress); `None`
     /// leaves the default gateway-routed posture.
     contain_egress: Option<bool>,
@@ -131,6 +133,7 @@ impl<'a> Server<'a> {
             behavior,
             executable: program,
             arguments: vec!["--declared".to_string(), name.to_string()],
+            alias: None,
             contain_egress: None,
             env: Vec::new(),
         }
@@ -140,6 +143,17 @@ impl<'a> Server<'a> {
         self.executable = executable;
         self.arguments = arguments;
         self
+    }
+
+    /// Declare `alias = name`, so the harness reaches the server as `name`.
+    pub fn aliased(mut self, name: &'a str) -> Self {
+        self.alias = Some(name);
+        self
+    }
+
+    /// The name the server's alias takes in `bin/`, which also keys its markers.
+    pub fn alias_name(&self) -> &'a str {
+        self.alias.unwrap_or(self.program)
     }
 
     /// Declare `[mcp.<name>.network] contain_egress = false` — the native-egress trust grant.
@@ -209,7 +223,7 @@ impl RuntimeMcpBox {
 
     pub fn install_server(&self, server: &Server<'_>) {
         if server.behavior.uses_release_fifo() {
-            make_fifo(&self.release_path(server.program));
+            make_fifo(&self.release_path(server.alias_name()));
         }
         let python = fixture_python();
         let sleep = fixture_sleep();
@@ -458,7 +472,7 @@ while True:
             control = self.control.to_string_lossy(),
             python = python.display(),
             sleep = sleep.to_string_lossy(),
-            program = server.program,
+            program = server.alias_name(),
             server = server.name,
             tool = server.tool,
             behavior = server.behavior.as_str(),
@@ -545,6 +559,9 @@ while True:
                 "\n[mcp.{}]\ntype = \"stdio\"\ncommand = {command:?}\n",
                 server.name
             ));
+            if let Some(alias) = server.alias {
+                config.push_str(&format!("alias = {alias:?}\n"));
+            }
             if let Some(contain_egress) = server.contain_egress {
                 config.push_str(&format!(
                     "[mcp.{}.network]\ncontain_egress = {contain_egress}\n",

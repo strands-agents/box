@@ -206,3 +206,117 @@ fn a_start_is_decided_on_the_canonical_program_and_its_arguments() {
         "the refused start is recorded against its canonical program"
     );
 }
+
+#[test]
+fn two_servers_sharing_one_launcher_start_through_their_aliases() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-start-alias");
+    let launched = |server: &str, executable: &str| {
+        vec![
+            box_.server_executable(executable)
+                .to_string_lossy()
+                .into_owned(),
+            "--declared".to_string(),
+            server.to_string(),
+        ]
+    };
+    let alpha = Server::new("alpha", "env", "read", DiscoveryBehavior::Ready)
+        .aliased("alpha-tool")
+        .launched_through("alpha-mcp", launched("alpha", "alpha-mcp"));
+    let beta = Server::new("beta", "env", "read", DiscoveryBehavior::Ready)
+        .aliased("beta-tool")
+        .launched_through("beta-mcp", launched("beta", "beta-mcp"));
+    box_.install_server(&alpha);
+    box_.install_server(&beta);
+    // The start permit names the launcher, so a start proves `shell:spawn` read `command[0]`.
+    let policy = format!(
+        "{}\n{}",
+        call_policy(&["alpha", "beta"]),
+        start_permit_for("env")
+    );
+    box_.write_workspace_as_authored(&policy, &[alpha, beta], BLOCKING_WORKLOAD);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    assert!(box_.root().join("bin/alpha-tool").is_file());
+    assert!(box_.root().join("bin/beta-tool").is_file());
+    assert!(
+        !box_.root().join("bin/env").exists(),
+        "an aliased server places no alias for its launcher, so the agent's own `env` is not \
+         shadowed"
+    );
+
+    for (alias, server) in [("alpha-tool", "alpha"), ("beta-tool", "beta")] {
+        let mut client = box_.open_client(alias);
+        run.wait_for_through_alias(box_.server_started(alias), STARTUP);
+        assert_eq!(box_.invocation_count(alias), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&box_.trace(alias, "argv"))
+                .expect("parse the server arguments"),
+            json!(["--declared", server]),
+            "the alias starts its own server's declared command"
+        );
+        client.initialize_and_activate(json!(format!("initialize-{server}")), STARTUP);
+        client.assert_running();
+        drop(client);
+    }
+
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn a_command_permit_starts_one_of_two_servers_sharing_a_launcher() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-start-alias-command");
+    let launched = |server: &str, executable: &str| {
+        vec![
+            box_.server_executable(executable)
+                .to_string_lossy()
+                .into_owned(),
+            "--declared".to_string(),
+            server.to_string(),
+        ]
+    };
+    let alpha_arguments = launched("alpha", "alpha-mcp");
+    let alpha_command = std::iter::once("env".to_string())
+        .chain(alpha_arguments.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let alpha = Server::new("alpha", "env", "read", DiscoveryBehavior::Ready)
+        .aliased("alpha-tool")
+        .launched_through("alpha-mcp", alpha_arguments);
+    let beta = Server::new("beta", "env", "read", DiscoveryBehavior::Ready)
+        .aliased("beta-tool")
+        .launched_through("beta-mcp", launched("beta", "beta-mcp"));
+    box_.install_server(&alpha);
+    box_.install_server(&beta);
+    let policy = format!(
+        r#"{}
+        @id("start_alpha_only")
+        permit (principal, action == Box::Action::"shell:spawn", resource)
+        when {{ context.input.command == {alpha_command:?} }};"#,
+        call_policy(&["alpha", "beta"]),
+    );
+    box_.write_workspace_as_authored(&policy, &[alpha, beta], BLOCKING_WORKLOAD);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    assert_start_refused(&box_, "beta-tool", None);
+
+    let mut client = box_.open_client("alpha-tool");
+    run.wait_for_through_alias(box_.server_started("alpha-tool"), STARTUP);
+    assert_eq!(box_.invocation_count("alpha-tool"), 1);
+    client.initialize_and_activate(json!("initialize-alpha"), STARTUP);
+    client.assert_running();
+
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}

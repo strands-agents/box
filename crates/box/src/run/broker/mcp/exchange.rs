@@ -1133,6 +1133,7 @@ mod tests {
         let registry = DiscoveryRegistry::testing_with_policy(
             &[McpServer {
                 name: "issues-mcp".to_string(),
+                alias: None,
                 command: vec!["issues-mcp".to_string()],
             }],
             Arc::clone(&policy),
@@ -1186,6 +1187,7 @@ done"#
     ) {
         let admitted = McpServer {
             name: "issues-mcp".to_string(),
+            alias: None,
             command,
         };
         let (running, stdout) =
@@ -1879,6 +1881,7 @@ done"#
     fn registry() -> Arc<DiscoveryRegistry> {
         DiscoveryRegistry::testing(&[McpServer {
             name: "issues-mcp".to_string(),
+            alias: None,
             command: vec!["issues-mcp".to_string()],
         }])
     }
@@ -1907,6 +1910,7 @@ done"#
     ) {
         let admitted = McpServer {
             name: "issues-mcp".to_string(),
+            alias: None,
             command,
         };
         let (running, stdout) =
@@ -2059,6 +2063,7 @@ done"#
             ] {
                 let admitted = McpServer {
                     name: name.to_string(),
+                    alias: None,
                     command: vec![
                         "/bin/sh".to_string(),
                         "-c".to_string(),
@@ -2116,6 +2121,7 @@ done"#
 
             let admitted = McpServer {
                 name: "issues-mcp".to_string(),
+                alias: None,
                 command: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
@@ -2230,6 +2236,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     ) {
         let admitted = McpServer {
             name: "issues-mcp".to_string(),
+            alias: None,
             command,
         };
         let (running, stdout) =
@@ -2516,6 +2523,7 @@ when { context.input has value && context.input.value == "secret" };"#;
             let (frames, _output) = tokio::sync::mpsc::channel(1);
             let registry = DiscoveryRegistry::testing(&[McpServer {
                 name: "non-reading-server".to_string(),
+                alias: None,
                 command: vec!["unused".to_string()],
             }]);
             let (mut program, _completion) = McpProgram::spawn(
@@ -2602,6 +2610,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     async fn non_reading_server() -> (RunningMcpServer, tokio::process::ChildStdout) {
         let admitted = McpServer {
             name: "non-reading-server".to_string(),
+            alias: None,
             command: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),

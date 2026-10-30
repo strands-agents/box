@@ -53,19 +53,49 @@ when { ["fetch", "github"].contains(context.input.server) };
 
 | Action | Field | Value |
 |---|---|---|
-| `shell:spawn` | `context.input.program` | Element 0 of the server's `command`. |
+| `shell:spawn` | `context.input.command` | The server's `command`, joined with single spaces. |
+| | `context.input.program` | Element 0 of the server's `command`, even when the table sets an `alias`. |
 | | `context.input.program_path` | The program's file, with every link resolved. `~` is the operator's home. |
 | | `context.input.arg1`, `arg2`, `arg_count` | The server's arguments. |
 | `mcp:call` | `context.input.server` | The `[mcp.<name>]` table's name. |
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
 
+### Allow a server that shares a launcher
+
+When two servers start through one launcher, such as `npx`, a `shell:spawn` permit that names only
+the program starts both of them. To allow exactly one server, match its whole command line.
+`context.input.command` is the table's `command`, joined with single spaces. For
+`command = ["npx", "-y", "@modelcontextprotocol/server-github"]`:
+
+```cedar
+@id("github_start")
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.command == "npx -y @modelcontextprotocol/server-github" };
+```
+
+You can also match single arguments: `arg1` and `arg2` are the first two, and `arg_count` is how
+many there are. This rule allows the same server, and any longer command that starts the same way:
+
+```cedar
+@id("github_start_by_argument")
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program == "npx" &&
+  context.input has arg2 && context.input.arg2 == "@modelcontextprotocol/server-github"
+};
+```
+
+`shell:spawn` reads the program and its arguments, and never the server's `alias` or name. Give
+each server's permit its own `@id`, so the decision log names the rule that started each one.
+
 ## Step 2. Connect the harness
 
 Add each server to the harness's own MCP configuration.
 
-- **A `stdio` server:** set its command to the program, the first element of `command`. The
-  harness runs the alias, and the box starts the server.
+- **A `stdio` server:** set its command to the server's `alias`, or to the program, the first
+  element of `command`, when the table sets no `alias`. The harness runs the alias, and the box
+  starts the server.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.
 
