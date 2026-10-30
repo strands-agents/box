@@ -583,21 +583,8 @@ Two other host spellings each get their own refusal:
   write `xn--bcher-kva.example`.
 
 A pinned address reaches policy as two fields, one per address family. `ip4` holds the IPv4
-address, as a dotted quad. `ip6` holds the IPv6 address, compressed and in lowercase. There is no
-`ip`, and a rule that names it refuses to load:
-
-```text
-@id("block_metadata")
-forbid (principal, action == Box::Action::"net:connect", resource)
-when { context.input has ip && context.input.ip like "169.254.*" };
-```
-
-```text
-policy fails schema validation: rule @id("block_metadata") reads context.input.ip, which no action carries; a destination address reads as context.input.ip4 for the IPv4 address it is or carries, and as context.input.ip6 for the IPv6 wire form, each behind its own "has" guard
-```
-
-**If a box that used to start now refuses with this message, that is the rule to rewrite.** Decide
-which family each literal in it belongs to, and give that family its own clause:
+address, as a dotted quad. `ip6` holds the IPv6 address, compressed and in lowercase. Each needs its
+own `has` guard, so a rule that covers both families gives each one its own clause:
 
 ```text
 @id("metadata_addresses")
@@ -611,9 +598,8 @@ when {
 };
 ```
 
-**Each field needs its own guard, so a rule that covers both families is longer than one `ip`
-clause was.** That is the cost of the split. What you get for it is that you can tell from the rule
-which addresses it will match.
+That is longer than one clause over both families would be. What you get for it is that you can tell
+from the rule which addresses it will match.
 
 #### Which field matches what
 
@@ -680,19 +666,25 @@ refuse to load:
 - **A pattern with an uppercase letter**, such as `ip6 like "64:FF9B::*"`. `like` is case-sensitive
   and `ip6` is always lowercase, so that `forbid` could never fire. Write `64:ff9b::*`.
 - **A pattern of the other family**, such as `ip4 like "fd00:ec2:*"`. The refusal names `ip6`.
+- **An `ip6` pattern with a dotted quad behind any prefix but `::ffff:`**, such as
+  `ip6 like "64:ff9b::169.254.*"` or `ip6 like "::169.254.*"`. The IPv4-mapped form is the one wire
+  form written with a dotted quad, so those patterns could never fire. RFC 6052 writes a NAT64
+  address that way, which is why this one is easy to reach for. Write the hexadecimal groups, as
+  `64:ff9b::a9fe:*`, or compare `ip4` to name the address it carries. A pattern that opens with a
+  wildcard is not refused, because what the wildcard admits cannot be listed.
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
-address takes, such as `ip6 like "::ffff:a9fe:*"` — an IPv4-mapped address is written with a dotted
-quad, so that pattern misses the mapped addresses it looks aimed at. Check an `ip6` pattern against
-the table above.
+address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
+that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
+above.
 
 A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
 with, so a temporal clause can still need an older one.
 
-**A box whose history predates the split holds events recorded under `ip`, and nothing can read
-them.** A temporal predicate on `ip4` or `ip6` does not match those events, and a predicate that
-names `input.ip` refuses to load, because the event schema no longer declares it. There is no
-rewind, so a counting rule across the change starts its count again.
+**A box can hold address events that this vocabulary cannot read.** An event recorded by an earlier
+build carries one address field, and a predicate on `ip4` or `ip6` does not match it. There is no
+rewind, so a counting rule that spans such a build starts its count again.
 
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved

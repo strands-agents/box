@@ -224,7 +224,7 @@ forbids, unmatched requests, representation faults, and evaluation faults return
 string, and both are absent before resolution. `ip4` is the dotted quad, present for an IPv4
 destination and for an IPv6 destination that carries an IPv4 address in a recognized wrapping. `ip6`
 is the compressed lowercase wire form, present for every IPv6 destination and absent for an IPv4
-one. There is no `ip`: a network rule that reads it refuses to load. Match either with `==` or
+one. Match either with `==` or
 `like`, for example `context.input.ip4 like "169.254.*"`, and guard each with its own
 `context.input has ip4` or `context.input has ip6`. Permit on `host` and `port`, and use an address
 in a `forbid`: an address-only permit never passes the decision before resolution.

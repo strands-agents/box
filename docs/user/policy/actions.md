@@ -116,8 +116,7 @@ has many IPv6 encodings and there is no single IPv6 form to report.
 
 Compare either as a String behind its own guard, as
 `context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to load
-with `expected ipaddr but saw String`. There is no `ip`: a rule that names it refuses to load and the
-refusal names both replacements.
+with `expected ipaddr but saw String`.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 

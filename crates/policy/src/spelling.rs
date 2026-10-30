@@ -551,6 +551,13 @@ fn judge_address_pattern(attribute: &str, elements: &[PatternElement], pattern: 
             "an address is spelled in lowercase; write \"{lowercase}\""
         ));
     }
+    if attribute == IP6 && literals.iter().any(|text| text.contains('.')) && !mapped_quad(elements)
+    {
+        return inert(format!(
+            "an IPv6 address holds a dotted quad behind \"::ffff:\" alone; write the hexadecimal \
+             groups, or compare context.input.{IP4} to name the IPv4 address it carries"
+        ));
+    }
     for text in literals {
         if let Some(character) = text
             .chars()
@@ -564,6 +571,15 @@ fn judge_address_pattern(attribute: &str, elements: &[PatternElement], pattern: 
         }
     }
     Finding::Sound
+}
+
+/// Whether an IPv6 pattern can reach the one wire form that holds a dotted quad.
+fn mapped_quad(elements: &[PatternElement]) -> bool {
+    match elements.first() {
+        Some(PatternElement::Literal(text)) => text.starts_with("::ffff:"),
+        Some(PatternElement::Wildcard) => true,
+        None => false,
+    }
 }
 
 /// Whether a pinned address under `attribute` ever holds `character`.
@@ -1700,6 +1716,16 @@ mod tests {
                 "fe80::1%*",
                 "an address holds no \"%\"; context.input.ip6 holds only digits, \"a\" to \"f\"",
             ),
+            (
+                "ip6",
+                "64:ff9b::169.254.*",
+                "an IPv6 address holds a dotted quad behind \"::ffff:\" alone",
+            ),
+            (
+                "ip6",
+                "::169.254.*",
+                "compare context.input.ip4 to name the IPv4 address it carries",
+            ),
         ] {
             let policies = parsed(&format!(
                 r#"@id("pattern")
@@ -1710,6 +1736,21 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(advice), "{attribute} {pattern}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_pattern_that_can_reach_a_dotted_quad_loads() {
+        for pattern in ["::ffff:169.254.*", "::ffff:*.254", "*169.254.*"] {
+            let policies = parsed(&format!(
+                r#"@id("pattern")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has ip6 && context.input.ip6 like "{pattern}" }};"#
+            ));
+            assert!(
+                judge(&policies, &Operator::unanchored()).is_ok(),
+                "{pattern} reaches the IPv4-mapped form, so the judge cannot prove it inert"
+            );
         }
     }
 

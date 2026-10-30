@@ -114,7 +114,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
   or `ip6`. Each needs its own `has` guard, so a rule that covers both families has one clause for
-  each. There is no `ip`, and a rule that names it is refused at load.
+  each.
 - `context.input.path` also carries a URL path, so a rule that reads `context.input` names actions
   of one family, and the load refuses any other
   (`spelling::refuse_input_across_families`). Pinned by
