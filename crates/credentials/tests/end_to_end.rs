@@ -1413,10 +1413,57 @@ mod credsd_e2e {
             .expect_err("the daemon refused the environment");
         assert_unknown_environment(&error, "prod-inference");
         let request: serde_json::Value = serde_json::from_slice(&rx.recv().unwrap()).unwrap();
-        assert_eq!(request["method"], "credential/get");
-        assert_eq!(request["params"]["environment"], "prod-inference");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "credential/get",
+                "params": { "environment": "prod-inference" },
+            })
+        );
         handle.join().unwrap();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_environment_assertion() {
+        for (response, expected_message) in [
+            ("not-json", "credsd returned a malformed response"),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"fixture error","data":{"code":"INTERNAL"}}}"#,
+                "credsd reported an internal error",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                "credsd returned a malformed response",
+            ),
+        ] {
+            let path = socket_path();
+            let (rx, handle) = fake_daemon(&path, format!("{response}\n").into_bytes());
+            let error = credsd_vault(path.clone())
+                .attach_for(bedrock_request(&[]))
+                .expect_err("the unrelated daemon failure must fail the request");
+            assert!(!error.is_soft());
+            let message = match &error {
+                CredentialError::Credential(message) | CredentialError::KeystoreAccess(message) => {
+                    message
+                }
+                other => panic!("the fixture reached an unexpected error: {other}"),
+            };
+            assert_eq!(
+                message,
+                &format!("{expected_message} for environment \"prod-inference\"")
+            );
+            rx.recv().expect("the daemon received the request");
+            handle.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                    .is_err(),
+                "an unrelated daemon failure must fail the live response assertion"
+            );
+        }
     }
 
     #[test]
