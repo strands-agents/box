@@ -23,12 +23,21 @@ Do not record an assumption as "held" until the table exists.
 
 ## Step B: check the change against the written rules of each area it touches
 
-For each crate or top-level directory that the diff touches, read its `AGENTS.md` if it has one, and the root `AGENTS.md` premises and frozen surfaces. Report a change that breaks a stated premise or invariant, changes a frozen surface without saying so, or gives one fact a second owner. A requirement that the change leaves to callers or to documentation, when the code could enforce it, is also a finding. Quote the rule and name its file.
+For each crate or top-level directory that the diff touches, read its `AGENTS.md` if it has one, and the root `AGENTS.md` premises and frozen surfaces. Report a change that breaks a stated premise or invariant, changes a frozen surface without saying so, or gives one fact a second owner. A requirement that the change leaves to callers or to documentation, when the code could enforce it, is also a finding. Quote the rule and name its file. A rule that asks for tests, or for a test named beside a claim, is not a reason for an inline comment, except in case 2 of "Test gaps".
+
+## Test gaps
+
+A test-only comment says that the code is correct, but that no test catches a regression. Post one only in these two cases:
+
+1. The gap is about a defect that you found in step A. Put it in the comment for that defect, not in a separate comment.
+2. The description or a commit names a test that does not exist, or a test that does not check what it claims.
+
+In case 2, the severity is **Suggestion**. In case 1, the test gap does not make the defect comment more severe. Put each other test gap in the summary review, in one line at most, and never inline. When you change the code and no test fails, that is a method to check a defect. It is not a finding.
 
 ## Ranking and budget
 
-- Rank findings in this order: correctness and scope, then broken premises and security, then tests that miss those defects, then maintainability. Documentation and style come last.
-- Post at most 5 comments in total, inline comments included. One to three strong comments are better than five weak ones.
+- Rank findings in this order: correctness and scope, then broken premises and security, then tests that miss a defect you found in step A, then maintainability. Documentation and style come last.
+- Post at most 5 comments in total, inline comments included. Zero inline comments is a valid review. When steps A and B find nothing, post only the summary review.
 - Do not post a nit. Do not comment on wording or formatting unless it gives a user a wrong result or a wrong instruction.
 - Before you post, read each candidate comment again and ask: "Would a maintainer of this repository change the code because of this?" If not, drop it.
 
