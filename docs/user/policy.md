@@ -666,12 +666,14 @@ refuse to load:
 - **A pattern with an uppercase letter**, such as `ip6 like "64:FF9B::*"`. `like` is case-sensitive
   and `ip6` is always lowercase, so that `forbid` could never fire. Write `64:ff9b::*`.
 - **A pattern of the other family**, such as `ip4 like "fd00:ec2:*"`. The refusal names `ip6`.
-- **An `ip6` pattern with a dotted quad behind any prefix but `::ffff:`**, such as
-  `ip6 like "64:ff9b::169.254.*"` or `ip6 like "::169.254.*"`. The IPv4-mapped form is the one wire
-  form written with a dotted quad, so those patterns could never fire. RFC 6052 writes a NAT64
-  address that way, which is why this one is easy to reach for. Write the hexadecimal groups, as
-  `64:ff9b::a9fe:*`, or compare `ip4` to name the address it carries. A pattern that opens with a
-  wildcard is not refused, because what the wildcard admits cannot be listed.
+- **An `ip6` pattern with a dotted quad anywhere but in `::ffff:` and the quad**, such as
+  `ip6 like "64:ff9b::169.254.*"`, `ip6 like "::169.254.*"`, or `ip6 like "::ffff:0:169.254.*"`. The
+  IPv4-mapped form is the one wire form written with a dotted quad, and it is exactly `::ffff:` and
+  the quad. So each of those could never fire. RFC 6052 writes a NAT64 address that way and RFC 6145
+  writes a translated one as `::ffff:0:` and a quad, which is why this mistake is easy to reach for.
+  Write the hexadecimal groups, as `64:ff9b::a9fe:*`, or compare `ip4` to name the address it
+  carries. A pattern that opens with a wildcard is not refused, because what the wildcard admits
+  cannot be listed.
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
 address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so

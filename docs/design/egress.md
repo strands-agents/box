@@ -118,9 +118,9 @@ whole address: a `like` pattern that holds a wildcard, because the addresses the
 cannot be listed, and a `when temporal` clause, because history keeps the spelling each event was
 recorded with. A wildcard pattern is still held to the characters its field holds, so a case slip
 or a literal of the other family refuses, as it does for a host. One shape of a wildcard pattern is
-held further: the IPv4-mapped form is the one IPv6 wire form written with a dotted quad, so an `ip6`
-pattern that puts a dotted quad behind any other prefix is refused, unless the pattern opens with a
-wildcard and the addresses it admits cannot be listed.
+held further: the IPv4-mapped form is the one IPv6 wire form written with a dotted quad, and it is
+exactly `::ffff:` and the quad, so an `ip6` pattern that holds a dotted quad anywhere else is
+refused, unless the pattern opens with a wildcard and the addresses it admits cannot be listed.
 
 **The host is one spelling too.** The gateway lowercases it and removes a trailing dot, so a request
 for `API.GitHub.com.` and a request for `api.github.com` reach policy as the same host. A rule

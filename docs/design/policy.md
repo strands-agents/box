@@ -220,8 +220,8 @@ The inert-rule check sorts each rule into one of three classes:
 - **Refused:** anything the load can prove inert. An action or field the schema doesn't declare, a
   read of `context.input.ip` under a network action, a path literal no reported path can match, a
   host literal no destination host can equal, an address literal no pinned destination can equal or
-  that belongs to the other address family, an `ip6` pattern that puts a dotted quad behind any
-  prefix but `::ffff:`, one `@id` on two rules, and a cap written as a `permit` beside an
+  that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
+  `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
   unconditioned `permit` for the same action, which can't narrow it.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing

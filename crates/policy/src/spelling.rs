@@ -554,8 +554,8 @@ fn judge_address_pattern(attribute: &str, elements: &[PatternElement], pattern: 
     if attribute == IP6 && literals.iter().any(|text| text.contains('.')) && !mapped_quad(elements)
     {
         return inert(format!(
-            "an IPv6 address holds a dotted quad behind \"::ffff:\" alone; write the hexadecimal \
-             groups, or compare context.input.{IP4} to name the IPv4 address it carries"
+            "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone; write the \
+             hexadecimal groups, or compare context.input.{IP4} to name the IPv4 address it carries"
         ));
     }
     for text in literals {
@@ -573,13 +573,20 @@ fn judge_address_pattern(attribute: &str, elements: &[PatternElement], pattern: 
     Finding::Sound
 }
 
-/// Whether an IPv6 pattern can reach the one wire form that holds a dotted quad.
+/// Whether an IPv6 pattern can reach the one wire form that holds a dotted quad, which is
+/// `::ffff:` and a dotted quad and nothing else.
 fn mapped_quad(elements: &[PatternElement]) -> bool {
-    match elements.first() {
-        Some(PatternElement::Literal(text)) => text.starts_with("::ffff:"),
-        Some(PatternElement::Wildcard) => true,
-        None => false,
-    }
+    let quad = |text: &str| text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let (head, rest) = match elements.split_first() {
+        Some((PatternElement::Wildcard, _)) => return true,
+        Some((PatternElement::Literal(text), rest)) => (text, rest),
+        None => return false,
+    };
+    head.strip_prefix("::ffff:").is_some_and(quad)
+        && rest.iter().all(|element| match element {
+            PatternElement::Literal(text) => quad(text),
+            PatternElement::Wildcard => true,
+        })
 }
 
 /// Whether a pinned address under `attribute` ever holds `character`.
@@ -1719,12 +1726,22 @@ mod tests {
             (
                 "ip6",
                 "64:ff9b::169.254.*",
-                "an IPv6 address holds a dotted quad behind \"::ffff:\" alone",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
             ),
             (
                 "ip6",
                 "::169.254.*",
                 "compare context.input.ip4 to name the IPv4 address it carries",
+            ),
+            (
+                "ip6",
+                "::ffff:0:169.254.*",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
+            ),
+            (
+                "ip6",
+                "::ffff:a9fe:1.*",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
             ),
         ] {
             let policies = parsed(&format!(
