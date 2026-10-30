@@ -258,6 +258,206 @@ permit(principal, action == alpha::Action::"write", resource);
     );
 }
 
+/// A tool name that carries a quote or a backslash must reach both fail-closed holds, and must
+/// still enforce its own rule once that rule's schema stages.
+#[test]
+fn an_escaped_tool_name_holds_and_degrades_like_a_plain_one() {
+    // `literal` is the name as a policy spells it; `raw` is the name a `tools/call` frame carries.
+    for (literal, raw) in [
+        ("foobar", "foobar"),
+        (r#"foo\"bar"#, "foo\"bar"),
+        (r#"foo\\bar"#, "foo\\bar"),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source(
+                "pending.dw",
+                &format!(
+                    r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when {{ context.input.server == "alpha" }};
+forbid(principal, action == alpha::Action::"{literal}", resource)
+when {{ context.input.path like "/secret/*" }};
+permit(principal, action == alpha::Action::"{literal}", resource);
+"#
+                ),
+            )],
+            &history.path().join("dogwood.redb"),
+        );
+
+        let arguments = json!({"path": "/secret/x"});
+        let call = |authority: &PolicyEngine| {
+            authority.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                raw,
+                &arguments,
+            )
+        };
+
+        assert!(
+            matches!(
+                call(&authority),
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            "{raw}: a call whose rule is still pending must be held, not ride the coarse permit"
+        );
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completion degrades the server"),
+            vec!["alpha".to_string()],
+            "{raw}: the server whose typed rule never staged is degraded"
+        );
+        assert!(
+            matches!(
+                call(&authority),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{raw}: a degraded tool call must be denied fail-closed"
+        );
+    }
+}
+
+/// A pending rule reaches a tool through its condition rather than its head. The hold must still
+/// cover that tool, and its server must still reach the degradation warning.
+#[test]
+fn a_tool_a_pending_condition_names_is_held_and_degrades() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "condition.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "srv" };
+forbid(principal, action, resource) when { action == srv::Action::"read" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    let arguments = json!({"path": "/secret/x"});
+    let call = || {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "srv",
+            "read",
+            &arguments,
+        )
+    };
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "a tool that only a pending condition names must still be held"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completion degrades the server"),
+        vec!["srv".to_string()],
+        "the server that only a pending condition names must reach the warning"
+    );
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the degraded hold must cover that tool too"
+    );
+}
+
+/// The hold above is transient: once the schema stages, an argument-constrained rule over a
+/// quote-bearing tool name decides the call itself.
+#[test]
+fn an_escaped_tool_name_enforces_its_own_rule_once_its_schema_stages() {
+    let tool = "foo\"bar";
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+forbid(principal, action == alpha::Action::"foo\"bar", resource)
+when { context.input.path like "/secret/*" };
+permit(principal, action == alpha::Action::"foo\"bar", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [{
+                "name": tool,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "alpha",
+                generate_mcp_schema("alpha", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty(),
+        "a staged tool degrades no server"
+    );
+
+    let refine = |path: &str| {
+        let arguments = json!({"path": path});
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            tool,
+            &arguments,
+        )
+    };
+    assert!(
+        matches!(
+            refine("/secret/x"),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the argument-constrained forbid must deny the forbidden argument"
+    );
+    assert!(
+        refine("/public/x").is_allow(),
+        "the forbid must not reach an argument it does not name"
+    );
+}
+
 #[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient

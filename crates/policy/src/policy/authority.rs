@@ -10,7 +10,7 @@ use dogwood_local_engine::DurableError;
 use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
-    DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
+    DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
 use crate::schema::{ActionIdentity, GovernedBox};
@@ -21,6 +21,8 @@ use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Reque
 struct CandidatePolicy {
     ordinal: usize,
     expanded_source: String,
+    /// The per-tool actions the head names, decoded at parse time.
+    head_tools: BTreeSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,14 +117,7 @@ impl Authority {
         sources: Vec<Policy>,
         mut engine: DogwoodEngine,
     ) -> Result<Self, PolicyStagingError> {
-        let candidates = parse_policy_source(&authored(&sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect::<Vec<_>>();
+        let candidates = candidates(&authored(&sources)).map_err(Refused::into_error)?;
         let mut proposal = ProposalState {
             operator: operator.clone(),
             candidates,
@@ -215,14 +210,7 @@ impl Authority {
         };
         let mut proposed = current.clone();
         // The operator and the discovered schemas carry over; only the authored rules change.
-        proposed.candidates = parse_policy_source(&authored(sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect();
+        proposed.candidates = candidates(&authored(sources)).map_err(Refused::into_error)?;
         proposed.ready = BTreeSet::new();
         proposed.pending = BTreeMap::new();
 
@@ -672,11 +660,26 @@ impl ProposalState {
     }
 }
 
-/// The pending typed `(namespace, tool)` pairs a proposal still needs a discovered schema for.
+/// Parse and macro-expand an authored bundle into one candidate per rule.
+fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
+    Ok(expand_policy_source(source)?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, policy)| CandidatePolicy {
+            ordinal,
+            expanded_source: policy.source,
+            head_tools: policy.head_tools,
+        })
+        .collect())
+}
+
+/// The pending typed `(namespace, tool)` pairs a proposal still needs a discovered schema for,
+/// from each pending rule's decoded head and from a scan of its rendered text.
 fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
         if let Some(candidate) = proposal.candidates.get(ordinal) {
+            out.extend(candidate.head_tools.iter().cloned());
             collect_typed_actions(&candidate.expanded_source, &mut out);
         }
     }
@@ -684,10 +687,8 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
 }
 
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
-/// excluding the fixed `Box::Action` vocabulary. A per-tool rule's head is
-/// `action == <ns>::Action::"<tool>"`, and `<ns>` is a single normalized identifier
-/// ([`mcp_action_namespace`](crate::schema::mcp_action_namespace)), so a scan for the marker
-/// recovers `(namespace, tool)`.
+/// excluding the fixed `Box::Action` vocabulary, including one that only a condition or a
+/// `when temporal` predicate names. A name arrives in the spelling the render gave it.
 fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
     const MARKER: &str = "::Action::\"";
     let mut rest = source;
@@ -718,15 +719,7 @@ pub(super) fn check_staged(
     operator: &Operator,
     sources: &[Policy],
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
-    let candidates = check_policy_source(&authored(sources))
-        .map_err(|refused| refused.findings)?
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, expanded_source)| CandidatePolicy {
-            ordinal,
-            expanded_source,
-        })
-        .collect::<Vec<_>>();
+    let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
         candidates,

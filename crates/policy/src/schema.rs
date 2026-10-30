@@ -177,6 +177,16 @@ pub(crate) fn mcp_action_namespace(server: &str) -> String {
     cedar_identifier(server)
 }
 
+/// The `(namespace, tool)` a per-tool action names, or `None` for the fixed `Box` vocabulary.
+pub(crate) fn mcp_tool_action(action: &EntityUid) -> Option<(String, String)> {
+    let type_name = action.type_name();
+    if type_name.basename() != "Action" || type_name.to_string() == FIXED_ACTION_TYPE {
+        return None;
+    }
+    let namespace = type_name.namespace();
+    (!namespace.is_empty()).then(|| (namespace, action.id().unescaped().to_string()))
+}
+
 pub(crate) fn cedar_identifier(raw: &str) -> String {
     let mut identifier = String::with_capacity(raw.len() + 1);
     for character in raw.chars() {
