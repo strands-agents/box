@@ -220,11 +220,17 @@ forbids, unmatched requests, representation faults, and evaluation faults return
 `RuleId::as_str` returns the determining rule identifier. Default denials use
 `RuleId::DEFAULT_DENY`.
 
-`context.input.ip` is the pinned address after resolution, as a string, and it is absent before
-resolution. An IPv6 address that carries an IPv4 address reads as that IPv4 address, and other IPv6
-uses its compressed lowercase form. Match it with `==` or `like`, for example
-`context.input.ip like "169.254.*"`, and guard it with `context.input has ip`. Permit on `host` and
-`port`, and use `ip` in a `forbid`: an `ip`-only permit never passes the decision before resolution.
+The pinned address reaches a rule as two strings, both absent before resolution.
+`context.input.ip4` is the IPv4 address the destination carries, as a dotted quad, and
+`context.input.ip6` is the IPv6 form it arrived as, compressed and in lowercase, and `::ffff:` with
+a dotted quad for an IPv4-mapped address. A destination that
+wraps an IPv4 address in IPv6 carries both. An IPv4 destination carries no `ip6`, because one IPv4
+address has many IPv6 encodings and none is computed. There is no `ip`.
+
+Match either with `==` or `like`, for example `context.input.ip4 like "169.254.*"`, and guard each
+with `has`, so a rule over both families needs one clause per family. Permit on `host` and `port`,
+and use an address in a `forbid`: an address-only permit never passes the decision before
+resolution.
 
 ### Shell actions
 

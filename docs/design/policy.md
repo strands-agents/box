@@ -185,7 +185,10 @@ every rule it can prove will never fire ([a rule that can't fire is refused at
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). It also
 refuses a rule that reads `context.input` under actions of more than one family, or under no
 action, because a field means what the action makes it mean ([a rule that reads the input names
-one action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family)).
+one action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family)). And it
+refuses a `net:connect` rule that reads `context.input.ip`, the one destination-address field that
+`ip4` and `ip6` replaced. Strict validation alone would report that as an undeclared attribute, so this
+refusal runs first and names the two fields that replace it, and which family each holds.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the

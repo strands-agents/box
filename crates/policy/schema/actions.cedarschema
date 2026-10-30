@@ -153,10 +153,13 @@ action "fs:other" appliesTo {
 // ── Network ──────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The L4 connect input. `ip` is the pinned address after resolution, absent before it.
+// The L4 connect input. `ip4` is the IPv4 address the pinned destination carries and `ip6` its
+// IPv6 wire form. Both are absent before resolution. An IPv4 destination carries no `ip6`, and an
+// IPv6 destination whose wrapping of an IPv4 address Box does not recognize carries no `ip4`.
 type NetworkConnectInput = {
   host: String,
-  ip?: String,
+  ip4?: String,
+  ip6?: String,
   port: Long
 };
 

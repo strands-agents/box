@@ -61,6 +61,14 @@ fn refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     }
 }
 
+fn schema_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
+    match result {
+        Ok(_) => panic!("an attribute no event carries must refuse the load"),
+        Err(PolicyStagingError::Policy(PolicyError::Schema(reason))) => reason,
+        Err(other) => panic!("expected a schema refusal, got {other}"),
+    }
+}
+
 fn family_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     match result {
         Ok(_) => panic!("a read of the input without one action family must refuse the load"),
@@ -557,16 +565,16 @@ fn a_trailing_dot_and_an_internationalized_host_are_refused_and_punycode_loads()
     assert!(!connects(&engine, "xn--bcher-kva.example"));
 }
 
-/// A decision reads one spelling of a pinned address, so an IPv6 encoding of an IPv4 address is
-/// refused at load and the dotted quad is the spelling that forbids.
+/// `ip4` reads a dotted quad, so an IPv6 encoding of an IPv4 address is refused at load, and the
+/// dotted quad is the spelling that forbids every encoding of it.
 #[test]
-fn an_ipv6_encoding_of_an_address_literal_is_refused_and_the_dotted_quad_forbids_the_connect() {
+fn an_ipv6_encoding_under_ip4_is_refused_and_the_dotted_quad_forbids_the_connect() {
     let home = Home::new();
     let encoded = format!(
         r#"{CONNECT_ALL}
         @id("block_metadata")
         forbid(principal, action == Box::Action::"net:connect", resource)
-        when {{ context.input has ip && context.input.ip == "64:ff9b::a9fe:a9fe" }};"#
+        when {{ context.input has ip4 && context.input.ip4 == "64:ff9b::a9fe:a9fe" }};"#
     );
     let reason = refusal(home.open("nat64-address", &encoded));
     assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
@@ -575,7 +583,7 @@ fn an_ipv6_encoding_of_an_address_literal_is_refused_and_the_dotted_quad_forbids
     let control = format!(
         r#"{CONNECT_ALL}
         forbid(principal, action == Box::Action::"net:connect", resource)
-        when {{ context.input has ip && context.input.ip == "169.254.169.254" }};"#
+        when {{ context.input has ip4 && context.input.ip4 == "169.254.169.254" }};"#
     );
     let engine = home
         .open("dotted-address", &control)
@@ -593,4 +601,113 @@ fn an_ipv6_encoding_of_an_address_literal_is_refused_and_the_dotted_quad_forbids
         );
     }
     assert!(connects_to(&engine, "203.0.113.7"));
+}
+
+/// A translator prefix is refusable on `ip6`. The rule names the wire form and leaves the IPv4
+/// address reached directly alone.
+#[test]
+fn a_translator_prefix_forbids_the_wire_form_and_not_the_address_it_wraps() {
+    let home = Home::new();
+    let source = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 like "64:ff9b::*" }};"#
+    );
+    let engine = home
+        .open("translator-prefix", &source)
+        .expect("a wire-form pattern loads");
+    assert!(
+        !connects_to(&engine, "64:ff9b::5db8:d822"),
+        "a destination on the well-known translator prefix is refused"
+    );
+    assert!(
+        connects_to(&engine, "93.184.216.34"),
+        "the IPv4 address that destination wraps is reachable directly"
+    );
+    assert!(connects_to(&engine, "64:ff9c::5db8:d822"));
+}
+
+/// Both attributes are populated for a wrapped destination, so a rule on either family decides it.
+#[test]
+fn a_wrapped_destination_is_decided_by_a_rule_on_either_family() {
+    let home = Home::new();
+    for (name, clause) in [
+        (
+            "by-address",
+            r#"context.input has ip4 && context.input.ip4 == "93.184.216.34""#,
+        ),
+        (
+            "by-wire-form",
+            r#"context.input has ip6 && context.input.ip6 == "64:ff9b::5db8:d822""#,
+        ),
+    ] {
+        let source = format!(
+            r#"{CONNECT_ALL}
+            forbid(principal, action == Box::Action::"net:connect", resource)
+            when {{ {clause} }};"#
+        );
+        let engine = home.open(name, &source).expect("the clause loads");
+        assert!(
+            !connects_to(&engine, "64:ff9b::5db8:d822"),
+            "{name} must decide the wrapped destination"
+        );
+    }
+}
+
+/// A plain IPv4 destination carries no IPv6 form, because one IPv4 address has many encodings and
+/// none is computed. A rule on `ip6` does not reach it.
+#[test]
+fn an_ipv4_destination_carries_no_wire_form_for_a_rule_to_read() {
+    let home = Home::new();
+    let source = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 }};"#
+    );
+    let engine = home.open("no-wire-form", &source).expect("the guard loads");
+    assert!(connects_to(&engine, "169.254.169.254"));
+    assert!(!connects_to(&engine, "fd00:ec2::254"));
+}
+
+/// The removed `ip` is refused at load with the two attributes that replace it.
+///
+/// The whole message, because `docs/user/policy.md` quotes it for an operator whose box used to
+/// start.
+#[test]
+fn a_rule_that_names_the_removed_ip_is_refused_at_load() {
+    let home = Home::new();
+    let source = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip && context.input.ip like "169.254.*" }};"#
+    );
+    let reason = schema_refusal(home.open("removed-ip", &source));
+    assert_eq!(
+        reason,
+        "rule @id(\"block_metadata\") reads context.input.ip, which a destination no longer \
+         carries; an address reaches a rule as context.input.ip4, the IPv4 address it carries, and \
+         context.input.ip6, the IPv6 form it arrived as, so write the one for the family the rule \
+         means, and one clause for each family to cover both"
+    );
+}
+
+/// `ip6` reads one spelling, so another spelling of the same address is refused with the one to
+/// write. The whole message, because `docs/user/policy.md` quotes it.
+#[test]
+fn an_uncased_wire_form_under_ip6_is_refused_with_the_spelling_a_decision_reads() {
+    let home = Home::new();
+    let source = format!(
+        r#"{CONNECT_ALL}
+        @id("block_wire_form")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 == "64:FF9B::A9FE:A9FE" }};"#
+    );
+    let reason = refusal(home.open("cased-wire-form", &source));
+    assert_eq!(
+        reason,
+        "rule @id(\"block_wire_form\") compares context.input.ip6 with \"64:FF9B::A9FE:A9FE\", and \
+         an IPv6 address is spelled compressed and in lowercase, and an IPv4-mapped address as \
+         \"::ffff:\" and a dotted quad; write \"64:ff9b::a9fe:a9fe\""
+    );
 }

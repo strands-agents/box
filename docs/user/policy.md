@@ -582,47 +582,8 @@ Two other host spellings each get their own refusal:
 - **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
   write `xn--bcher-kva.example`.
 
-A pinned address reaches policy in one spelling too. An IPv6 form that carries an IPv4 address
-reads as that IPv4 address, and any other IPv6 address reads compressed and in lowercase. So a
-`when` or `unless` condition that names an IPv6 encoding of an IPv4 address is refused, and the
-refusal names the dotted quad:
-
-```text
-@id("block_metadata")
-forbid (principal, action == Box::Action::"net:connect", resource)
-when { context.input has ip && context.input.ip == "64:ff9b::a9fe:a9fe" };
-```
-
-```text
-policy compares an inert literal: rule @id("block_metadata") compares context.input.ip with "64:ff9b::a9fe:a9fe", and an address is spelled as the IPv4 address an IPv6 form carries, or compressed and in lowercase; write "169.254.169.254"
-```
-
-**If a box that used to start now refuses with this message, that is the rule to rewrite.** Write
-the form the refusal names. One dotted quad covers every IPv6 encoding of that address, so you need
-no separate clause per encoding — and the reverse was never true, because a rule written in an IPv6
-form does not cover the dotted quad. Three more address spellings each get their own refusal:
-
-- **An address that carries a port**, such as `169.254.169.254:80` or `[2001:db8::1]:443`. Write the
-  address alone, and compare `context.input.port` for the port.
-- **An address in brackets**, such as `[2001:db8::1]`. Write it without them.
-- **Anything that is no IP address**, such as `metadata.example` or `169.254.169.254/32`. `ip` holds
-  the address the gateway pinned; compare `context.input.host` to pin a name.
-
-A `like` pattern that holds a wildcard is not judged, because the addresses a wildcard admits
-cannot be listed. So `context.input.ip like "169.254.*"` loads as written. Write a pattern against
-the spelling a decision reads: `like "fe8*"` reaches an `fe80::` address, and `like "64:ff9b::*"`
-no longer reaches an address on `64:ff9b::/96`, because each of those reads as its dotted quad. It
-still reaches an address outside that prefix whose spelling starts the same way, such as
-`64:ff9b::1:a9fe:a9fe`. So read such a pattern in both directions: a `forbid` written that way stops
-covering the `/96`, and a `permit` written that way keeps granting what is left.
-
-Two IPv6 encodings of an IPv4 address are **not** read as the dotted quad, and for those an
-IPv6-form rule is the only one that works: the NAT64 local-use prefix `64:ff9b:1::/48`, and a NAT64
-prefix a network chose for itself, which Box takes as no configuration and so cannot recognize.
-Those spellings load, because they are the spelling a decision reads.
-
-A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
-with, so a temporal clause can still need an older one.
+A `when temporal` clause is not judged. History keeps the spelling each event was recorded with, so
+a temporal clause can still need an older one.
 
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
@@ -649,6 +610,101 @@ when { context.input.path like "*/Users/dev/project/*" };
 ```text
 rule @id("later_home") compares context.input.path with the pattern "*/Users/dev/project/*", which names the operator home after a wildcard; a path under the operator home is spelled ~/…, so the pattern may match nothing
 ```
+
+### A rule that names `ip`, or the wrong address family
+
+A destination address reaches policy as two fields, one per family. `context.input.ip4` is the IPv4
+address, and `context.input.ip6` is the IPv6 address the gateway connects to. Each is a String, and
+each needs its own `has` guard. There is no `ip`, so a rule that names one refuses to load:
+
+```text
+@id("block_metadata")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip && context.input.ip like "169.254.*" };
+```
+
+```text
+policy fails schema validation: rule @id("block_metadata") reads context.input.ip, which a destination no longer carries; an address reaches a rule as context.input.ip4, the IPv4 address it carries, and context.input.ip6, the IPv6 form it arrived as, so write the one for the family the rule means, and one clause for each family to cover both
+```
+
+**If a box that used to start now refuses with this message, that is the rule to rewrite.** Pick
+the field for the family each clause means. The rule above is about IPv4 metadata, so it becomes:
+
+```text
+@id("block_metadata")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip4 && context.input.ip4 like "169.254.*" };
+```
+
+`ip4` matches an IPv4 address however it arrives, as long as Box reads the IPv6 wrapping it came in.
+That rule refuses `169.254.169.254` reached directly, and it refuses `64:ff9b::a9fe:a9fe`,
+`::ffff:a9fe:a9fe`, and `2002:a9fe:a9fe::` too, because each of those carries the same IPv4 address.
+[The network fields](policy/actions.md#network) list the encodings Box reads.
+
+`ip6` matches the form the destination arrived as, and nothing else. That is what makes a rule on a
+translator prefix writable:
+
+```text
+@id("no_translator")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip6 && context.input.ip6 like "64:ff9b::*" };
+```
+
+That rule refuses every destination on the well-known NAT64 prefix. It does not refuse the IPv4
+address behind one, reached directly, which is a separate clause on `ip4`.
+
+**A destination of both families needs one clause per family.** There is no field that holds either,
+so a rule about, say, every link-local address spells it twice:
+
+```text
+when {
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && (context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*"))
+};
+```
+
+That is more verbose than one field was. It is also the only way to say which family you mean, which
+one field could not.
+
+Each field reaches policy in one spelling, so a condition that names another spelling of the same
+family is refused, and the refusal names the one to write. `ip4` is a dotted quad. `ip6` is
+compressed and in lowercase, except for an IPv4-mapped address, which is `::ffff:` and a dotted
+quad, such as `::ffff:169.254.169.254`. Every other wrapping of an IPv4 address, the NAT64 prefix
+included, is hexadecimal: `64:ff9b::a9fe:a9fe`, not `64:ff9b::169.254.169.254`.
+
+```text
+policy compares an inert literal: rule @id("block_wire_form") compares context.input.ip6 with "64:FF9B::A9FE:A9FE", and an IPv6 address is spelled compressed and in lowercase, and an IPv4-mapped address as "::ffff:" and a dotted quad; write "64:ff9b::a9fe:a9fe"
+```
+
+Naming the wrong family is refused too, and the refusal names the other field:
+
+- **An IPv6 literal under `ip4`.** When Box reads its wrapping, the refusal names the IPv4 address
+  to write: `ip4 == "64:ff9b::a9fe:a9fe"` says `write "169.254.169.254"`. When Box reads no
+  wrapping, there is no IPv4 address to name, so the refusal says to compare `ip6` instead.
+- **An IPv4 literal under `ip6`.** There is no IPv6 form to name, because one IPv4 address has many
+  encodings and Box computes none, so the refusal says to compare `ip4` instead.
+
+Three more spellings each get their own refusal:
+
+- **An address that carries a port**, such as `169.254.169.254:80` or `[2001:db8::1]:443`. Write the
+  address alone, and compare `context.input.port` for the port.
+- **An address in brackets**, such as `[2001:db8::1]`. Write it without them.
+- **Anything that is no IP address**, such as `metadata.example` or `169.254.169.254/32`. Compare
+  `context.input.host` to pin a name.
+
+A `like` pattern that holds a wildcard is not judged, because the addresses a wildcard admits
+cannot be listed. So `context.input.ip4 like "169.254.*"` loads as written. Write a pattern against
+the spelling its own field reads: `ip6 like "fe8*"` reaches an `fe80::` address, and
+`ip4 like "fe8*"` reaches nothing, because a dotted quad never starts that way.
+
+One address an IPv6 destination can carry is **not** reachable from `ip4`: a NAT64 prefix a network
+chose for itself. RFC 6052 permits one, and Box takes none as configuration, so it reads no IPv4
+address out of such a destination and `ip4` is absent. Write the rule on `ip6` and the prefix the
+network uses.
+
+History keeps what each event was recorded with. A `when temporal` clause on `ip4` or `ip6` does not
+match an event a box recorded before this split, because that event carries the one field these two
+replaced, and history has no rewind.
 
 ### A rule that checks `context.input` for two kinds of action
 

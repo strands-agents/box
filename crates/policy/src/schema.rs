@@ -234,8 +234,10 @@ pub(crate) mod attr {
     pub(crate) const HOST: &str = "host";
     /// `context.input.port` — destination port (`net:*`).
     pub(crate) const PORT: &str = "port";
-    /// `context.input.ip` — optional pinned destination IP (`net:connect`).
-    pub(crate) const IP: &str = "ip";
+    /// `context.input.ip4` — the IPv4 address a pinned destination carries (`net:connect`).
+    pub(crate) const IP4: &str = "ip4";
+    /// `context.input.ip6` — the IPv6 wire form of a pinned destination (`net:connect`).
+    pub(crate) const IP6: &str = "ip6";
     /// `context.input.method` — HTTP method (`http:request`).
     pub(crate) const METHOD: &str = "method";
     /// `output.status` — the upstream's reply status on an `http:request` response event, and
@@ -506,12 +508,14 @@ fn context_for(
                     RestrictedExpression::new_long(i64::from(*port)),
                 ),
             ];
-            // `ip?` is optional in the schema — only include it when the PEP pinned one.
+            // `ip4?` and `ip6?` are optional in the schema — each is included only when the
+            // address the PEP pinned carries it.
             if let Some(ip) = ip {
-                fields.push((
-                    attr::IP.to_string(),
-                    RestrictedExpression::new_string(crate::address::canonical(*ip)),
-                ));
+                for (name, spelling) in crate::address::fields(*ip) {
+                    if let Some(spelling) = spelling {
+                        fields.push((name.to_string(), RestrictedExpression::new_string(spelling)));
+                    }
+                }
             }
             fields
         }

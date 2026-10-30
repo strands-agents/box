@@ -1318,7 +1318,7 @@ mod tests {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && context.input.ip like "10.*" };"#,
+               when { context.input has ip4 && context.input.ip4 like "10.*" };"#,
         );
         assert!(
             fixture
@@ -1583,14 +1583,15 @@ mod tests {
         }
     }
 
-    /// A forbid on `ip` refuses the pinned address and leaves every other address to the permit.
+    /// A forbid on an address refuses the pinned address and leaves every other address to the
+    /// permit. One clause per family: `ip4` reaches each IPv6 wrapping of the IPv4 address too.
     #[test]
     fn an_address_forbid_refuses_only_its_addresses() {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && (context.input.ip like "169.254.*"
-                      || context.input.ip == "fd00:ec2::254") };"#,
+               when { (context.input has ip4 && context.input.ip4 like "169.254.*")
+                      || (context.input has ip6 && context.input.ip6 == "fd00:ec2::254") };"#,
         );
         for refused in [
             "169.254.169.254:80",
@@ -1620,7 +1621,29 @@ mod tests {
         }
     }
 
-    /// `ip` is a string, so the Cedar `ipaddr` form fails when the policy loads.
+    /// A NAT64 wire form is refusable on its own prefix. The same destination also carries the
+    /// IPv4 address it wraps.
+    #[test]
+    fn a_translator_prefix_forbid_refuses_the_wire_form_and_leaves_the_address_admitted() {
+        let fixture = interceptor(
+            r#"permit(principal, action == Box::Action::"net:connect", resource);
+               forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input has ip6 && context.input.ip6 like "64:ff9b::*" };"#,
+        );
+        assert!(
+            fixture
+                .intercept(&connect_attempt(
+                    "[64:ff9b::5db8:d822]:443".parse().unwrap()
+                ))
+                .is_err(),
+            "a destination on the translator prefix is refused on its wire form"
+        );
+        fixture
+            .intercept(&connect_attempt("93.184.216.34:443".parse().unwrap()))
+            .expect("the same IPv4 address reached directly is admitted");
+    }
+
+    /// An address attribute is a string, so the Cedar `ipaddr` form fails when the policy loads.
     #[test]
     fn an_ipaddr_rule_is_refused_when_the_policy_loads() {
         let history = tempfile::tempdir().expect("history directory");
@@ -1628,7 +1651,7 @@ mod tests {
             vec![Policy {
                 origin: PathBuf::from("adapter-test.cedar"),
                 text: r#"forbid(principal, action == Box::Action::"net:connect", resource)
-                    when { context.input has ip && context.input.ip.isInRange(ip("10.0.0.0/8")) };"#
+                    when { context.input has ip4 && context.input.ip4.isInRange(ip("10.0.0.0/8")) };"#
                     .to_string(),
             }],
             &history.path().join("dogwood.redb"),
@@ -1637,6 +1660,27 @@ mod tests {
         };
         let refusal = refusal.to_string();
         assert!(refusal.contains("schema validation"), "{refusal}");
+    }
+
+    /// A network rule that names the removed `ip` is refused at load, and the refusal names both
+    /// attributes that replace it.
+    #[test]
+    fn the_removed_ip_attribute_is_refused_when_the_policy_loads() {
+        let history = tempfile::tempdir().expect("history directory");
+        let Err(refusal) = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("adapter-test.cedar"),
+                text: r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                    when { context.input has ip && context.input.ip like "169.254.*" };"#
+                    .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        ) else {
+            panic!("a rule that names the removed ip does not load");
+        };
+        let refusal = refusal.to_string();
+        assert!(refusal.contains("context.input.ip4"), "{refusal}");
+        assert!(refusal.contains("context.input.ip6"), "{refusal}");
     }
 
     /// The request leg projects `port` and `body_bytes` into its decision. No rule runs on the

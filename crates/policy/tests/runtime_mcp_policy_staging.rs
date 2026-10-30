@@ -707,6 +707,56 @@ fn staged_validation_refuses_a_read_of_the_input_across_families() {
     .expect("a rule over one tool action passes staged validation");
 }
 
+/// The removed `ip` is refused before an MCP server reports its tools.
+///
+/// `PolicyError::Schema` is no inert class, so a rule this path does not refuse is parked as
+/// pending rather than reported, and a box with a local MCP server reaches this path alone before
+/// any schema stages.
+#[test]
+fn staged_validation_refuses_the_removed_address_attribute() {
+    for (name, text) in [
+        (
+            "literal.dw",
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input has ip && context.input.ip == "169.254.169.254" };"#,
+        ),
+        (
+            "pattern.dw",
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input.ip like "169.254.*" };"#,
+        ),
+        (
+            "guard_only.dw",
+            r#"forbid(principal, action in [Box::Action::"net:connect"], resource)
+               when { context.input has ip };"#,
+        ),
+    ] {
+        let refusal = PolicyEngine::validate_staged(&[source(name, text)])
+            .expect_err("the removed attribute is refused before discovery, not parked");
+        assert!(
+            matches!(refusal, policy::PolicyError::Schema(_)),
+            "{name}: {refusal}"
+        );
+        let reason = refusal.to_string();
+        assert!(reason.contains("context.input.ip4"), "{name}: {reason}");
+        assert!(reason.contains("context.input.ip6"), "{name}: {reason}");
+    }
+
+    PolicyEngine::validate_staged(&[source(
+        "split.dw",
+        r#"forbid(principal, action == Box::Action::"net:connect", resource)
+           when { context.input has ip4 && context.input.ip4 like "169.254.*" };"#,
+    )])
+    .expect("a rule on ip4 passes staged validation");
+
+    PolicyEngine::validate_staged(&[source(
+        "tool.dw",
+        r#"forbid(principal, action == filesrv::Action::"deploy", resource)
+           when { context.input.ip == "169.254.169.254" };"#,
+    )])
+    .expect("a tool action's own ip argument is not a destination address");
+}
+
 #[test]
 fn staged_validation_checks_parse_macro_and_provider_without_weakening_strict_validation() {
     let unknown_action = source(

@@ -106,11 +106,33 @@ Each outbound call is two decisions, both of which must permit.
 |---|---|---|
 | `host` | String | The destination host. |
 | `port` | Long | The destination port. |
-| `ip?` | String | The IP address the gateway connects to, as text, such as `"203.0.113.7"`. |
+| `ip4?` | String | The IPv4 address the destination carries, as a dotted quad, such as `"203.0.113.7"`. |
+| `ip6?` | String | The IPv6 address the gateway connects to, compressed and in lowercase, such as `"2606:2800:220:1::1"`. An IPv4-mapped address is `"::ffff:"` and a dotted quad. |
 
-Compare `ip` as a String behind a guard, as
-`context.input has ip && context.input.ip == "203.0.113.7"`. An `ipaddr` comparison refuses to load
-with `the types String and ipaddr are not compatible`.
+Both are absent before resolution, so compare each as a String behind its own guard, as
+`context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to
+load with `the types String and ipaddr are not compatible`.
+
+A destination carries `ip4`, `ip6`, or both:
+
+| The gateway connects to | `ip4` | `ip6` |
+|---|---|---|
+| `93.184.216.34` | `"93.184.216.34"` | absent |
+| `2606:2800:220:1::1` | absent | `"2606:2800:220:1::1"` |
+| `64:ff9b::5db8:d822` | `"93.184.216.34"` | `"64:ff9b::5db8:d822"` |
+| `::ffff:93.184.216.34` | `"93.184.216.34"` | `"::ffff:93.184.216.34"` |
+
+An IPv6 destination that wraps an IPv4 address carries both: `ip4` is the address it wraps, and
+`ip6` is the form it arrived as. Box reads the wrapping for the IPv4-mapped, IPv4-compatible,
+IPv4-translated, 6to4, Teredo, and well-known NAT64 (`64:ff9b::/96`) encodings. For an IPv6
+destination outside all of those, `ip4` is absent. Only an IPv4-mapped address spells `ip6` with a
+dotted quad; every other wrapping spells it in hexadecimal, so a NAT64 destination is
+`"64:ff9b::5db8:d822"` and not `"64:ff9b::93.184.216.34"`.
+
+An IPv4 destination carries no `ip6`. One IPv4 address has many IPv6 encodings, so there is no one
+IPv6 form to report, and Box computes none.
+
+There is no `ip` field. A rule that names one refuses to load and names `ip4` and `ip6` instead.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 

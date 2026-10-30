@@ -563,6 +563,9 @@ pub(crate) fn refuse_input_across_families_before_discovery(
     };
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
         rule_ref(&lowered, cedar_policy_id, &[])
+    })?;
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &|cedar_policy_id| {
+        rule_ref(&lowered, cedar_policy_id, &[])
     })
 }
 
@@ -709,6 +712,9 @@ pub(crate) fn check_and_expand(
     refuse_shared_rule_ids(&lowered, positions)?;
     refuse_reserved_action_rules(&lowered, positions)?;
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
+        rule_ref(&lowered, cedar_policy_id, positions)
+    })?;
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &|cedar_policy_id| {
         rule_ref(&lowered, cedar_policy_id, positions)
     })?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
@@ -1278,7 +1284,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
                 (attr::PORT, Value::Int(i64::from(*port))),
             ];
             if let Some(ip) = ip {
-                fields.push((attr::IP, Value::String(crate::address::canonical(*ip))));
+                fields.extend(address_fields(*ip));
             }
             fields
         }
@@ -1356,6 +1362,14 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
     }
 }
 
+/// The address fields a destination carries, mirroring [`crate::schema`]'s Cedar mapping.
+fn address_fields(ip: std::net::IpAddr) -> Vec<(&'static str, Value)> {
+    crate::address::fields(ip)
+        .into_iter()
+        .filter_map(|(name, spelling)| spelling.map(|spelling| (name, Value::String(spelling))))
+        .collect()
+}
+
 /// The argument fields, mirroring [`crate::schema`]'s Cedar mapping exactly.
 ///
 /// The two mappings are checked against one schema, so a field present in one and absent
@@ -1393,14 +1407,14 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             port,
             address,
             ..
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (
-                attr::IP,
-                Value::String(crate::address::canonical(address.ip())),
-            ),
-        ],
+        } => {
+            let mut fields = vec![
+                (attr::HOST, Value::String((*host).to_string())),
+                (attr::PORT, Value::Int(i64::from(*port))),
+            ];
+            fields.extend(address_fields(address.ip()));
+            fields
+        }
         Outcome::Http {
             host,
             port,

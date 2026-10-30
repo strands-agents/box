@@ -82,11 +82,11 @@ when {
 @description("Refuse link-local and cloud metadata addresses, on the address resolution pinned.")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  context.input has ip && (
-    context.input.ip like "169.254.*" ||
-    context.input.ip == "fd00:ec2::254" ||
-    context.input.ip like "fe8*" || context.input.ip like "fe9*" ||
-    context.input.ip like "fea*" || context.input.ip like "feb*")
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && (
+    context.input.ip6 == "fd00:ec2::254" ||
+    context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
+    context.input.ip6 like "fea*" || context.input.ip6 like "feb*"))
 };
 ```
 
@@ -125,6 +125,12 @@ records why, the item links it.
   [how Box decides a file operation](../design/monty.md#how-box-decides-a-file-operation).
 - **The decision log records the rule and the path, and not the operation.** A `cat` and an `ls`
   of one file produce the same entry.
+- **A rule on an IPv4 address does not reach a destination behind a NAT64 prefix a network chose
+  for itself.** Box reads the well-known `64:ff9b::/96` prefix and the other standard IPv6
+  wrappings of an IPv4 address, and it takes no network's own prefix as configuration. For such a
+  destination `context.input.ip4` is absent and an `ip4` rule does not fire. Add a clause on
+  `context.input.ip6` for the prefix your network uses. See
+  [a rule that names `ip`, or the wrong address family](policy.md#a-rule-that-names-ip-or-the-wrong-address-family).
 - **A long temporal window slows every decision on that action.** Each decision recounts the events
   in the window, so a `24h` window on a busy action costs more than a `1m` one. Pick the shortest
   window the rule needs. See [residual risk](../design/policy.md#residual-risk).

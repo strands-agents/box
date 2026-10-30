@@ -100,10 +100,15 @@ flowchart TD
    the address. A deny stops the request. The first permitted address that answers is the one the
    gateway uses, and it decides no later address.
 
-**An address is one spelling.** The gateway gives policy the address as a string, in one canonical
-form: an IPv6 spelling of an IPv4 address, such as `::ffff:169.254.169.254`, becomes the IPv4
-address, and other IPv6 addresses are compressed and lowercase. A rule matches it with `==` or
-`like`. An address literal that a `when` or `unless` condition compares is held to that form at
+**An address reaches policy as one field per family.** The gateway gives policy two strings, each
+in one spelling: `ip4` is the IPv4 address, as a dotted quad, and `ip6` is the IPv6 address,
+compressed and lowercase, or `::ffff:` with a dotted quad when it is IPv4-mapped. An IPv6 address that wraps an IPv4 address, such as
+`::ffff:169.254.169.254` or `64:ff9b::a9fe:a9fe`, carries both, so a rule on either family decides
+it and nothing about the address the gateway dialed is discarded. An IPv4 address carries no `ip6`,
+because one IPv4 address has many IPv6 encodings and the gateway computes none. A rule matches
+either with `==` or `like`, and a rule about both families spells one clause for each.
+
+An address literal that a `when` or `unless` condition compares is held to its own field's form at
 load, as a host literal is, and the refusal names the form to write ([a rule that cannot fire is
 refused at
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). Two
@@ -145,7 +150,8 @@ MCP server gets a JSON-RPC error body.
 **Policy is the only check on metadata endpoints.** The gateway has no built-in block. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames
 `metadata.google.internal` and `metadata.azure.internal`, and one for the metadata addresses
-`169.254.*`, `fd00:ec2::254`, and the IPv6 link-local range.
+`169.254.*`, `fd00:ec2::254`, and the IPv6 link-local range. The address rule carries one clause per
+family, because `ip4` and `ip6` are separate fields.
 
 ## How credentials are added
 
