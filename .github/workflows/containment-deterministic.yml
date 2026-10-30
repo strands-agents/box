@@ -18,7 +18,6 @@ on:
   workflow_call:
 
 env:
-  EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
   CARGO_TERM_COLOR: always
   # Same disk-pressure guard as rust-test-lint.yml: hosted runners give ~14 GB
   # free and full DWARF on the dev profile has overflowed it.

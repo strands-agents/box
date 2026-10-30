@@ -202,6 +202,7 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, package verification, and release gates.
 
