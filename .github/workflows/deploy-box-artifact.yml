@@ -354,13 +354,13 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
         run: |
           set -euo pipefail
-          # Check the selected source's consent behavior before using its smoke script.
+          # Reject a selected source that still refuses startup without an opt-in.
           if output=$(env -u EXPERIMENTAL_LINUX_SUPPORT stage/box-core/box run \
-            --config "$RUNNER_TEMP/missing-linux-preview.toml" 2>&1); then
-            echo "::error::Linux startup did not require explicit consent."
+            --config "$RUNNER_TEMP/missing-linux-config.toml" 2>&1); then
+            echo "::error::Linux startup accepted a missing configuration."
             exit 1
           fi
-          grep -Fq 'EXPERIMENTAL_LINUX_SUPPORT=TRUE' <<< "$output"
+          grep -Fq "$RUNNER_TEMP/missing-linux-config.toml" <<< "$output"
           # This named profile permits user namespaces for the disposable test container.
           cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
           abi <abi/4.0>,
@@ -736,8 +736,6 @@ jobs:
           fi
           cat >> body.md <<EOF
 
-          Linux startup requires explicit opt-in with \`EXPERIMENTAL_LINUX_SUPPORT=TRUE\`.
-
           For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
           \`\`\`sh
@@ -746,7 +744,7 @@ jobs:
             sha256sum --check box-linux.sha256 &&
             mkdir -p box-core &&
             tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz &&
-            EXPERIMENTAL_LINUX_SUPPORT=TRUE ./box-core/box run --config ./box.toml
+            ./box-core/box run --config ./box.toml
           \`\`\`
 
           The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.

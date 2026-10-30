@@ -3,7 +3,7 @@
 #[cfg(unix)]
 fn main() {
     #[cfg(target_os = "linux")]
-    if std::env::args().any(|argument| argument == "--linux-refusal") {
+    if std::env::args().any(|argument| argument == "--linux-startup") {
         let mut called = false;
         assert_eq!(
             strands_box::run(
@@ -19,7 +19,7 @@ fn main() {
             ),
             std::process::ExitCode::FAILURE
         );
-        assert!(!called, "opt-in refusal must precede the callback");
+        assert!(called, "startup must reach the callback without an opt-in");
         assert_eq!(
             strands_box::generate_policy_schema(
                 "/missing-linux-schema.toml".into(),
@@ -63,7 +63,7 @@ fn main() {
 
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--probe")
-        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
         .output()
         .expect("run the library probe");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -77,7 +77,7 @@ fn main() {
     );
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-error")
-        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,7 +90,7 @@ fn main() {
 
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-config")
-        .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -102,23 +102,20 @@ fn main() {
     );
 
     #[cfg(target_os = "linux")]
-    for value in [None, Some("true"), Some("1")] {
+    for value in [None, Some("TRUE"), Some("true"), Some("1"), Some("FALSE")] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
-            .arg("--linux-refusal")
+            .arg("--linux-startup")
             .env_remove("EXPERIMENTAL_LINUX_SUPPORT");
         if let Some(value) = value {
             command.env("EXPERIMENTAL_LINUX_SUPPORT", value);
         }
-        let output = command.output().expect("run the Linux refusal probe");
+        let output = command.output().expect("run the Linux startup probe");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
-        assert_eq!(
-            stderr.matches("Linux support is experimental.").count(),
-            2,
-            "{stderr}"
-        );
-        assert!(!stderr.contains("missing-linux-"), "{stderr}");
+        assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
+        assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
+        assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
 }
 

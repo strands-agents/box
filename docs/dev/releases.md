@@ -60,6 +60,6 @@ Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` toget
 Verify the reported version, an allowed operation, and a denied operation using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
-Linux startup still requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`.
-A stable version does not remove this runtime requirement or establish security acceptance.
+Linux startup requires no environment opt-in.
+A stable version does not establish security acceptance.
 Use manual checksum verification and extraction; this workflow change does not add Linux support to `download.sh`.

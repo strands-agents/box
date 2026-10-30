@@ -201,10 +201,6 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    #[cfg(target_os = "linux")]
-    #[error("Linux support is experimental. Set EXPERIMENTAL_LINUX_SUPPORT=TRUE to enable it.")]
-    ExperimentalLinuxSupport,
-
     #[error(
         "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
     )]

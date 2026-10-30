@@ -246,7 +246,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 )
                 self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
                 body = (root / "body.md").read_text()
-                self.assertIn("EXPERIMENTAL_LINUX_SUPPORT=TRUE", body)
+                self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
                 self.assertIn(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz", body)
                 self.assertIn("sha256sum --check box-linux.sha256", body)
                 self.assertEqual("## Linux ARM64" in body, not preview)
