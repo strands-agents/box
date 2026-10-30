@@ -848,7 +848,7 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
   Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
-  returns `EACCES` to the workload. Guard: `supervisor_memory_linux::workload_cannot_write_namespace_supervisor_memory`.
+  changes owner and returns `EACCES` to the workload. Guard: `supervisor_memory_linux::workload_cannot_write_namespace_supervisor_memory`.
   Namespace PID 1 forwards `SIGTERM` and `SIGINT`, stores the workload pid *before* installing the
   handlers, and reaps in a loop.
 - **`netns`:** a socket's namespace is fixed at creation, so bind inside and pass the descriptor out

@@ -475,15 +475,11 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(127) };
     }
 
-    // The mount view is up and the workload is about to run: signal "reached exec" now. A long-lived
-    // leaf (a streaming MCP server) never lets the status pipe EOF during its life — the reaper and
-    // the waiter both hold the writer — so the supervisor must be told explicitly, not by EOF.
-    write_confirm_byte(confirm_fd, EXEC_CONFIRM_BYTE);
-
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
     if let Err(error) = authority::close_inherited_descriptors(keep) {
         eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: as above.
         unsafe { libc::_exit(127) };
     }
@@ -493,9 +489,15 @@ fn establish_pid_namespace_and_reaper(
              ({error:?}); killing the namespace rather than starting a workload \
              from a reachable PID 1"
         );
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace before any workload starts.
         unsafe { libc::_exit(127) };
     }
+
+    // The mount view is up and the workload is about to run: signal "reached exec" now. A long-lived
+    // leaf (a streaming MCP server) never lets the status pipe EOF during its life — the reaper and
+    // the waiter both hold the writer — so the supervisor must be told explicitly, not by EOF.
+    write_confirm_byte(confirm_fd, EXEC_CONFIRM_BYTE);
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };

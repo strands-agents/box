@@ -867,6 +867,7 @@ fn verify_no_inherited_handles(args: &[String]) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn attempt_supervisor_memory_write() -> ExitCode {
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
     let address = (&SUPERVISOR_MEMORY_MARKER as *const _) as u64;
@@ -888,6 +889,22 @@ fn attempt_supervisor_memory_write() -> ExitCode {
     if let Err(error) = self_mem.read_exact(&mut control) {
         eprintln!("probe: cannot read own memory control: {error}");
         return ExitCode::from(2);
+    }
+
+    let owner = match std::fs::metadata("/proc/1/mem").map(|metadata| metadata.uid()) {
+        Ok(owner) => owner,
+        Err(error) => {
+            eprintln!("probe: cannot stat supervisor memory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    // SAFETY: `getuid` has no failure mode.
+    let workload_uid = unsafe { libc::getuid() };
+    if owner == workload_uid {
+        eprintln!(
+            "probe FAILED: /proc/1/mem is owned by the workload uid, so PID 1 is still dumpable"
+        );
+        return ExitCode::from(1);
     }
 
     let mut supervisor_mem = match std::fs::OpenOptions::new()
