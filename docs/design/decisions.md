@@ -85,7 +85,8 @@ The `native-filesystem-policy` Cargo feature includes the adapter but does not a
 `[experimental-features] native-filesystem-policy = true` enables the mechanism and supplies the default for each workload.
 An optional `native-filesystem-policy` boolean in `[agent]`, `[tool.<name>]`, or a local `[mcp.<name>]` overrides that default.
 Each table inherits the global default independently. Remote MCP entries refuse the setting.
-An explicit process enablement requires the global gate. Standard release builds exclude the adapter.
+An explicit process enablement requires the global gate.
+Signed macOS releases include the adapter, but retain this explicit runtime selection.
 
 The trusted launcher holds each workload before execution and registers its selection against the kernel-observed process identity.
 Children inherit the selection across forks and executable changes. Only trusted launches apply table overrides.
@@ -718,6 +719,32 @@ cannot narrow another permit; beside a conditioned permit for the same action it
 inert only for the requests that permit admits; and alone it loads, because it is then a widening and
 not a cap.
 
+<a id="a-rule-that-reads-the-input-names-one-action-family"></a>
+### A rule that reads `context.input` names actions of one family
+
+An input attribute means what the action makes it mean: `path` is a filesystem path on `fs:*` and a
+URL path on `http:request`, and `host` is a destination on `net:connect` and any argument a
+generated tool action declares. So the load refuses a rule that reads `context.input` and does not
+constrain its action to one family, and names the actions to write. A read is one in a `when` or
+`unless` condition; a `when temporal` clause names its own action, so the check does not look inside
+it. A family is the prefix before
+`:` in a `Box::Action` name (`fs`, `shell`, `net`, `http`, `mcp`), and each generated tool action
+is a family of its own. The check needs no action schema, so it runs before strict validation and
+before a box with an MCP server stages a tool schema: a rule that reads the input across a tool
+action and another family is refused, not parked until discovery, and a rule scoped to one tool
+action loads. This is wider than
+[refusing a rule that cannot fire](#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns):
+it refuses a rule that is ambiguously authored, not one proven inert, so it refuses some rules that
+fire correctly today. Three alternatives lost. Judging the literal under an unconstrained scope
+refused a valid rule that compared a tool argument, and the spelling it suggested changed what the
+rule matched. A warning scrolls past the startup disclosure and does not stop the run, and no
+shipped policy has this shape. The schema
+cannot decide it, because it records a type and not a meaning, and `path` is a `String` on both
+`fs:*` and `http:request`. The cost: a rule that reads the input across families must be split into
+one rule per family, even `net:connect` with `http:request` on `host`, where the meaning agrees. The
+rule starts strict because loosening it later loads every policy that loads today, and tightening it
+would refuse some. A blanket `permit` or `forbid` with no condition still loads.
+
 <a id="the-enforced-surface-is-the-whole-vocabulary"></a>
 ### The enforced surface is the whole vocabulary, so there are no harness actions and no risk tags
 
@@ -783,7 +810,13 @@ enforced against recorded history, so do not claim tamper resistance for them. A
 is satisfied by a denied attempt, because the request event carries no verdict, so a step-up rule keyed
 on `::request` is defeated by asking and being refused. Key a precondition on `::response` instead;
 `a_denied_attempt_satisfies_a_request_keyed_precondition` pins the failure mode, which is known and
-open. A missing outcome event also makes a counting rule undercount and fail open. History is pruned to
+open. A missing outcome event also makes a counting rule undercount and fail open. A Shell metadata
+read that got an answer records `::response` even when the answer is "no", so a `read_metadata`
+budget counts a probe of an absent path, which `a_read_metadata_budget_counts_probes_of_absent_paths`
+pins, and a read that the reach floor or the admission-window guard refuses stays `::error`, which
+`a_metadata_read_the_floor_refuses_meets_no_response_precondition` and
+`a_probe_the_admission_window_refuses_reports_a_failure` pin; the cost is that no event kind
+separates a "yes" from a "no". History is pruned to
 the deepest authored window and the workload itself fills that window, so treat window depth as an
 availability bound and not as a strength claim. A counting rule also evaluates against recorded
 history and not against requests in flight, so a parallel burst can exceed a limit together while each
@@ -947,6 +980,23 @@ because it faces every author with a blank file. Agent generation alone was reje
 strands an operator who runs no agent and leaves review without a trusted reference. The cost is a
 standing maintenance burden: the examples and the authoring skill must track the action vocabulary as
 it moves.
+
+<a id="a-tool-pack-holds-grammars-never-code"></a>
+### A tool pack holds grammars, never code
+
+A tool pack is a TOML file that describes one tool: its actions, its effects, and the grammar Box uses
+to recognize those actions. It holds no code. So Box puts no external code inside its trusted process,
+and a pack stays easy to write and to review. Parsers written as Python code that runs in Monty were
+rejected. The cost is that a pack can describe only what its grammar can express.
+
+<a id="box-owns-the-tool-pack-format"></a>
+### Box owns the tool pack file format, and it is separate from the pack's own version
+
+A tool pack file declares two versions. `format` is the version of the pack file language, and Box owns
+it: Box bumps it when it adds or changes keys in a way an older Box cannot read. `version` is the major
+version of the pack's content, and the pack author owns it. Box refuses a file with no `format`, or with
+a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
+file must state `format = 1`.
 
 ## Containment
 
@@ -1367,15 +1417,24 @@ path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that
 carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
-### The Shell's outbound HTTP goes through the box's egress gateway
+### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
 
-The Shell builds no HTTP client of its own. It dials the box's egress gateway on loopback and trusts the
-gateway's interception CA. The gateway stays the one authority for `net:connect` and `http:request`, so
-a Shell `curl` becomes one more source of decisions that the gateway already raises. A direct client
-would be a second unaudited route to an effect the gateway governs. The Shell resolves no credential and
-attaches no secret, and it runs its network off-switch before any transport. A build-time check fails
-the build if a network client appears in the Shell sources outside the two sanctioned files, but that
-check is a lint and not a guarantee.
+Box owns the Shell's HTTP step. `CallKernel::http_request` does not hand a request to the vendored
+backend: it refuses every request when the box has no gateway, runs the private-address floor, and
+sends the request with its own client. That client dials the box's egress gateway on loopback, trusts
+only the gateway's interception CA, and follows no redirect, so each `curl -L` hop is a new request
+through the wrapper. It ignores `curl -k`. The backend keeps its own network off, so the vendored
+client can't dial even if a call skips the wrapper. The gateway stays the one authority for
+`net:connect` and `http:request`, and the Shell resolves no credential and attaches no secret.
+
+The alternative was proxy fields on the vendored `VfsKernel`, set through `ShellBuilder::egress_proxy`.
+Upstream Shell doesn't have that feature and Box won't propose it, and the builder calls did nothing
+once Box supplied its own kernel.
+
+The cost: the wrapper governs only what reaches the kernel's HTTP step. A future Shell network command
+that builds its own client would skip it. A test in `shell_egress_client_guard.rs` fails if a client
+is built in the Shell sources outside `vfs_kernel.rs` and `shell.rs`, but that check is a lint and not
+a guarantee.
 
 <a id="a-gateway-refusal-never-reports-success"></a>
 ### A gateway refusal never reaches the workload as a successful response
@@ -1383,11 +1442,11 @@ check is a lint and not a guarantee.
 The gateway forges the origin's leaf certificate when it intercepts a request, so a refusal it writes
 inside its own tunnel would reach the Shell as an ordinary HTTP status, and `curl` exits 0 for any
 status unless the caller passes `-f`. The gateway therefore marks each response it writes itself with a
-header, and the Shell turns such a response into a permission-denied error, so `curl` prints one
-reason line and exits 1. The marker is not authorization: the gateway already refused, and the marker
-only says who wrote the refusal. `a_gateway_refusal_exits_non_zero_and_is_not_rendered` pins it.
+header, and Box's kernel wrapper turns such a response into a permission-denied error, so `curl`
+prints one reason line and exits 1. The marker is not authorization: the gateway already refused, and
+the marker only says who wrote the refusal. `kernel.rs::a_marked_refusal_fails_curl` pins it.
 
-**The conversion is the Shell's alone, and Monty does not have it.** A Monty `fetch` builds its own
+**The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds its own
 client and never reads the marker, so a denied request reaches the script as an ordinary response
 carrying a `403` status. A script that does not check the status reads a refusal as an answer. That is
 an open residual rather than a closed case.

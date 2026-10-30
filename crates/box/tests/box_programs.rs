@@ -601,6 +601,59 @@ permit(principal, action == Box::Action::"fs:write", resource);
     );
 }
 
+/// **A program called by one of two links to one file runs under the table of that link**, so the
+/// spawn selects by the spelling the caller used and not by the resolved file.
+#[test]
+fn a_program_called_by_a_link_runs_under_the_table_of_that_link() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    for name in ["first", "second"] {
+        std::os::unix::fs::symlink(&bash, links.path().join(name)).expect("a link to bash");
+    }
+    let directory = links.path().display();
+
+    // `PERMISSIVE` plus a spawn of the two links, and no other program.
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/first" || context.input.program == "{directory}/second" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-called-link",
+        &policy,
+        &format!(
+            "[tool.first]\ncommand = [\"{directory}/first\"]\nenv = {{ WHICH = \"first\" }}\n\
+             [tool.first.filesystem]\nread = [\"{directory}\"]\n\
+             [tool.second]\ncommand = [\"{directory}/second\"]\nenv = {{ WHICH = \"second\" }}\n\
+             [tool.second.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_read(&[links.path()])
+    .expect();
+
+    // Both links, so the test holds whichever table wins a tie that no name breaks.
+    for name in ["first", "second"] {
+        let output = box_.bash(&format!(
+            r#"zsh -c '{directory}/{name} -c "printf which=%s \"\$WHICH\""'"#
+        ));
+
+        assert_workload_launched(&output, "the linked tool");
+        assert!(
+            stdout(&output).contains(&format!("which={name}")),
+            "the program called as {name} must run under [tool.{name}]: {output:?}"
+        );
+    }
+}
+
 /// Redirection, appending, and reading back — the file semantics a build depends on.
 ///
 /// **`#[ignore]`d on a real defect this test found: `>>` loses the preceding write.**

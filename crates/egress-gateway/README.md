@@ -227,7 +227,9 @@ workload; `box.toml` exposes no key for it.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `Drop` shuts the adapter down and
-joins the accept thread.
+joins the accept thread. A successful wakeup connection stays open until the
+accept thread exits. A failed wakeup connection or an exhausted connection limit
+can still block shutdown.
 
 ## Errors
 

@@ -1,0 +1,336 @@
+# cargo pack corpus
+#
+# Each case is one argv, and what the shell grammar of `../valid/cargo.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+# Cases marked "verified" were checked against cargo 1.98.
+
+[[case]]
+argv = ["cargo", "test"]
+action = "test"
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# An alias. A `[alias] t` in `.cargo/config.toml` can redefine `t`, and the parser cannot see it (L1)
+[[case]]
+argv = ["cargo", "t"]
+action = "test"
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "+stable", "test"]
+action = "test"
+fields = { toolchain = "stable" }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "+nightly", "-Zunstable-options", "t", "--locked"]
+action = "test"
+fields = { locked = true, toolchain = "nightly", unstable = ["unstable-options"] }
+effects = ["execute_built_code", "network", "run_build_scripts"]
+
+# A global option before the command
+[[case]]
+argv = ["cargo", "--locked", "build"]
+action = "build"
+fields = { locked = true }
+effects = ["network", "run_build_scripts"]
+
+# An `anywhere` global option after the command
+[[case]]
+argv = ["cargo", "build", "--locked"]
+action = "build"
+fields = { locked = true }
+effects = ["network", "run_build_scripts"]
+
+[[case]]
+argv = ["cargo", "test", "--frozen"]
+action = "test"
+fields = { frozen = true }
+effects = ["execute_built_code", "run_build_scripts"]
+
+# `--offline` alone can still rewrite Cargo.lock
+[[case]]
+argv = ["cargo", "build", "--offline"]
+action = "build"
+fields = { offline = true }
+effects = ["run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "b", "-r", "-p", "strands-box"]
+action = "build"
+fields = { package = ["strands-box"], release = true }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "build", "-rp", "strands-box"]
+action = "build"
+fields = { package = ["strands-box"], release = true }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+# Short value option with `=` (clap reads `strands-box`, verified; git would read `=strands-box`)
+[[case]]
+argv = ["cargo", "build", "-p=strands-box"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "build", "--manifest-path=crates/x/Cargo.toml"]
+action = "build"
+fields = { manifest_path = "crates/x/Cargo.toml" }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+# Not a global option; cargo refuses it too (verified)
+[[case]]
+argv = ["cargo", "--manifest-path", "x/Cargo.toml", "build"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "test", "-p", "box", "--all-features", "--", "--nocapture"]
+action = "test"
+fields = { all_features = true, package = ["box"], test_args = ["--nocapture"] }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "test", "parser", "--", "--test-threads=1"]
+action = "test"
+fields = { test_args = ["--test-threads=1"], testname = "parser" }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# Too many operands: `[-- <test_args>...]` is reached only after `--` (cargo: "unexpected argument", verified)
+[[case]]
+argv = ["cargo", "test", "foo", "bar"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "test", "--no-run"]
+action = "test"
+fields = { no_run = true }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+# Values are not split
+[[case]]
+argv = ["cargo", "test", "-F", "a,b", "-F", "c"]
+action = "test"
+fields = { features = ["a,b", "c"] }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# No prefix matching (cargo refuses it too, verified)
+[[case]]
+argv = ["cargo", "test", "--relea"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "run", "--release", "--", "--port", "8080"]
+action = "run"
+fields = { program_args = ["--port", "8080"], release = true }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# From the first operand on, every word goes to the program, so the build is not a release build (verified)
+[[case]]
+argv = ["cargo", "run", "app", "--release"]
+action = "run"
+fields = { program_args = ["--release", "app"] }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# The first `--` is the separator (verified)
+[[case]]
+argv = ["cargo", "run", "--", "--", "y"]
+action = "run"
+fields = { program_args = ["--", "y"] }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "r", "--bin", "server"]
+action = "run"
+fields = { bin = "server" }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "update"]
+action = "update"
+effects = ["network", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "update", "-p", "serde", "--precise", "1.0.200"]
+action = "update"
+fields = { package = ["serde"], precise = "1.0.200" }
+effects = ["network", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "update", "serde", "tokio"]
+action = "update"
+fields = { spec = ["serde", "tokio"] }
+effects = ["network", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "update", "-n"]
+action = "update"
+fields = { dry_run = true }
+effects = ["network"]
+
+# Cargo then refuses to write
+[[case]]
+argv = ["cargo", "update", "--locked"]
+action = "update"
+fields = { locked = true }
+effects = ["network"]
+
+[[case]]
+argv = ["cargo", "add", "serde", "-F", "derive"]
+action = "add"
+fields = { dependency = ["serde"], features = ["derive"] }
+effects = ["modify_manifest", "network", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "add", "--locked", "tokio"]
+action = "add"
+fields = { dependency = ["tokio"], locked = true }
+effects = ["modify_manifest", "network"]
+
+[[case]]
+argv = ["cargo", "add", "--dry-run", "anyhow"]
+action = "add"
+fields = { dependency = ["anyhow"], dry_run = true }
+effects = ["network"]
+
+# Required operand `<dependency>...` missing
+[[case]]
+argv = ["cargo", "add"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "add", "evil", "--git", "https://example.com/evil.git"]
+action = "add"
+fields = { dependency = ["evil"], git = "https://example.com/evil.git" }
+effects = ["modify_manifest", "network", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "rm", "serde"]
+action = "remove"
+fields = { dependency = ["serde"] }
+effects = ["modify_manifest", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "publish"]
+action = "publish"
+effects = ["network", "publish_crate", "run_build_scripts"]
+
+# `-n` (verified)
+[[case]]
+argv = ["cargo", "publish", "-n"]
+action = "publish"
+fields = { dry_run = true }
+effects = ["network", "run_build_scripts"]
+
+[[case]]
+argv = ["cargo", "publish", "--dry-run", "--no-verify"]
+action = "publish"
+fields = { dry_run = true, no_verify = true }
+effects = ["network"]
+
+[[case]]
+argv = ["cargo", "install", "ripgrep", "--locked"]
+action = "install"
+fields = { crate = ["ripgrep"], locked = true }
+effects = ["install_binary", "network", "run_build_scripts"]
+
+[[case]]
+argv = ["cargo", "install", "--list"]
+action = "install"
+fields = { list = true }
+
+[[case]]
+argv = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+action = "clippy"
+fields = { all_targets = true, clippy_args = ["-D", "warnings"] }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "clippy", "--fix", "--allow-dirty"]
+action = "clippy"
+fields = { allow_dirty = true, fix = true }
+effects = ["modify_sources", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "fmt"]
+action = "fmt"
+effects = ["modify_sources"]
+
+[[case]]
+argv = ["cargo", "fmt", "--check"]
+action = "fmt"
+fields = { check = true }
+
+# A `when` entry on an operand
+[[case]]
+argv = ["cargo", "fmt", "--", "--check"]
+action = "fmt"
+fields = { rustfmt_args = ["--check"] }
+
+# A flag with no value, given twice in one cluster
+[[case]]
+argv = ["cargo", "-vv", "test"]
+action = "test"
+fields = { verbose = true }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+[[case]]
+argv = ["cargo", "--config", "build.rustc-wrapper=\"/tmp/x\"", "build"]
+action = "build"
+fields = { config = ['build.rustc-wrapper="/tmp/x"'] }
+effects = ["network", "override_config", "run_build_scripts", "update_lockfile"]
+
+# The parser does not read config values: update_lockfile stays
+[[case]]
+argv = ["cargo", "build", "--config", "net.offline=true"]
+action = "build"
+fields = { config = ["net.offline=true"] }
+effects = ["network", "override_config", "run_build_scripts", "update_lockfile"]
+
+# `+<toolchain>` is honoured only as the first argument (rustup)
+[[case]]
+argv = ["cargo", "-v", "+stable", "test"]
+action = "unmodeled"
+
+# Cargo refuses without nightly `-Z unstable-options`, verified; harmless
+[[case]]
+argv = ["cargo", "-C", "sub", "build"]
+action = "build"
+fields = { directory = "sub" }
+effects = ["network", "run_build_scripts", "update_lockfile"]
+
+# `-C` is before-only (cargo: "unexpected argument", verified)
+[[case]]
+argv = ["cargo", "build", "-C", "sub"]
+action = "unmodeled"
+
+# An unknown subcommand
+[[case]]
+argv = ["cargo", "tset"]
+action = "unmodeled"
+
+# External subcommand `cargo-nextest`
+[[case]]
+argv = ["cargo", "nextest", "run"]
+action = "unmodeled"
+
+# Build has no operands
+[[case]]
+argv = ["cargo", "build", "--", "x"]
+action = "unmodeled"
+
+# An empty toolchain
+[[case]]
+argv = ["cargo", "+", "test"]
+action = "unmodeled"
+
+# A toolchain and no command word
+[[case]]
+argv = ["cargo", "+stable"]
+action = "unmodeled"
+
+# `anywhere` global options in a cluster after the command
+[[case]]
+argv = ["cargo", "test", "-vq"]
+action = "test"
+fields = { quiet = true, verbose = true }
+effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]

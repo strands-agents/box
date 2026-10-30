@@ -114,11 +114,14 @@ sequenceDiagram
    rule can count completed reads, or close egress after a read
    ([what a history rule sees](./policy.md#what-a-history-rule-sees)).
 
-**A rename is two paths.** `Path.rename()` reads the source, moves it, and replaces whatever the
-destination names. Box asks `fs:read` and `fs:move` on the source, `fs:delete` on an existing
-destination, and `fs:move` on the destination, and the reachable paths check approves both paths ([an
-overwriting rename also raises a
-delete](decisions.md#an-overwriting-rename-also-deletes-the-destination)).
+**A rename is two paths.** `Path.rename()` reads and moves the source. It can replace a destination
+after policy permits its deletion. Box asks `fs:read` and `fs:move` on the source, `fs:delete` on an
+existing destination, and `fs:move` on the destination. The reachable paths check approves both paths
+([an overwriting rename also raises a delete](decisions.md#an-overwriting-rename-also-deletes-the-destination)).
+
+Box retains whether the destination existed when policy checked it. If it did not exist, the rename
+must atomically refuse replacement. A destination created after that check survives, and Box records
+a failed move. If the platform cannot perform that operation, Box returns the error without a replacing retry.
 
 ## What Monty performs, and what it refuses
 

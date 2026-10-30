@@ -18,8 +18,8 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **35 names with `--all-features`, and 31 by default.** The adapter features add
-the four names in the last row.
+The façade exports **52 names with `--all-features`, and 46 by default.** The adapter features add
+the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -36,11 +36,12 @@ the four names in the last row.
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup and history-recording errors. |
+| `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
-| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor` + `ScriptPermit` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
+| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:
 
@@ -60,10 +61,11 @@ calls can return different verdicts. A denied request still advances history.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 
-One call sits off the lifecycle:
+Two calls sit off the lifecycle:
 
 ```text
 PolicyEngine::validate(&[Policy]) -> Result<(), PolicyError>
+PolicyEngine::check(&Operator, &[Policy], complete: bool) -> PolicyCheck
 ```
 
 `validate` answers "would `open` accept this text", and returns no authority. Use it
@@ -72,6 +74,12 @@ second `PolicyEngine` to find out. `open` and `validate` share one private compo
 so a validator that accepts text the authority would refuse is not expressible. Its
 caller is `strands-box`'s configuration step, which the `run` and `init` verbs both
 reach. A policy the engine cannot load is refused there, before the box stores it.
+
+`check` reports every finding of the same composition, and returns no authority. A finding
+names its rules by position (from 1) and `@id`, its line and column when the engine reports
+a span, and the validator's help, such as ``did you mean `path`?``. Pass `complete = false`
+for a box that declares a local MCP server: each rule that names a per-tool MCP action is then
+listed as unchecked, as `open_staged` holds it pending, and every other rule is validated.
 
 ## Minimal Example
 
@@ -179,8 +187,9 @@ its own policy text and temporal history. The authored policy cannot discriminat
 box name.
 
 The removed `Filesystem`, `Network`, `Process`, and `Box` entity types fail strict
-validation. Rewrite those scopes as an action or `context.input` guard. For example,
-every `fs:*` action carries `operation`, while network and shell inputs do not.
+validation. Rewrite those scopes as an action constraint. A rule that reads
+`context.input` names actions of one family, such as `fs:read` and `fs:write`, so the
+load refuses an `operation` guard under no action.
 
 ## Requests And Decisions
 
@@ -310,7 +319,9 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
-a `::error`. Every filesystem response also carries `output.result`, one of three
+a `::error`. A Shell `read_metadata` that got an answer has happened, even when the answer
+is "no", so it records a `::response`; one that the reach floor or the admission-window guard
+refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
 without reporting). A rule that counts certain completions matches
@@ -379,6 +390,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             path: "/v1/items",
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
+            intercepted: true,
         },
     )
 }
@@ -387,7 +399,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |

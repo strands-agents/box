@@ -2337,7 +2337,7 @@ async fn run_capturing_status(
             output.push_str(&out);
             if proc.max_output > 0 && output.len() > proc.max_output {
                 proc.err_msg("strands-shell: output size limit exceeded");
-                output.truncate(proc.max_output);
+                output.truncate(os::floor_char_boundary(&output, proc.max_output));
                 proc.last_exit = 1;
                 last_exit = 1;
                 break;

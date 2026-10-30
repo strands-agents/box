@@ -384,6 +384,7 @@ impl VfsKernel {
         Some(format!("{}/{tail}", bind.trim_end_matches('/')))
     }
 
+    /// The host path that `abs_path` names, per `follow`; a bind point always follows.
     fn resolve_host_for(
         vfs: &Vfs,
         abs_path: &str,
@@ -1191,9 +1192,9 @@ impl VfsKernel {
         if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
-            return host_stat(&host_path).await;
+            return host_stat(&host_path, Follow::Yes).await;
             #[cfg(target_arch = "wasm32")]
-            return host_stat_sync(&host_path);
+            return host_stat_sync(&host_path, Follow::Yes);
         }
 
         match vfs.resolve(&abs, true) {
@@ -1206,12 +1207,17 @@ impl VfsKernel {
         let abs = Self::abs(proc, path);
         let vfs = self.vfs.lock().await;
 
-        if let Some((host_path, _ro, _)) = Self::resolve_host(&vfs, &abs) {
+        let follow = if Self::is_bind_point(&vfs, &abs) {
+            Follow::Yes
+        } else {
+            Follow::No
+        };
+        if let Some((host_path, _ro, _)) = Self::resolve_host_for(&vfs, &abs, follow) {
             drop(vfs);
             #[cfg(not(target_arch = "wasm32"))]
-            return host_stat(&host_path).await;
+            return host_stat(&host_path, follow).await;
             #[cfg(target_arch = "wasm32")]
-            return host_stat_sync(&host_path);
+            return host_stat_sync(&host_path, follow);
         }
 
         match vfs.resolve(&abs, false) {
@@ -2048,27 +2054,33 @@ impl Kernel for VfsKernel {
     }
 
     async fn stat(&self, proc: &Process, path: Resolved) -> FileStat {
-        debug_assert_eq!(path.follow(), Follow::Yes, "stat follows a final symlink");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return FileStat::default();
-        };
-        self.stat_effect(proc, path.path()).await
+        self.stat_answer(proc, path).await.unwrap_or_default()
     }
 
     async fn lstat(&self, proc: &Process, path: Resolved) -> FileStat {
-        debug_assert_eq!(path.follow(), Follow::No, "lstat acts on the link itself");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return FileStat::default();
-        };
-        self.lstat_effect(proc, path.path()).await
+        self.lstat_answer(proc, path).await.unwrap_or_default()
     }
 
     async fn access(&self, proc: &Process, path: Resolved, mode: i32) -> bool {
+        self.access_answer(proc, path, mode).await.unwrap_or(false)
+    }
+
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        debug_assert_eq!(path.follow(), Follow::Yes, "stat follows a final symlink");
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.stat_effect(proc, path.path()).await)
+    }
+
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        debug_assert_eq!(path.follow(), Follow::No, "lstat acts on the link itself");
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.lstat_effect(proc, path.path()).await)
+    }
+
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool> {
         debug_assert_eq!(path.follow(), Follow::Yes, "access follows to its target");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return false;
-        };
-        self.access_effect(proc, path.path(), mode).await
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.access_effect(proc, path.path(), mode).await)
     }
 
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf> {
@@ -2235,8 +2247,12 @@ impl Kernel for VfsKernel {
 // --- host stat helper ---
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn host_stat(path: &std::path::Path) -> FileStat {
-    let meta = match tokio::fs::metadata(path).await {
+async fn host_stat(path: &std::path::Path, follow: Follow) -> FileStat {
+    let metadata = match follow {
+        Follow::Yes => tokio::fs::metadata(path).await,
+        Follow::No => tokio::fs::symlink_metadata(path).await,
+    };
+    let meta = match metadata {
         Ok(m) => m,
         Err(_) => return FileStat::default(),
     };
@@ -2268,8 +2284,12 @@ async fn host_stat(path: &std::path::Path) -> FileStat {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn host_stat_sync(path: &std::path::Path) -> FileStat {
-    let meta = match std::fs::metadata(path) {
+fn host_stat_sync(path: &std::path::Path, follow: Follow) -> FileStat {
+    let metadata = match follow {
+        Follow::Yes => std::fs::metadata(path),
+        Follow::No => std::fs::symlink_metadata(path),
+    };
+    let meta = match metadata {
         Ok(m) => m,
         Err(_) => return FileStat::default(),
     };

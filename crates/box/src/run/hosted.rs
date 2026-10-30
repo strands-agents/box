@@ -87,11 +87,14 @@ pub(crate) struct SelectedTool {
 /// A program no table names runs in the caller's own boundary when it lies under one of the
 /// caller's `exec` entries.
 ///
-/// The prefix is compared expanded, because the translator runs the expanded arguments.
+/// The prefix is compared expanded, because the translator runs the expanded arguments. Among
+/// prefixes of one length, a command with the file name of `called` wins. `called` is the path the
+/// caller used, and `program` is the file it resolves to.
 pub(crate) fn select_tool(
     record: &Record,
     attachment: &Attachment,
     program: &Path,
+    called: &Path,
     args: &[String],
 ) -> Result<SelectedTool, BoxError> {
     let refuse = |reason: String| {
@@ -114,7 +117,8 @@ pub(crate) fn select_tool(
     let invoked = program;
     // The matched prefix length travels with the winner, so `trailing` never re-derives it from an
     // unexpanded count.
-    let mut selected: Option<(&str, &ProcessSpec, usize)> = None;
+    let mut selected: Option<(&str, &ProcessSpec, usize, bool)> = None;
+    let called_name = called.file_name();
     let mut unexpandable: Vec<String> = Vec::new();
     let mut named_by_a_table = false;
     for (label, spec) in &record.tool {
@@ -142,12 +146,16 @@ pub(crate) fn select_tool(
         if args.len() < fixed.len() || args[..fixed.len()] != fixed[..] {
             continue;
         }
-        if selected.is_none_or(|(_, current, _)| spec.command.len() > current.command.len()) {
-            selected = Some((label, spec, fixed.len()));
+        let called_by_name =
+            called_name.is_some() && Path::new(spec.program()).file_name() == called_name;
+        if selected.is_none_or(|(_, current, _, current_by_name)| {
+            (spec.command.len(), called_by_name) > (current.command.len(), current_by_name)
+        }) {
+            selected = Some((label, spec, fixed.len(), called_by_name));
         }
     }
     match selected {
-        Some((label, spec, fixed)) => Ok(SelectedTool {
+        Some((label, spec, fixed, _)) => Ok(SelectedTool {
             table: format!("[tool.{label}]"),
             spec: spec.clone(),
             trailing: args[fixed..].to_vec(),
@@ -249,8 +257,14 @@ fn tool_spawner(
         let workspace = workspace.clone();
         let protected_sources = protected_sources.clone();
         Box::pin(async move {
-            let selected = select_tool(&record, &attachment, &spawn.program, &spawn.args)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let selected = select_tool(
+                &record,
+                &attachment,
+                &spawn.program,
+                &spawn.invoked,
+                &spawn.args,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
             let table = selected.table.clone();
             // The reach this run judged for the table; every declared table was judged, so a miss
@@ -1877,16 +1891,101 @@ while :; do :; done"#
             &record,
             &selection_attachment(),
             &sh,
+            &sh,
             &["-c".to_string(), "printf x".to_string()],
         )
         .expect("the invocation matches two tools");
         assert_eq!(selected.table, "[tool.sh-c]");
         assert_eq!(selected.trailing, ["printf x"]);
 
-        let selected = select_tool(&record, &selection_attachment(), &sh, &["-x".to_string()])
-            .expect("the shorter prefix still matches");
+        let selected = select_tool(
+            &record,
+            &selection_attachment(),
+            &sh,
+            &sh,
+            &["-x".to_string()],
+        )
+        .expect("the shorter prefix still matches");
         assert_eq!(selected.table, "[tool.sh]");
         assert_eq!(selected.trailing, ["-x"]);
+    }
+
+    /// A directory holding one executable `rustup` and the `cargo` and `rustc` links to it.
+    #[cfg(unix)]
+    fn rustup_links() -> (tempfile::TempDir, PathBuf, Record) {
+        let root = tempfile::tempdir().expect("a directory");
+        let bin = root.path().canonicalize().expect("canonical");
+        let rustup = bin.join("rustup");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &rustup)
+            .expect("an executable");
+        for name in ["cargo", "rustc"] {
+            std::os::unix::fs::symlink(&rustup, bin.join(name)).expect("a link");
+        }
+        let cargo = bin.join("cargo").display().to_string();
+        let rustc = bin.join("rustc").display().to_string();
+        let record =
+            selection_record(&[("cargo", &[cargo.as_str()]), ("rustc", &[rustc.as_str()])]);
+        (root, bin, record)
+    }
+
+    /// **The name a program was called by selects among tables that resolve to one file**, so
+    /// `rustc` runs under `[tool.rustc]` and not under the `[tool.cargo]` that shares its file.
+    #[cfg(unix)]
+    #[test]
+    fn the_called_name_selects_among_tools_that_resolve_to_one_file() {
+        let (_root, bin, record) = rustup_links();
+        let program = bin.join("rustup");
+
+        for (name, table) in [("rustc", "[tool.rustc]"), ("cargo", "[tool.cargo]")] {
+            let selected = select_tool(
+                &record,
+                &selection_attachment(),
+                &program,
+                &bin.join(name),
+                &["--version".to_string()],
+            )
+            .expect("the invocation matches both tools");
+            assert_eq!(selected.table, table, "called as {name}");
+            assert_eq!(selected.trailing, ["--version"]);
+        }
+    }
+
+    /// **A called name no table's command has leaves selection unchanged**: the first table with the
+    /// longest matching prefix, in name order, still wins.
+    #[cfg(unix)]
+    #[test]
+    fn a_called_name_no_tool_has_leaves_selection_unchanged() {
+        let (_root, bin, record) = rustup_links();
+        let program = bin.join("rustup");
+
+        let selected = select_tool(&record, &selection_attachment(), &program, &program, &[])
+            .expect("the invocation matches both tools");
+
+        assert_eq!(selected.table, "[tool.cargo]");
+    }
+
+    /// **A longer matching prefix still wins over the called name**: the name breaks a tie between
+    /// prefixes of one length and nothing more.
+    #[cfg(unix)]
+    #[test]
+    fn a_longer_prefix_still_wins_over_the_called_name() {
+        let (_root, bin, mut record) = rustup_links();
+        let mut longer = record.tool["cargo"].clone();
+        longer.command.push("-c".to_string());
+        record.tool.insert("cargo-c".to_string(), longer);
+        let program = bin.join("rustup");
+
+        let selected = select_tool(
+            &record,
+            &selection_attachment(),
+            &program,
+            &bin.join("rustc"),
+            &["-c".to_string(), "x".to_string()],
+        )
+        .expect("the invocation matches every tool");
+
+        assert_eq!(selected.table, "[tool.cargo-c]");
+        assert_eq!(selected.trailing, ["x"]);
     }
 
     /// **A `${...}` in a tool's `command` is compared expanded**, so the invocation the operator
@@ -1908,14 +2007,21 @@ while :; do :; done"#
             attachment.telemetry_port
         );
 
-        let selected = select_tool(&record, &attachment, &sh, &[expanded, "tail".to_string()])
-            .expect("the expanded argument matches the tool");
+        let selected = select_tool(
+            &record,
+            &attachment,
+            &sh,
+            &sh,
+            &[expanded, "tail".to_string()],
+        )
+        .expect("the expanded argument matches the tool");
         assert_eq!(selected.table, "[tool.probe]");
         assert_eq!(selected.trailing, ["tail"]);
 
         let literal = select_tool(
             &record,
             &attachment,
+            &sh,
             &sh,
             &["--endpoint=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}".to_string()],
         );
@@ -1931,7 +2037,7 @@ while :; do :; done"#
         let record = selection_record(&[("probe", &["/bin/sh", "--endpoint=${NOT_A_CORE_NAME}"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
-        let error = select_tool(&record, &selection_attachment(), &sh, &[])
+        let error = select_tool(&record, &selection_attachment(), &sh, &sh, &[])
             .err()
             .expect("an unexpandable token is refused");
 
@@ -1949,7 +2055,7 @@ while :; do :; done"#
             ("probe", &["/bin/sh", "--endpoint=${NOT_A_CORE_NAME}"]),
             ("plain", &["/bin/sh"]),
         ]);
-        let selected = select_tool(&both, &selection_attachment(), &sh, &[])
+        let selected = select_tool(&both, &selection_attachment(), &sh, &sh, &[])
             .expect("the well-formed table still selects");
         assert_eq!(selected.table, "[tool.plain]");
     }
@@ -1961,7 +2067,7 @@ while :; do :; done"#
         let record = selection_record(&[("sh", &["/bin/sh"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
-        let selected = select_tool(&record, &selection_attachment(), &sh, &[])
+        let selected = select_tool(&record, &selection_attachment(), &sh, &sh, &[])
             .expect("a declared tool is selected");
 
         assert_eq!(selected.table, "[tool.sh]");
@@ -1990,6 +2096,7 @@ while :; do :; done"#
         let selected = select_tool(
             &record,
             &selection_attachment(),
+            &demo,
             &demo,
             &["--flag".to_string()],
         )
@@ -2022,7 +2129,7 @@ while :; do :; done"#
             contain_egress: false,
         });
 
-        let selected = select_tool(&record, &selection_attachment(), &demo, &[])
+        let selected = select_tool(&record, &selection_attachment(), &demo, &demo, &[])
             .expect("the caller runs its own build output");
 
         assert_eq!(selected.table, "[agent]");
@@ -2072,9 +2179,15 @@ while :; do :; done"#
         let mut record = selection_record(&[("sh-c", &[spelled.as_str(), "-c"])]);
         record.agent.as_mut().expect("an agent").filesystem.exec = vec![tools.clone()];
 
-        let error = select_tool(&record, &selection_attachment(), &sh, &["-x".to_string()])
-            .err()
-            .expect("a prefix no table matches is refused, not run as the caller");
+        let error = select_tool(
+            &record,
+            &selection_attachment(),
+            &sh,
+            &sh,
+            &["-x".to_string()],
+        )
+        .err()
+        .expect("a prefix no table matches is refused, not run as the caller");
 
         assert!(
             error
@@ -2100,7 +2213,7 @@ while :; do :; done"#
         agent.filesystem.deny = vec![root.path().join("target/debug")];
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_err(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_err(),
             "a denied program must not run"
         );
     }
@@ -2124,7 +2237,7 @@ while :; do :; done"#
         agent.filesystem.deny = vec![root.path().join("absent")];
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_ok(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_ok(),
             "a `deny` entry that names no file covers nothing"
         );
 
@@ -2137,7 +2250,7 @@ while :; do :; done"#
             .push(barrier.join("under"));
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_err(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_err(),
             "a `deny` entry this run cannot resolve must refuse the program"
         );
     }
@@ -2157,6 +2270,7 @@ while :; do :; done"#
         let error = select_tool(
             &record,
             &selection_attachment(),
+            &elsewhere.canonicalize().expect("canonical"),
             &elsewhere.canonicalize().expect("canonical"),
             &[],
         )
@@ -2266,7 +2380,7 @@ while :; do :; done"#
             .expect("a link to the tool");
 
         for program in [impostor.as_path(), link.as_path(), Path::new("/bin/true")] {
-            let error = select_tool(&record, &selection_attachment(), program, &[])
+            let error = select_tool(&record, &selection_attachment(), program, program, &[])
                 .err()
                 .unwrap_or_else(|| panic!("{} must not select a tool", program.display()));
             assert!(

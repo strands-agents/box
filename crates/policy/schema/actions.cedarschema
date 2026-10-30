@@ -166,8 +166,8 @@ type NetworkRequestInput = {
   host: String,
   port: Long,
   method: String,
-  // The URL path. The same name is a filesystem path on `fs:*`, so guard a filesystem
-  // rule with `context.input has operation`.
+  // The URL path. The same name is a filesystem path on `fs:*`, so a rule that reads
+  // `context.input` names actions of one family.
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.

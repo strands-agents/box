@@ -165,7 +165,7 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-Keep the downloaded binaries together in `./box-core`.
+Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
 
@@ -201,6 +201,12 @@ cargo build --release -p strands-box -p strands-box-containment
 
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
+
+The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
+automated signing, package verification, and release gates.
+
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
+parser.
 
 Common tasks run through [`just`](https://github.com/casey/just):
 

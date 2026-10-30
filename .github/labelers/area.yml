@@ -1,0 +1,28 @@
+# .github/labelers/area.yml
+# Classifies issues by technical area/subsystem.
+
+instructions: |
+  This is the Strands Box repository (Rust): a sandbox that runs an AI agent under operating-system containment and Dogwood policy.
+  Containment of the agent process itself (sandbox profiles, seccomp, namespaces, filesystem grants, process lifecycle) belongs to Area - Agent Containment. Containment of tools, binaries, and local MCP servers the agent launches belongs to Area - Tool Containment (Binaries/Local MCP).
+  Outbound network, the egress gateway, DNS, IPv6, and credential injection belong to Area - Egress/Creds, even when a policy rule is involved, unless the issue is about how the rule is evaluated.
+  Dogwood syntax, policy.dw, and rule evaluation belong to Area - policy-engine.
+  Packaging, install, download.sh, release artifacts, test infrastructure, and docs epics belong to Area - Release. Porting to a platform, architecture, or kernel belongs to the area being ported, not Area - Release.
+  Dependency bumps (dependabot) get no area label.
+  If no area clearly applies, assign no area label.
+  Add a second area only when the issue requires changes in both areas, not because it mentions the other. Order matters: list the most important label first, because at most 2 labels are kept.
+
+labels:
+  Area - Agent Containment:
+    description: "OS containment of the agent process: macOS and Linux backends, seccomp, namespaces, filesystem grants in box.toml, the box's private tree, workload lifecycle"
+  Area - Tool Containment (Binaries/Local MCP):
+    description: "Tools, binaries, and local MCP servers launched inside a box: leaf exec, the MCP broker, tool packs"
+  Area - Egress/Creds:
+    description: "Egress gateway, outbound network and proxy, DNS, IPv6, credential vault and credential injection at the network boundary"
+  Area - policy-engine:
+    description: "Dogwood policy language, policy.dw, the local policy decision point, rule matching, policy reload"
+  Area - Shell/Monty:
+    description: "Strands Shell virtual shell and the Monty Python interpreter"
+  Area - Telemetry:
+    description: "The telemetry collector, receiver, and record targets"
+  Area - Release:
+    description: "Packaging, release artifacts, download.sh and install, platform support matrix, test infrastructure, docs epics"

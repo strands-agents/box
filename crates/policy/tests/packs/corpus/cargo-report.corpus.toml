@@ -1,0 +1,51 @@
+# cargo-report pack corpus
+#
+# Each case is one argv, and what the shell grammar of `cargo-report.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# An action with no global options
+[[case]]
+argv = ["cargo", "version"]
+action = "version"
+
+# A global option before an action whose usage has no `[global options]`
+[[case]]
+argv = ["cargo", "--config", "net.offline=true", "version"]
+action = "unmodeled"
+
+# A toolchain before an action whose usage has no `[+<toolchain>]`
+[[case]]
+argv = ["cargo", "+stable", "version"]
+action = "unmodeled"
+
+# The shorter spelling, with an operand
+[[case]]
+argv = ["cargo", "report", "other"]
+action = "report"
+fields = { kind = "other" }
+
+# The longest spelling, and not `report` with an operand
+[[case]]
+argv = ["cargo", "report", "future-incompatibilities", "--id", "3"]
+action = "report_future_incompatibilities"
+fields = { id = "3" }
+effects = ["network"]
+
+# An `anywhere` option between the command words
+[[case]]
+argv = ["cargo", "report", "-q", "future-incompatibilities"]
+action = "report_future_incompatibilities"
+fields = { quiet = true }
+effects = ["network"]
+
+# The longest spelling has no `[+<toolchain>]`
+[[case]]
+argv = ["cargo", "+stable", "report", "future-incompatibilities"]
+action = "unmodeled"
+
+# A toolchain before an action that has one
+[[case]]
+argv = ["cargo", "+stable", "report"]
+action = "report"
+fields = { toolchain = "stable" }

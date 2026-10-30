@@ -101,6 +101,14 @@ These raise an error whatever the policy says:
 | A path that is a symbolic link, or has one in it | `PermissionError: <path>: resolves to a different path, so it is not the identity policy judged` | The path of the file the link points to |
 | The box directory, or the `box.toml` and `policy.dw` this run loaded | `PermissionError: <path>: resolves into trusted Box state, which no policy may open`, or `resolves to an authority source that this run loaded` | A path outside the box directory |
 
+A rename can also fail if another operation creates its destination while Box checks policy.
+Box raises `PermissionError: <destination>: filesystem identity changed during effect admission`
+and leaves both files in place. Retry the rename to let policy check deletion of the existing destination.
+
+For a destination that does not exist, Box requires an atomic rename that cannot replace an existing name.
+If the operating system or filesystem rejects that operation, the rename raises `OSError` and changes neither path.
+Box does not retry with a replacing rename. An overwrite that policy explicitly permits still uses the existing rename operation.
+
 ## Time and randomness
 
 Each call in this table takes no policy decision.

@@ -531,10 +531,8 @@ after its path read.
 
 This exists so `strands-box` can route the hosted Shell's egress through its one governed
 boundary rather than adding a second network authority inside the Shell
-([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). It is
-plausibly upstream-worthy — proxy support is a general sandbox feature — rather than
-divergence for local convenience, and it changes no existing behaviour when the option is
-absent.
+([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). Box no longer uses `egress_proxy`: its own kernel wrapper sends the Shell's HTTP. Box will not
+propose it upstream, and it changes no existing behaviour when the option is absent.
 
 
 ## 2026-08-20 — additive: `Kernel::run_script` forwards a script to an embedder interpreter
@@ -1704,3 +1702,79 @@ Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and
 so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
 `is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
 each canonicalize the bind root again for one path.
+
+## 2026-10-23 — `lstat` on a host bind followed the final symbolic link
+
+A wrong result in the host branch of `lstat`, so upstream would call it a bug. `Mediated::lstat`
+admits `FsOperation::ReadMetadata { follow_symlinks: false }`, and `Kernel::lstat` asserts that its
+token carries `Follow::No`. But `lstat_effect` resolved the host path with `resolve_host`, whose
+`canonicalize` replaces a final link with its target. Then `host_stat` called `tokio::fs::metadata`,
+which also follows the link.
+
+Thus on a `bind_direct` mount, a no-follow metadata read gave the metadata of the target of the link.
+`test -L`, `test -h`, `find -type l`, `ls -l`, and `rm` saw the type of the target, not a symbolic
+link. The token pinned the link, so the effect read an object that the decision did not name.
+
+`lstat_effect` now resolves with `resolve_host_for(.., Follow::No)`, which resolves the parent and
+joins the leaf. `host_stat` and `host_stat_sync` take a `Follow`, and they call `symlink_metadata`
+for `Follow::No`. A bind point keeps `Follow::Yes`, because the bind is the object that the VFS
+names, and its host source can be a link. `stat_effect` passes `Follow::Yes` and does not change.
+
+The rename destination facts also change when the destination is a host symbolic link. They now
+describe the link itself, as in the in-memory case: `destination_exists` is `true` for a dangling
+link, and `destination_is_dir` is `false` for a link to a directory. `rename_effect` still refuses a
+host symbolic link destination with `cannot rename onto a host symlink`.
+
+`tests/lstat_follow_on_a_host_bind.rs` pins the fix. These tests fail without it:
+`test_minus_l_sees_a_host_symlink`, `test_minus_l_sees_a_dangling_host_symlink`,
+`find_type_l_lists_a_host_symlink`, `ls_l_shows_a_host_symlink_as_a_link`,
+`rm_on_a_host_symlink_to_a_directory_removes_the_link`,
+`rm_r_on_a_host_symlink_to_a_directory_removes_only_the_link`, and
+`rm_r_on_a_host_symlink_out_of_the_mount_removes_only_the_link`.
+`a_file_bind_whose_source_is_a_symlink_is_not_a_link` fails when a bind point is read with
+`Follow::No`. `stat_still_follows_a_host_symlink` pins that `stat` still follows.
+`in_mount_admission_window.rs::a_rename_onto_a_dangling_host_symlink_is_refused_by_the_kernel` now
+expects the present destination fact, and it keeps the refusal.
+
+Follow-ups of the same class, not changed here:
+
+- `remove_dir` admits `Follow::Yes`, but POSIX `rmdir` does not follow a final symbolic link.
+- `rename_effect` resolves the source with `resolve_host`, which follows the link, but
+  `Mediated::rename` pins the source with `Follow::No`. So `mv link link2` on a host bind refuses
+  with `filesystem identity changed during effect admission`. It fails closed.
+
+## 2026-10-27 — a multibyte character at `max_output` inside `$(…)` panicked
+
+`run_capturing_status` cut the output of a command substitution with
+`output.truncate(proc.max_output)`. `String::truncate` panics when the index is not a character
+boundary, so `X=$(printf abc; printf é)` with `max_output = 4` stopped the shell. The
+captured-output path did not have this problem, because `append_limited` already moves the cut to
+a character boundary. This is an upstream bug.
+
+This port applies the command-substitution half of
+[strands-agents/shell#176](https://github.com/strands-agents/shell/pull/176)
+from upstream commit `fccc2750dd276a1ffa763207c86e0572e463299c`. The cut now goes to
+`os::floor_char_boundary`, which returns the largest character boundary at or below the limit. The
+limit, the `output size limit exceeded` message, and the exit status do not change.
+`append_limited` stays in place for the captured-output path.
+
+The two upstream tests are copied unchanged. `subst_max_output_truncate_multibyte` panics without
+the change. `stdout_max_output_truncate_multibyte` passes before and after the change, and pins
+that the captured-output path agrees with upstream.
+
+## 2026-10-21 — a metadata probe answered "no" reported a failed effect
+
+`stat`, `lstat`, and `access` reported a "no" answer as `EffectResult::Failed(NotFound)`. The
+probe ran and its caller received the answer, so the effect occurred. A consumer that counts
+completed effects did not count these probes. Upstream would call this a bug, because `Failed`
+means that the effect did not occur.
+
+This copy reports `EffectResult::Completed` for each answered `stat`, `lstat`, and `access`,
+through `Mediated::report_answer`. A probe that the admission-window guard refuses reports
+`EffectResult::Failed`, because `Kernel` now has `stat_answer`, `lstat_answer`, and
+`access_answer`, which return the refusal as an error. They have no default implementation, so
+each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `find_in_path`, and
+`glob` still report through `Mediated::report_probe` unchanged. A denied probe still records no
+outcome, because admission refuses it first.
+`tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
+`a_probe_the_admission_window_refuses_reports_a_failure` pin the change.

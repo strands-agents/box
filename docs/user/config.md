@@ -109,7 +109,7 @@ loses a name during its security assessment.
 
 ## `[experimental-features]`
 
-Native filesystem policy checks require both a custom build and explicit selection:
+Native filesystem policy checks require a compatible, signed build and explicit selection:
 
 ```toml
 [experimental-features]
@@ -117,7 +117,8 @@ native-filesystem-policy = true
 ```
 
 The default is `false`. Unknown feature names are errors.
-The standard release excludes this experiment. An unsupported build refuses `true` before the workload starts.
+Signed macOS releases include the adapter, but leave it disabled until you select it.
+An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
 ## `[agent]` and `[tool.<name>]`

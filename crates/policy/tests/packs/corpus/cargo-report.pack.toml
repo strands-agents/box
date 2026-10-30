@@ -1,0 +1,26 @@
+# A tool pack for cargo: report and version. One spelling starts another, and some actions take
+# no global options or no toolchain.
+
+pack    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[effects]
+network         = "Can download from a registry"
+override_config = "Overrides cargo configuration for this one command"
+
+[global]
+options.config = { flag = ["--config"], value = "required", repeated = true, anywhere = true, adds = ["override_config"] }
+options.quiet  = { flag = ["-q", "--quiet"], anywhere = true }
+
+[shell.version]
+usage = "cargo version"
+
+[shell.report]
+usage = "cargo [+<toolchain>] [global options] report [<kind>]"
+
+[shell.report_future_incompatibilities]
+usage = "cargo [global options] report future-incompatibilities [options]"
+adds  = ["network"]
+options.id = { flag = ["--id"], value = "required" }
