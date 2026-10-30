@@ -582,6 +582,112 @@ Two other host spellings each get their own refusal:
 - **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
   write `xn--bcher-kva.example`.
 
+A pinned address reaches policy as two fields, one per address family. `ip4` holds the IPv4
+address, as a dotted quad. `ip6` holds the IPv6 address, compressed and in lowercase. Each needs its
+own `has` guard, so a rule that covers both families gives each one its own clause:
+
+```text
+@id("metadata_addresses")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && (
+    context.input.ip6 == "fd00:ec2::254" ||
+    context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
+    context.input.ip6 like "fea*" || context.input.ip6 like "feb*"))
+};
+```
+
+That is longer than one clause over both families would be. What you get for it is that you can tell
+from the rule which addresses it will match.
+
+#### Which field matches what
+
+**`ip4` matches an IPv4 address however it arrives, when Box recognises the wrapping.** A
+destination that reaches the box as an IPv6 encoding of an IPv4 address carries the IPv4 address on
+`ip4` as well. So one `ip4 like "169.254.*"` covers the dotted quad and every encoding in the table
+below, and you need no clause per encoding.
+
+**`ip6` matches the wire form** — the address the gateway actually dials. A destination that arrives
+wrapped carries both fields, so `ip6 like "64:ff9b::*"` refuses every address routed through the
+well-known NAT64 translator, whatever IPv4 address each one carries. Use `ip6` when the route is
+what you care about and `ip4` when the endpoint is.
+
+**A dual-stack destination needs a clause per family.** A host that resolves to both an IPv4 and an
+IPv6 address raises one `net:connect` per pinned address, and each carries only the fields its own
+address has. A rule that names `ip4` alone leaves the IPv6 address to whatever else the policy says.
+
+**An IPv4 destination carries no `ip6`.** Box never computes an IPv6 form for one, because a single
+IPv4 address has many IPv6 encodings and none of them is the address that was dialled.
+
+| The destination arrives as | `ip4` | `ip6` |
+|---|---|---|
+| `169.254.169.254` | `169.254.169.254` | absent |
+| `::ffff:169.254.169.254` (IPv4-mapped) | `169.254.169.254` | `::ffff:169.254.169.254` |
+| `::169.254.169.254` (IPv4-compatible) | `169.254.169.254` | `::a9fe:a9fe` |
+| `2002:a9fe:a9fe::` (6to4) | `169.254.169.254` | `2002:a9fe:a9fe::` |
+| `2001::5601:5601` (Teredo) | `169.254.169.254` | `2001::5601:5601` |
+| `64:ff9b::a9fe:a9fe` (NAT64, well-known prefix) | `169.254.169.254` | `64:ff9b::a9fe:a9fe` |
+| `::ffff:0:a9fe:a9fe` (IPv4-translated) | `169.254.169.254` | `::ffff:0:a9fe:a9fe` |
+| `64:ff9b:1::a9fe:a9fe` (NAT64, local use) | **absent** | `64:ff9b:1::a9fe:a9fe` |
+| an address on a network's own NAT64 prefix | **absent** | the address as dialled |
+| `fd00:ec2::254` | absent | `fd00:ec2::254` |
+
+**Where `ip4` is absent, an `ip4` rule does not fire.** The last two rows are the ones to watch. RFC
+6052 lets a network choose its own NAT64 prefix and RFC 7050 exists so a host can discover it; Box
+takes no such prefix as configuration, so it cannot tell such an address from any other IPv6
+address. On a network like that, pin the destination with `ip6` or with `host`, not with `ip4`.
+
+#### Address spellings that refuse to load
+
+Each field is held to its own spelling at load, and the refusal names the form to write.
+
+- **An IPv6 literal on `ip4`, or an IPv4 literal on `ip6`.** The refusal names the other field.
+- **An IPv6 address that is not compressed and lowercase**, such as `64:FF9B::A9FE:A9FE`. Write
+  `64:ff9b::a9fe:a9fe`. An IPv4-mapped form keeps its dotted quad, so `::ffff:a9fe:a9fe` is written
+  `::ffff:169.254.169.254`.
+- **An address that carries a port**, such as `169.254.169.254:80` or `[2001:db8::1]:443`. Write the
+  address alone, and compare `context.input.port` for the port.
+- **An address in brackets**, such as `[2001:db8::1]`. Write it without them.
+- **Anything that is no IP address**, such as `metadata.example` or `169.254.169.254/32`. These
+  fields hold the address the gateway pinned; compare `context.input.host` to pin a name.
+
+A `like` pattern that holds a wildcard is not held to a whole address, because the addresses a
+wildcard admits cannot be listed. So `context.input.ip4 like "169.254.*"` loads as written, and so
+does `context.input.ip6 like "64:ff9b::*"`. A wildcard pattern reaches whatever its own field holds:
+`ip6 like "fe8*"` reaches an `fe80::` link-local address, and `ip6 like "64:ff9b::*"` reaches every
+address on the well-known translator prefix and also an address outside it whose spelling starts the
+same way, such as `64:ff9b::1:a9fe:a9fe`.
+
+Each piece of the pattern between the wildcards is still held to the characters its field holds.
+`ip4` holds digits and `.`, and `ip6` holds digits, `a` to `f`, `:`, and `.`. So two more mistakes
+refuse to load:
+
+- **A pattern with an uppercase letter**, such as `ip6 like "64:FF9B::*"`. `like` is case-sensitive
+  and `ip6` is always lowercase, so that `forbid` could never fire. Write `64:ff9b::*`.
+- **A pattern of the other family**, such as `ip4 like "fd00:ec2:*"`. The refusal names `ip6`.
+- **An `ip6` pattern with a dotted quad anywhere but in `::ffff:` and the quad**, such as
+  `ip6 like "64:ff9b::169.254.*"`, `ip6 like "::169.254.*"`, or `ip6 like "::ffff:0:169.254.*"`. The
+  IPv4-mapped form is the one wire form written with a dotted quad, and it is exactly `::ffff:` and
+  the quad. So each of those could never fire. RFC 6052 writes a NAT64 address that way and RFC 6145
+  writes a translated one as `::ffff:0:` and a quad, which is why this mistake is easy to reach for.
+  Write the hexadecimal groups, as `64:ff9b::a9fe:*`, or compare `ip4` to name the address it
+  carries. A pattern that opens with a wildcard is not refused, because what the wildcard admits
+  cannot be listed.
+
+What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
+address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
+that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
+above.
+
+A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
+with, so a temporal clause can still need an older one.
+
+**A box can hold address events that this vocabulary cannot read.** An event recorded by an earlier
+build carries one address field, and a predicate on `ip4` or `ip6` does not match it. There is no
+rewind, so a counting rule that spans such a build starts its count again.
+
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
 path is in `program_path`:

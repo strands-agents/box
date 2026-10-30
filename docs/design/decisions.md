@@ -599,12 +599,13 @@ cost is direct. A plaintext or non-HTTP upstream over `CONNECT` is not reachable
 
 Core compiles no metadata or link-local deny list and holds no opinion on which destinations to
 refuse. A metadata address is refused by an ordinary `forbid` on `net:connect`'s
-`context.input.ip`, which the gateway decides on each resolved, pinned address before its socket
-opens, so the address decided is the address dialed and a DNS name cannot route around the rule.
-Every range the former floor held is
-expressible exactly as a rule: `169.254.0.0/16` as `like "169.254.*"`, `fe80::/10` as the four
-prefixes `fe8`, `fe9`, `fea` and `feb` (its first group runs `fe80` to `febf`), and EC2's IPv6
-endpoint as the one address `fd00:ec2::254`, not the unique-local range around it.
+`context.input.ip4` or `context.input.ip6`, which the gateway decides on each resolved, pinned
+address before its socket opens, so the address decided is the address dialed and a DNS name cannot
+route around the rule. Every range the former floor held is
+expressible exactly as a rule, one clause per address family: `169.254.0.0/16` as
+`ip4 like "169.254.*"`, `fe80::/10` as the four `ip6` prefixes `fe8`, `fe9`, `fea` and `feb` (its
+first group runs `fe80` to `febf`), and EC2's IPv6 endpoint as the one `ip6` address
+`fd00:ec2::254`, not the unique-local range around it.
 
 The cost is direct. A box carries the protection only if its policy carries the forbids, so a policy
 without them can reach metadata. A new metadata endpoint is a policy change, not a Core release, and

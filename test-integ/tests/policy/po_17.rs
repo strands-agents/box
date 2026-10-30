@@ -9,14 +9,14 @@ use strands_det_harness::egress::{
 // `localhost` resolves to two addresses, `127.0.0.1` and `::1`. The compiled native probe sends a
 // request for `localhost:<port>` through `$HTTP_PROXY` to a host recorder on loopback, twice. The
 // first run permits the host at `net:connect` and `http:request`, and the request reaches the
-// recorder. The second run keeps those permits and adds one `forbid` on `context.input.ip` for both
+// recorder. The second run keeps those permits and adds one `forbid` with a clause per address family for both
 // addresses. The gateway decides that forbid on each resolved, pinned address after DNS, so the
 // permitted host is refused by the authority's `403 Forbidden` naming the rule, and the recorder
-// records no connection. The forbid does not load where `ip` is not a string.
+// records no connection. The forbid does not load where an address field is not a string.
 det_case! {
     name: po_17,
     id:   "PO-17",
-    desc: "Pinned address: a permitted host that resolves to 127.0.0.1 and ::1 is reached, and the same host is refused by a forbid on context.input.ip for those addresses; the recorder sees only the first request",
+    desc: "Pinned address: a permitted host that resolves to 127.0.0.1 and ::1 is reached, and the same host is refused by a forbid on context.input.ip4 and context.input.ip6 for those addresses; the recorder sees only the first request",
     run: |b| {
         let recorder = HostRecorder::start();
         recorder.self_test();
@@ -53,7 +53,8 @@ when {{ context.input.host == "localhost" && context.input.port == {port} }};"#
         b.apply_policy(&format!(
             r#"{permits}
 @id("block_loopback") forbid (principal, action == Box::Action::"net:connect", resource)
-when {{ context.input has ip && (context.input.ip == "127.0.0.1" || context.input.ip == "::1") }};"#
+when {{ (context.input has ip4 && context.input.ip4 == "127.0.0.1")
+    || (context.input has ip6 && context.input.ip6 == "::1") }};"#
         ));
         let r = b.run_sh_with_config(b.with_exec_tree(), &script("BLOCKED", "/po17-blocked"));
         r.assert_entered();

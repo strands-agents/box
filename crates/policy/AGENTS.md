@@ -112,7 +112,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
-- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip`.
+- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
+  or `ip6`. Each needs its own `has` guard, so a rule that covers both families has one clause for
+  each.
 - `context.input.path` also carries a URL path, so a rule that reads `context.input` names actions
   of one family, and the load refuses any other
   (`spelling::refuse_input_across_families`). Pinned by

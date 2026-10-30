@@ -536,18 +536,16 @@ pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> 
         .collect())
 }
 
-/// Parse and macro-expand a source bundle, and refuse a read of `context.input` without one
-/// action family, without an MCP action schema.
+/// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that
+/// needs no MCP action schema.
 pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
     let expanded = parse_policy_source(source)?;
-    refuse_input_across_families_before_discovery(&expanded).map_err(Refused::into_error)
+    refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
 }
 
-/// Refuse a macro-expanded rule that reads `context.input` without one action family, before an
-/// MCP action schema stages.
-pub(crate) fn refuse_input_across_families_before_discovery(
-    expanded: &[String],
-) -> Result<(), Refused> {
+/// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
+/// without one action family, before an MCP action schema stages.
+pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
     let source = expanded
         .iter()
         .map(|policy| without_temporal(policy))
@@ -561,9 +559,9 @@ pub(crate) fn refuse_input_across_families_before_discovery(
     let Ok(lowered) = parsed.lower(&policy_schema) else {
         return Ok(());
     };
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
-        rule_ref(&lowered, cedar_policy_id, &[])
-    })
+    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
@@ -718,9 +716,9 @@ pub(crate) fn check_against(
         .map_err(|error| PolicyError::Schema(format!("dogwood lower: {error}")))?;
     refuse_shared_rule_ids(&lowered, positions)?;
     refuse_reserved_action_rules(&lowered, positions)?;
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
-        rule_ref(&lowered, cedar_policy_id, positions)
-    })?;
+    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, positions);
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a
@@ -1288,7 +1286,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
                 (attr::PORT, Value::Int(i64::from(*port))),
             ];
             if let Some(ip) = ip {
-                fields.push((attr::IP, Value::String(crate::address::canonical(*ip))));
+                fields.extend(address_fields(*ip));
             }
             fields
         }
@@ -1366,6 +1364,17 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
     }
 }
 
+/// The address fields of one pinned destination, mirroring [`crate::schema`]'s Cedar mapping.
+///
+/// Both legs of a `net:connect` go through it, so a rule on `ip4` or `ip6` reads the same set on
+/// the request, the response, and the error.
+fn address_fields(ip: std::net::IpAddr) -> Vec<(&'static str, Value)> {
+    crate::address::attributes(ip)
+        .into_iter()
+        .map(|(name, spelling)| (name, Value::String(spelling)))
+        .collect()
+}
+
 /// The argument fields, mirroring [`crate::schema`]'s Cedar mapping exactly.
 ///
 /// The two mappings are checked against one schema, so a field present in one and absent
@@ -1403,14 +1412,14 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             port,
             address,
             ..
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (
-                attr::IP,
-                Value::String(crate::address::canonical(address.ip())),
-            ),
-        ],
+        } => {
+            let mut fields = vec![
+                (attr::HOST, Value::String((*host).to_string())),
+                (attr::PORT, Value::Int(i64::from(*port))),
+            ];
+            fields.extend(address_fields(address.ip()));
+            fields
+        }
         Outcome::Http {
             host,
             port,

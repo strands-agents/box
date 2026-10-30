@@ -293,7 +293,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   authorities — `box`'s `Cargo.toml` enables all three policy features for that reason. The
   proxy's `CapabilitySet` carries credential injection only. **Never add a destination allowlist
   beside the policy, and never expose an upstream-CA knob.** A metadata address is refused by a
-  policy `forbid` on `context.input.ip`, not by the proxy.
+  policy `forbid` on `context.input.ip4` or `context.input.ip6`, not by the proxy.
 
   **The Shell's binds are writable, and its mount set is not a floor.** Read-only
   protected nothing and cost parity: under one identical `permit fs:write`, Monty wrote to the box
