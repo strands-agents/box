@@ -30,6 +30,14 @@ fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     if segments[..6] == [0, 0, 0, 0, 0, 0] && (segments[6] != 0 || segments[7] > 1) {
         return Some(last_four(0x00));
     }
+    // NAT64: the address follows the well-known `64:ff9b::/96` prefix.
+    if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        return Some(last_four(0x00));
+    }
+    // IPv4-translated: the address follows the `::ffff:0:0:0/96` prefix.
+    if segments[..6] == [0, 0, 0, 0, 0xffff, 0] {
+        return Some(last_four(0x00));
+    }
     // 6to4: the address follows the `2002` prefix.
     if segments[0] == 0x2002 {
         let [a, b] = segments[1].to_be_bytes();
@@ -60,6 +68,10 @@ mod tests {
             ("IPv4-compatible", "::169.254.169.254"),
             ("6to4", "2002:a9fe:a9fe::"),
             ("Teredo", "2001:0:0:0:0:0:5601:5601"),
+            ("NAT64 well-known prefix", "64:ff9b::169.254.169.254"),
+            ("NAT64 well-known prefix, hex", "64:ff9b::a9fe:a9fe"),
+            ("IPv4-translated", "::ffff:0:169.254.169.254"),
+            ("IPv4-translated, hex", "::ffff:0:a9fe:a9fe"),
         ] {
             assert_eq!(
                 spelled(literal),
@@ -77,6 +89,17 @@ mod tests {
         );
         assert_eq!(spelled("fd00:ec2:0::254"), "fd00:ec2::254");
         assert_eq!(spelled("FE80::1"), "fe80::1");
+        // An address outside every embedding prefix keeps its IPv6 form, although its last 32
+        // bits spell an IPv4 address.
+        for literal in [
+            "64:ff9c::a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
+            "64:ff9b::1:a9fe:a9fe",
+            "::fffe:0:a9fe:a9fe",
+            "::ffff:1:a9fe:a9fe",
+        ] {
+            assert_eq!(spelled(literal), literal, "{literal} embeds no address");
+        }
     }
 
     #[test]

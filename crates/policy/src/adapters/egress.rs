@@ -1598,6 +1598,8 @@ mod tests {
             "[fd00:ec2::254]:80",
             "[::ffff:169.254.169.254]:80",
             "[2002:a9fe:a9fe::]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[::ffff:0:a9fe:a9fe]:80",
         ] {
             assert!(
                 fixture
