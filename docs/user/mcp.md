@@ -87,13 +87,15 @@ On Linux, `false` permits direct IPv4 connections through the surrounding OS. Th
 reachable private networks, loopback services, and instance metadata endpoints.
 
 `false` applies to a server whose client does not read `HTTPS_PROXY`, such as a client that signs
-in through single sign-on:
+in through single sign-on.
+
+Replace `<HOME>` in `env.PATH` with your absolute home directory:
 
 ```toml
 [mcp.sso-tools]
 type    = "stdio"
 command = ["sso-tools-mcp"]
-env     = { PATH = "~/.local/share/sso-tools/bin:/usr/bin:/bin" }
+env     = { PATH = "<HOME>/.local/share/sso-tools/bin:/usr/bin:/bin" }
 
 [mcp.sso-tools.network]
 contain_egress = false
