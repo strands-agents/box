@@ -203,7 +203,7 @@ Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
-automated signing, package verification, and release gates.
+automated signing, notarization, package verification, and release gates.
 
 The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
 parser.
