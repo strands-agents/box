@@ -17,20 +17,20 @@ use crate::dogwood::{check_against, service_schema};
 use crate::schema::ActionSchema;
 use crate::spelling::Operator;
 
-const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
+pub(super) const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
 
 /// One `<pack>.corpus.toml` file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Corpus {
-    case: Vec<Case>,
+pub(super) struct Corpus {
+    pub(super) case: Vec<Case>,
 }
 
 /// One `[[case]]`: an argv, and what the shell grammar reads it as.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Case {
-    argv: Vec<String>,
+pub(super) struct Case {
+    pub(super) argv: Vec<String>,
     action: String,
     #[serde(default)]
     fields: toml::Table,
@@ -38,7 +38,7 @@ struct Case {
     effects: BTreeSet<String>,
 }
 
-fn corpus_files() -> Vec<PathBuf> {
+pub(super) fn corpus_files() -> Vec<PathBuf> {
     let directory = Path::new(PACKS).join("corpus");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
@@ -47,6 +47,18 @@ fn corpus_files() -> Vec<PathBuf> {
     paths.sort();
     assert!(!paths.is_empty(), "{} holds no corpus", directory.display());
     paths
+}
+
+/// The pack that the corpus file at `path`, named `<stem>.corpus.toml`, reads against.
+pub(super) fn pack_of(path: &Path, stem: &str) -> PathBuf {
+    let beside = path.with_file_name(format!("{stem}.pack.toml"));
+    if beside.exists() {
+        beside
+    } else {
+        Path::new(PACKS)
+            .join("valid")
+            .join(format!("{stem}.pack.toml"))
+    }
 }
 
 fn field_values(fields: &toml::Table) -> Result<BTreeMap<String, FieldValue>, String> {
@@ -162,15 +174,7 @@ fn show(reading: &Reading) -> String {
 
 /// The pack that a corpus file reads with: the pack beside it, or the valid fixture of its name.
 fn corpus_pack(path: &Path, stem: &str) -> Pack {
-    let beside = path.with_file_name(format!("{stem}.pack.toml"));
-    let pack_path = if beside.exists() {
-        beside
-    } else {
-        Path::new(PACKS)
-            .join("valid")
-            .join(format!("{stem}.pack.toml"))
-    };
-    Pack::load(&pack_path).expect("the corpus pack loads")
+    Pack::load(&pack_of(path, stem)).expect("the corpus pack loads")
 }
 
 /// Each corpus file, the pack it reads with, and its cases.
@@ -425,6 +429,38 @@ struct Event {
     conditions: Vec<String>,
 }
 
+/// The Cedar request for one parse of `argv`, through the request gate bound to `schema`.
+fn gated_request(
+    pack: &Pack,
+    schema: &ActionSchema,
+    argv: &[String],
+    parsed: &Parsed,
+) -> Result<Request, String> {
+    let namespace = pack.namespace();
+    let action = match parsed {
+        Parsed::Action { action, .. } => action.as_str(),
+        Parsed::Unmodeled => UNMODELED_ACTION,
+    };
+    let uid: EntityUid = format!("{namespace}::Action::{}", literal(action))
+        .parse()
+        .map_err(|error| format!("{error}"))?;
+    let principal: EntityUid = r#"Box::Agent::"self""#
+        .parse()
+        .map_err(|error| format!("{error}"))?;
+    let resource: EntityUid = r#"Box::Resource::"unused""#
+        .parse()
+        .map_err(|error| format!("{error}"))?;
+    let input = input_record(pack, argv, parsed);
+    let context = Context::from_json_value(
+        serde_json::json!({ "input": input }),
+        Some((&schema.cedar, &uid)),
+    )
+    .map_err(|error| format!("the event does not type: {error}"))?;
+    let request = Request::new(principal, uid, resource, context, Some(&schema.cedar))
+        .map_err(|error| format!("the event does not conform: {error}"))?;
+    Ok(request)
+}
+
 /// The event that the parser builds from `case`, typed by the generated schema of `pack`.
 fn event(
     pack: &Pack,
@@ -461,23 +497,7 @@ fn event(
         return Err(format!("the schema has no effect {effect}"));
     }
 
-    let uid: EntityUid = format!("{namespace}::Action::{}", literal(action))
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let principal: EntityUid = r#"Box::Agent::"self""#
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let resource: EntityUid = r#"Box::Resource::"unused""#
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let input = input_record(pack, &case.argv, &parsed);
-    let context = Context::from_json_value(
-        serde_json::json!({ "input": input }),
-        Some((&schema.cedar, &uid)),
-    )
-    .map_err(|error| format!("the event does not type: {error}"))?;
-    let request = Request::new(principal, uid, resource, context, Some(&schema.cedar))
-        .map_err(|error| format!("the event does not conform: {error}"))?;
+    let request = gated_request(pack, schema, &case.argv, &parsed)?;
 
     let mut conditions = vec![format!(
         "context.input.program == {}",
@@ -655,5 +675,86 @@ fn every_corpus_case_gives_an_event_that_its_generated_schema_types_and_decides(
     }
 
     assert!(count > 0, "the corpus holds no case");
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn a_group_permit_never_reaches_an_unmodeled_command_and_an_explicit_permit_does() {
+    const GROUP_PERMIT_AND_EFFECT_FORBID: &str = r#"
+        permit (principal, action in Tool::git::Action::"*", resource);
+        forbid (principal, action in Tool::git::Action::"*", resource)
+        when { context.input.effects.contains(Tool::git::Effect::"delete_remote_ref")
+               || context.input.effects.contains(Tool::git::Effect::"run_program") };
+    "#;
+    const UNMODELED_PERMIT: &str =
+        r#"permit (principal, action == Tool::git::Action::"unmodeled", resource);"#;
+    const FORBID_THE_GROUP_AND_UNMODELED: &str = r#"
+        permit (principal, action, resource);
+        forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
+    "#;
+    let explicit = format!("{GROUP_PERMIT_AND_EFFECT_FORBID}{UNMODELED_PERMIT}");
+    let cases: [(&str, &[&str], bool); 9] = [
+        (GROUP_PERMIT_AND_EFFECT_FORBID, &["git", "status"], true),
+        (
+            GROUP_PERMIT_AND_EFFECT_FORBID,
+            &["git", "push", "--delete", "origin", "main"],
+            false,
+        ),
+        (
+            GROUP_PERMIT_AND_EFFECT_FORBID,
+            &["git", "push", "--dele", "origin", "main"],
+            false,
+        ),
+        (
+            GROUP_PERMIT_AND_EFFECT_FORBID,
+            &["git", "--exec-path=/tmp/evil", "push"],
+            false,
+        ),
+        (&explicit, &["git", "status"], true),
+        (
+            &explicit,
+            &["git", "push", "--dele", "origin", "main"],
+            true,
+        ),
+        (&explicit, &["git", "--exec-path=/tmp/evil", "push"], true),
+        (FORBID_THE_GROUP_AND_UNMODELED, &["git", "status"], false),
+        (
+            FORBID_THE_GROUP_AND_UNMODELED,
+            &["git", "--exec-path=/tmp/evil", "push"],
+            false,
+        ),
+    ];
+    let pack = Pack::load(&Path::new(PACKS).join("valid").join("git.pack.toml"))
+        .expect("the git pack loads");
+    let schema = pack_action_schema(std::slice::from_ref(&pack), &[]).expect("the schema composes");
+    let service = service_schema().expect("the event schema builds");
+    let policy_schema = dogwood_language::PolicySchema::from_cedarschema_str(&schema.source)
+        .expect("the action schema reads");
+    let mut failures = Vec::new();
+    for (policy, argv, allowed) in cases {
+        if let Err(refused) = load(policy, &pack) {
+            failures.push(format!(
+                "{argv:?}: the policy is refused: {}",
+                describe(&refused)
+            ));
+            continue;
+        }
+        let lowered = dogwood_language::ParsedPolicySet::parse(policy, &service)
+            .expect("the policy parses")
+            .lower(&policy_schema)
+            .expect("the policy lowers");
+        let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+        let parsed = pack.grammar().parse(&argv[1..]);
+        let verdict = gated_request(&pack, &schema, &argv, &parsed)
+            .and_then(|request| verdict(&mut dogwood_language::Authorizer::new(lowered), &request));
+        match verdict {
+            Ok((verdict, _)) if verdict == allowed => {}
+            Ok((verdict, _)) => failures.push(format!(
+                "{argv:?}: allowed is {verdict}, expected {allowed}, under\n{policy}"
+            )),
+            Err(error) => failures.push(format!("{argv:?}: {error}")),
+        }
+    }
+
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

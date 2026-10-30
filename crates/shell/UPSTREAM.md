@@ -1761,3 +1761,20 @@ limit, the `output size limit exceeded` message, and the exit status do not chan
 The two upstream tests are copied unchanged. `subst_max_output_truncate_multibyte` panics without
 the change. `stdout_max_output_truncate_multibyte` passes before and after the change, and pins
 that the captured-output path agrees with upstream.
+
+## 2026-10-21 — a metadata probe answered "no" reported a failed effect
+
+`stat`, `lstat`, and `access` reported a "no" answer as `EffectResult::Failed(NotFound)`. The
+probe ran and its caller received the answer, so the effect occurred. A consumer that counts
+completed effects did not count these probes. Upstream would call this a bug, because `Failed`
+means that the effect did not occur.
+
+This copy reports `EffectResult::Completed` for each answered `stat`, `lstat`, and `access`,
+through `Mediated::report_answer`. A probe that the admission-window guard refuses reports
+`EffectResult::Failed`, because `Kernel` now has `stat_answer`, `lstat_answer`, and
+`access_answer`, which return the refusal as an error. They have no default implementation, so
+each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `find_in_path`, and
+`glob` still report through `Mediated::report_probe` unchanged. A denied probe still records no
+outcome, because admission refuses it first.
+`tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
+`a_probe_the_admission_window_refuses_reports_a_failure` pin the change.

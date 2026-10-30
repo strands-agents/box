@@ -80,6 +80,12 @@ the job summary and the verdict plus logs upload as an artifact.
 failure is visible but does not yet physically prevent a merge. Adding it is a
 repository-settings change and needs admin.
 
+## Test an installed Linux package
+
+Use the [Linux target tests](../docs/dev/linux-target-tests.md) to check an installed package
+without Cargo or cloud credentials on the target. The runner reuses the Phase 3 lifecycle probe
+and writes separate deployment evidence. It does not replace this deterministic suite.
+
 ## Add a test case — one file in the right folder
 
 Cases are grouped into folders by category. Create `tests/<category>/<case>.rs`

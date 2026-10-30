@@ -330,6 +330,21 @@ argv = ["git", "status", "-sb"]
 action = "status"
 fields = { branch = true, short = true }
 
+# An undeclared letter after a flag that takes no value
+[[case]]
+argv = ["git", "status", "-vY"]
+action = "unmodeled"
+
+[[case]]
+argv = ["git", "status", "-sbY"]
+action = "unmodeled"
+
+# After a flag that takes a value, the letters are its value
+[[case]]
+argv = ["git", "status", "-suY"]
+action = "status"
+fields = { short = true, untracked_files = "Y" }
+
 # Optional value, attached
 [[case]]
 argv = ["git", "status", "-uno"]

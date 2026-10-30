@@ -55,7 +55,9 @@ det_case! {
             &format!("{} --version", sh_quote(&other_git.to_string_lossy())));
         other.assert_shell_denied();
         let resource = if Platform::current() == Platform::Linux {
-            format!("~/{}", other_git.strip_prefix(strands_det_harness::user_home()).unwrap().display())
+            let home = strands_det_harness::user_home().canonicalize()
+                .expect("DET_ERROR: resolve the operator home");
+            format!("~/{}", other_git.strip_prefix(home).unwrap().display())
         } else {
             other_git.to_string_lossy().into_owned()
         };

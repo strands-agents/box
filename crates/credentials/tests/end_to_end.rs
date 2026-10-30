@@ -1212,7 +1212,8 @@ mod credsd_e2e {
     use std::thread::JoinHandle;
 
     use credentials::{
-        Destination, DestinationPattern, Locator, Outbound, RouteSpec, Vault, VaultConfig,
+        CredentialError, Destination, DestinationPattern, Locator, Outbound, RouteSpec, Vault,
+        VaultConfig, credsd_preflight,
     };
 
     const BEDROCK_HOST: &str = "bedrock-runtime.us-west-2.amazonaws.com";
@@ -1392,33 +1393,134 @@ mod credsd_e2e {
         super::clear_var("E2E_BACKCOMPAT_TOKEN");
     }
 
-    /// A live smoke test against the real daemon at the platform default socket, when present. It
-    /// asserts the transport and error mapping interoperate with the shipped daemon: a nonexistent
-    /// environment is a hard failure, never a hang or a panic. Skips when the socket is absent, per
-    /// the crate's skip-don't-fail convention.
+    fn assert_unknown_environment(error: &CredentialError, environment: &str) {
+        assert!(
+            matches!(error, CredentialError::Credential(message)
+            if message == &format!(
+                "credsd has no environment {environment:?}, or this box is not authorized for it"
+            )),
+            "expected the daemon's unknown-environment mapping, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_daemon_unknown_environment_response_has_the_specific_mapping() {
+        let path = socket_path();
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"ENVIRONMENT_NOT_FOUND\"}}}\n".to_vec();
+        let (rx, handle) = fake_daemon(&path, response);
+        let error = credsd_vault(path.clone())
+            .attach_for(bedrock_request(&[]))
+            .expect_err("the daemon refused the environment");
+        assert_unknown_environment(&error, "prod-inference");
+        let request: serde_json::Value = serde_json::from_slice(&rx.recv().unwrap()).unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "credential/get",
+                "params": { "environment": "prod-inference" },
+            })
+        );
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_environment_assertion() {
+        for (response, expected_message) in [
+            ("not-json", "credsd returned a malformed response"),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"fixture error","data":{"code":"INTERNAL"}}}"#,
+                "credsd reported an internal error",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                "credsd returned a malformed response",
+            ),
+        ] {
+            let path = socket_path();
+            let (rx, handle) = fake_daemon(&path, format!("{response}\n").into_bytes());
+            let error = credsd_vault(path.clone())
+                .attach_for(bedrock_request(&[]))
+                .expect_err("the unrelated daemon failure must fail the request");
+            assert!(!error.is_soft());
+            let message = match &error {
+                CredentialError::Credential(message) | CredentialError::KeystoreAccess(message) => {
+                    message
+                }
+                other => panic!("the fixture reached an unexpected error: {other}"),
+            };
+            assert_eq!(
+                message,
+                &format!("{expected_message} for environment \"prod-inference\"")
+            );
+            rx.recv().expect("the daemon received the request");
+            handle.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                    .is_err(),
+                "an unrelated daemon failure must fail the live response assertion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_socket_cannot_satisfy_the_unknown_environment_assertion() {
+        let path = socket_path();
+        drop(UnixListener::bind(&path).expect("create an owned stale socket"));
+        assert!(path.exists());
+        let error = credsd_vault(path.clone())
+            .attach_for(bedrock_request(&[]))
+            .expect_err("no daemon listens on this socket");
+        assert!(matches!(error, CredentialError::KeystoreAccess(_)));
+        assert!(
+            std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                .is_err(),
+            "a transport failure must fail the live test's response assertion"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A configured fixture proves caller access before the unknown-environment request.
     #[test]
     fn a_live_daemon_maps_an_unknown_environment_to_a_hard_failure() {
-        // The same resolution the client uses: CREDSD_SOCKET if set, else the platform default
-        // (macOS /var/run, Linux /run), so this runs against the real daemon on either OS.
-        let socket = std::env::var_os("CREDSD_SOCKET")
+        let explicit_socket = std::env::var_os("CREDSD_SOCKET")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                if cfg!(target_os = "macos") {
-                    PathBuf::from("/var/run/credsd/credsd.sock")
-                } else {
-                    PathBuf::from("/run/credsd/credsd.sock")
-                }
-            });
+            .map(PathBuf::from);
+        let known_environment = std::env::var("CREDSD_TEST_ENVIRONMENT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let required = explicit_socket.is_some() || known_environment.is_some();
+        let socket = explicit_socket.unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                PathBuf::from("/var/run/credsd/credsd.sock")
+            } else {
+                PathBuf::from("/run/credsd/credsd.sock")
+            }
+        });
         if !socket.exists() {
+            assert!(
+                !required,
+                "configured credsd socket is absent: {}",
+                socket.display()
+            );
             eprintln!("skipping: no credsd daemon at {}", socket.display());
             return;
         }
-        // An environment no daemon is enrolled for, so the only live outcome is a hard
-        // ENVIRONMENT_NOT_FOUND. `credsd_vault` hard-wires `prod-inference`, which a host enrolled
-        // for it would sign — minting real credentials during a unit-test run — so this route names
-        // a unique nonexistent environment and the test never accepts a success.
+        let Some(known_environment) = known_environment else {
+            assert!(
+                !required,
+                "set CREDSD_TEST_ENVIRONMENT to the fixture's configured environment"
+            );
+            eprintln!("skipping: CREDSD_TEST_ENVIRONMENT is absent");
+            return;
+        };
+        credsd_preflight(Some(&socket), &[&known_environment])
+            .expect("the fixture must answer health and authorize the caller's known environment");
         let environment = format!("strands-e2e-nonexistent-{}", std::process::id());
+        assert_ne!(environment, known_environment);
         let vault = Vault::open(
             VaultConfig::new(credentials::Backend::local(), "tenant-e2e")
                 .credsd_socket(socket)
@@ -1430,14 +1532,9 @@ mod credsd_e2e {
         )
         .expect("a credsd signed route registers at open without touching the daemon")
         .into_vault();
-        // The round-trip reaches the real daemon and comes back a hard failure, never a hang, a
-        // panic, or a soft miss.
         let error = vault
             .attach_for(bedrock_request(&[]))
             .expect_err("an environment no daemon is enrolled for must fail");
-        assert!(
-            !error.is_soft(),
-            "a live credsd failure must be hard, got a soft miss: {error}"
-        );
+        assert_unknown_environment(&error, &environment);
     }
 }

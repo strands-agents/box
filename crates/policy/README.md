@@ -319,7 +319,9 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
-a `::error`. Every filesystem response also carries `output.result`, one of three
+a `::error`. A Shell `read_metadata` that got an answer has happened, even when the answer
+is "no", so it records a `::response`; one that the reach floor or the admission-window guard
+refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
 without reporting). A rule that counts certain completions matches
@@ -388,6 +390,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             path: "/v1/items",
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
+            intercepted: true,
         },
     )
 }
@@ -396,7 +399,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |

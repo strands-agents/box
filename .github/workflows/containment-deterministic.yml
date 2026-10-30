@@ -167,6 +167,19 @@ jobs:
           command -v strands-box
           bash test-integ/run.sh
 
+      - name: Test the portable Linux evidence runner
+        if: always() && startsWith(matrix.os, 'ubuntu')
+        run: python3 -m unittest discover -s test-integ/tools -p test_target_validation.py -v
+
+      - name: Check the installed Linux package
+        if: always() && startsWith(matrix.os, 'ubuntu')
+        run: |
+          rustc --edition=2024 -O test-integ/tests/phase3/probe.rs -o target/release/target-lifecycle-probe
+          python3 test-integ/tools/target_validation.py run \
+            --box "$GITHUB_WORKSPACE/target/release/strands-box" \
+            --probe "$GITHUB_WORKSPACE/target/release/target-lifecycle-probe" \
+            --revision "$(git rev-parse HEAD)" --root "$RUNNER_TEMP/box-target-validation"
+
       # Always: a RED verdict is the case this reporting exists for.
       - name: Summarize the verdict
         if: always()
@@ -181,5 +194,8 @@ jobs:
             det-results/verdict.json
             det-results/cargo-test.log
             det-results/*.jsonl
+            ${{ runner.temp }}/box-target-validation/**/*.json
+            ${{ runner.temp }}/box-target-validation/**/stdout
+            ${{ runner.temp }}/box-target-validation/**/stderr
           if-no-files-found: warn
           retention-days: 14

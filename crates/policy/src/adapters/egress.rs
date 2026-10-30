@@ -378,6 +378,9 @@ enum AttemptIdentity {
         port: u16,
         method: String,
         path: String,
+        /// Whether the gateway decrypted a TLS exchange, carried from the attempt so the
+        /// response leg reports the transport the request leg reported.
+        intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
     },
@@ -404,6 +407,7 @@ impl AttemptIdentity {
                 port,
                 method,
                 path,
+                intercepted,
                 mcp,
                 ..
             } => Self::Http {
@@ -411,6 +415,7 @@ impl AttemptIdentity {
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
+                intercepted: *intercepted,
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -485,6 +490,7 @@ impl LocalPolicyEffectPermit {
                     port,
                     method,
                     path,
+                    intercepted,
                     mcp,
                 },
                 Some(delivery),
@@ -499,6 +505,7 @@ impl LocalPolicyEffectPermit {
                         path,
                         delivery,
                         status: reply_status_of(outcome),
+                        intercepted: *intercepted,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -1704,6 +1711,58 @@ mod tests {
         assert!(
             interceptor.intercept(&request(false)).is_err(),
             "a plain-HTTP request must not satisfy a rule that requires intercepted"
+        );
+    }
+
+    /// A `http:request::response` reports the transport the exchange really used. A plain-HTTP
+    /// exchange records `intercepted: false`, and a TLS-intercepted exchange records `true`.
+    #[test]
+    fn the_response_leg_reports_the_real_transport() {
+        // One `::response` with `input.intercepted: true` arms the forbid. A plain-HTTP
+        // exchange must leave it unarmed; a TLS-intercepted exchange must arm it.
+        let tls_only_history = || {
+            interceptor(
+                r#"permit(principal, action == Box::Action::"http:request", resource);
+                   forbid(principal, action == Box::Action::"http:request", resource)
+                   when temporal {
+                     formerly within 3600s (
+                       Box::Action::"http:request"::response{ input.intercepted: true }
+                     )
+                   };"#,
+            )
+        };
+        let request = |intercepted| EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "POST",
+            path: "/v1/messages",
+            body_bytes: 0,
+            intercepted,
+            mcp: None,
+        };
+        let exchange = |fixture: &InterceptorFixture, intercepted| {
+            fixture
+                .intercept(&request(intercepted))
+                .expect("the permit admits the request")
+                .record_outcome(EgressEffectOutcome::Replied {
+                    accepted_bytes: 10,
+                    status: 200,
+                })
+                .expect("the reply records");
+        };
+
+        let plain = tls_only_history();
+        exchange(&plain, false);
+        plain
+            .intercept(&request(false))
+            .expect("a plain-HTTP response records intercepted: false, so the forbid stays unarmed")
+            .mark_indeterminate();
+
+        let tls = tls_only_history();
+        exchange(&tls, true);
+        assert!(
+            tls.intercept(&request(true)).is_err(),
+            "a TLS-intercepted response records intercepted: true, which arms the forbid"
         );
     }
 }
