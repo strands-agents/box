@@ -43,6 +43,8 @@ jobs:
               - '.github/workflows/**'
             rust:
               - 'crates/**/!(*.md)'
+              - 'docs/site-manifest.json'
+              - 'docs/user/**/*.md'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/rust-*'
