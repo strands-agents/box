@@ -5,12 +5,13 @@ use zeroize::Zeroizing;
 
 use crate::boundary::HeaderMap;
 use crate::error::{ProxyError, Result};
+use crate::proxy::websocket;
 
 /// A parsed HTTP/1.1 request read off the wire.
 #[derive(Debug)]
 pub(crate) struct ParsedRequest {
     /// The method (`GET`, `POST`, …).
-    pub(super) method: String,
+    pub(crate) method: String,
     /// The request target (origin-form path, e.g. `/v1/x?a=1`).
     pub(crate) target: String,
     /// The request headers.
@@ -30,6 +31,8 @@ pub(crate) struct ParsedResponse {
     pub(crate) body: Vec<u8>,
     /// The header case the upstream sent, which hyper writes back to the workload.
     pub(super) header_case: hyper::http::Extensions,
+    /// The upstream stream after a `101` that answers a WebSocket handshake.
+    pub(super) upgraded: Option<hyper::upgrade::Upgraded>,
 }
 
 /// The validated `Content-Length`, rejecting repeated, comma-coalesced, or malformed values so an
@@ -285,14 +288,24 @@ where
     })
 }
 
-/// Read the upstream's final response up to `max_body`, and refuse an ambiguous framing first.
+/// Read the upstream's final response up to `max_body`, and refuse an ambiguous framing first. A
+/// `101` is taken only when it answers the handshake whose accept value is `accept`.
 pub(crate) async fn read_response(
-    response: hyper::Response<hyper::body::Incoming>,
+    mut response: hyper::Response<hyper::body::Incoming>,
     max_body: usize,
+    accept: Option<&str>,
 ) -> Result<ParsedResponse> {
+    let upgrade = match (response.status().as_u16(), accept) {
+        (101, Some(accept)) => {
+            websocket::check_101(response.headers(), accept)
+                .map_err(|why| ProxyError::Intercept(why.to_string()))?;
+            Some(hyper::upgrade::on(&mut response))
+        }
+        _ => None,
+    };
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
-    if status == 101 {
+    if status == 101 && upgrade.is_none() {
         return Err(ProxyError::Intercept(
             "HTTP protocol upgrades are not supported".to_string(),
         ));
@@ -309,6 +322,14 @@ pub(crate) async fn read_response(
         framing,
     )?;
     let body = collect(body, max_body).await?;
+    let upgraded = match upgrade {
+        Some(upgrade) => Some(
+            upgrade
+                .await
+                .map_err(|e| ProxyError::Io(format!("websocket upgrade: {e}")))?,
+        ),
+        None => None,
+    };
     strip_hop_by_hop_headers(&mut headers)?;
     // Pass on the header case, not the upstream's reason phrase.
     head.extensions.remove::<hyper::ext::ReasonPhrase>();
@@ -317,6 +338,7 @@ pub(crate) async fn read_response(
         headers,
         body,
         header_case: head.extensions,
+        upgraded,
     })
 }
 
@@ -366,6 +388,7 @@ pub(super) fn write_request(
     target: &str,
     headers: &HeaderMap,
     body_len: usize,
+    upgrade: bool,
 ) -> Result<Zeroizing<String>> {
     let nominated = connection_nominated_headers(headers)?;
     // The head buffer is where the attached credential is serialized, so it is wiped on drop. The
@@ -385,8 +408,12 @@ pub(super) fn write_request(
         }
         push_header_line(&mut out, name, value);
     }
-    out.push_str("Connection: close\r\n");
-    write_content_length_and_terminator(&mut out, body_len);
+    if upgrade {
+        out.push_str("Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+    } else {
+        out.push_str("Connection: close\r\n");
+        write_content_length_and_terminator(&mut out, body_len);
+    }
     Ok(out)
 }
 
@@ -636,7 +663,7 @@ mod tests {
     fn write_refreshes_content_length() {
         let mut headers = HeaderMap::new();
         headers.append("Content-Length", "9999"); // stale
-        let s = write_request("POST", "/", &headers, 3).unwrap();
+        let s = write_request("POST", "/", &headers, 3, false).unwrap();
         assert!(s.contains("Content-Length: 3\r\n"));
         assert!(!s.contains("9999"));
     }
@@ -663,7 +690,7 @@ mod tests {
             ("X-End-To-End".to_string(), "keep".to_string()),
         ]);
 
-        let wire = write_request("POST", "/", &headers, 4)
+        let wire = write_request("POST", "/", &headers, 4, false)
             .unwrap()
             .to_ascii_lowercase();
         for removed in [

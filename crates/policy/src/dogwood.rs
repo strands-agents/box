@@ -1289,14 +1289,21 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             path,
             body_bytes,
             intercepted,
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
-            (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-        ],
+            upgrade,
+        } => {
+            let mut fields = vec![
+                (attr::HOST, Value::String((*host).to_string())),
+                (attr::PORT, Value::Int(i64::from(*port))),
+                (attr::METHOD, Value::String((*method).to_string())),
+                (attr::PATH, Value::String((*path).to_string())),
+                (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
+                (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            ];
+            if let Some(upgrade) = upgrade {
+                fields.push((attr::UPGRADE, Value::String((*upgrade).to_string())));
+            }
+            fields
+        }
         Request::McpCall {
             server,
             method,
@@ -1408,20 +1415,27 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             path,
             delivery,
             intercepted,
+            upgrade,
             ..
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
-            // The DELIVERED count, carried on the schema's `body_bytes`. A budget rule
-            // sums this, so it must be what left the box, not what was offered.
-            (
-                attr::BODY_BYTES,
-                Value::Int(clamp(delivery.accepted_bytes())),
-            ),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-        ],
+        } => {
+            let mut fields = vec![
+                (attr::HOST, Value::String((*host).to_string())),
+                (attr::PORT, Value::Int(i64::from(*port))),
+                (attr::METHOD, Value::String((*method).to_string())),
+                (attr::PATH, Value::String((*path).to_string())),
+                // The DELIVERED count, carried on the schema's `body_bytes`. A budget rule
+                // sums this, so it must be what left the box, not what was offered.
+                (
+                    attr::BODY_BYTES,
+                    Value::Int(clamp(delivery.accepted_bytes())),
+                ),
+                (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            ];
+            if let Some(upgrade) = upgrade {
+                fields.push((attr::UPGRADE, Value::String((*upgrade).to_string())));
+            }
+            fields
+        }
         Outcome::ShellRun {
             command,
             program,
@@ -1996,6 +2010,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
             intercepted: true,
+            upgrade: None,
         }
     }
 
@@ -2007,6 +2022,7 @@ when temporal {
             path: "/v1",
             body_bytes: 10,
             intercepted: true,
+            upgrade: None,
         }
     }
 
@@ -2068,6 +2084,7 @@ when temporal {
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
                         intercepted: true,
+                        upgrade: None,
                     }
                 )
                 .is_err(),
@@ -2154,6 +2171,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
             intercepted: true,
+            upgrade: None,
         };
         assert!(
             engine

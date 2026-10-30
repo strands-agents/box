@@ -7,7 +7,7 @@ secret never enters a box.
 
 | The gateway | What it does |
 |---|---|
-| Decides | `net:connect` for each destination, before DNS and again for each address it dials. `http:request` for each request. `mcp:call` for each request to an http MCP server. |
+| Decides | `net:connect` for each destination, before DNS and again for each address it dials. `http:request` for each request, and again while a WebSocket is open. `mcp:call` for each request to an http MCP server. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
@@ -133,6 +133,27 @@ certificates, and forward the request. Each connection carries one request.
 `x-strands-box-egress: refused`, and a body that says why. A `net:connect` refusal of a `CONNECT`
 arrives before the `200`, so the client never starts TLS. A policy refusal of a request to an http
 MCP server gets a JSON-RPC error body.
+
+### WebSockets
+
+**A WebSocket opens with an ordinary request.** Its handshake is a `GET` inside a `CONNECT`, and
+`http:request` decides it like any other request, with `upgrade` set to `"websocket"`. The route's
+credential goes on the handshake. A plain `http://` handshake is refused before any decision.
+
+**Policy decides the open WebSocket again.** After the server's `101`, the gateway forwards frames
+in both directions and checks each frame's header. Before more of the workload's frames leave, it
+decides `http:request` again: when the workload has used the bytes that the last decision
+allowed (64 KiB, or one larger frame), after 30 seconds, or when the box decides or records an action other than `net:connect`
+or `http:request`, such as a file read. Each of these checks records the bytes it let out, so a
+history rule over `http:request::response` sees what a WebSocket sends. A refusal closes the
+WebSocket. The server's messages get no decision, as the reply to a request gets none.
+
+**The scrub reads each server message.** When a route matches the handshake, the gateway joins the
+frames of each server message, replaces each copy of the secret with `[REDACTED]`, and forwards the
+message as one frame. It removes the offer of compression from the handshake, so that every copy of
+the secret can be found. It reads one message at a time, so a secret that the server splits across
+two messages passes. [WebSockets](../user/egress.md#websockets) in the user guide lists the limits,
+the refusals, and the close codes.
 
 ### Cloud instance metadata
 

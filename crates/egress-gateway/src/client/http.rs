@@ -15,6 +15,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsConnector;
 
+use zeroize::Zeroizing;
+
 use crate::effect::EffectOutcome;
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::SharedState;
@@ -56,8 +58,9 @@ impl Upstream {
         self,
         state: &SharedState,
         method: &str,
-        head: &[u8],
-        body: &[u8],
+        head: Zeroizing<String>,
+        body: Vec<u8>,
+        accept: Option<&str>,
     ) -> (EffectOutcome, Result<ParsedResponse>) {
         let Self {
             socket,
@@ -74,7 +77,7 @@ impl Upstream {
             let tcp = socket
                 .into_async()
                 .map_err(|e| lost("upstream socket", e))?;
-            let request = (method, head, body);
+            let request = (method, head, body, accept);
             match tls {
                 None => round_trip(tcp, &writes, request, &status, max_body).await,
                 Some(name) => {
@@ -110,12 +113,12 @@ impl Upstream {
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body): (&str, &[u8], &[u8]),
+    (method, head, body, accept): (&str, Zeroizing<String>, Vec<u8>, Option<&str>),
     status: &Cell<Option<u16>>,
     max_body: usize,
 ) -> std::result::Result<ParsedResponse, NoResponse>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let lost = |error: hyper::Error| {
         let kind = socket::error_kind(&error);
@@ -140,13 +143,13 @@ where
     let exchange = async move {
         let response = sender.send_request(stand_in).await.map_err(lost)?;
         status.set(Some(response.status().as_u16()));
-        http1::read_response(response, max_body)
+        http1::read_response(response, max_body, accept)
             .await
             .map_err(|error| (io::ErrorKind::Other, error))
     };
     // Drive the connection until the response is read; dropping it closes the upstream.
     let connection = async {
-        let _ = connection.await;
+        let _ = connection.with_upgrades().await;
         std::future::pending::<()>().await
     };
     tokio::select! {
@@ -157,17 +160,17 @@ where
 
 /// Writes the box's request bytes in place of hyper's stand-in, and holds reads until they are
 /// flushed, because hyper treats early bytes on an idle connection as an error.
-struct Prepared<'a, S> {
+struct Prepared<S> {
     inner: S,
-    head: &'a [u8],
-    body: &'a [u8],
+    head: Zeroizing<String>,
+    body: Vec<u8>,
     sent: usize,
     flushed: bool,
     reader: Option<Waker>,
 }
 
-impl<'a, S> Prepared<'a, S> {
-    fn new(inner: S, head: &'a [u8], body: &'a [u8]) -> Self {
+impl<S> Prepared<S> {
+    fn new(inner: S, head: Zeroizing<String>, body: Vec<u8>) -> Self {
         Self {
             inner,
             head,
@@ -179,7 +182,7 @@ impl<'a, S> Prepared<'a, S> {
     }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
+impl<S: AsyncRead + Unpin> AsyncRead for Prepared<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -194,16 +197,20 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         stand_in: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        while !this.flushed {
+        if this.flushed {
+            // The request has left, so this is a WebSocket frame after the upgrade.
+            return Pin::new(&mut this.inner).poll_write(cx, stand_in);
+        }
+        loop {
             let rest = match this.sent.checked_sub(this.head.len()) {
-                None => &this.head[this.sent..],
+                None => &this.head.as_bytes()[this.sent..],
                 Some(at) => &this.body[at..],
             };
             if rest.is_empty() {
@@ -212,7 +219,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
                 if let Some(reader) = this.reader.take() {
                     reader.wake();
                 }
-                break;
+                return Poll::Ready(Ok(stand_in.len()));
             }
             let written = ready!(Pin::new(&mut this.inner).poll_write(cx, rest))?;
             if written == 0 {
@@ -220,7 +227,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
             }
             this.sent += written;
         }
-        Poll::Ready(Ok(stand_in.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -263,7 +269,18 @@ mod tests {
                 seen.extend(rest);
                 seen
             };
-            let client = round_trip(gateway, &writes, ("POST", HEAD, b"ok"), &status, 1024);
+            let client = round_trip(
+                gateway,
+                &writes,
+                (
+                    "POST",
+                    Zeroizing::new(String::from_utf8_lossy(HEAD).into_owned()),
+                    b"ok".to_vec(),
+                    None,
+                ),
+                &status,
+                1024,
+            );
             let (result, seen) = tokio::join!(client, server);
             (seen, result, status.get(), writes.get().accepted)
         })

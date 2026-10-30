@@ -254,6 +254,7 @@ fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
         body_bytes,
         intercepted: true,
         mcp: None,
+        upgrade: None,
     }
 }
 
@@ -287,6 +288,7 @@ fn mcp_request_attempt(
             tool,
             arguments,
         }),
+        upgrade: None,
     }
 }
 
@@ -540,6 +542,7 @@ fn request_to_host(host: &'static str) -> EffectAttempt<'static> {
         body_bytes: 0,
         intercepted: true,
         mcp: None,
+        upgrade: None,
     }
 }
 

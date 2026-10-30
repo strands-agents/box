@@ -215,6 +215,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                upgrade,
             } => {
                 // The `http:request` gate. `decide` records to history, so it is called exactly
                 // once here; the `mcp:call` gate below is the second recorded decision.
@@ -228,6 +229,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         path,
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
+                        upgrade: *upgrade,
                     },
                 ) {
                     // Unreachable: an `Http` request never carries `PolicyPending`, so this arm never
@@ -270,6 +272,10 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
+    }
+
+    fn history_version(&self) -> u64 {
+        self.policy.history_version()
     }
 
     fn stage_mcp_catalog(&self, server: &str, reply: McpListReply<'_>) -> io::Result<()> {
@@ -383,6 +389,7 @@ enum AttemptIdentity {
         intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
+        upgrade: Option<String>,
     },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
@@ -409,6 +416,7 @@ impl AttemptIdentity {
                 path,
                 intercepted,
                 mcp,
+                upgrade,
                 ..
             } => Self::Http {
                 host: (*host).to_string(),
@@ -416,6 +424,7 @@ impl AttemptIdentity {
                 method: (*method).to_string(),
                 path: (*path).to_string(),
                 intercepted: *intercepted,
+                upgrade: upgrade.map(str::to_string),
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -492,6 +501,7 @@ impl LocalPolicyEffectPermit {
                     path,
                     intercepted,
                     mcp,
+                    upgrade,
                 },
                 Some(delivery),
             ) => {
@@ -506,6 +516,7 @@ impl LocalPolicyEffectPermit {
                         delivery,
                         status: reply_status_of(outcome),
                         intercepted: *intercepted,
+                        upgrade: upgrade.as_deref(),
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -756,6 +767,7 @@ mod tests {
             body_bytes: 32,
             intercepted: false,
             mcp: Some(McpFrame::List { server, method }),
+            upgrade: None,
         }
     }
 
@@ -777,6 +789,7 @@ mod tests {
                 tool,
                 arguments,
             }),
+            upgrade: None,
         }
     }
 
@@ -1385,6 +1398,7 @@ mod tests {
                 body_bytes: 42,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .expect("request is allowed")
             .record_outcome(EgressEffectOutcome::Completed(100))
@@ -1403,6 +1417,78 @@ mod tests {
             .expect("local outcome recording succeeds");
     }
 
+    /// A WebSocket check reaches the decision and its history record with `upgrade`, and the
+    /// adapter reports the engine's history version.
+    #[test]
+    fn a_websocket_check_carries_upgrade_to_the_decision_and_the_record() {
+        let interceptor = interceptor(
+            r#"permit(principal, action == Box::Action::"http:request", resource)
+               when { context.input has upgrade && context.input.upgrade == "websocket" };
+               forbid(principal, action == Box::Action::"http:request", resource)
+               when temporal {
+                 formerly within 1m (
+                   Box::Action::"http:request"::response{ input.upgrade: "websocket", input.body_bytes: 7 }
+                 )
+               };"#,
+        );
+        let check = |upgrade| EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "GET",
+            path: "/chat",
+            body_bytes: 65536,
+            intercepted: true,
+            mcp: None,
+            upgrade,
+        };
+        assert!(
+            interceptor.intercept(&check(None)).is_err(),
+            "no upgrade, no permit"
+        );
+        interceptor
+            .intercept(&check(Some("websocket")))
+            .expect("the check is allowed")
+            .record_outcome(EgressEffectOutcome::Replied {
+                accepted_bytes: 7,
+                status: 101,
+            })
+            .expect("local outcome recording succeeds");
+        assert!(
+            interceptor.intercept(&check(Some("websocket"))).is_err(),
+            "the record carries upgrade, so the temporal rule matches it"
+        );
+
+        let history = tempfile::tempdir().expect("history directory");
+        let source = r#"permit(principal, action == Box::Action::"fs:read", resource);"#;
+        let policy = Arc::new(
+            PolicyEngine::open(
+                vec![Policy {
+                    origin: PathBuf::from("fs.cedar"),
+                    text: source.to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("policy opens"),
+        );
+        let (governed, principal) = (GovernedBox::assigned("test-box"), Principal::agent());
+        let handle = EgressPolicyInterceptor::into_handle(
+            policy.clone(),
+            principal.clone(),
+            governed.clone(),
+        );
+        let key = crate::path::ApprovedPath::interpreter_resolved("/home/agent/.ssh/id_ed25519");
+        let read = crate::Request::Fs {
+            path: &key,
+            operation: crate::request::FsOperation::ReadContent,
+        };
+        let _ = policy.decide(&governed, &principal, &read);
+        assert_eq!(
+            handle.history_version(),
+            1,
+            "the adapter reports the engine's version"
+        );
+    }
+
     /// The request is decided; the release of a reply is not, and the reply is recorded once, on
     /// the request permit, as `output.status`.
     #[test]
@@ -1415,6 +1501,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
             host: "api.github.com",
@@ -1506,6 +1593,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         for _ in 0..3 {
             fixture
@@ -1574,6 +1662,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
             let fixture = interceptor(source);
@@ -1669,6 +1758,7 @@ mod tests {
             body_bytes,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
 
         interceptor
@@ -1700,6 +1790,7 @@ mod tests {
             body_bytes: 0,
             intercepted,
             mcp: None,
+            upgrade: None,
         };
 
         // TLS-terminated (intercepted == true) satisfies the rule.
@@ -1739,6 +1830,7 @@ mod tests {
             body_bytes: 0,
             intercepted,
             mcp: None,
+            upgrade: None,
         };
         let exchange = |fixture: &InterceptorFixture, intercepted| {
             fixture

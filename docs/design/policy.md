@@ -136,7 +136,10 @@ leave the other two out. A shell response carries the command's exit status as `
 a command that a signal killed records 128 plus the signal number, so a rule can require a passing
 test before it permits a commit. A connect that definitely failed is a `::error`, and one that may
 have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
-still counts the uncertain ones.
+still counts the uncertain ones. An HTTP response carries the reply's status as `output.status`
+and the request bytes that left as `input.body_bytes`. An open WebSocket records one more response
+for each check that the gateway makes before more of the workload's frames leave, with
+`input.upgrade` set and `output.status` `101`, so a byte budget counts what a WebSocket sends.
 
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead ([temporal rules are enforced
@@ -145,6 +148,8 @@ Counting differs the same way. Each request is appended under the one lock befor
 decided, so a `::request` count includes every earlier attempt, and a budget keyed on `::request`
 admits exactly N attempts, even when they arrive together. A `::response` count only sees operations
 that have finished, so several requests in flight at once can each pass before any of them lands.
+A WebSocket's check is in flight until the next check or the close, so each open WebSocket can send
+up to one check's bytes past a byte budget.
 
 A `when temporal` clause names one action, with no group, no `or`, and no wildcard, so a budget over
 several actions needs one clause per action ([a temporal rule names one

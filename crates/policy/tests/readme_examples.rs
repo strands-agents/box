@@ -84,6 +84,7 @@ fn history_example() -> Result<(), PolicyError> {
                 delivery: Delivery::Completed { bytes: 512 },
                 status: Some(200),
                 intercepted: true,
+                upgrade: None,
             },
         )
     }

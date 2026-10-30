@@ -245,6 +245,8 @@ pub(crate) mod attr {
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
+    /// `context.input.upgrade` — `websocket` on a WebSocket handshake and its later checks.
+    pub(crate) const UPGRADE: &str = "upgrade";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -522,32 +524,43 @@ fn context_for(
             path,
             body_bytes,
             intercepted,
-        } => vec![
-            (
-                attr::HOST.to_string(),
-                RestrictedExpression::new_string((*host).to_string()),
-            ),
-            (
-                attr::PORT.to_string(),
-                RestrictedExpression::new_long(i64::from(*port)),
-            ),
-            (
-                attr::METHOD.to_string(),
-                RestrictedExpression::new_string((*method).to_string()),
-            ),
-            (
-                attr::PATH.to_string(),
-                RestrictedExpression::new_string((*path).to_string()),
-            ),
-            (
-                attr::BODY_BYTES.to_string(),
-                RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
-            ),
-            (
-                attr::INTERCEPTED.to_string(),
-                RestrictedExpression::new_bool(*intercepted),
-            ),
-        ],
+            upgrade,
+        } => {
+            let mut fields = vec![
+                (
+                    attr::HOST.to_string(),
+                    RestrictedExpression::new_string((*host).to_string()),
+                ),
+                (
+                    attr::PORT.to_string(),
+                    RestrictedExpression::new_long(i64::from(*port)),
+                ),
+                (
+                    attr::METHOD.to_string(),
+                    RestrictedExpression::new_string((*method).to_string()),
+                ),
+                (
+                    attr::PATH.to_string(),
+                    RestrictedExpression::new_string((*path).to_string()),
+                ),
+                (
+                    attr::BODY_BYTES.to_string(),
+                    RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
+                ),
+                (
+                    attr::INTERCEPTED.to_string(),
+                    RestrictedExpression::new_bool(*intercepted),
+                ),
+            ];
+            // `upgrade?` is optional in the schema, so it is present only on a WebSocket.
+            if let Some(upgrade) = upgrade {
+                fields.push((
+                    attr::UPGRADE.to_string(),
+                    RestrictedExpression::new_string((*upgrade).to_string()),
+                ));
+            }
+            fields
+        }
         Request::McpCall {
             server,
             method,
@@ -735,6 +748,7 @@ mod tests {
                 path: "/",
                 body_bytes: 12,
                 intercepted: true,
+                upgrade: None,
             },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {

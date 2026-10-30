@@ -84,6 +84,7 @@ impl AttemptSnapshot {
                 body_bytes,
                 intercepted: _,
                 mcp: _,
+                upgrade: _,
             } => Self::HttpRequest {
                 host: (*host).to_string(),
                 port: *port,
@@ -1098,6 +1099,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
         body_bytes: 42,
         intercepted: true,
         mcp: None,
+        upgrade: None,
     };
 
     let rendered = format!("{attempt:?}").to_ascii_lowercase();
@@ -1121,6 +1123,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
                 tool,
                 arguments: r#"{"password":"the-secret-value"}"#,
             }),
+            upgrade: None,
         };
         let rendered = format!("{attempt:?}").to_ascii_lowercase();
         assert!(

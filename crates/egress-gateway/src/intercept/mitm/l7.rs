@@ -1,6 +1,5 @@
 //! The L7 interception path: run the request/response legs, forward.
 
-use std::borrow::Cow;
 use std::io;
 use std::net::TcpStream;
 
@@ -20,6 +19,7 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
+use crate::proxy::websocket::{self, Handshake};
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 pub(crate) async fn forward_tls(
@@ -28,6 +28,7 @@ pub(crate) async fn forward_tls(
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
+    handshake: Handshake,
 ) -> Result<WorkloadResponse> {
     // Check the upstream's TLS name before any request effect.
     let server_name =
@@ -87,6 +88,7 @@ pub(crate) async fn forward_tls(
         upstream,
         state,
         correlation,
+        handshake,
         |method, target, headers| validate_request_binding(connect, method, target, headers),
     )
     .await
@@ -100,6 +102,7 @@ async fn run_l7_legs(
     upstream: Upstream,
     state: &SharedState,
     correlation: RequestId,
+    handshake: Handshake,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let intercepted = upstream.is_tls();
@@ -146,6 +149,21 @@ async fn run_l7_legs(
             },
             correlation,
         ));
+    }
+
+    let websocket = match websocket::admit(handshake, state, &connect.host) {
+        Ok(websocket) => websocket,
+        Err((status, reason, diagnostic)) => {
+            let request = (req.method.as_deref().unwrap_or_default(), &*req.target.path);
+            record_deny(state, connect, request, reason, correlation);
+            return Ok(WorkloadResponse::refusal(status, diagnostic));
+        }
+    };
+    if websocket.is_some() {
+        // A compressed message would hide a secret from the scrub.
+        req.headers.remove("sec-websocket-extensions");
+        // A handshake has no body, and its head goes out with no `Content-Length`.
+        req.headers.remove("content-length");
     }
 
     let cx = CapabilityContext::new(
@@ -265,25 +283,28 @@ async fn run_l7_legs(
     // the same, or a respelling this classifier judged as one identity would be FETCHED as another by
     // the upstream server. Only `resources/read` whose canonical form differs is rewritten; every
     // other frame (and an unparseable body) forwards byte-identical.
-    let forwarded_body: Cow<[u8]> = match &mcp_target {
+    let canonical = match &mcp_target {
         Some((_, target)) if matches!(target.identity, McpTargetIdentity::Resource(_)) => {
             canonicalize_mcp_frame(req.body.as_bytes())
-                .map_or_else(|| Cow::Borrowed(req.body.as_bytes()), Cow::Owned)
         }
-        _ => Cow::Borrowed(req.body.as_bytes()),
+        _ => None,
     };
+    let body_len = canonical
+        .as_ref()
+        .map_or(req.body.as_bytes().len(), Vec::len);
     let prepared_request = http1::write_request(
         &request_method,
         &fwd_target,
         &req.headers,
-        forwarded_body.len(),
+        body_len,
+        websocket.is_some(),
     )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
         port: connect.port,
         method: &request_method,
         path: &workload_path,
-        body_bytes: forwarded_body.len(),
+        body_bytes: body_len,
         intercepted,
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
@@ -307,6 +328,7 @@ async fn run_l7_legs(
                 },
             }
         }),
+        upgrade: websocket.is_some().then_some("websocket"),
     };
     let request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
@@ -350,13 +372,23 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
+    let cursor = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/list")
+        .and_then(|_| list_cursor(req.body.as_bytes()));
     // The request permit is consumed at reply time, or when no reply comes.
+    let forwarded_body = canonical.unwrap_or_else(|| match std::mem::take(&mut req.body) {
+        BodyRef::Bytes(body) => body,
+        BodyRef::Empty => Vec::new(),
+    });
+    let accept = websocket.as_ref().map(|(accept, _)| accept.as_str());
     let (outcome, response) = upstream
         .send(
             state,
             &request_method,
-            prepared_request.as_bytes(),
-            &forwarded_body,
+            prepared_request,
+            forwarded_body,
+            accept,
         )
         .await;
     request_permit
@@ -364,7 +396,21 @@ async fn run_l7_legs(
         .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
 
     // --- Response leg: read, evaluate+apply, return ---
-    let parsed_res = response?;
+    let parsed_res = match response {
+        Err(error) if websocket.is_some() => {
+            let request = (request_method.as_str(), workload_path.as_str());
+            let reason = match error {
+                ProxyError::Intercept(reason) => reason,
+                error => error.to_string(),
+            };
+            record_deny(state, connect, request, &reason, correlation);
+            return Ok(WorkloadResponse::refusal(
+                502,
+                b"WebSocket upgrade response refused",
+            ));
+        }
+        response => response?,
+    };
     // Move, don't clone — `parsed_res` is dead after this; the body can be large.
     let mut res = InterceptedResponse::http(
         parsed_res.status,
@@ -404,7 +450,7 @@ async fn run_l7_legs(
             server,
             McpListReply {
                 session: req.headers.get("mcp-session-id"),
-                cursor: list_cursor(req.body.as_bytes()).as_deref(),
+                cursor: cursor.as_deref(),
                 body: res.body.as_bytes(),
             },
         )
@@ -456,6 +502,22 @@ async fn run_l7_legs(
         ));
     }
 
+    let relay = match (parsed_res.upgraded, websocket) {
+        (Some(upstream), Some((_, slot))) => {
+            res.headers.set("Upgrade", "websocket");
+            res.headers.set("Connection", "Upgrade");
+            let scrub = state.controls.matches_any(&cx.target.as_destination());
+            Some(Box::new(websocket::Relay {
+                upstream,
+                scrub: scrub.then(|| cx.target.clone()),
+                method: request_method,
+                path: workload_path,
+                correlation,
+                _slot: slot,
+            }))
+        }
+        _ => None,
+    };
     Ok(WorkloadResponse {
         status: res.status,
         reason: None,
@@ -466,6 +528,7 @@ async fn run_l7_legs(
         },
         release: Some(response_permit),
         header_case: parsed_res.header_case,
+        relay,
     })
 }
 
@@ -515,6 +578,7 @@ pub(crate) async fn forward_plain(
         upstream,
         state,
         correlation,
+        Handshake::None,
         |_method, _target, _headers| Ok(()),
     )
     .await
@@ -531,11 +595,13 @@ pub(crate) struct WorkloadResponse {
     pub(crate) release: Option<ClaimedEffectPermit>,
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
+    /// The upgraded upstream of a WebSocket, relayed after hyper writes the `101`.
+    pub(crate) relay: Option<Box<websocket::Relay>>,
 }
 
 impl WorkloadResponse {
     /// A proxy-originated diagnostic, outside the response-release lifecycle.
-    fn refusal(status: u16, body: &[u8]) -> Self {
+    pub(crate) fn refusal(status: u16, body: &[u8]) -> Self {
         Self {
             reason: None,
             headers: proxy_originated_headers(),
@@ -559,6 +625,7 @@ impl WorkloadResponse {
             body: Vec::new(),
             release: None,
             header_case: hyper::http::Extensions::new(),
+            relay: None,
         }
     }
 
@@ -572,7 +639,7 @@ impl WorkloadResponse {
 }
 
 /// Claim one effect from the authorization authority.
-fn claim_effect(
+pub(crate) fn claim_effect(
     state: &SharedState,
     attempt: &EffectAttempt<'_>,
 ) -> io::Result<ClaimedEffectPermit> {
@@ -661,25 +728,48 @@ fn refuse_request(
     refused: RefusedRequest<'_>,
     correlation: RequestId,
 ) -> WorkloadResponse {
+    let request = (refused.method.unwrap_or_default(), refused.path);
+    record_deny(state, connect, request, refused.reason, correlation);
+    WorkloadResponse::refusal(403, refused.diagnostic)
+}
+
+/// Record the allow of `request`, its method and path, on `connect`.
+pub(crate) fn record_allow(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    (method, path): (&str, &str),
+    correlation: RequestId,
+) {
+    let subject = DecisionSubject {
+        host: &connect.host,
+        port: connect.port,
+        method,
+        path,
+    };
+    emit_decision(state, subject, AuditDecision::Allow, "", correlation);
+}
+
+/// Record the denial of `request`, its method and path, on `connect`, with its audit line.
+pub(crate) fn record_deny(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    (method, path): (&str, &str),
+    reason: &str,
+    correlation: RequestId,
+) {
     state.audit.push(NetworkAuditEvent::deny(
         &connect.host,
         connect.port,
-        refused.reason.to_string(),
+        reason.to_string(),
         correlation.clone(),
     ));
-    emit_decision(
-        state,
-        DecisionSubject {
-            host: &connect.host,
-            port: connect.port,
-            method: refused.method.unwrap_or_default(),
-            path: refused.path,
-        },
-        AuditDecision::Deny,
-        refused.reason,
-        correlation,
-    );
-    WorkloadResponse::refusal(403, refused.diagnostic)
+    let subject = DecisionSubject {
+        host: &connect.host,
+        port: connect.port,
+        method,
+        path,
+    };
+    emit_decision(state, subject, AuditDecision::Deny, reason, correlation);
 }
 
 /// The `params.cursor` a `tools/list` request names.

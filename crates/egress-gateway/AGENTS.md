@@ -100,7 +100,8 @@ Conventions: `docs/conventions.md`.
 - Keep `Arc<dyn EffectInterceptor>` mandatory in `MitmInterceptor::start` and `start_with_emitter`,
   and never add `start_without_policy()` or an `Option` form.
 - Use `WorkloadResponse::refusal` and `WorkloadResponse::bare` only for static, secret-free,
-  proxy-originated bytes. Upstream bytes always need a `ResponseRelease` permit.
+  proxy-originated bytes. Upstream bytes always need a `ResponseRelease` permit; a WebSocket's
+  server frames after its released `101` are the one exception, and no decision covers them.
 - Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
   `ProxyOnly` kernel pin, the real anti-hijack defence.
 - Report the pre-mutation `workload_path`, which `emit_decision` reads from `DecisionSubject`. Never

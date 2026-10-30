@@ -583,6 +583,7 @@ mod tests {
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             expected_token: None,
+            websockets: Default::default(),
         }
     }
 

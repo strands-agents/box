@@ -862,6 +862,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             delivery: Delivery::Completed { bytes: 1 },
             status: Some(200),
             intercepted: true,
+            upgrade: None,
         }
     }
 

@@ -115,7 +115,7 @@ impl Default for MitmConfig {
 /// The shared, read-only state every connection handler borrows (behind an `Arc`).
 pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
-    controls: CapabilitySet,
+    pub(crate) controls: CapabilitySet,
     /// The adapter config.
     pub(crate) config: MitmConfig,
     /// The ephemeral session CA.
@@ -127,14 +127,16 @@ pub(crate) struct SharedState {
     /// The final outbound decision emitter.
     emitter: Box<dyn Emitter>,
     /// The authorization authority for every outbound effect.
-    effect_interceptor: Arc<dyn EffectInterceptor>,
+    pub(crate) effect_interceptor: Arc<dyn EffectInterceptor>,
     /// The best-effort proxy session token.
     pub(crate) expected_token: Option<String>,
+    /// The open WebSockets, for the cap in [`Slot`](crate::proxy::websocket::Slot).
+    pub(crate) websockets: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SharedState {
     /// The current Unix time in seconds — the clock seam handed to each [`CapabilityContext`](crate::capability::CapabilityContext).
-    fn now_unix_secs(&self) -> u64 {
+    pub(crate) fn now_unix_secs(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -157,7 +159,7 @@ impl SharedState {
     /// frame — so an agent cannot claim a different server by putting a name in the JSON-RPC body. A
     /// match tells the L7 leg to parse the frame and raise `mcp:call`; `None` leaves the request a
     /// plain `http:request`.
-    fn mcp_server_for(&self, host: &str) -> Option<&str> {
+    pub(crate) fn mcp_server_for(&self, host: &str) -> Option<&str> {
         self.config
             .mcp_servers
             .iter()
@@ -245,6 +247,7 @@ impl MitmInterceptor {
             emitter,
             effect_interceptor,
             expected_token,
+            websockets: Default::default(),
         });
 
         let stop = Arc::new(AtomicBool::new(false));

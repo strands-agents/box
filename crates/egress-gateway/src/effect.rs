@@ -126,6 +126,9 @@ pub enum EffectAttempt<'a> {
         /// The MCP frame this request carries, when its destination is a configured remote MCP
         /// server; `None` otherwise. Present drives the `mcp:call` gate alongside `http:request`.
         mcp: Option<McpFrame<'a>>,
+        /// `websocket` on a WebSocket handshake, and on each later check before more of the
+        /// workload's bytes leave the open socket. `body_bytes` is then the bytes the check allows.
+        upgrade: Option<&'a str>,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {
@@ -197,6 +200,12 @@ pub struct McpListReply<'a> {
 pub trait EffectInterceptor: Send + Sync {
     /// Obtain the permit that must receive the effect's terminal outcome.
     fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>>;
+
+    /// A count that grows when a decision for an open WebSocket can change, other than through
+    /// the socket's own bytes. The gateway asks again before the next message when it grows.
+    fn history_version(&self) -> u64 {
+        0
+    }
 
     /// Observe one `tools/list` reply from a remote MCP server, before the workload receives it.
     fn stage_mcp_catalog(&self, _server: &str, _reply: McpListReply<'_>) -> io::Result<()> {

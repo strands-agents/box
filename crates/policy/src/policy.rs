@@ -58,6 +58,8 @@ pub struct PolicyEngine {
     authority: Authority,
     effective: EffectivePolicy,
     observer: Option<Arc<dyn crate::observe::DecisionObserver>>,
+    /// See [`history_version`](Self::history_version).
+    changes: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for PolicyEngine {
@@ -90,6 +92,7 @@ impl PolicyEngine {
             authority: Authority::open_complete(sources, mcp_schemas, history)?,
             effective,
             observer: None,
+            changes: Default::default(),
         })
     }
 
@@ -107,6 +110,7 @@ impl PolicyEngine {
             authority: Authority::open_staged(operator, sources, history)?,
             effective,
             observer: None,
+            changes: Default::default(),
         })
     }
 
@@ -125,6 +129,7 @@ impl PolicyEngine {
             authority: Authority::open_staged_file(operator, sources, history, label)?,
             effective,
             observer: None,
+            changes: Default::default(),
         })
     }
 
@@ -143,6 +148,7 @@ impl PolicyEngine {
             authority: Authority::open_with_faults(sources, history, faults)?,
             effective,
             observer: None,
+            changes: Default::default(),
         })
     }
 
@@ -269,7 +275,24 @@ impl PolicyEngine {
     /// request: the contained agent must never reach a reload, and the only thing that keeps
     /// it out is where the trigger lives.
     pub fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
-        self.authority.reload(sources)
+        let reloaded = self.authority.reload(sources);
+        if reloaded.is_ok() {
+            self.changed();
+        }
+        reloaded
+    }
+
+    /// A count that grows on each reload, and on each decision or record of an action other than
+    /// `net:connect` and `http:request`. An open WebSocket asks again when it grows, so a rule on
+    /// another action, such as a file read, applies before the next message leaves.
+    #[must_use]
+    pub fn history_version(&self) -> u64 {
+        self.changes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn changed(&self) {
+        self.changes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Decide whether `principal` may perform `request`.
@@ -298,6 +321,9 @@ impl PolicyEngine {
         request: &Request<'_>,
         decision: Decision,
     ) -> Decision {
+        if !matches!(request, Request::Connect { .. } | Request::Http { .. }) {
+            self.changed();
+        }
         let decision = decision.naming(request.resource());
         if let Some(observer) = &self.observer {
             observer.observed(
@@ -316,7 +342,11 @@ impl PolicyEngine {
         principal: &Principal,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.authority.record(governed, principal, outcome)
+        let recorded = self.authority.record(governed, principal, outcome);
+        if !matches!(outcome, Outcome::Connect { .. } | Outcome::Http { .. }) {
+            self.changed();
+        }
+        recorded
     }
 
     /// Return the loaded engine and source identity.
@@ -498,7 +528,45 @@ mod tests {
                 policy_id: effective_policy_id(&sources),
             },
             observer: None,
+            changes: Default::default(),
         }
+    }
+
+    #[test]
+    fn the_history_version_moves_on_other_actions_not_on_network_ones() {
+        let source = r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);"#;
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = policy_at(source, &history.path().join("dogwood.redb"), 1_000);
+        let (governed, principal) = (GovernedBox::assigned("test-box"), Principal::agent());
+        let http = Request::Http {
+            host: "api.example.com",
+            port: 443,
+            method: "GET",
+            path: "/chat",
+            body_bytes: 65536,
+            intercepted: true,
+            upgrade: Some("websocket"),
+        };
+        let connect = Request::Connect {
+            host: "api.example.com",
+            ip: None,
+            port: 443,
+        };
+        let _ = policy.decide(&governed, &principal, &http);
+        let _ = policy.decide(&governed, &principal, &connect);
+        assert_eq!(
+            policy.history_version(),
+            0,
+            "network decisions do not move it"
+        );
+
+        let key = ApprovedPath::interpreter_resolved("/home/agent/.ssh/id_ed25519");
+        let read = Request::Fs {
+            path: &key,
+            operation: crate::request::FsOperation::ReadContent,
+        };
+        assert!(policy.decide(&governed, &principal, &read).is_allow());
+        assert_eq!(policy.history_version(), 1, "a file read moves it");
     }
 
     #[test]
@@ -662,6 +730,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                 path: "/v1",
                 body_bytes: 10,
                 intercepted: true,
+                upgrade: None,
             },
         ]
     }
@@ -1247,9 +1316,11 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             "the first policy names no fs:write rule, so the write is denied"
         );
 
+        let version = engine.history_version();
         engine
             .reload(&read_and_write)
             .expect("the second policy reloads onto the live engine");
+        assert_eq!(engine.history_version(), version + 1, "a reload moves it");
 
         assert!(
             write_allowed(&engine, &target),
@@ -1273,9 +1344,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             "the working policy permits the write"
         );
 
+        let version = engine.history_version();
         engine
             .reload(&source("this is not a policy {{{"))
             .expect_err("a policy that does not parse is refused");
+        assert_eq!(
+            engine.history_version(),
+            version,
+            "a refused reload does not move it"
+        );
 
         assert!(
             write_allowed(&engine, &target),

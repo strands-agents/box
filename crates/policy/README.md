@@ -61,12 +61,17 @@ calls can return different verdicts. A denied request still advances history.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 
-Two calls sit off the lifecycle:
+Three calls sit off the lifecycle:
 
 ```text
 PolicyEngine::validate(&[Policy]) -> Result<(), PolicyError>
 PolicyEngine::check(&Operator, &[Policy], complete: bool) -> PolicyCheck
+PolicyEngine::history_version() -> u64
 ```
+
+`history_version` is a count that grows on each reload, and on each decision or record of an
+action other than `net:connect` and `http:request`. The egress adapter reports it to the gateway,
+which asks again before an open WebSocket's next frame when it grows.
 
 `validate` answers "would `open` accept this text", and returns no authority. Use it
 when you must refuse bad policy text *before* writing it, and you must not open a
@@ -199,7 +204,7 @@ load refuses an `operation` guard under no action.
 |---|---|---|
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
-| `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool` |
+| `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `upgrade: Option<&str>` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -391,6 +396,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
             intercepted: true,
+            upgrade: None,
         },
     )
 }
@@ -399,13 +405,15 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted`, `upgrade` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
 
 One HTTP exchange records exactly one `http:request::response`, at reply time. Its
-`input.body_bytes` is the delivered request, and its `output.status` is the reply. A request
+`input.body_bytes` is the delivered request, and its `output.status` is the reply. An open
+WebSocket also records one for each check: `upgrade` is `Some("websocket")`, `input.body_bytes` is
+what the check let out, and `output.status` is `101`. A request
 that got no reply records the same event with no `output`, so a rule on `output.status`
 does not match it. A rule reads `status` in a temporal predicate over `::response`; a decision
 carries no `output`.
@@ -445,7 +453,8 @@ Rules written against history:
   carries it as delivered. Pin the event kind (`::request` or `::response`) in
   a predicate so a sum reads one quantity.
 - A window measures elapsed seconds. A rule over `net:connect` counts one event
-  per pinned address; a rule over `http:request` counts one per exchange.
+  per pinned address; a rule over `http:request` counts one per exchange, plus one per check
+  of an open WebSocket.
 - A `Connect` outcome records `host` and `port`. `connected`, the `status` on a `ShellRun`
   or `ShellSpawn` outcome, and the failure category of a `Delivery` reach no event, so a
   failure-rate rule over them matches nothing. An `Fs` outcome is the exception: it records
@@ -510,7 +519,9 @@ The interceptor maps connect and HTTP request attempts to `Request::Connect` and
 `Request::Http`. A response release raises **no request and no decision**, and its permit
 records nothing. The gateway consumes the request permit at reply time with
 `EffectOutcome::Replied`, so the one `http:request::response` an exchange records carries
-the reply as `output.status`, which only a `when temporal { … }` rule reads.
+the reply as `output.status`, which only a `when temporal { … }` rule reads. Each check of an
+open WebSocket is one more `Request::Http` with `upgrade`, and its permit records one more
+response.
 
 1. `intercept` evaluates the typed attempt with `PolicyEngine::decide`.
 2. A denial returns `io::ErrorKind::PermissionDenied`.

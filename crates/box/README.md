@@ -192,7 +192,8 @@ action for each tool.
 **There is no `net:response` action.** The reply is a phase of `http:request`. It takes no
 decision, and one exchange records one `http:request::response` at reply time, carrying the
 reply's `output.status`, so a temporal rule can count server errors; a rule cannot budget on a
-reply's size.
+reply's size. An open WebSocket records one more for each check, which policy decides before more
+of the workload's frames leave.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
 egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,

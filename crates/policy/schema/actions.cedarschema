@@ -171,7 +171,10 @@ type NetworkRequestInput = {
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.
-  intercepted: Bool
+  intercepted: Bool,
+  // `websocket` on a WebSocket handshake, and on each later check before more of the
+  // workload's bytes leave the open socket.
+  upgrade?: String
 };
 
 // The reply, on the `output` of an `http:request` response event. `status` is the
@@ -191,7 +194,9 @@ action "net:connect" appliesTo {
 
 // The L7 HTTP decision. The reply decides nothing. One exchange records exactly one
 // `http:request::response`, at reply time, carrying the delivered `input.body_bytes` and
-// the reply's `output.status` — a safe one-per-exchange key for a counting rule.
+// the reply's `output.status` — a safe one-per-exchange key for a counting rule. An open
+// WebSocket is decided again before more of the workload's bytes leave, and each check
+// records one more `::response` with `input.upgrade` "websocket" and the bytes it sent.
 action "http:request" appliesTo {
   principal: Agent,
   resource: Resource,

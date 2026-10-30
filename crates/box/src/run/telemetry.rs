@@ -380,6 +380,10 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         result
     }
 
+    fn history_version(&self) -> u64 {
+        self.inner.history_version()
+    }
+
     fn stage_mcp_catalog(
         &self,
         server: &str,
@@ -1055,6 +1059,7 @@ mod tests {
                 body_bytes: 0,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .expect("ordinary HTTP is admitted")
             .mark_indeterminate();
@@ -1142,6 +1147,7 @@ mod tests {
                 body_bytes: 0,
                 intercepted: true,
                 mcp: None,
+                upgrade: None,
             })
             .err()
             .expect("no permit matches a GET");
@@ -1220,6 +1226,7 @@ mod tests {
             body_bytes: 0,
             intercepted: true,
             mcp: None,
+            upgrade: None,
         };
         let emitted = |host: &str, port, method: &str, path: &str| EgressDecision {
             host: host.to_string(),
@@ -1405,6 +1412,19 @@ mod tests {
                 .push(POLICY_OBSERVATIONS.with(|observations| observations.borrow().is_some()));
             Ok(Box::new(DiscardPermit))
         }
+
+        fn history_version(&self) -> u64 {
+            7
+        }
+    }
+
+    /// An open WebSocket asks again when the version moves, so the wrapper must pass it through.
+    #[test]
+    fn the_decision_wrapper_reports_the_inner_history_version() {
+        let inner = Arc::new(CaptureProbe {
+            observed: Arc::default(),
+        });
+        assert_eq!(EgressDecisionInterceptor::over(inner).history_version(), 7);
     }
 
     struct DiscardPermit;
@@ -1433,6 +1453,7 @@ mod tests {
                 tool: "add",
                 arguments,
             }),
+            upgrade: None,
         }
     }
 

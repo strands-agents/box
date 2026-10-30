@@ -20,6 +20,7 @@ use crate::intercept::mitm::connect::{self, ConnectRequest};
 use crate::intercept::mitm::l7::{self, WorkloadResponse};
 use crate::intercept::mitm::listener::open_governed_upstream;
 use crate::intercept::mitm::{SharedState, http1, tls};
+use crate::proxy::websocket::{self, Handshake};
 use crate::transport::socket::{self, Counted, HeadCopy, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// Serve one connection. `connect_only` refuses plain HTTP, for the AF_UNIX transport.
@@ -95,6 +96,7 @@ async fn first_request(
     if connect_only {
         return Ok(WorkloadResponse::bare(400));
     }
+    let handshake = websocket::classify(&request);
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
     let max_body = state.config.response_limits.max_body_bytes;
@@ -107,6 +109,13 @@ async fn first_request(
     };
     let connect = ConnectRequest { host, port };
     let correlation = RequestId::unique().with_headers(&parsed.headers);
+    // A WebSocket rides only TLS, so the plain path refuses it before any decision.
+    if handshake != Handshake::None {
+        let request = (parsed.method.as_str(), origin_target.as_str());
+        let reason = "websocket: upgrade on a plaintext request";
+        l7::record_deny(state, &connect, request, reason, correlation);
+        return Ok(WorkloadResponse::refusal(403, b"WebSocket requires TLS"));
+    }
     let upstream = match admit(state, &connect, token.as_deref(), &correlation) {
         Ok(upstream) => upstream,
         Err(refusal) => return Ok(refusal),
@@ -152,12 +161,27 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         correlation,
         ..
     } = tunnel;
-    serve(client, |request, head| async move {
+    let (connect, pending) = (&connect, &Cell::new(None));
+    serve(client, |mut request, head| async move {
+        let handshake = websocket::classify(&request);
+        let upgrade = hyper::upgrade::on(&mut request);
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        l7::forward_tls(parsed, upstream, &connect, state, correlation).await
+        let mut response =
+            l7::forward_tls(parsed, upstream, connect, state, correlation, handshake).await?;
+        if let Some(relay) = response.relay.take() {
+            pending.set(Some((upgrade, relay)));
+        }
+        Ok(response)
     })
-    .await
+    .await?;
+    if let Some((upgrade, relay)) = pending.take() {
+        let workload = upgrade
+            .await
+            .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
+        websocket::run(workload, *relay, state, connect).await;
+    }
+    Ok(())
 }
 
 /// Serve one request with hyper, and record the release outcome once the response is written.
@@ -187,7 +211,6 @@ where
         Ok::<_, ProxyError>(hyper_response(response))
     });
     let served = hyper::server::conn::http1::Builder::new()
-        .keep_alive(false)
         .half_close(true)
         .auto_date_header(false)
         .max_headers(64)
@@ -214,6 +237,11 @@ fn hyper_response(response: WorkloadResponse) -> Response<Full<Bytes>> {
     let mut out = Response::new(Full::new(Bytes::from(response.body)));
     *out.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     *out.extensions_mut() = response.header_case;
+    // One request per connection. hyper would also close a `101`, which must keep its upgrade.
+    if response.status != 101 {
+        let close = HeaderValue::from_static("close");
+        out.headers_mut().insert(hyper::header::CONNECTION, close);
+    }
     if let Some(reason) = response.reason {
         out.extensions_mut()
             .insert(hyper::ext::ReasonPhrase::from_static(reason.as_bytes()));
@@ -247,6 +275,7 @@ mod tests {
             body: body.to_vec(),
             release: None,
             header_case: Default::default(),
+            relay: None,
         }
     }
 

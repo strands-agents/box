@@ -40,6 +40,7 @@ Domain authorization is supplied as an `EffectInterceptor`:
 ```rust
 pub trait EffectInterceptor: Send + Sync {
     fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>>;
+    fn history_version(&self) -> u64 { 0 }
 }
 
 pub trait EffectPermit: Send {
@@ -54,12 +55,18 @@ kinds, and the proxy presents each one immediately before its effect:
 | Attempt | Fields | Reported when |
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `upgrade` | after the request is serialized, before it is written; on an open WebSocket, before more of the workload's frames leave |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
 edit. `body_bytes` is a length.
+
+`upgrade` is `Some("websocket")` on a WebSocket handshake and on each check of the open
+WebSocket. A check repeats the handshake's `host`, `port`, `method`, and `path`, and its
+`body_bytes` is what it allows: 64 KiB, or one frame when the frame is larger. The proxy asks
+again when those bytes are used up, after 30 s, or when `history_version` grows. Its permit
+records `EffectOutcome::Replied` with the bytes sent and status `101`.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
@@ -101,7 +108,8 @@ so plaintext is always available to a capability.
 The proxy answers a refusal with a static, secret-free diagnostic. Such a
 diagnostic is trusted boundary output and does not enter `ResponseRelease`, so a
 denied effect needs no authorization to report. Upstream response bytes always
-enter `ResponseRelease` before workload delivery.
+enter `ResponseRelease` before workload delivery, except a WebSocket's server frames,
+which follow its released `101` with no further attempt.
 
 ## Destination Matching
 
@@ -217,7 +225,10 @@ write on an upstream socket and one exchange's upstream reads and writes as a wh
 upstream that never drains or sips the request, or never replies or drips its reply, ends the
 exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
 exchange whose request and reply together take longer than the deadline, with no reply to the
-workload; `box.toml` exposes no key for it.
+workload; `box.toml` exposes no key for it. On an open WebSocket, `upstream_read_deadline` is an
+idle limit: the proxy closes both sides when no byte moves in either direction for that long.
+Open WebSockets hold at most three quarters of `max_connections`, and
+`response_limits.max_body_bytes` caps each WebSocket message.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `drain_audit_events()`, and `shutdown()`.

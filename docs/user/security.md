@@ -39,10 +39,12 @@ MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy) list
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
 
-Two things pass with no decision from either tier:
+Three things pass with no decision from either tier:
 
 - The reply to an HTTP request. Its status is recorded as `output.status`, so a temporal rule can
   read it.
+- A message from the server on an open WebSocket. [WebSockets](policy.md#websockets) states what
+  policy decides on the workload's side.
 - A few MCP protocol methods, and every notification. [MCP](policy/actions.md#mcp) lists them by
   transport.
 
@@ -112,7 +114,9 @@ records why, the item links it.
   [what a history rule sees](../design/policy.md#what-a-history-rule-sees).
 - **A budget keyed on `::response` can be overspent by requests in flight.** A `::response` is
   recorded when the operation ends, so several requests in flight pass the same count. A budget
-  keyed on `::request` is exact, and a refused attempt spends from it. See
+  keyed on `::request` is exact, and a refused attempt spends from it. An open WebSocket's check is
+  in flight until the next check or the close, so each open WebSocket can send up to 64 KiB, or one
+  frame, past a byte budget. See
   [what a history rule sees](../design/policy.md#what-a-history-rule-sees).
 - **A rule that calls a temporal macro, such as `count_within`, loses its count when any text
   before the call changes**, even a comment. A rule that writes its `when temporal` clause inline

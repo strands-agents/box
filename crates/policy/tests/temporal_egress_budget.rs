@@ -35,6 +35,7 @@ fn request(body_bytes: usize) -> Request<'static> {
         path: "/v1/upload",
         body_bytes,
         intercepted: true,
+        upgrade: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn delivered(bytes: usize) -> Outcome<'static> {
         delivery: Delivery::Completed { bytes },
         status: Some(200),
         intercepted: true,
+        upgrade: None,
     }
 }
 
@@ -223,6 +225,7 @@ fn a_delivery_with_no_reply_still_charges_the_budget() {
                     delivery: Delivery::Completed { bytes: 60 },
                     status: None,
                     intercepted: true,
+                    upgrade: None,
                 },
             )
             .expect("a reply-less delivery records");

@@ -23,7 +23,8 @@ Four parts of the box ask policy, each about its own boundary:
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
 - **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+  `http:request`, and once per MCP request over HTTP, as `mcp:call`. On an open WebSocket, it asks
+  `http:request` again before more data leaves, as [WebSockets](#websockets) describes.
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -114,7 +115,8 @@ discovers. [The action vocabulary](policy/actions.md) lists the fields of each o
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
 - **[Network](policy/actions.md#network)**: an outbound call through the egress gateway. Each call
   is two decisions: `net:connect` for the connection, before TLS, and `http:request` for each
-  request inside it, after TLS on an HTTPS connection.
+  request inside it, after TLS on an HTTPS connection. A WebSocket gets more `http:request`
+  decisions while it is open.
 - **[Shell](policy/actions.md#shell)**: a command line in Strands Shell, judged once after the
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
@@ -202,6 +204,11 @@ when temporal {
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
   description. [How a denial reads](#how-a-denial-reads) shows the form.
+- A WebSocket to the host counts too: its handshake, and each check while it is open, are
+  `http:request` events. The rule can refuse a check, which closes the WebSocket. Adding
+  `!(context.input has upgrade)` to the `when` clause stops the rule from refusing a WebSocket, and
+  the handshake and the checks still count toward the sixty. [WebSockets](#websockets) describes
+  the checks.
 
 ### Deny a program and its aliases
 
@@ -407,6 +414,106 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
+
+<a id="websockets"></a>
+
+## WebSockets
+
+A WebSocket is a handshake, then messages in both directions on a connection that stays open. A
+message travels in one or more frames. The egress gateway decides the workload's side of a
+WebSocket as `http:request`, more than once:
+
+- **The handshake** is a `GET` with `body_bytes` set to `0` and `upgrade` set to `"websocket"`. A
+  permit for its host and path admits it.
+- **A check** comes before more of the workload's data leaves the box. It is another `http:request`
+  decision, with the handshake's host, port, method, and path, `upgrade` set to `"websocket"`, and
+  `body_bytes` set to the bytes it allows: 64 KiB, or one frame when the frame is larger.
+
+So a new WebSocket takes two decisions before its first message leaves: the handshake and the first
+check.
+
+The gateway runs a check before the next frame from the workload when one of these is true:
+
+- The workload used up the bytes that the last check allowed.
+- 30 seconds have passed since the last check.
+- Since the last check, the box decided or recorded an action other than `net:connect` or
+  `http:request`, such as a file read. So a rule that refuses requests after a file read applies to
+  an open WebSocket before its next frame.
+
+A refused check closes the WebSocket with close code `1008` to the workload, and the frame that
+needed the check stays in the box. Two frames need no check: a Close frame with no body or only
+its 2-byte close code, and one Pong frame for each Ping from the server, with the same payload. The
+gateway sends both under its own masking key, so no byte of the workload's leaves in a Pong. From a
+Close, its 2-byte code leaves, once per WebSocket. Any other Pong needs a check. A Close frame with
+a reason goes through the check like any message. Messages from the server get no decision, as the
+reply to an HTTP request gets none. [WebSockets](egress.md#websockets) on the egress page covers the rest of what the gateway
+does with a WebSocket, and the close codes.
+
+The handshake records one `http:request::response`, as any request does, with `input.upgrade` set
+to `"websocket"`. Each check records one more when it ends, at the next check or the close, with
+`output.status` set to `101`, and with `input.body_bytes` set to the bytes that the workload sent
+under that check, frame headers included. So your `http:request` rules decide the handshake and
+each check, and count their records:
+
+- A byte budget on `http:request::response` counts the bytes a WebSocket sends.
+- A permit that requires `body_bytes == 0` admits the handshake and no check, so the workload can
+  open the WebSocket and send no message on it.
+- A rate limit on `http:request`, such as [a rate limit on one host](#a-rate-limit-on-one-host),
+  counts the handshake and each check, and it can refuse a check, which closes the WebSocket. To
+  keep the limit from refusing a WebSocket, add `!(context.input has upgrade)` to its `when`
+  clause. Each handshake and check still counts toward the limit, so an open WebSocket uses part of
+  the limit for plain requests.
+
+### Keep WebSockets off one host
+
+Requests to `api.example.com` go out, and a WebSocket to it is refused at the handshake. Write it
+beside a `permit` for the host on `http:request`, such as `api_v1` in
+[forbid one URL path on a host](#forbid-one-url-path-on-a-host).
+
+```text
+@id("api_no_websocket")
+@description("No WebSockets to api.example.com.")
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "api.example.com" && context.input has upgrade };
+```
+
+```text
+http:request gate: policy denied this operation on 'api.example.com:443/v1/stream' [policy: api_no_websocket]: No WebSockets to api.example.com.
+```
+
+The server never sees the handshake. To refuse every WebSocket, leave out the host condition.
+
+### A budget for WebSocket bytes
+
+At most 1 MiB sent over WebSockets in ten minutes. Once the budget is spent, the next check closes
+the open WebSocket with `1008`, and a new handshake gets a `403`.
+
+```text
+@id("websocket_budget")
+@description("At most 1 MiB sent over WebSockets in 10 minutes.")
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input has upgrade }
+when temporal {
+  exists (total: Long). (
+    (sum b for (b: Long), (t: Timepoint). where (
+      formerly within 10m (
+        Box::Action::"http:request"::response{ input.upgrade: "websocket", input.body_bytes: b } && tp(t)
+      )
+    )) == total && total >= 1048576
+  )
+};
+```
+
+```text
+http:request gate: policy denied this operation on 'api.example.com:443/v1/stream' [policy: websocket_budget]: At most 1 MiB sent over WebSockets in 10 minutes.
+```
+
+- The rule adds up `input.body_bytes` of the `http:request::response` events that carry
+  `upgrade`: the handshake and each check of every WebSocket.
+- The `when` clause limits the `forbid` to the handshakes and the checks, so it leaves plain
+  requests alone.
+- A check is decided on the bytes sent before it, so the last check can let out up to one check's
+  bytes past the budget.
 
 ## Troubleshooting load failures
 

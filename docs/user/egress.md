@@ -102,6 +102,42 @@ the host, which ends in `.amazonaws.com` or `.api.aws`.
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.
 
+<a id="websockets"></a>
+
+## WebSockets
+
+The workload can open a WebSocket through the gateway to a `wss://` URL. A WebSocket starts with a
+handshake: a `GET` with `Upgrade: websocket`, which the server answers with `101 Switching
+Protocols`. The connection then stays open, and each side sends messages on it. A message travels
+in one or more frames.
+
+The gateway handles the handshake as it handles any request:
+
+- Policy decides it as `http:request`, after `net:connect` for the connection.
+  [WebSockets](policy.md#websockets) in the policy guide states what a rule sees.
+- The credential goes on the handshake, as on any request to a route's destinations: the gateway
+  replaces the placeholder, or signs the handshake with SigV4.
+- The gateway removes the `Sec-WebSocket-Extensions` header, and with it an offer of
+  `permessage-deflate`, from the handshake. Each message travels uncompressed.
+- When the server answers with another status, such as `401`, the workload gets that reply as an
+  ordinary response, and no WebSocket opens.
+
+After the `101`, the gateway forwards each frame in both directions:
+
+- It checks the frame's header against RFC 6455, then forwards the frame as it came. The workload
+  and the server check the payload, such as the UTF-8 of a text message.
+- A message is at most 16 MiB, in each direction.
+- When no byte moves in either direction for 5 minutes, the gateway closes the WebSocket.
+- While the WebSocket is open, the gateway asks policy again before it forwards more of the
+  workload's frames. Each of these decisions is a check.
+
+When a route's destinations match the handshake, the gateway also removes the route's credential
+from each message the server sends. It reads the whole message, puts `[REDACTED]` in place of the
+credential, and forwards the message as one frame. A Ping or a Pong frame that holds the credential
+is forwarded with an empty payload, and a Close frame that holds it keeps only its close code. The
+gateway reads one message at a time, so a credential that the server splits across two messages
+reaches the workload in two parts.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when a route breaks a rule on this page.
@@ -130,6 +166,33 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
+
+A WebSocket handshake can also get one of these refusals, with the same header:
+
+| Status | Body | Cause |
+|---|---|---|
+| `403` | `WebSocket requires TLS` | A plain `http://` request names `websocket` in its `Upgrade` header, as a `ws://` URL does. The gateway refuses it before any decision. Use `wss://`. |
+| `400` | `malformed WebSocket handshake` | The request names `websocket` in its `Upgrade` header, and it is not a valid RFC 6455 handshake. For example, it is not a `GET`, or its `Sec-WebSocket-Version` is not `13`. |
+| `403` | `WebSocket refused for an MCP server` | The host is an http MCP server's host. |
+| `503` | `WebSocket session limit reached` | The box already has 192 WebSockets open. |
+| `502` | `WebSocket upgrade response refused` | The server's `101` does not answer the handshake. It lacks `Upgrade: websocket` or `Connection: upgrade`, carries the wrong `Sec-WebSocket-Accept`, or names an extension in `Sec-WebSocket-Extensions`. |
+
+The gateway closes an open WebSocket when one of these happens, and sends a Close frame with a
+code to each side:
+
+| Cause | The workload gets | The server gets |
+|---|---|---|
+| Policy refused a check | `1008` | `1001` |
+| The workload sent a frame whose header breaks RFC 6455 | `1002` | `1001` |
+| The workload sent a message of more than 16 MiB | `1009` | `1001` |
+| The server sent a frame whose header breaks RFC 6455 | `1014` | `1002` |
+| The server sent a message of more than 16 MiB | `1014` | `1009` |
+| No byte moved in either direction for 5 minutes | `1001` | `1001` |
+
+The frame that caused the close goes no further. The
+[decision log](getting-started.md#step-7-read-the-decision-log) holds a `deny` for each refused
+handshake and for each of these closes, with the reason. A Close frame that the workload or the
+server sends ends the WebSocket with no `deny`.
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 

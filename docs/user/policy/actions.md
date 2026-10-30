@@ -51,7 +51,8 @@ Ten actions in four categories, and one generated action per MCP tool:
   - `fs:other`: reserved. No operation raises it.
 - **[Network](#network)**, raised by the egress gateway.
   - `net:connect`: each connection, before TLS.
-  - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection.
+  - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection, and
+    again while a WebSocket is open.
 - **[Shell](#shell)**, raised by Strands Shell.
   - `shell:exec`: a command line that runs a program the shell implements, such as `cat` or `grep`.
   - `shell:spawn`: a command line that runs a program of the surrounding OS, such as `git`. The box
@@ -112,7 +113,10 @@ Compare `ip` as a String behind a guard, as
 `context.input has ip && context.input.ip == "203.0.113.7"`. An `ipaddr` comparison refuses to load
 with `the types String and ipaddr are not compatible`.
 
-**`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
+**`http:request`**, once per request inside the connection, after TLS on an HTTPS connection.
+While a WebSocket is open, the gateway decides `http:request` again, with the handshake's `host`,
+`port`, `method`, and `path`, before more of the workload's data leaves. Each of these decisions is
+a check, and [WebSockets](../policy.md#websockets) states when one runs and what it records:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -120,8 +124,9 @@ with `the types String and ipaddr are not compatible`.
 | `port` | Long | The destination port. |
 | `method` | String | `GET`, `POST`, and so on. |
 | `path` | String | The URL path in canonical form, without the query. |
-| `body_bytes` | Long | The request body length. |
+| `body_bytes` | Long | The request body length. On a check of an open WebSocket, the bytes that the check allows: 64 KiB, or one frame when the frame is larger. |
 | `intercepted` | Bool | `true` when the gateway decrypted a TLS exchange, `false` for plain HTTP. |
+| `upgrade?` | String | `"websocket"` on a WebSocket handshake, and on each check of the open WebSocket. |
 
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
@@ -231,7 +236,7 @@ What each caller records as a response:
 |---|---|---|
 | `fs:*` | When the operation ends. A Shell `test -e`, `test -L`, or `test -r` that got an answer is a response even when the answer is "no", such as one of a missing path. A Shell check that Box itself refuses, at the reach floor or because the filesystem changed during the check, is an error. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | At reply time, once per request. An open WebSocket also records one for each check, when the check ends, with the bytes that the workload sent under it as `input.body_bytes`. | `status`: the upstream's reply status. A check records `101`. |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
 

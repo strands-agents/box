@@ -125,7 +125,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by
-  `tests/temporal_egress_budget.rs::a_reply_adds_nothing_to_an_outbound_budget`.
+  `tests/temporal_egress_budget.rs::a_reply_adds_nothing_to_an_outbound_budget`. An open WebSocket
+  also records one for each check, with `input.upgrade`, the bytes the check let out, and
+  `output.status` 101. Pinned by
+  `tests/websocket_policy.rs::a_byte_budget_counts_the_bytes_of_each_check`.
 - An outcome-only fact reaches history through the event kind (`response` vs `error`); every filesystem response also carries `output.result`.
 - Do not extend a durability, audit, atomicity, or performance claim past what the tests
   pin.

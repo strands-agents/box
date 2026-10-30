@@ -483,6 +483,7 @@ fn one_principal_and_the_action_separates_the_boundaries() {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: None,
         },
     ] {
         assert!(
@@ -512,6 +513,7 @@ fn one_principal_and_the_action_separates_the_boundaries() {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: None,
         },
     ] {
         assert!(
