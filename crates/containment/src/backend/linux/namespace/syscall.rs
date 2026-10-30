@@ -626,6 +626,8 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         disposition: Disposition::ArgumentScoped,
         reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
     },
+    // This checks explicit directory modes, so ordinary subdirectories can still
+    // inherit the parent's group and set-group-ID bit.
     MediatedSyscall {
         name: "mkdirat",
         number: libc::SYS_mkdirat,
