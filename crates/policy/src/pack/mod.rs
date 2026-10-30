@@ -8,9 +8,11 @@
 //! | `grammar` | the shell grammar that compiling a pack builds |
 //! | `parse` | one command line, read against the shell grammar |
 //! | `schema` | the Cedar schema fragment that a checked pack generates |
+//! | `invocation` | one command line that a pack read, as the record its action decides |
 
 mod format;
 mod grammar;
+mod invocation;
 mod model;
 mod parse;
 mod schema;
@@ -24,6 +26,7 @@ mod fuzz;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub(crate) use invocation::{PackInvocation, PackResponse};
 pub(crate) use model::Pack;
 pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;

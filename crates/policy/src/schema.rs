@@ -126,8 +126,21 @@ pub(crate) mod action {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ActionIdentity {
-    Fixed { id: &'static str },
-    McpTool { namespace: String, tool: String },
+    Fixed {
+        id: &'static str,
+    },
+    McpTool {
+        namespace: String,
+        tool: String,
+    },
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller decides a pack action yet")
+    )]
+    PackAction {
+        namespace: String,
+        action: String,
+    },
 }
 
 impl ActionIdentity {
@@ -155,13 +168,17 @@ impl ActionIdentity {
     pub(crate) fn cedar_uid(&self) -> Result<EntityUid, PolicyError> {
         match self {
             Self::Fixed { id } => fixed_action_uid(id),
-            Self::McpTool { namespace, tool } => {
+            Self::McpTool {
+                namespace,
+                tool: action,
+            }
+            | Self::PackAction { namespace, action } => {
                 let action_type = format!("{namespace}::Action")
                     .parse::<EntityTypeName>()
                     .map_err(|error| PolicyError::Schema(error.to_string()))?;
                 Ok(EntityUid::from_type_name_and_id(
                     action_type,
-                    EntityId::new(tool),
+                    EntityId::new(action),
                 ))
             }
         }
@@ -173,9 +190,13 @@ impl ActionIdentity {
                 "{FIXED_ACTION_TYPE}::\"{}\"",
                 EntityId::new(id).escaped()
             )),
-            Self::McpTool { namespace, tool } => Cow::Owned(format!(
+            Self::McpTool {
+                namespace,
+                tool: action,
+            }
+            | Self::PackAction { namespace, action } => Cow::Owned(format!(
                 "{namespace}::Action::\"{}\"",
-                EntityId::new(tool).escaped()
+                EntityId::new(action).escaped()
             )),
         }
     }
@@ -666,6 +687,29 @@ pub(crate) fn to_cedar_request(
     let context = context_for(req, schema, &action)?;
     // The schema is bound: a non-conforming request errors here rather than silently
     // no-matching.
+    CedarRequest::new(principal, action, resource, context, Some(schema))
+        .map_err(|e| PolicyError::Schema(format!("request does not conform to schema: {e}")))
+}
+
+/// Build a schema-bound Cedar authorization request whose `input` is the JSON record `input`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no caller decides a pack action yet")
+)]
+pub(crate) fn to_cedar_input_request(
+    principal: &Principal,
+    identity: &ActionIdentity,
+    input: &serde_json::Value,
+    schema: &Schema,
+) -> Result<CedarRequest, PolicyError> {
+    let principal = principal_uid(principal)?;
+    let action = identity.cedar_uid()?;
+    let resource = resource_uid()?;
+    let context = Context::from_json_value(
+        serde_json::json!({ "input": input }),
+        Some((schema, &action)),
+    )
+    .map_err(|error| PolicyError::Schema(format!("invalid action input: {error}")))?;
     CedarRequest::new(principal, action, resource, context, Some(schema))
         .map_err(|e| PolicyError::Schema(format!("request does not conform to schema: {e}")))
 }

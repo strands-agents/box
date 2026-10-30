@@ -998,6 +998,36 @@ version of the pack's content, and the pack author owns it. Box refuses a file w
 a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
 file must state `format = 1`.
 
+<a id="a-pack-action-names-no-enforcement-point"></a>
+### A tool pack action doesn't name where Box enforces it
+
+A tool pack action names what the tool does, not where Box sees it happen. To deny a git force push,
+you forbid `Tool::git::Action::"push"` when
+`context.input.effects.contains(Tool::git::Effect::"force_push")`, and the rule doesn't say whether
+the push arrives as a shell command or as an HTTP request. That's the point of a semantic policy: you
+state the rule in the tool's own words, and Box works out how and where to enforce it. An action per
+enforcement point, such as a separate shell push and HTTP push, was rejected, because you'd have to
+write each rule once for each enforcement point, and a rule written for one would silently miss the
+others. The cost is that the action name can't tell two enforcement points apart, so every grammar in a
+tool pack must read a request into the same fields and effects, or one rule means different things at
+each enforcement point.
+
+<a id="an-unmodeled-command-is-denied-by-default"></a>
+### A request the grammar can't read is the `unmodeled` action, and it's denied by default
+
+When a tool pack's grammar can't read a request, Box raises `Tool::<pack>::Action::"unmodeled"`, and
+your policy decides it like any other action. With no rule that permits it, it's denied. `unmodeled`
+sits outside the tool pack's `"*"` group, so a permit on `action in Tool::git::Action::"*"` never
+allows a command the grammar can't read. To allow one, a rule must name
+`Tool::git::Action::"unmodeled"` itself. Putting `unmodeled` inside `"*"` was rejected, because then a
+permit over the whole tool would also allow every command the grammar can't read, including one spelled
+to slip past it, such as `git push --dele origin main`. The cost is that a forbid over `"*"` also skips
+`unmodeled`. Under a policy that permits everything, a rule that denies all of git must name both:
+
+```dw
+forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
+```
+
 ## Containment
 
 <a id="box-owns-its-containment-code"></a>

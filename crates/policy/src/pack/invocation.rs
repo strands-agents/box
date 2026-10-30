@@ -1,0 +1,295 @@
+//! One command line that a pack read, as the `context.input` record its pack action decides.
+
+use super::Pack;
+use super::grammar::{BASE_FIELDS, FieldValue, Parsed};
+use super::model::UNMODELED_ACTION;
+use crate::schema::ActionIdentity;
+
+/// One spawn of a pack-bound program, and what its pack read the command line as.
+pub(crate) struct PackInvocation<'a> {
+    pub(crate) pack: &'a Pack,
+    pub(crate) parsed: &'a Parsed,
+    pub(crate) program: &'a str,
+    pub(crate) program_path: &'a str,
+    pub(crate) cwd: &'a str,
+    pub(crate) args: &'a [String],
+    pub(crate) credential_reads: &'a [String],
+}
+
+/// The `::response` of one decided pack action, held until the program exits.
+pub(crate) struct PackResponse {
+    pub(crate) identity: ActionIdentity,
+    pub(crate) input: serde_json::Value,
+}
+
+impl PackInvocation<'_> {
+    /// The action the parse names: its own action, or `unmodeled`.
+    pub(crate) fn action(&self) -> &str {
+        match self.parsed {
+            Parsed::Action { action, .. } => action.as_str(),
+            Parsed::Unmodeled => UNMODELED_ACTION,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> ActionIdentity {
+        ActionIdentity::PackAction {
+            namespace: self.pack.namespace(),
+            action: self.action().to_string(),
+        }
+    }
+
+    /// The `context.input` record in Cedar's JSON form, with each effect as an `__entity` escape.
+    pub(crate) fn input(&self) -> serde_json::Value {
+        let [
+            program,
+            program_path,
+            cwd,
+            args,
+            effects_field,
+            credential_reads,
+        ] = BASE_FIELDS;
+        let mut sorted = self.args.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let mut record = serde_json::Map::new();
+        record.insert(program.to_string(), self.program.into());
+        record.insert(program_path.to_string(), self.program_path.into());
+        record.insert(cwd.to_string(), self.cwd.into());
+        record.insert(args.to_string(), sorted.into());
+        if !self.credential_reads.is_empty() {
+            record.insert(credential_reads.to_string(), self.credential_reads.into());
+        }
+        let (fields, effects) = match self.parsed {
+            Parsed::Action {
+                fields, effects, ..
+            } => (Some(fields), effects.iter().collect()),
+            Parsed::Unmodeled => (None, Vec::new()),
+        };
+        if !self.pack.effects.is_empty() {
+            let effect_type = format!("{}::Effect", self.pack.namespace());
+            let effects: Vec<serde_json::Value> = effects
+                .into_iter()
+                .map(|effect| {
+                    serde_json::json!({ "__entity": { "type": effect_type, "id": effect.as_str() } })
+                })
+                .collect();
+            record.insert(effects_field.to_string(), effects.into());
+        }
+        for (name, value) in fields.into_iter().flatten() {
+            let value = match value {
+                FieldValue::Bool(value) => serde_json::Value::from(*value),
+                FieldValue::String(value) => serde_json::Value::from(value.as_str()),
+                FieldValue::Set(values) => serde_json::Value::from(values.as_slice()),
+            };
+            record.insert(name.clone(), value);
+        }
+        serde_json::Value::Object(record)
+    }
+
+    pub(crate) fn response(&self) -> PackResponse {
+        PackResponse {
+            identity: self.identity(),
+            input: self.input(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use super::super::corpus::{Engine, PACKS};
+    use super::*;
+    use crate::{Decision, DecisionObserver, DenyReason, GovernedBox, Principal, Request};
+
+    fn valid(name: &str) -> Pack {
+        Pack::load(
+            &Path::new(PACKS)
+                .join("valid")
+                .join(format!("{name}.pack.toml")),
+        )
+        .expect("the fixture pack loads")
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    fn forbidden_by(decision: &Decision, id: &str) -> bool {
+        matches!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ) && decision
+            .attribution()
+            .iter()
+            .any(|attribution| attribution.annotation_id.as_deref() == Some(id))
+    }
+
+    const PUSH_AFTER_A_PASSING_TEST: &str = r#"
+        permit (principal, action in Tool::git::Action::"*", resource);
+        permit (principal, action in Tool::cargo::Action::"*", resource);
+        @id("push_after_a_passing_test")
+        forbid (principal, action == Tool::git::Action::"push", resource)
+        unless temporal {
+            formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+        };
+    "#;
+
+    #[test]
+    fn a_temporal_rule_reads_the_exit_status_that_a_pack_response_records() {
+        let packs = [valid("git"), valid("cargo")];
+        let engine = Engine::open(PUSH_AFTER_A_PASSING_TEST, &packs).expect("the engine opens");
+        let [git, cargo] = &packs;
+        let push = argv(&["git", "push", "origin", "main"]);
+        let test = argv(&["cargo", "test"]);
+
+        assert!(
+            forbidden_by(&engine.decide(git, &push), "push_after_a_passing_test"),
+            "no test has run, so the push is refused"
+        );
+        assert!(engine.invoke(cargo, &test, Some(1)).is_allow());
+        assert!(
+            forbidden_by(&engine.decide(git, &push), "push_after_a_passing_test"),
+            "a test that exited 1 must not satisfy `output.status: 0`"
+        );
+        assert!(engine.invoke(cargo, &test, Some(0)).is_allow());
+        assert!(
+            engine.decide(git, &push).is_allow(),
+            "a test that exited 0 satisfies `output.status: 0`"
+        );
+    }
+
+    #[test]
+    fn an_input_that_its_action_schema_does_not_type_is_refused_as_a_fault() {
+        let git = valid("git");
+        let engine = Engine::open(
+            "permit (principal, action, resource);",
+            std::slice::from_ref(&git),
+        )
+        .expect("the engine opens");
+        let words = argv(&["git", "push", "--force", "origin", "main"]);
+        let Parsed::Action {
+            action,
+            mut fields,
+            effects,
+        } = git.grammar().parse(&words[1..])
+        else {
+            panic!("the push parses as an action");
+        };
+        fields.insert("force".to_string(), FieldValue::String("yes".to_string()));
+        let mistyped = Parsed::Action {
+            action,
+            fields,
+            effects,
+        };
+        let decision = engine.engine().decide_pack_action(
+            &Principal::agent(),
+            &PackInvocation {
+                pack: &git,
+                parsed: &mistyped,
+                program: "git",
+                program_path: "/usr/bin/git",
+                cwd: "/work",
+                args: &words[1..],
+                credential_reads: &[],
+            },
+        );
+
+        assert!(
+            matches!(
+                decision,
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a `force` that is a string, not a bool, is refused: {decision:?}"
+        );
+    }
+
+    const NO_SPAWN_AFTER_A_PUSH: &str = r#"
+        permit (principal, action in Tool::git::Action::"*", resource);
+        permit (principal, action == Box::Action::"shell:spawn", resource);
+        @id("no_spawn_after_a_push")
+        forbid (principal, action == Box::Action::"shell:spawn", resource)
+        when temporal {
+            formerly within 1h Tool::git::Action::"push"::request{ input.program: "git" }
+        };
+    "#;
+
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<(String, String, bool)>>);
+
+    impl DecisionObserver for Recording {
+        fn observed(&self, action: &str, resource: &str, decision: &Decision) {
+            self.0.lock().expect("the recording lock").push((
+                action.to_string(),
+                resource.to_string(),
+                decision.is_allow(),
+            ));
+        }
+    }
+
+    #[test]
+    fn a_pack_decision_enters_the_one_history_and_reaches_the_observer() {
+        let git = valid("git");
+        let recording = Arc::new(Recording::default());
+        let engine = Engine::open(NO_SPAWN_AFTER_A_PUSH, std::slice::from_ref(&git))
+            .expect("the engine opens")
+            .observed_by(recording.clone());
+        let words = argv(&["make"]);
+        let spawn = Request::ShellSpawn {
+            command: "make",
+            program: "make",
+            program_path: "/usr/bin/make",
+            credential_reads: &[],
+            args: &words[1..],
+            cwd: "/work",
+        };
+        let spawned = || {
+            engine.engine().decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &spawn,
+            )
+        };
+
+        assert!(
+            spawned().is_allow(),
+            "no push has run, so the spawn is allowed"
+        );
+        assert!(
+            engine
+                .decide(&git, &argv(&["git", "push", "origin", "main"]))
+                .is_allow()
+        );
+        assert!(
+            forbidden_by(&spawned(), "no_spawn_after_a_push"),
+            "the push is in the history that the spawn rule reads"
+        );
+        assert_eq!(
+            recording.0.lock().expect("the recording lock").as_slice(),
+            [
+                (
+                    r#"Box::Action::"shell:spawn""#.to_string(),
+                    "/usr/bin/make".to_string(),
+                    true
+                ),
+                (
+                    r#"Tool::git::Action::"push""#.to_string(),
+                    "/usr/bin/git".to_string(),
+                    true
+                ),
+                (
+                    r#"Box::Action::"shell:spawn""#.to_string(),
+                    "/usr/bin/make".to_string(),
+                    false
+                ),
+            ]
+        );
+    }
+}

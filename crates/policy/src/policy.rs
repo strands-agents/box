@@ -128,6 +128,25 @@ impl PolicyEngine {
         })
     }
 
+    /// Open durable history with the schema fragment of each tool pack in `packs`.
+    #[cfg(test)]
+    pub(crate) fn open_with_packs(
+        sources: Vec<Policy>,
+        packs: &[crate::pack::Pack],
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let effective = EffectivePolicy {
+            engine: ENGINE_ID,
+            policy_id: effective_policy_id(&sources),
+        };
+        let pack_schemas: Vec<String> = packs.iter().map(crate::pack::Pack::schema).collect();
+        Ok(Self {
+            authority: Authority::open_complete_with_packs(sources, &pack_schemas, &[], history)?,
+            effective,
+            observer: None,
+        })
+    }
+
     /// Open with a fault injector on the durable log, for tests that pause the store.
     #[cfg(test)]
     pub(crate) fn open_with_faults(
@@ -288,17 +307,50 @@ impl PolicyEngine {
         let decision = self
             .authority
             .decide(governed, principal, request, &identity);
-        self.conclude(&identity, request, decision)
+        self.conclude(&identity, request.resource(), decision)
     }
 
-    /// Name the request's resource on the verdict, then report it once.
+    /// Decide one parsed command line as its pack action, in the box's one history
+    /// (docs/design/decisions.md#a-pack-action-names-no-enforcement-point,
+    /// docs/design/decisions.md#an-unmodeled-command-is-denied-by-default).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller decides a pack action yet")
+    )]
+    pub(crate) fn decide_pack_action(
+        &self,
+        principal: &Principal,
+        invocation: &crate::pack::PackInvocation<'_>,
+    ) -> Decision {
+        let identity = invocation.identity();
+        let decision = self
+            .authority
+            .decide_input(principal, &identity, &invocation.input());
+        self.conclude(&identity, invocation.program_path.to_string(), decision)
+    }
+
+    /// Record the `::response` of one decided pack action, with the program's exit status.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller records a pack response yet")
+    )]
+    pub(crate) fn record_pack_response(
+        &self,
+        response: &crate::pack::PackResponse,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        self.authority
+            .record_response(&response.identity, &response.input, status)
+    }
+
+    /// Name the resource on the verdict, then report it once.
     fn conclude(
         &self,
         identity: &crate::schema::ActionIdentity,
-        request: &Request<'_>,
+        resource: String,
         decision: Decision,
     ) -> Decision {
-        let decision = decision.naming(request.resource());
+        let decision = decision.naming(resource);
         if let Some(observer) = &self.observer {
             observer.observed(
                 identity.observer_action().as_ref(),
@@ -360,7 +412,9 @@ impl PolicyEngine {
         };
         let action = match identity.cedar_uid() {
             Ok(action) => action,
-            Err(_) => return self.conclude(&identity, &request, Decision::internal_fault()),
+            Err(_) => {
+                return self.conclude(&identity, request.resource(), Decision::internal_fault());
+            }
         };
         if !self.declares_tool_action(&action) {
             // A tool with no declared per-tool action can be one of three things while its schema is
@@ -379,7 +433,7 @@ impl PolicyEngine {
                     resource: String::new(),
                 }
             };
-            return self.conclude(&identity, &request, decision);
+            return self.conclude(&identity, request.resource(), decision);
         }
         let decision = match self
             .authority
@@ -397,7 +451,7 @@ impl PolicyEngine {
             // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
             other => other,
         };
-        self.conclude(&identity, &request, decision)
+        self.conclude(&identity, request.resource(), decision)
     }
 }
 

@@ -1,21 +1,20 @@
 //! Golden tests: each corpus case is one argv and the action, fields, and effects it gives, and
-//! the generated schema types the event that the parser builds from it.
+//! the policy engine types and decides the pack action that the parser builds from it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 
-use cedar_policy::{Context, EntityUid, Request};
-
-use super::Pack;
 use super::grammar::{FieldKind, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
 use super::schema::pack_action_schema;
+use super::{Pack, PackInvocation};
 use crate::check::Refused;
-use crate::dogwood::{check_against, service_schema};
-use crate::schema::ActionSchema;
+use crate::dogwood::check_against;
 use crate::spelling::Operator;
+use crate::{Decision, DecisionObserver, DenyReason, Policy, PolicyEngine, PolicyError, Principal};
 
 pub(super) const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
 
@@ -306,65 +305,94 @@ fn mistyped_condition(name: &str, kind: FieldKind) -> String {
     }
 }
 
-/// The `context.input` record of one parse, in the shape that the generated schema declares.
-fn input_record(pack: &Pack, argv: &[String], parsed: &Parsed) -> serde_json::Value {
-    let effect_type = format!("{}::Effect", pack.namespace());
-    let mut args = argv[1..].to_vec();
-    args.sort();
-    args.dedup();
-    let mut record = serde_json::Map::new();
-    record.insert("program".to_string(), serde_json::json!(pack.program));
-    let program_path = format!("/usr/bin/{}", pack.program);
-    record.insert("program_path".to_string(), serde_json::json!(program_path));
-    record.insert("cwd".to_string(), serde_json::json!("/work"));
-    record.insert("args".to_string(), serde_json::json!(args));
-    let (fields, effects) = match parsed {
-        Parsed::Action {
-            fields, effects, ..
-        } => (Some(fields), effects.iter().collect()),
-        Parsed::Unmodeled => (None, Vec::new()),
-    };
-    if !pack.effects.is_empty() {
-        let effects: Vec<serde_json::Value> = effects
-            .into_iter()
-            .map(|effect| {
-                serde_json::json!({ "__entity": { "type": effect_type, "id": effect.as_str() } })
-            })
-            .collect();
-        record.insert("effects".to_string(), serde_json::json!(effects));
-    }
-    for (name, value) in fields.into_iter().flatten() {
-        let value = match value {
-            FieldValue::Bool(value) => serde_json::json!(value),
-            FieldValue::String(value) => serde_json::json!(value),
-            FieldValue::Set(values) => serde_json::json!(values),
-        };
-        record.insert(name.clone(), value);
-    }
-    serde_json::Value::Object(record)
+/// The directory that holds the program of every corpus case.
+const PROGRAM_DIRECTORY: &str = "/usr/bin";
+/// The working directory of every corpus case.
+const CWD: &str = "/work";
+
+/// A policy engine over a temporary history, with the schema of each pack installed.
+pub(super) struct Engine {
+    engine: PolicyEngine,
+    _history: tempfile::TempDir,
 }
 
-/// The verdict of a Dogwood authorizer on the event of `request`, and the index of each rule
-/// that determined it.
-fn verdict(
-    authorizer: &mut dogwood_language::Authorizer,
-    request: &Request,
-) -> Result<(bool, BTreeSet<usize>), String> {
-    let event =
-        dogwood_language::Event::from_request(request).map_err(|error| error.to_string())?;
-    let response = authorizer
-        .is_authorized(&event)
-        .ok_or("the request event takes no decision")?;
-    let errors: Vec<&str> = response.diagnostics().errors().collect();
-    if !errors.is_empty() {
-        return Err(format!("the decision has errors: {}", errors.join("; ")));
+impl Engine {
+    pub(super) fn open(source: &str, packs: &[Pack]) -> Result<Self, PolicyError> {
+        let history = tempfile::tempdir().expect("a history directory");
+        let engine = PolicyEngine::open_with_packs(
+            vec![Policy {
+                origin: PathBuf::from("corpus.dw"),
+                text: source.to_string(),
+            }],
+            packs,
+            &history.path().join("dogwood.redb"),
+        )?;
+        Ok(Self {
+            engine,
+            _history: history,
+        })
+    }
+
+    /// Report every verdict of the engine to `observer`.
+    pub(super) fn observed_by(self, observer: Arc<dyn DecisionObserver>) -> Self {
+        Self {
+            engine: self.engine.observed_by(observer),
+            _history: self._history,
+        }
+    }
+
+    pub(super) fn engine(&self) -> &PolicyEngine {
+        &self.engine
+    }
+
+    /// Parse `argv` with `pack`, and decide the pack action it gives.
+    pub(super) fn decide(&self, pack: &Pack, argv: &[String]) -> Decision {
+        self.invoke(pack, argv, None)
+    }
+
+    /// Parse `argv` with `pack` and decide its pack action, then, when the action is allowed and
+    /// `status` is given, record its `::response` with that exit status.
+    pub(super) fn invoke(&self, pack: &Pack, argv: &[String], status: Option<i32>) -> Decision {
+        let parsed = pack.grammar().parse(&argv[1..]);
+        let program_path = format!("{PROGRAM_DIRECTORY}/{}", pack.program);
+        let invocation = PackInvocation {
+            pack,
+            parsed: &parsed,
+            program: &pack.program,
+            program_path: &program_path,
+            cwd: CWD,
+            args: &argv[1..],
+            credential_reads: &[],
+        };
+        let decision = self
+            .engine
+            .decide_pack_action(&Principal::agent(), &invocation);
+        if let Some(status) = status
+            && decision.is_allow()
+        {
+            self.engine
+                .record_pack_response(&invocation.response(), status)
+                .expect("history records the response");
+        }
+        decision
+    }
+}
+
+/// Whether `decision` allows, and the `@id` of each rule that determined it.
+fn verdict(decision: &Decision) -> Result<(bool, BTreeSet<String>), String> {
+    if let Decision::Deny {
+        reason: DenyReason::InternalFault,
+        ..
+    } = decision
+    {
+        return Err("the decision faults: the event does not type, or a rule errs".to_string());
     }
     Ok((
-        response.allowed(),
-        response
-            .diagnostics()
-            .reason()
-            .map(|rule| rule.rule_index)
+        decision.is_allow(),
+        decision
+            .attribution()
+            .iter()
+            .filter_map(|attribution| attribution.annotation_id.clone())
             .collect(),
     ))
 }
@@ -373,6 +401,14 @@ fn verdict(
 fn load(source: &str, pack: &Pack) -> Result<(), Refused> {
     let schema = pack_action_schema(std::slice::from_ref(pack), &[]).map_err(Refused::from)?;
     check_against(source, schema, &Operator::unanchored(), true, &[]).map(|_| ())
+}
+
+/// Open an engine over `source` and `pack`, or describe why the strict load path refuses it.
+fn open(source: &str, pack: &Pack) -> Result<Engine, String> {
+    Engine::open(source, std::slice::from_ref(pack)).map_err(|error| match load(source, pack) {
+        Err(refused) => describe(&refused),
+        Ok(()) => format!("the engine does not open: {error}"),
+    })
 }
 
 /// The message of each finding of `refused` that names rule `index`.
@@ -413,6 +449,11 @@ fn all_of(conditions: &[String]) -> String {
     }
 }
 
+/// A rule over one action of `pack`, with the `@id` `id`.
+fn identified(id: &str, rule: &str) -> String {
+    format!("@id({id:?})\n{rule}")
+}
+
 /// A rule over one action of `pack`.
 fn rule(namespace: &str, action: &str, condition: &str) -> String {
     format!(
@@ -421,52 +462,16 @@ fn rule(namespace: &str, action: &str, condition: &str) -> String {
     )
 }
 
-/// The event of one case, and the conditions that hold exactly for its values.
-struct Event {
+/// The argv of one case, its action, and the conditions that hold exactly for its values.
+struct Event<'a> {
     at: String,
     action: String,
-    request: Request,
+    argv: &'a [String],
     conditions: Vec<String>,
 }
 
-/// The Cedar request for one parse of `argv`, through the request gate bound to `schema`.
-fn gated_request(
-    pack: &Pack,
-    schema: &ActionSchema,
-    argv: &[String],
-    parsed: &Parsed,
-) -> Result<Request, String> {
-    let namespace = pack.namespace();
-    let action = match parsed {
-        Parsed::Action { action, .. } => action.as_str(),
-        Parsed::Unmodeled => UNMODELED_ACTION,
-    };
-    let uid: EntityUid = format!("{namespace}::Action::{}", literal(action))
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let principal: EntityUid = r#"Box::Agent::"self""#
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let resource: EntityUid = r#"Box::Resource::"unused""#
-        .parse()
-        .map_err(|error| format!("{error}"))?;
-    let input = input_record(pack, argv, parsed);
-    let context = Context::from_json_value(
-        serde_json::json!({ "input": input }),
-        Some((&schema.cedar, &uid)),
-    )
-    .map_err(|error| format!("the event does not type: {error}"))?;
-    let request = Request::new(principal, uid, resource, context, Some(&schema.cedar))
-        .map_err(|error| format!("the event does not conform: {error}"))?;
-    Ok(request)
-}
-
-/// The event that the parser builds from `case`, typed by the generated schema of `pack`.
-fn event(
-    pack: &Pack,
-    schema: &ActionSchema,
-    case: &Case,
-) -> Result<(String, Request, Vec<String>), String> {
+/// The action that the parser reads `case` as, and the conditions that hold exactly for its values.
+fn event(pack: &Pack, case: &Case) -> Result<(String, Vec<String>), String> {
     let namespace = pack.namespace();
     let parsed = pack.grammar().parse(&case.argv[1..]);
     let action = match &parsed {
@@ -497,8 +502,6 @@ fn event(
         return Err(format!("the schema has no effect {effect}"));
     }
 
-    let request = gated_request(pack, schema, &case.argv, &parsed)?;
-
     let mut conditions = vec![format!(
         "context.input.program == {}",
         literal(&pack.program)
@@ -517,21 +520,22 @@ fn event(
             format!("!{contains}")
         });
     }
-    Ok((action.to_string(), request, conditions))
+    Ok((action.to_string(), conditions))
 }
 
-/// Check every case of one corpus against the generated schema of `pack`.
+/// Check every case of one corpus. The engine loads a rule over the exact values of each case and
+/// rules that each negate one of those values, decides the pack action of the case, and allows it by
+/// its exact rule and by none of its negations.
 fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<String>) {
     let namespace = pack.namespace();
-    let schema = pack_action_schema(std::slice::from_ref(pack), &[]).expect("the schema composes");
     let mut events = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         let at = format!("{file} case {} {:?}", index + 1, case.argv);
-        match event(pack, &schema, case) {
-            Ok((action, request, conditions)) => events.push(Event {
+        match event(pack, case) {
+            Ok((action, conditions)) => events.push(Event {
                 at,
                 action,
-                request,
+                argv: &case.argv,
                 conditions,
             }),
             Err(failure) => failures.push(format!("{at}: {failure}")),
@@ -540,9 +544,73 @@ fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<Stri
 
     let exact: String = events
         .iter()
-        .map(|event| rule(&namespace, &event.action, &all_of(&event.conditions)))
+        .enumerate()
+        .map(|(index, event)| {
+            identified(
+                &format!("case-{index}"),
+                &rule(&namespace, &event.action, &all_of(&event.conditions)),
+            )
+        })
         .collect();
-    if let Err(refused) = load(&exact, pack) {
+    let mut negations = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let mut picked = vec![0, 1, event.conditions.len() - 1];
+        picked.dedup();
+        for at in picked.into_iter().filter(|at| *at < event.conditions.len()) {
+            let condition = format!("!({})", event.conditions[at]);
+            let id = format!("negation-{}", negations.len());
+            negations.push((
+                index,
+                id.clone(),
+                identified(&id, &rule(&namespace, &event.action, &condition)),
+            ));
+        }
+    }
+    let negated: String = negations.iter().map(|(_, _, rule)| rule.as_str()).collect();
+    let engine = match Engine::open(&format!("{exact}{negated}"), std::slice::from_ref(pack)) {
+        Ok(engine) => engine,
+        Err(error) => {
+            refused_corpus(file, pack, &events, &exact, &negated, &error, failures);
+            return;
+        }
+    };
+    for (index, event) in events.iter().enumerate() {
+        let own: BTreeSet<String> = negations
+            .iter()
+            .filter(|(case, _, _)| *case == index)
+            .map(|(_, id, _)| id.clone())
+            .collect();
+        match verdict(&engine.decide(pack, event.argv)) {
+            Ok((allowed, rules)) => {
+                if !allowed || !rules.contains(&format!("case-{index}")) {
+                    failures.push(format!(
+                        "{}: the rule over its values does not permit it",
+                        event.at
+                    ));
+                }
+                if !rules.is_disjoint(&own) {
+                    failures.push(format!(
+                        "{}: a rule that negates one of its values permits it",
+                        event.at
+                    ));
+                }
+            }
+            Err(error) => failures.push(format!("{}: {error}", event.at)),
+        }
+    }
+}
+
+/// Report why the engine does not open over the exact and the negated rules of one corpus.
+fn refused_corpus(
+    file: &str,
+    pack: &Pack,
+    events: &[Event<'_>],
+    exact: &str,
+    negated: &str,
+    error: &PolicyError,
+    failures: &mut Vec<String>,
+) {
+    if let Err(refused) = load(exact, pack) {
         failures.push(format!(
             "{file}: the rules over the case values are refused: {}",
             describe(&refused)
@@ -552,59 +620,13 @@ fn check_corpus(file: &str, pack: &Pack, cases: &[Case], failures: &mut Vec<Stri
                 failures.push(format!("{}: its rule is one that is refused", event.at));
             }
         }
-        return;
-    }
-    let mut negations = Vec::new();
-    for (index, event) in events.iter().enumerate() {
-        let mut picked = vec![0, 1, event.conditions.len() - 1];
-        picked.dedup();
-        for at in picked.into_iter().filter(|at| *at < event.conditions.len()) {
-            let condition = format!("!({})", event.conditions[at]);
-            negations.push((index, rule(&namespace, &event.action, &condition)));
-        }
-    }
-    let negated: String = negations.iter().map(|(_, rule)| rule.as_str()).collect();
-    if let Err(refused) = load(&negated, pack) {
+    } else if let Err(refused) = load(negated, pack) {
         failures.push(format!(
             "{file}: the negated rules are refused: {}",
             describe(&refused)
         ));
-        return;
-    }
-    let service = service_schema().expect("the event schema builds");
-    let policy_schema = dogwood_language::PolicySchema::from_cedarschema_str(&schema.source)
-        .expect("the action schema reads");
-    let lower = |source: &str| {
-        dogwood_language::ParsedPolicySet::parse(source, &service)
-            .expect("the rules parse")
-            .lower(&policy_schema)
-            .expect("the rules lower")
-    };
-    let mut exact = dogwood_language::Authorizer::new(lower(&exact));
-    let mut negated = dogwood_language::Authorizer::new(lower(&negated));
-    for (index, event) in events.iter().enumerate() {
-        match verdict(&mut exact, &event.request) {
-            Ok((true, rules)) if rules.contains(&index) => {}
-            Ok(_) => failures.push(format!(
-                "{}: the rule over its values does not permit it",
-                event.at
-            )),
-            Err(error) => failures.push(format!("{}: {error}", event.at)),
-        }
-        let own: BTreeSet<usize> = negations
-            .iter()
-            .enumerate()
-            .filter(|(_, (case, _))| *case == index)
-            .map(|(rule, _)| rule)
-            .collect();
-        match verdict(&mut negated, &event.request) {
-            Ok((_, rules)) if rules.is_disjoint(&own) => {}
-            Ok(_) => failures.push(format!(
-                "{}: a rule that negates one of its values permits it",
-                event.at
-            )),
-            Err(error) => failures.push(format!("{}: {error}", event.at)),
-        }
+    } else {
+        failures.push(format!("{file}: the engine does not open: {error}"));
     }
 }
 
@@ -662,7 +684,7 @@ fn check_field_types(file: &str, pack: &Pack, failures: &mut Vec<String>) {
 }
 
 #[test]
-fn every_corpus_case_gives_an_event_that_its_generated_schema_types_and_decides() {
+fn every_corpus_case_is_typed_and_decided_by_the_policy_engine() {
     let mut failures = Vec::new();
     let mut count = 0;
     for (file, pack, cases) in corpora() {
@@ -692,8 +714,15 @@ fn a_group_permit_never_reaches_an_unmodeled_command_and_an_explicit_permit_does
         permit (principal, action, resource);
         forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
     "#;
+    const GROUP_PERMIT: &str = r#"permit (principal, action in Tool::git::Action::"*", resource);"#;
     let explicit = format!("{GROUP_PERMIT_AND_EFFECT_FORBID}{UNMODELED_PERMIT}");
-    let cases: [(&str, &[&str], bool); 9] = [
+    let cases: [(&str, &[&str], bool); 11] = [
+        (GROUP_PERMIT, &["git", "status"], true),
+        (
+            GROUP_PERMIT,
+            &["git", "--exec-path=/tmp/evil", "push"],
+            false,
+        ),
         (GROUP_PERMIT_AND_EFFECT_FORBID, &["git", "status"], true),
         (
             GROUP_PERMIT_AND_EFFECT_FORBID,
@@ -726,28 +755,17 @@ fn a_group_permit_never_reaches_an_unmodeled_command_and_an_explicit_permit_does
     ];
     let pack = Pack::load(&Path::new(PACKS).join("valid").join("git.pack.toml"))
         .expect("the git pack loads");
-    let schema = pack_action_schema(std::slice::from_ref(&pack), &[]).expect("the schema composes");
-    let service = service_schema().expect("the event schema builds");
-    let policy_schema = dogwood_language::PolicySchema::from_cedarschema_str(&schema.source)
-        .expect("the action schema reads");
     let mut failures = Vec::new();
     for (policy, argv, allowed) in cases {
-        if let Err(refused) = load(policy, &pack) {
-            failures.push(format!(
-                "{argv:?}: the policy is refused: {}",
-                describe(&refused)
-            ));
-            continue;
-        }
-        let lowered = dogwood_language::ParsedPolicySet::parse(policy, &service)
-            .expect("the policy parses")
-            .lower(&policy_schema)
-            .expect("the policy lowers");
+        let engine = match open(policy, &pack) {
+            Ok(engine) => engine,
+            Err(refusal) => {
+                failures.push(format!("{argv:?}: the policy is refused: {refusal}"));
+                continue;
+            }
+        };
         let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
-        let parsed = pack.grammar().parse(&argv[1..]);
-        let verdict = gated_request(&pack, &schema, &argv, &parsed)
-            .and_then(|request| verdict(&mut dogwood_language::Authorizer::new(lowered), &request));
-        match verdict {
+        match verdict(&engine.decide(&pack, &argv)) {
             Ok((verdict, _)) if verdict == allowed => {}
             Ok((verdict, _)) => failures.push(format!(
                 "{argv:?}: allowed is {verdict}, expected {allowed}, under\n{policy}"

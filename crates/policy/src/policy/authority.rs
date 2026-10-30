@@ -70,8 +70,19 @@ impl Authority {
         mcp_schemas: &[String],
         history: &Path,
     ) -> Result<Self, PolicyError> {
-        let (engine, warnings) = DogwoodEngine::open_with_mcp_schemas(
+        Self::open_complete_with_packs(sources, &[], mcp_schemas, history)
+    }
+
+    /// Opens a ready authority with a complete policy set, tool pack schemas, and MCP schemas.
+    pub(super) fn open_complete_with_packs(
+        sources: Vec<Policy>,
+        pack_schemas: &[String],
+        mcp_schemas: &[String],
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let (engine, warnings) = DogwoodEngine::open_with_schemas(
             &authored(&sources),
+            pack_schemas,
             mcp_schemas,
             history,
             &Operator::unanchored(),
@@ -431,6 +442,41 @@ impl Authority {
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
         live.engine.observe_outcome(governed, principal, outcome)
+    }
+
+    /// Decides one action whose `input` is a JSON record, in the one live history.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller decides a pack action yet")
+    )]
+    pub(super) fn decide_input(
+        &self,
+        principal: &Principal,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+    ) -> Decision {
+        match self.live.lock() {
+            Ok(live) => live.engine.decide_input(principal, identity, input),
+            Err(_) => Decision::internal_fault(),
+        }
+    }
+
+    /// Records the `::response` of one completed action whose `input` is a JSON record.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller records a pack response yet")
+    )]
+    pub(super) fn record_response(
+        &self,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine.observe_response(identity, input, status)
     }
 
     /// Returns whether the live authority declares a tool action, or true when its lock is unavailable.

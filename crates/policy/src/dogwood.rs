@@ -29,7 +29,7 @@ use crate::outcome::Delivery;
 use crate::request::{Principal, Request};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
-    UNUSED_RESOURCE_ID, action, action_schema, attr,
+    UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, DenyReason, Outcome, PolicyAttribution, RuleId};
@@ -54,6 +54,11 @@ impl ActionIdentity {
             Self::Fixed { id } => Event::builder_for(FIXED_ACTION_NAMESPACE, id, kind),
             Self::McpTool { namespace, tool } => {
                 Event::builder_for(&[namespace, "Action"], tool, kind)
+            }
+            Self::PackAction { namespace, action } => {
+                let mut path: Vec<&str> = namespace.split("::").collect();
+                path.push("Action");
+                Event::builder_for(&path, action, kind)
             }
         }
     }
@@ -172,19 +177,34 @@ impl DogwoodEngine {
     }
 
     /// Open durable history and install sources against canonical plus MCP schemas.
+    #[cfg(test)]
     pub(crate) fn open_with_mcp_schemas(
         source: &str,
         mcp_schemas: &[String],
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
+        Self::open_with_schemas(source, &[], mcp_schemas, history, operator)
+    }
+
+    /// Open durable history and install sources against canonical, tool pack, and MCP schemas.
+    pub(crate) fn open_with_schemas(
+        source: &str,
+        pack_schemas: &[String],
+        mcp_schemas: &[String],
+        history: &Path,
+        operator: &Operator,
+    ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
+        let effective_schema = composed_action_schema(pack_schemas, mcp_schemas)?;
         let (canonical_policies, effective_schema, warnings) =
-            validate_and_expand(source, mcp_schemas, operator)?;
+            check_against(source, effective_schema, operator, true, &[])
+                .map_err(Refused::into_error)?;
+        let fragments: Vec<String> = pack_schemas.iter().chain(mcp_schemas).cloned().collect();
         let mut engine = open_history(history, durable_config()).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
-            mcp_schemas,
+            &fragments,
             &effective_schema.source,
         )?;
 
@@ -439,6 +459,56 @@ impl DogwoodEngine {
         self.submit(|| outcome_event(governed, principal, outcome))
             .map(|_| ())
             .map_err(PolicyError::Evaluation)
+    }
+
+    /// Decide one action whose `input` is the JSON record `input`, at the current point in history.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller decides a pack action yet")
+    )]
+    pub(crate) fn decide_input(
+        &self,
+        principal: &Principal,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+    ) -> Decision {
+        if let Err(error) =
+            crate::schema::to_cedar_input_request(principal, identity, input, &self.request_schema)
+        {
+            eprintln!("policy: warn: {error}; denying");
+            return Decision::internal_fault();
+        }
+        let input = entity_json_value(input);
+        match self.submit(|| with_input(identity.event_builder(KIND_REQUEST), input)) {
+            Ok(Some(decision)) => decision,
+            Ok(None) => Decision::internal_fault(),
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                Decision::internal_fault()
+            }
+        }
+    }
+
+    /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller records a pack response yet")
+    )]
+    pub(crate) fn observe_response(
+        &self,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        self.submit(|| {
+            let builder = with_input(
+                identity.event_builder(KIND_RESPONSE),
+                entity_json_value(input),
+            );
+            with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))])
+        })
+        .map(|_| ())
+        .map_err(PolicyError::Evaluation)
     }
 
     /// Feed one event through the durable engine under the scope lock.
@@ -1157,6 +1227,38 @@ fn json_value(value: &serde_json::Value) -> Value {
                 .map(|(name, value)| (name.clone(), json_value(value)))
                 .collect(),
         ),
+    }
+}
+
+/// A Cedar JSON record that Box builds, as a dogwood `Value` with each `__entity` escape an entity.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no caller decides a pack action yet")
+)]
+fn entity_json_value(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Object(values) => {
+            if let Some(serde_json::Value::Object(entity)) = values.get("__entity")
+                && values.len() == 1
+                && let (Some(serde_json::Value::String(ty)), Some(serde_json::Value::String(id))) =
+                    (entity.get("type"), entity.get("id"))
+            {
+                return Value::Entity {
+                    ty: ty.clone(),
+                    id: id.clone(),
+                };
+            }
+            Value::Object(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), entity_json_value(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => {
+            Value::Array(values.iter().map(entity_json_value).collect())
+        }
+        other => json_value(other),
     }
 }
 
