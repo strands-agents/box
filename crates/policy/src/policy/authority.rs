@@ -3,8 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
+use cedar_policy::EntityUid;
 use dogwood_local_engine::DurableError;
 
 use super::{Policy, SchemaStage, authored};
@@ -13,7 +15,7 @@ use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
-use crate::schema::{ActionIdentity, GovernedBox};
+use crate::schema::{ActionIdentity, GovernedBox, mcp_tool_action};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
 
@@ -709,8 +711,8 @@ enum HistoryReferences {
 
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
 /// excluding the fixed `Box::Action` vocabulary, including one that only a condition names, and
-/// treating a `when temporal` history reference as `references` says. A name arrives in the
-/// spelling the render gave it.
+/// treating a `when temporal` history reference as `references` says. The scan finds the candidate
+/// text, and `decoded_tool_action` is the one decoder that says which tool it names.
 fn collect_typed_actions(
     source: &str,
     references: HistoryReferences,
@@ -728,20 +730,47 @@ fn collect_typed_actions(
             .rev()
             .collect();
         let after = &rest[pos + MARKER.len()..];
-        match after.find('"') {
+        match closing_quote(after) {
             Some(end) => {
+                let literal = &after[..end];
                 rest = &after[end + 1..];
                 // A name that `::` follows is an event a `when temporal` predicate reads
                 // (`::request{`, `::response{`, `::error{`), and not an action the rule decides.
                 let history = rest.starts_with("::");
                 let keep = !history || references == HistoryReferences::Named;
-                if keep && !namespace.is_empty() && namespace != "Box" {
-                    out.insert((namespace, after[..end].to_string()));
+                if keep {
+                    out.extend(decoded_tool_action(&namespace, literal));
                 }
             }
             None => break,
         }
     }
+}
+
+/// The offset of the quote that ends a Cedar string literal, where `\` escapes the character
+/// after it.
+fn closing_quote(literal: &str) -> Option<usize> {
+    let mut characters = literal.char_indices();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '"' => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `(namespace, tool)` that a rendered `<ns>::Action::"<literal>"` names, through the decoder
+/// a parsed head uses, or `None` for the fixed `Box::Action` vocabulary.
+fn decoded_tool_action(namespace: &str, literal: &str) -> Option<(String, String)> {
+    if namespace.is_empty() {
+        return None;
+    }
+    let action = EntityUid::from_str(&format!("{namespace}::Action::\"{literal}\"")).ok()?;
+    mcp_tool_action(&action)
 }
 
 /// What `open_staged` refuses in `sources`, or its warnings and the rules it holds pending.
