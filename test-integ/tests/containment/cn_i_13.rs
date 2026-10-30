@@ -31,7 +31,7 @@ use strands_det_harness::det_case;
 //
 // macOS-only: there is no Linux counterpart in the shared tree.
 det_case! {
-    name: cn_i_13,
+    name: when_macos_agent_registers_host_process_events_then_process_existence_remains_visible,
     id: "CN-I-13",
     platforms: [Macos],
     desc: "Recorded gap: an EVFILT_PROC registration on a foreign pid still answers whether it exists",

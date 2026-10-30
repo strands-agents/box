@@ -11,7 +11,7 @@ use strands_det_harness::{det_case, user_home};
 // second line is reachable: under an unconfined run it is printed and the case fails on it
 // (a review found the earlier single-line read could never print it).
 det_case! {
-    name: cn_c_01,
+    name: when_agent_reads_host_credentials_then_contents_remain_hidden,
     id:   "CN-C-01",
     desc: "Operator-home floor: a credential file the host plants under ~/.aws is unreadable by the agent's own syscall and its content never leaks",
     run: |b| {

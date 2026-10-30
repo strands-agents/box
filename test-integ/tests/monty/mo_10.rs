@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test monty): `NameError` reported, no value,
 // Monty footer present.
 det_case! {
-    name: mo_10,
+    name: when_monty_references_undefined_name_then_name_error_is_reported_without_a_value,
     id:   "MO-10",
     desc: "Failure handling: an undefined name is a catchable NameError at status 1, not a broker failure",
     run: |b| {

@@ -6,7 +6,7 @@ use strands_det_harness::{det_case, sh_quote};
 const PROBE: &str = include_str!("../probes/leaf_probe.rs");
 
 det_case! {
-    name: cn_t_06,
+    name: when_tool_reads_environment_then_own_variable_is_present_and_agent_and_host_variables_are_absent,
     id:   "CN-T-06",
     desc: "A tool leaf's environment holds its [tool.x.env] TOOL_V, and not the agent's [agent.env] AGENT_V nor a host variable set on strands-box run; the agent sees AGENT_V",
     run: |b| {

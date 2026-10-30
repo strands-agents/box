@@ -39,7 +39,7 @@ fn escape_denials() -> &'static [i32] {
 }
 
 det_case! {
-    name: cn_v_02,
+    name: when_agent_follows_symlink_outside_grants_then_secret_reads_and_writes_are_refused,
     id:   "CN-V-02",
     desc: "Native symlink escape: a workspace link to a secret outside every grant, host-prepared or made by the workload's own symlink(2), yields no bytes and takes no write through the agent's own syscalls; an in-grant link reads and writes through; the secret is unchanged on the host",
     run: |b| {

@@ -11,7 +11,7 @@ use strands_det_harness::det_case;
 // An in-box write cannot arrange this: the deny refuses the write
 // too (CN-D-02), so the file would never exist and an absent read would prove nothing.
 det_case! {
-    name: cn_d_01,
+    name: when_host_creates_a_denied_file_after_startup_then_agent_cannot_read_it,
     id:   "CN-D-01",
     platforms: [Macos],
     desc: "Deny: a denied path the host creates after startup inside a writable tree stays unreadable",

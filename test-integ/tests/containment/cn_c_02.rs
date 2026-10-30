@@ -2,7 +2,7 @@ use std::process::Command;
 
 use strands_det_harness::{NATIVE_PROBE_SEARCH_PATH, Platform, det_case};
 det_case! {
-    name: cn_c_02,
+    name: when_agent_searches_for_programs_then_aliases_come_first_and_ungranted_execution_is_refused,
     id:   "CN-C-02",
     platforms: [Macos, Linux],
     desc: "Exec surface: PATH is the alias directory then the declared search path; host programs outside the command and grants cannot execute",

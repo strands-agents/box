@@ -2,7 +2,7 @@
 use strands_det_harness::{Platform, det_case};
 
 det_case! {
-    name: cn_n_01,
+    name: when_agent_connects_outbound_then_gateway_works_and_direct_routes_cannot_bypass_it,
     id:   "CN-N-01",
     platforms: [Macos, Linux],
     desc: "Egress: the composed gateway connects; other loopback, public, and link-local routes cannot bypass it",

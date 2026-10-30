@@ -111,7 +111,7 @@ fn assert_degraded(outputs: &[String], run: &RunResult, tools: &[&str]) {
 }
 
 det_case! {
-    name: cn_mcp_list_degrade,
+    name: when_tool_server_discovery_is_denied_then_calls_fail_closed_and_box_keeps_running,
     id:   "CN-MD-01",
     platforms: [Linux, Macos],
     desc: "MCP discovery degrade: a forbid on a server's tools/list degrades that server — every tools/call fails closed with the catalog refusal while the box keeps running — and a tool-argument rule does not reopen it",

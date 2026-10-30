@@ -44,7 +44,7 @@ def set_name():
 "#;
 
 det_case! {
-    name: cn_linux_system_information,
+    name: when_linux_agent_queries_system_information_then_identity_and_statistics_are_visible_but_hostname_changes_fail,
     id: "CN-LINUX-SYSTEM-INFORMATION",
     platforms: [Linux],
     desc: "Linux exposes identity and aggregate statistics but refuses workload hostname changes",

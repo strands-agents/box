@@ -4,7 +4,7 @@ use strands_det_harness::det_case;
 // The link `sub/link -> ../secret.txt` names the workspace's own `secret.txt`, so a read forbid on
 // that file refuses the link's creation, and the refusal names the resolved target.
 det_case! {
-    name: sh_symlink_rel,
+    name: when_shell_creates_relative_symlink_to_forbidden_file_then_resolved_target_rule_refuses_link,
     id:   "SH-SYMLINK-REL",
     desc: "Relative symlink: ln -s ../secret.txt sub/link is judged on the workspace's secret.txt, and its read forbid refuses the link",
     run: |b| {

@@ -4,7 +4,7 @@ use std::process::Command;
 use strands_det_harness::{BoxFixture, Platform, det_case, native_python};
 
 det_case! {
-    name: cn_i_04,
+    name: when_agent_queries_host_processes_then_linux_refuses_and_macos_retains_visibility,
     id:   "CN-I-04",
     platforms: [Macos, Linux],
     desc: "Process queries: macOS retains foreign-process visibility; Linux refuses queries against a live host process",

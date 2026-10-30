@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // selection matches the tool's command, and the tool runs in its own boundary with the tree
 // executable, so its output returns through the Shell.
 det_case! {
-    name: cn_e_01,
+    name: when_declared_tool_runs_an_exec_tree_binary_then_its_output_returns,
     id:   "CN-E-01",
     desc: "Exec tree: a declared tool runs a binary from its exec tree and its output returns",
     run: |b| {

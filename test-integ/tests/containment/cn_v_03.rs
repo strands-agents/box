@@ -17,7 +17,7 @@ fn escape_denials() -> &'static [i32] {
 }
 
 det_case! {
-    name: cn_v_03,
+    name: when_tool_follows_symlink_outside_grants_then_secret_reads_and_writes_are_refused,
     id:   "CN-V-03",
     desc: "Leaf symlink escape: a link inside a tool's read grant to a secret outside it yields no bytes and takes no write; a link to a file inside the grant reads; the secret is unchanged on the host",
     run: |b| {

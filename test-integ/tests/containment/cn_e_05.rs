@@ -29,7 +29,7 @@
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_e_05,
+    name: when_agent_reads_an_absent_path_outside_home_then_error_reports_missing_file,
     id:   "CN-E-05",
     platforms: [Macos, Linux],
     desc: "Tripwire: reading an absent path outside the operator home answers ENOENT, not EPERM",

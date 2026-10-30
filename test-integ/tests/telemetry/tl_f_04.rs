@@ -17,7 +17,7 @@ use strands_det_harness::{det_case, sh_quote};
 // enters the broker, and `Journal::assert_mediated_entry` reads that same proof off the declared
 // file.
 det_case! {
-    name: tl_f_04,
+    name: when_telemetry_declares_file_target_then_records_use_it_and_default_file_stops_growing,
     id:   "TL-F-04",
     desc: "A declared file target replaces the default destination: records land there, and the default file does not grow",
     run: |b| {

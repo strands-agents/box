@@ -2,7 +2,7 @@ use crate::phase3::{git_identity, with_git};
 use strands_det_harness::{det_case, git_only_spawn_policy, sh_quote};
 
 det_case! {
-    name: cn_l_03,
+    name: when_git_tool_fetches_through_helper_then_helper_runs_and_gateway_refuses_fetch,
     id:   "CN-L-03",
     platforms: [Macos, Linux],
     desc: "Broad exec: a permitted git tool leaf runs its git-remote-https helper; egress bounds the fetch (gateway 403), no refs returned and no exec refusal; git-runs control holds",

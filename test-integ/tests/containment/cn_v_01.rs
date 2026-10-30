@@ -18,7 +18,7 @@ use strands_det_harness::{det_case, user_home};
 //     from everything the workload printed.
 // An in-workspace link to `readable.txt` reads through, because its target is in the grant.
 det_case! {
-    name: cn_v_01,
+    name: when_mediated_read_follows_symlink_outside_grants_then_target_policy_refuses_secret_access,
     id:   "CN-V-01",
     desc: "Symlink escape: a workspace symlink to a secret outside every grant is judged on the secret and refused by policy; the secret never leaks; an in-grant link and a canonical direct read work",
     run: |b| {

@@ -6,7 +6,7 @@ const PROBE: &str = include_str!("../probes/leaf_probe.rs");
 const LIBRARY: &str = "#[no_mangle]\npub extern \"C\" fn det_leaf_value() -> i32 {\n    4204\n}\n";
 
 det_case! {
-    name: cn_x_04,
+    name: when_tool_runs_or_loads_written_output_then_it_works_but_agent_execution_and_loading_are_refused,
     id:   "CN-X-04",
     platforms: [Macos, Linux],
     desc: "Leaf build output: a tool with write=[work] (and read of it) execs a program and dlopens a library it copied into work; the agent's own exec and load of the same written files are refused",

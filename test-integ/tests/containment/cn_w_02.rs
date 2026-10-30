@@ -5,7 +5,7 @@ use strands_det_harness::{det_case, user_home};
 // A file under the operator home reads only when `read_file` names it: the listed settings file
 // reads, and an unlisted sibling under HOME does not.
 det_case! {
-    name: cn_w_02,
+    name: when_agent_has_home_read_file_grant_then_named_file_reads_and_sibling_does_not,
     id:   "CN-W-02",
     desc: "Workload act 2: a read_file entry under HOME reads and an unlisted sibling does not",
     run: |b| {

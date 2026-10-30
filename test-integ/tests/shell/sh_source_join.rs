@@ -4,7 +4,7 @@ use strands_det_harness::{det_case, sh_quote};
 // function, `if`, `for`, `$(`, `case`, a heredoc, a `|` at end of line, and `&&` and `||` at end of
 // line. `false &&` at end of a line skips the command on the next line, as `false && cmd` does.
 det_case! {
-    name: sh_source_join,
+    name: when_sourced_statement_spans_lines_then_shell_joins_and_runs_it_to_completion,
     id:   "SH-SOURCE-JOIN",
     desc: "source joins the lines of an incomplete statement (function, if, for, $(, case, heredoc, trailing |, && and ||) and runs the file to the end with status 0",
     run: |b| {

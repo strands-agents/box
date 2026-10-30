@@ -10,7 +10,7 @@
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_f_02,
+    name: when_macos_agent_changes_owner_flags_or_identity_then_changes_are_refused,
     id:   "CN-F-02",
     platforms: [Macos],
     desc: "No self-authority: owner, file flags, and root identity are refused in a write cell; the set-user-ID bit is not stored",

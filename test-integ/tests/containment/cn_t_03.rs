@@ -205,7 +205,7 @@ fn mcp_leaf(b: &BoxFixture, native: bool) {
 }
 
 det_case! {
-    name: cn_t_03,
+    name: when_tools_or_tool_servers_try_broker_routes_then_aliases_and_socket_are_unreachable,
     id:   "CN-T-03",
     platforms: [Linux, Macos],
     desc: "Leaf has no route to the broker: a [tool.x] leaf, a gateway [mcp.x] leaf, and a contain_egress=false [mcp.x] leaf hold no <box_dir>/bin on PATH in any spelling, run no alias, and fail to connect to box.sock; the agent holds all three",

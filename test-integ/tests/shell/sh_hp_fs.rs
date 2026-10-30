@@ -10,7 +10,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): journaled fs:write on note.txt,
 // onlydir, tf.txt, cf.txt and fs:read on note.txt; `INSIDE` and `FS_OK` returned.
 det_case! {
-    name: sh_hp_fs,
+    name: when_shell_uses_workspace_file_builtins_then_operations_run_through_mediated_route,
     id:   "SH-HP-FS",
     desc: "Happy path: workspace fs built-ins (write/read/mkdir/touch/cp) are each pinned mediated; chmod rides the same pipeline",
     run: |b| {

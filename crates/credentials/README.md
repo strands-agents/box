@@ -213,7 +213,7 @@ credentials, then run:
 ```sh
 CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
   cargo test -p strands-box-credentials --all-features --test end_to_end \
-  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+  credsd_e2e::when_live_daemon_receives_unknown_environment_then_specific_hard_failure_is_returned -- --exact --nocapture
 ```
 
 The test checks daemon health and caller access to the configured environment before

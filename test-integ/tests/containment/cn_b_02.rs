@@ -14,7 +14,7 @@ use strands_det_harness::det_case;
 // machine carries that directory for its own reasons and its mere presence would make this case pass
 // or fail for the wrong reason.
 det_case! {
-    name: cn_b_02,
+    name: when_box_starts_then_only_four_box_directory_children_are_created,
     id:   "CN-B-02",
     desc: "The box creates the four children of box_dir and nothing beside it",
     run: |b| {

@@ -10,7 +10,7 @@ use strands_det_harness::det_case;
 // across requests, so one request builds it and expands it. Plain `mkdir` creates each level
 // without a probe of the forbidden directory.
 det_case! {
-    name: sh_sec_glob,
+    name: when_shell_glob_crosses_forbidden_directory_then_no_entry_name_is_disclosed,
     id:   "SH-SEC-GLOB",
     desc: "Security: a multi-level glob discloses no name inside a directory whose fs:read is forbidden",
     run: |b| {

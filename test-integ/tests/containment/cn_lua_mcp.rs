@@ -74,7 +74,7 @@ fn lua_then_broker_call(b: &BoxFixture) -> (String, RunResult) {
 }
 
 det_case! {
-    name: cn_lua_mcp,
+    name: when_lua_requests_a_tool_server_module_then_module_is_unavailable_and_tool_never_runs,
     id:   "CN-LUA-MCP",
     platforms: [Linux, Macos],
     desc: "No Lua MCP bridge: with a live fetch server the broker serves, the hosted Shell's Lua has no fetch module and its tool call never runs",

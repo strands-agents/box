@@ -1404,7 +1404,7 @@ mod credsd_e2e {
     }
 
     #[test]
-    fn a_daemon_unknown_environment_response_has_the_specific_mapping() {
+    fn when_daemon_reports_unknown_environment_then_specific_error_mapping_is_preserved() {
         let path = socket_path();
         let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"ENVIRONMENT_NOT_FOUND\"}}}\n".to_vec();
         let (rx, handle) = fake_daemon(&path, response);
@@ -1427,7 +1427,7 @@ mod credsd_e2e {
     }
 
     #[test]
-    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_environment_assertion() {
+    fn when_daemon_fails_for_another_reason_then_unknown_environment_assertion_rejects_it() {
         for (response, expected_message) in [
             ("not-json", "credsd returned a malformed response"),
             (
@@ -1485,7 +1485,7 @@ mod credsd_e2e {
 
     /// A configured fixture proves caller access before the unknown-environment request.
     #[test]
-    fn a_live_daemon_maps_an_unknown_environment_to_a_hard_failure() {
+    fn when_live_daemon_receives_unknown_environment_then_specific_hard_failure_is_returned() {
         let explicit_socket = std::env::var_os("CREDSD_SOCKET")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);

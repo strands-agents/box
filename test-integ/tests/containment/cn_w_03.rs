@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // Linux has no lowering for `list` or for a `deny` of a path that does not exist yet, so the
 // configuration is refused at load, by the entry's value, with the platform named.
 det_case! {
-    name: cn_w_03,
+    name: when_linux_configuration_has_list_or_future_deny_then_load_refusal_names_entry,
     id:   "CN-W-03",
     platforms: [Linux],
     desc: "Workload act 3: list and a future-file deny are refused at load on Linux, naming the entry",

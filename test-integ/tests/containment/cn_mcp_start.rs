@@ -82,7 +82,7 @@ fn forbid_start() -> String {
 }
 
 det_case! {
-    name: cn_mcp_start,
+    name: when_tool_server_start_has_no_spawn_permit_then_server_never_runs_and_box_continues,
     id:   "CN-MS-01",
     platforms: [Linux, Macos],
     desc: "MCP start: a stdio MCP server starts only under a shell:spawn permit — a forbid on its program refuses the open and the server never runs, while the box keeps running",

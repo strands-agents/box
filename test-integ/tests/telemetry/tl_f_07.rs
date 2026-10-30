@@ -17,7 +17,7 @@ const SECRET: &str = "TL_SECRET_c0ffee";
 // redacts every argument, which would lose the audit trail; the presence of the literal `cat`
 // argument is what shows the record still names what was read.
 det_case! {
-    name: tl_f_07,
+    name: when_command_argument_is_expanded_then_record_omits_it_but_keeps_literal_argument,
     id:   "TL-F-07",
     desc: "An expanded argument never reaches the record, and a literal one still does",
     run: |b| {

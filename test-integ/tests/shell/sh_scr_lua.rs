@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // The computed value and the nested output both returning prove reachability and the mediated route.
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `42` and `NESTED_OK` returned.
 det_case! {
-    name: sh_scr_lua,
+    name: when_lua_executes_nested_command_then_shell_mediates_it,
     id:   "SH-SCR-LUA",
     desc: "Script route: Lua is reachable and os.execute routes its nested command through the mediated path",
     run: |b| {

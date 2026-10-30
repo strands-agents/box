@@ -4,7 +4,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_i_10,
+    name: when_agent_uses_unix_sockets_then_local_pair_works_and_host_abstract_listener_is_unreachable,
     id: "CN-I-10",
     platforms: [Linux],
     desc: "A native Unix socket pair works while a live host abstract listener remains unreachable",

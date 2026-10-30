@@ -11,7 +11,7 @@ use strands_det_harness::det_case;
 // Needs the box at c7d0f41d or later. On 864df453 no table names the program, the spawn is refused
 // by name, and this case reads FAIL with that reason, not ERROR: the expected verdict there.
 det_case! {
-    name: cn_f1_01,
+    name: when_agent_has_an_exec_grant_then_program_runs_without_a_tool_declaration,
     id:   "CN-F1-01",
     desc: "Follow-up F1: a program under the agent's own exec entry runs in the agent's boundary with no table",
     run: |b| {

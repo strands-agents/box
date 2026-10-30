@@ -1,7 +1,7 @@
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_linux_future_deny_refusal,
+    name: when_linux_deny_path_is_absent_then_startup_is_refused_before_workload_runs,
     id: "CN-LINUX-FUTURE-DENY",
     platforms: [Linux],
     desc: "Linux refuses an absent deny path before the workload runs, while an existing deny path permits startup",

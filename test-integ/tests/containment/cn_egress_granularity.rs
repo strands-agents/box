@@ -124,7 +124,7 @@ fn assert_refused(output: &str) {
 }
 
 det_case! {
-    name: cn_egress_granularity,
+    name: when_tool_server_uses_gateway_then_path_method_host_port_and_request_limits_hold,
     id:   "CN-EG-01",
     platforms: [Linux, Macos],
     desc: "Egress granularity: on a contained MCP leaf's gateway egress, a path forbid refuses one L7 path, a method forbid refuses one L7 method, an L4 port forbid and an L4 host forbid each override a connect permit, and a temporal forbid caps L7 requests to one host",

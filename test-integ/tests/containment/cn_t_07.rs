@@ -17,7 +17,7 @@ fn denials() -> &'static [i32] {
 }
 
 det_case! {
-    name: cn_t_07,
+    name: when_two_tools_have_disjoint_grants_then_each_reaches_only_its_own_files,
     id:   "CN-T-07",
     desc: "Two tools hold disjoint grants: tool a (write=[a-work]) cannot read tool b's read_file or write b's directory, tool b cannot write a-work, and each reaches its own grant (host witness, file bytes)",
     run: |b| {

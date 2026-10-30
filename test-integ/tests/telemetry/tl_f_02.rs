@@ -10,7 +10,7 @@ use strands_det_harness::telemetry::{CONTROL_OPERATION_KEY, CONTROL_SCOPE, SOURC
 // the file holds two ids and each names one `box_started`. That count is what proves the id tracks a
 // run rather than a box: an id minted per box would appear once for both runs.
 det_case! {
-    name: tl_f_02,
+    name: when_box_records_telemetry_then_each_record_names_box_producer_and_run,
     id:   "TL-F-02",
     desc: "Every record names this box's own id, the producer `box`, and one run id per `strands-box run`",
     run: |b| {

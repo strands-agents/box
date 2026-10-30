@@ -14,7 +14,7 @@ use strands_det_harness::{det_case, Route};
 // If the alias directory ever left the PATH, or `bash` itself became an alias, the sentinels and
 // journal shapes below change and this case fails before any other case can misattribute.
 det_case! {
-    name: cn_r_01,
+    name: when_workload_uses_native_or_mediated_shell_then_only_mediated_commands_are_journaled,
     id:   "CN-R-01",
     desc: "Routing: run_sh is the native bash (alias dir first on PATH, no journal); run_mediated reaches the hosted Shell (journaled shell:exec, no spawn for a Shell command)",
     run: |b| {

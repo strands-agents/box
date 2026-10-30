@@ -3,7 +3,7 @@ use strands_det_harness::{det_case, user_home};
 // The hosted Shell's environment is exactly HOME, PATH, PWD and USER. A variable set on the box
 // process, and a variable the agent exports, are both absent.
 det_case! {
-    name: sh_env,
+    name: when_shell_reads_environment_then_only_home_path_pwd_and_user_are_present,
     id:   "SH-ENV",
     desc: "Composed environment: the hosted Shell's env is exactly HOME, PATH, PWD and USER; host and agent variables are absent",
     run: |b| {

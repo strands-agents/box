@@ -2,7 +2,7 @@ use strands_det_harness::det_case;
 
 // An append is an `fs:write` of its own that keeps the existing content.
 det_case! {
-    name: mo_append,
+    name: when_monty_appends_to_file_then_existing_content_remains_and_append_is_policy_checked,
     id:   "MO-APPEND",
     desc: "Append: open(..., 'a') adds to a file without truncating it, and the append is a second judged fs:write",
     run: |b| {

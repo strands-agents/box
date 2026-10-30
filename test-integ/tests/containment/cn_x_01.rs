@@ -1,7 +1,7 @@
 use strands_det_harness::{Platform, det_case};
 
 det_case! {
-    name: cn_x_01,
+    name: when_agent_writes_script_or_copies_interpreter_then_execution_is_refused,
     id:   "CN-X-01",
     platforms: [Macos, Linux],
     desc: "Write-xor-exec: a written script and a copy of the running interpreter both refuse to exec; the marker never prints",

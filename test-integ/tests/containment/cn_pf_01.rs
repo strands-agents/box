@@ -15,7 +15,7 @@ const FILES_PER_DIRECTORY: usize = 1000;
 const LARGEST_RATIO: f64 = 3.0;
 
 det_case! {
-    name: cn_pf_01,
+    name: when_tool_read_grant_contains_many_entries_then_per_call_spawn_cost_stays_within_limit,
     id:   "CN-PF-01",
     desc: "A tool spawn costs the same per call under a 300k-entry read grant as under the workspace alone: the box judges a tool's reach once per run, not per spawn",
     run: |b| {

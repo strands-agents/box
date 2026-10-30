@@ -30,6 +30,7 @@ const BODY: &str = "STRANDS_NATIVE_EGRESS_OK";
 /// - **Linux:** copied to `/usr/bin/<this>` — world-accessible + binds into the leaf's mount view.
 /// - **macOS:** copied to a test-owned dir injected onto the box PATH, with a read+exec grant
 ///   (Seatbelt reads the binary in place; there is no mount view to bind).
+///
 /// The name differs from `FETCH_BINARY` so it never collides with the built copy in `target/`.
 #[cfg(target_os = "linux")]
 const FETCH_PROGRAM: &str = "box-mcp-fetch-linux";
@@ -144,7 +145,7 @@ fn call_reach(b: &BoxFixture, native_egress: bool, url: &str) -> (String, RunRes
 }
 
 det_case! {
-    name: cn_native_egress,
+    name: when_tool_server_disables_egress_containment_then_direct_host_network_works,
     id:   "CN-NE-01",
     platforms: [Linux, Macos],
     desc: "Native egress: a contain_egress=false MCP leaf joins the host network namespace and reaches an un-proxied host endpoint, while the gateway default (routeless namespace) cannot",

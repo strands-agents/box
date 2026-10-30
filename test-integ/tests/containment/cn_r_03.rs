@@ -152,7 +152,7 @@ fn the_read_probe_prints_the_whole_content_on_one_line() {
 }
 
 det_case! {
-    name: cn_r_03,
+    name: when_sibling_box_policy_is_inside_write_grant_then_it_is_writable_but_own_policy_stays_protected,
     id:   "CN-R-03",
     desc: "Authority by path: a sibling box's .strands-box/policy.dw under the granted project is readable and writable by the agent's own syscalls and the write lands on the host, the write grant that reaches it is disclosed at startup, and this box's own .strands-box beside it stays refused in the same run",
     run: |b| {

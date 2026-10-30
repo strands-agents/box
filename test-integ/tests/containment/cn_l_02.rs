@@ -2,7 +2,7 @@ use crate::phase3::{git_identity, with_git};
 use strands_det_harness::{Platform, det_case, git_only_spawn_policy, sh_quote};
 
 det_case! {
-    name: cn_l_02,
+    name: when_spawn_policy_permits_one_git_identity_then_only_that_declared_program_runs,
     id:   "CN-L-02",
     platforms: [Macos, Linux],
     desc: "No shell:spawn permit refuses git with no output; a permit for exactly the declared git identity allows it; a sibling program and another git identity stay denied under that same narrow permit",

@@ -15,7 +15,7 @@ use strands_det_harness::{SsrfFloor, det_case, judge_ssrf_probe};
 // is the reason a Shell-route allowed control against a loopback recorder does not exist, and why
 // PO-13/PO-14/PO-16 use the native route for theirs.
 det_case! {
-    name: po_15,
+    name: when_shell_curl_uses_alternate_metadata_address_then_canonical_address_floor_refuses_request,
     id:   "PO-15",
     desc: "Shell curl address spellings: every inet_aton and trailing-dot spelling of 169.254.169.254 is refused by the Shell kernel floor with the canonical address; a decimal loopback spelling is refused and its recorder sees nothing",
     run: |b| {

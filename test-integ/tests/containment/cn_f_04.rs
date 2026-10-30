@@ -28,7 +28,7 @@ use strands_det_harness::det_case;
 // `mkdir`, so a case that does not clear it measures the umask and not the profile. `os.umask(0)`
 // comes first, and the stored mode is what every arm judges — never the return code.
 det_case! {
-    name: cn_f_04,
+    name: when_agent_recreates_files_in_write_grant_then_creation_modes_can_be_stored,
     id: "CN-F-04",
     platforms: [Macos, Linux],
     desc: "Recorded gap: unlink-then-create and mkdir carry a mode no rule refuses, so a file's mode launders inside a write root",

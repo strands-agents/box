@@ -2,7 +2,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_p_01,
+    name: when_agent_lists_private_process_view_then_self_is_visible_and_live_host_process_is_hidden,
     id: "CN-P-01",
     platforms: [Linux],
     desc: "The private proc view shows the native probe but hides a live owned host marker",

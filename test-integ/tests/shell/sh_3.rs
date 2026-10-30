@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // (the broker journals filesystem and spawn subjects only), so the evidence is curl's own report
 // plus the absence of any body or 200 status. (The spawn gate is PO-9's subject.)
 det_case! {
-    name: sh_3,
+    name: when_shell_curl_host_has_no_permit_then_policy_refuses_before_request,
     id:   "SH-3",
     desc: "Default-deny: the Shell's curl to an unpermitted host is refused by policy before any request is made",
     run: |b| {

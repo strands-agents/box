@@ -7,7 +7,7 @@ use strands_det_harness::{det_case, user_home};
 // entry first so the tree has something a permitted listing would show; the planted name and
 // key text never appear, and the kernel's refusal spelling does.
 det_case! {
-    name: cn_c_03,
+    name: when_agent_accesses_host_ssh_directory_then_entries_and_contents_remain_hidden,
     id:   "CN-C-03",
     desc: "Operator-home floor: the agent's own syscalls cannot enumerate ~/.ssh or read a planted entry there",
     run: |b| {

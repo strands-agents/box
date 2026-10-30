@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): journaled fs:move and `LS=1`
 // (destination present) returned.
 det_case! {
-    name: sh_hp_5b,
+    name: when_shell_has_move_permit_then_file_is_renamed_in_workspace,
     id:   "SH-HP-5B",
     desc: "Happy path: mv under a granted fs:move permit performs the rename in the workspace",
     run: |b| {

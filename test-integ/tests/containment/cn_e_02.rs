@@ -4,7 +4,7 @@ use strands_det_harness::det_case;
 // a script whose shebang is `#!/usr/bin/env sh`. The kernel runs `env`, and `env` runs the shell,
 // so the tool's boundary must grant both along with the exec tree.
 det_case! {
-    name: cn_e_02,
+    name: when_declared_tool_runs_an_exec_tree_script_then_its_output_returns,
     id:   "CN-E-02",
     desc: "Exec tree: a declared tool runs a `#!/usr/bin/env sh` script from its exec tree and its output returns",
     run: |b| {

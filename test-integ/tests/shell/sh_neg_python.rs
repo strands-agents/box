@@ -7,7 +7,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `only one script file`/`RC=2` and
 // `no REPL`/`RC=2`, no `effect denied`.
 det_case! {
-    name: sh_neg_python,
+    name: when_shell_python_invocation_is_invalid_then_usage_error_is_distinct_from_policy_denial,
     id:   "SH-NEG-PY",
     desc: "Negative: python bad invocations (two files, bare REPL) are usage errors, not policy denials",
     run: |b| {

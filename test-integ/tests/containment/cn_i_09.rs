@@ -2,7 +2,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_i_09,
+    name: when_agent_attaches_a_tracer_to_host_process_then_host_remains_untraced_and_running,
     id: "CN-I-09",
     platforms: [Linux],
     desc: "A native ptrace attach cannot stop or trace a live owned host marker",

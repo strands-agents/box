@@ -10,7 +10,7 @@
 use strands_det_harness::{det_case, operator_home};
 
 det_case! {
-    name: cn_e_04,
+    name: when_macos_queries_existence_outside_operator_home_then_existence_remains_visible,
     id:   "CN-E-04",
     platforms: [Macos],
     desc: "Recorded gap: machine-wide existence still answers outside the operator home; the deny is scoped to it",

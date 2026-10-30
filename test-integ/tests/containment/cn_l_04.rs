@@ -2,7 +2,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_l_04,
+    name: when_workload_exits_normally_then_its_live_descendant_is_removed,
     id: "CN-L-04",
     desc: "Ordinary workload exit removes a descendant observed alive from the host",
     run: |b| {

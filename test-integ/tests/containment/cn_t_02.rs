@@ -16,7 +16,7 @@ fn denials() -> &'static [i32] {
 }
 
 det_case! {
-    name: cn_t_02,
+    name: when_tool_can_read_workspace_then_own_box_authority_and_private_files_stay_hidden,
     id:   "CN-T-02",
     desc: "A tool with read=[<workspace>] cannot read the workspace's .strands-box/policy.dw or box.toml, or <box_dir>/private/*, and lists no entry of <box_dir>/private; a sibling file under the same grant reads; the host files are unchanged",
     run: |b| {

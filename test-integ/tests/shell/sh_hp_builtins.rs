@@ -8,7 +8,7 @@ use strands_det_harness::det_case;
 // and compute correctly against an independent oracle.
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `PIPE=3`, `JQ=V`, `BASE=c.txt`.
 det_case! {
-    name: sh_hp_builtins,
+    name: when_shell_runs_pipelines_and_builtins_then_results_are_computed_correctly,
     id:   "SH-HP-BUILTINS",
     desc: "Happy path: built-ins (pipeline, jq, path arithmetic) run through the seam and compute correctly",
     run: |b| {

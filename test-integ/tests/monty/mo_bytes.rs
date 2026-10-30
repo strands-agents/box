@@ -3,7 +3,7 @@ use strands_det_harness::det_case;
 // A binary write and its read-back through pathlib are each one judged `fs:*` effect, and the bytes
 // return unchanged, including a NUL.
 det_case! {
-    name: mo_bytes,
+    name: when_monty_writes_and_reads_bytes_then_bytes_round_trip_and_each_effect_is_policy_checked,
     id:   "MO-BYTES",
     desc: "Bytes round-trip: Path.write_bytes then read_bytes returns the same bytes, each effect judged",
     run: |b| {

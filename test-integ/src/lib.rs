@@ -9,7 +9,7 @@
 //! use strands_det_harness::det_case;
 //!
 //! det_case! {
-//!     name: po_9,                       // a valid Rust fn name (snake_case)
+//!     name: when_shell_runs_git_without_spawn_permit_then_status_is_126_and_git_never_runs,
 //!     id:   "PO-9",                      // the case id (also the verdict.json id)
 //!     desc: "Shell gate: 'git status' is refused with no shell:spawn permit",
 //!     run: |b| {

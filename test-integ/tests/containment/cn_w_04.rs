@@ -5,7 +5,7 @@ use strands_det_harness::{det_case, user_home};
 // The environment is composed, never inherited: HOME is the operator's, PATH starts with the alias
 // directory, and an unusual TERM exported on the host is absent inside the box.
 det_case! {
-    name: cn_w_04,
+    name: when_workload_starts_then_home_is_operator_home_and_alias_path_precedes_search_path,
     id:   "CN-W-04",
     desc: "Workload act 4: HOME is the operator's, PATH starts with the alias directory, the host's TERM is absent",
     run: |b| {

@@ -35,7 +35,7 @@
 use strands_det_harness::det_case;
 
 det_case! {
-    name: cn_f_03,
+    name: when_macos_agent_sets_file_attributes_then_attribute_changes_fail_and_granted_chmod_succeeds,
     id:   "CN-F-03",
     platforms: [Macos],
     desc: "The setattrlist route to a write cell's attributes is refused, although chmod to the granted mode leaf succeeds",

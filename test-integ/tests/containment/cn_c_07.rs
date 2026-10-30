@@ -9,7 +9,7 @@ use strands_det_harness::det_case;
 // 125 — the boundary-failure status — because a generic "non-zero" would also be
 // satisfied by the command running and failing, which is the opposite result.
 det_case! {
-    name: cn_c_07,
+    name: when_alias_receives_a_socket_argument_then_it_refuses_with_status_125,
     id:   "CN-C-07",
     platforms: [Macos, Linux],
     desc: "Alias argument: an alias derives its socket and refuses a socket argument with exit 125",

@@ -3,7 +3,7 @@ use strands_det_harness::det_case;
 // A tool states six filesystem lists. `metadata` and `exec` are refused at load by name, because a
 // leaf discovers metadata across the operator home and runs its toolchain through broad exec.
 det_case! {
-    name: cn_t_04,
+    name: when_tool_declares_metadata_or_exec_list_then_configuration_is_refused_by_key,
     id:   "CN-T-04",
     desc: "A [tool.<name>.filesystem] metadata or exec list is refused at load, naming the key",
     run: |b| {

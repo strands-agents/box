@@ -70,7 +70,7 @@ fn forged_payload() -> String {
 // under the policy scope beside the payload — without it, "no decision names the forged resource"
 // holds in a file that holds no decision at all.
 det_case! {
-    name: tl_f_08,
+    name: when_workload_posts_telemetry_then_payload_is_sanitized_and_cannot_forge_policy_decision,
     id:   "TL-F-08",
     desc: "A payload the workload posts to the receiver is stripped, renamed and stamped `agent`, and forges no decision",
     run: |b| {

@@ -9,7 +9,7 @@ use strands_det_harness::det_case;
 // Measured green on macOS 2026-09-22: the write performed, Path.unlink raised a PermissionError
 // carrying the engine text, and `DELETED` was absent.
 det_case! {
-    name: mo_del,
+    name: when_monty_unlinks_without_delete_permit_then_policy_refuses_and_file_remains,
     id:   "MO-DEL",
     desc: "Monty delete refusal: os.unlink with no fs:delete permit is refused by policy; the file is not removed",
     run: |b| {

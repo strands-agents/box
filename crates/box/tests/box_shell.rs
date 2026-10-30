@@ -422,7 +422,7 @@ fn the_alias_image_is_execute_only() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "https://github.com/strands-agents/box/issues/48: an executable alias remains readable; run explicitly to measure read protection"]
-fn linux_alias_read_protection_requirement() {
+fn when_linux_agent_reads_alias_executable_then_contents_should_be_protected() {
     assert!(
         fixture::namespace_launcher_is_usable(),
         "the read-protection measurement requires a working Linux backend"
