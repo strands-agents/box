@@ -1973,9 +1973,9 @@ mod tests {
     fn proc_mem_fd_route_status() -> i32 {
         let mem = route_to_c_string("/proc/self/mem");
         // SAFETY: path is NUL-terminated, and the descriptor is closed below when opened.
-        let fd = unsafe { libc::open(mem.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        let fd = unsafe { libc::open(mem.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
-            return 0;
+            return 64;
         }
         let route = route_to_c_string(&format!("/proc/self/fd/{fd}"));
         let status = write_executable_page_through_proc_mem(&route);
@@ -2057,7 +2057,7 @@ mod tests {
         assert_eq!(
             libc::WEXITSTATUS(status),
             0,
-            "50 = apply failed, 60 = read-execute mapping failed, 61 = proc mem wrote an executable page, 62 = direct memory write failed, 63 = writable memory failed, 70/71 = child route did not run"
+            "50 = apply failed, 60 = read-execute mapping failed, 61 = proc mem wrote an executable page, 62 = direct memory write failed, 63 = writable memory failed, 64 = read-only proc mem descriptor failed, 70/71 = child route did not run"
         );
     }
 
