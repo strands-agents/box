@@ -106,6 +106,8 @@ pub enum Outcome<'a> {
         delivery: Delivery,
         /// The upstream's reply status, or `None` when no reply arrived.
         status: Option<u16>,
+        /// Whether the gateway decrypted a TLS exchange. `false` for plain HTTP.
+        intercepted: bool,
     },
     /// A resolved command line finished (`shell:exec::response`).
     ///

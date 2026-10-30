@@ -1397,12 +1397,19 @@ fn credential_read_fields(paths: &[String]) -> Vec<(&'static str, Value)> {
 /// The `input` fields of a response or error event.
 fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
     match outcome {
-        // Only schema-declared fields may appear; a field the schema does not know is
-        // a hard load error. Whether the socket opened is carried by the event KIND
-        // (`response` vs `error`), so the fields record the attempt's identity.
-        Outcome::Connect { host, port, .. } => vec![
+        // Whether the socket opened is carried by the event KIND (`response` vs `error`).
+        Outcome::Connect {
+            host,
+            port,
+            address,
+            ..
+        } => vec![
             (attr::HOST, Value::String((*host).to_string())),
             (attr::PORT, Value::Int(i64::from(*port))),
+            (
+                attr::IP,
+                Value::String(crate::address::canonical(address.ip())),
+            ),
         ],
         Outcome::Http {
             host,
@@ -1410,6 +1417,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             method,
             path,
             delivery,
+            intercepted,
             ..
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
@@ -1422,7 +1430,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
                 attr::BODY_BYTES,
                 Value::Int(clamp(delivery.accepted_bytes())),
             ),
-            (attr::INTERCEPTED, Value::Bool(true)),
+            (attr::INTERCEPTED, Value::Bool(*intercepted)),
         ],
         Outcome::ShellRun {
             command,
@@ -1997,6 +2005,7 @@ when temporal {
             path: "/v1",
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
+            intercepted: true,
         }
     }
 
@@ -2068,6 +2077,7 @@ when temporal {
                         path: "/v1",
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
+                        intercepted: true,
                     }
                 )
                 .is_err(),
@@ -2153,6 +2163,7 @@ when temporal {
             path: "/v1",
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
+            intercepted: true,
         };
         assert!(
             engine

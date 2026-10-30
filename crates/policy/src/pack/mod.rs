@@ -18,6 +18,8 @@ mod usage;
 
 #[cfg(test)]
 mod corpus;
+#[cfg(test)]
+mod fuzz;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -943,6 +943,89 @@ mod tests {
         );
     }
 
+    /// **A metadata read the reach floor refuses meets no `::response` precondition**, and an
+    /// answered one does.
+    #[tokio::test]
+    async fn a_metadata_read_the_floor_refuses_meets_no_response_precondition() {
+        let root = tempfile::tempdir().expect("a fixture root");
+        let shared = root.path().canonicalize().expect("the root resolves");
+        let box_root = shared.join("boxes/codex");
+        let refused = box_root.join("private/secret.txt");
+        std::fs::create_dir_all(refused.parent().expect("the refused parent"))
+            .expect("this box's private directory");
+        std::fs::write(&refused, "secret").expect("the refused file");
+        let gated = shared.join("gated.txt");
+        std::fs::write(&gated, "gated").expect("the gated file");
+        let checked = shared.join("checked.txt");
+        std::fs::write(&checked, "checked").expect("the checked file");
+        let reach = Arc::new(crate::test_support::with_operator_home(&shared, || {
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+                .expect("the reachable set is usable")
+        }));
+        let policy = Arc::new(open_policy(vec![Policy {
+            origin: PathBuf::from("precondition.dw"),
+            text: r#"permit(principal, action == Box::Action::"fs:read", resource)
+                     when { context.input.path != "~/gated.txt" };
+                     permit(principal, action == Box::Action::"fs:read", resource)
+                     when { context.input.path == "~/gated.txt" }
+                     when temporal {
+                         formerly within 60s
+                         Box::Action::"fs:read"::response{ input.path: _, input.operation: Box::FsReadOperation::"read_metadata" }
+                     };"#
+            .to_string(),
+        }]));
+        let floor = ReachFloor {
+            reach,
+            inner: ShellPolicyInterceptor::into_handle_reporting_under(
+                policy,
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                &shared,
+            ),
+            recorder: DecisionRecorder::discarding(),
+        };
+        let metadata = strands_shell::FsOperation::ReadMetadata {
+            follow_symlinks: true,
+        };
+        let refused_text = refused.to_string_lossy();
+        let gated_text = gated.to_string_lossy();
+        let checked_text = checked.to_string_lossy();
+        let read_gated = EffectAttempt::Filesystem {
+            path: &gated_text,
+            operation: strands_shell::FsOperation::ReadContent,
+        };
+
+        assert!(
+            floor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: &refused_text,
+                    operation: metadata,
+                })
+                .await
+                .is_err(),
+            "the floor refuses a metadata read of private state"
+        );
+        assert!(
+            floor.intercept(&read_gated).await.is_err(),
+            "a refused metadata read is not a response"
+        );
+
+        floor
+            .intercept(&EffectAttempt::Filesystem {
+                path: &checked_text,
+                operation: metadata,
+            })
+            .await
+            .expect("a metadata read of a reachable file is permitted")
+            .record_outcome(EffectOutcome::Kernel(EffectResult::Completed))
+            .await
+            .expect("outcome reporting is best effort");
+        assert!(
+            floor.intercept(&read_gated).await.is_ok(),
+            "an answered metadata read meets the precondition"
+        );
+    }
+
     /// A `PATH` candidate inside trusted Box state is refused by the floor with no decision
     /// recorded, and one beside it passes.
     #[tokio::test]

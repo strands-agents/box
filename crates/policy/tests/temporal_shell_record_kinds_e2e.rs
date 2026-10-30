@@ -102,6 +102,11 @@ const READLINK_PROBES: (&str, &str, &str) = (
     "fs:read",
     r#"Box::FsReadOperation::"read_link""#,
 );
+const METADATA_PROBES: (&str, &str, &str) = (
+    "metadata",
+    "fs:read",
+    r#"Box::FsReadOperation::"read_metadata""#,
+);
 
 fn governed_by(base: &str, (name, action, operation): (&str, &str, &str)) -> String {
     format!("{base}{}", probes(name, action, operation))
@@ -251,18 +256,78 @@ fn a_readlink_that_fails_records_an_error_and_charges_nothing() {
     assert_eq!(kind, Some(false));
 }
 
-/// A probe write forbidden once at least `threshold` `set_permissions` responses are in history.
-fn at_least(threshold: u32) -> String {
+#[test]
+fn a_metadata_probe_that_finds_the_path_records_a_response() {
+    let project = project();
+    let mut shell = shell_over(
+        project.path(),
+        &governed_by(PROJECT_SCOPED, METADATA_PROBES),
+    );
+    let kind = run(async {
+        let tested = shell.run("test -e /work/file").await;
+        assert_eq!(tested.status, 0, "{}", rendered(&tested));
+        recorded_kind(&mut shell, project.path(), "metadata").await
+    });
+    assert_eq!(kind, Some(true));
+}
+
+#[test]
+fn a_metadata_probe_answered_no_records_a_response() {
+    for command in ["test -e /work/missing", "test -r /work/missing"] {
+        let project = project();
+        let mut shell = shell_over(
+            project.path(),
+            &governed_by(PROJECT_SCOPED, METADATA_PROBES),
+        );
+        let kind = run(async {
+            let tested = shell.run(command).await;
+            assert_eq!(tested.status, 1, "{command}: {}", rendered(&tested));
+            assert!(
+                !tested.stderr.contains("policy denied"),
+                "{command}: {}",
+                rendered(&tested)
+            );
+            recorded_kind(&mut shell, project.path(), "metadata").await
+        });
+        assert_eq!(kind, Some(true), "{command}");
+    }
+}
+
+#[test]
+fn a_read_metadata_budget_counts_probes_of_absent_paths() {
+    let project = project();
+    let source = format!(
+        "{PROJECT_SCOPED}{}{}",
+        at_least(METADATA_PROBES, 3),
+        at_least(METADATA_PROBES, 4)
+    );
+    let mut shell = shell_over(project.path(), &source);
+    let (three, four) = run(async {
+        for index in 0..3 {
+            let tested = shell.run(&format!("test -e /work/absent-{index}")).await;
+            assert_eq!(tested.status, 1, "{}", rendered(&tested));
+        }
+        (
+            probe(&mut shell, project.path(), "metadata-at-least-3").await,
+            probe(&mut shell, project.path(), "metadata-at-least-4").await,
+        )
+    });
+    assert!(three, "three absent-path probes spend a budget of three");
+    assert!(!four, "only three probes ran");
+}
+
+/// A probe write forbidden once at least `threshold` responses of one operation are in history.
+fn at_least((name, action, operation): (&str, &str, &str), threshold: u32) -> String {
     format!(
         r#"
-@id("at-least-{threshold}")
+@id("{name}-at-least-{threshold}")
 forbid(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource)
-when {{ context.input.path == "/work/probe-at-least-{threshold}" }}
+when {{ context.input.path == "/work/probe-{name}-at-least-{threshold}" }}
 when temporal {{
     exists (total: Long). (
         (count for (t: Timepoint). where (
             formerly within 3600s (
-                Box::Action::"fs:write"::response{{ input.path: _, input.operation: Box::FsWriteOperation::"set_permissions" }} && tp(t)
+                Box::Action::"{action}"::response{{ input.path: _, input.operation: {operation} }} && tp(t)
             )
         )) == total
         && total >= {threshold}
@@ -276,7 +341,11 @@ when temporal {{
 fn a_set_permissions_budget_counts_the_chmods_that_landed_and_not_the_one_that_failed() {
     let project = project();
     std::fs::write(project.path().join("other"), "payload").expect("a second file");
-    let source = format!("{PROJECT_SCOPED}{}{}", at_least(2), at_least(3));
+    let source = format!(
+        "{PROJECT_SCOPED}{}{}",
+        at_least(CHMOD_PROBES, 2),
+        at_least(CHMOD_PROBES, 3)
+    );
     let mut shell = shell_over(project.path(), &source);
     let (two, three) = run(async {
         for command in ["chmod 600 /work/file", "chmod 600 /work/other"] {
@@ -285,8 +354,8 @@ fn a_set_permissions_budget_counts_the_chmods_that_landed_and_not_the_one_that_f
         }
         assert_admitted_then_failed(&shell.run("chmod 600 /work/missing").await);
         (
-            probe(&mut shell, project.path(), "at-least-2").await,
-            probe(&mut shell, project.path(), "at-least-3").await,
+            probe(&mut shell, project.path(), "chmod-at-least-2").await,
+            probe(&mut shell, project.path(), "chmod-at-least-3").await,
         )
     });
     assert!(two, "two chmods landed, so the budget of two is spent");

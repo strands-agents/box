@@ -73,6 +73,10 @@ strands-box-egress-gateway = { path = "../egress-gateway" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# The shell parser fuzz tests: a random engine under `cargo test`, and libFuzzer in the long
+# run that docs/dev/fuzzing.md gives. The lock holds 0.13.4: a later bolero needs a derive crate that pins
+# `indexmap = "=2.11.2"`, older than the locked one.
+bolero = "0.13.4"
 
 [lints.rust]
 # A swallowed `Result` on a decision path is a compile error.

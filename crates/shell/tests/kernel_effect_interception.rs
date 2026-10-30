@@ -599,6 +599,120 @@ fn an_open_reports_a_descriptor_not_a_transfer() {
     }
 }
 
+/// An answered metadata probe reports a completed effect, whether the answer is yes or no.
+#[test]
+fn an_answered_probe_reports_a_completed_effect() {
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut shell = shell_with(interceptor);
+
+    let out = run(async {
+        shell
+            .run(
+                "printf x > /home/lash/present; test -e /home/lash/present; echo $?; \
+                 test -e /home/lash/absent; echo $?; test -r /home/lash/absent; echo $?; \
+                 test -L /home/lash/absent; echo $?",
+            )
+            .await
+    });
+    assert_eq!(out.stdout, "0\n1\n1\n1\n", "{}", out.stderr);
+
+    let recorded = outcomes.lock().unwrap().clone();
+    let probes: Vec<_> = recorded
+        .iter()
+        .filter(|(effect, _)| {
+            effect.starts_with("meta(")
+                && (effect.ends_with("/home/lash/present") || effect.ends_with("/home/lash/absent"))
+        })
+        .collect();
+    assert!(
+        probes
+            .iter()
+            .any(|(effect, _)| effect == "meta(follow=false) /home/lash/absent"),
+        "the absent-path lstat must report an outcome: {recorded:?}"
+    );
+    for (effect, result) in probes {
+        assert_eq!(*result, EffectResult::Completed, "{effect}");
+    }
+}
+
+/// A metadata probe that the admission-window guard refuses reports a failure, not an answer.
+#[test]
+fn a_probe_the_admission_window_refuses_reports_a_failure() {
+    struct Slow {
+        inner: Arc<Recorder>,
+    }
+
+    #[async_trait]
+    impl EffectInterceptor for Slow {
+        async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            self.inner.intercept(effect).await
+        }
+    }
+
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut shell = Shell::builder()
+        .effect_interceptor(Arc::new(Slow { inner: recorder }))
+        .build()
+        .expect("shell builds");
+
+    let out = run(async {
+        let setup = shell
+            .run("printf x > /home/lash/present && ln -s present /home/lash/link")
+            .await;
+        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
+        shell
+            .run(
+                "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do mkdir /home/lash/churn; rmdir /home/lash/churn; done & \\
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do test -e /home/lash/present; echo e$?; test -L /home/lash/link; echo l$?; test -r /home/lash/present; echo r$?; done; wait",
+            )
+            .await
+    });
+
+    let recorded = outcomes.lock().unwrap().clone();
+    let completed = |effect: &str| {
+        recorded
+            .iter()
+            .filter(|(seen, result)| seen == effect && *result == EffectResult::Completed)
+            .count()
+    };
+    let yes = |tag: &str| {
+        out.stdout
+            .lines()
+            .filter(|line| *line == format!("{tag}0"))
+            .count()
+    };
+    assert_eq!(
+        completed("meta(follow=true) /home/lash/present"),
+        yes("e") + yes("r"),
+        "only a stat or access that answered may report completed: {:?}",
+        out.stdout
+    );
+    assert_eq!(
+        completed("meta(follow=false) /home/lash/link"),
+        yes("l"),
+        "only an lstat that answered may report completed: {:?}",
+        out.stdout
+    );
+    assert!(
+        yes("e") + yes("l") + yes("r") < 60,
+        "the namespace churn must refuse at least one probe: {:?}",
+        out.stdout
+    );
+}
+
 /// A symlink cannot launder a denied read.
 ///
 /// `abs` normalizes a path string but does not follow symlinks. Admitting its output
@@ -1422,6 +1536,28 @@ fn a_supplied_kernel_is_mediated_identically() {
             mode: i32,
         ) -> bool {
             self.inner.access(proc, path, mode).await
+        }
+        async fn stat_answer(
+            &self,
+            proc: &strands_shell::os::Process,
+            path: Resolved,
+        ) -> io::Result<strands_shell::os::FileStat> {
+            self.inner.stat_answer(proc, path).await
+        }
+        async fn lstat_answer(
+            &self,
+            proc: &strands_shell::os::Process,
+            path: Resolved,
+        ) -> io::Result<strands_shell::os::FileStat> {
+            self.inner.lstat_answer(proc, path).await
+        }
+        async fn access_answer(
+            &self,
+            proc: &strands_shell::os::Process,
+            path: Resolved,
+            mode: i32,
+        ) -> io::Result<bool> {
+            self.inner.access_answer(proc, path, mode).await
         }
         async fn canonicalize(
             &self,
