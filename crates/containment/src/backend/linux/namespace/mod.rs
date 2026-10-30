@@ -394,6 +394,12 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
     }
 }
 
+fn close_confirm_writer(confirm_fd: Option<std::os::fd::RawFd>) {
+    let Some(fd) = confirm_fd else { return };
+    // SAFETY: best-effort close of the inherited status writer after its final byte.
+    unsafe { libc::close(fd) };
+}
+
 /// Retry interrupted waits and propagate only a normal reaper exit.
 fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()>) -> libc::c_int {
     let mut status = 0;
@@ -475,18 +481,34 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(127) };
     }
 
+    // Close the reaper's inherited descriptors before forking, so the workload does
+    // not inherit them a second time through PID 1.
+    let mut sweep_keep = keep.to_vec();
+    if let Some(fd) = confirm_fd {
+        sweep_keep.push(fd);
+    }
+    if let Err(error) = authority::close_inherited_descriptors(&sweep_keep) {
+        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: as above.
+        unsafe { libc::_exit(127) };
+    }
+    if let Err(error) = authority::refuse_process_memory_access() {
+        eprintln!(
+            "strands-box: namespace reaper could not refuse process-memory access \
+             ({error:?}); killing the namespace rather than starting a workload \
+             from a reachable PID 1"
+        );
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
+        unsafe { libc::_exit(127) };
+    }
+
     // The mount view is up and the workload is about to run: signal "reached exec" now. A long-lived
     // leaf (a streaming MCP server) never lets the status pipe EOF during its life — the reaper and
     // the waiter both hold the writer — so the supervisor must be told explicitly, not by EOF.
     write_confirm_byte(confirm_fd, EXEC_CONFIRM_BYTE);
-
-    // Close the reaper's inherited descriptors before forking, so the workload does
-    // not inherit them a second time through PID 1.
-    if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
-        // SAFETY: as above.
-        unsafe { libc::_exit(127) };
-    }
+    close_confirm_writer(confirm_fd);
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };
@@ -2581,5 +2603,74 @@ mod tests {
             );
             assert_eq!(received, expected_bytes, "{label}: wrong status bytes");
         }
+    }
+
+    #[test]
+    fn the_reaper_closes_the_exec_confirm_writer_before_the_workload_runs() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+
+        let mut pipe = [-1; 2];
+        // SAFETY: a plain pipe for this test's own status byte.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0,
+            "pipe2"
+        );
+        let [reader, writer] = pipe;
+
+        // SAFETY: the child applies containment. Only the contained workload returns.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+
+        if child == 0 {
+            // SAFETY: closing the child's copy of the read end.
+            unsafe { libc::close(reader) };
+            let backend = NamespaceBackend::with_probe_result(true);
+            if let Err(error) = backend.apply(&ContainmentConfig::new(), None, Some(writer), None) {
+                eprintln!("apply failed: {error}");
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(50) };
+            }
+            // SAFETY: `F_GETFD` only reads descriptor flags. EBADF proves the workload did not
+            // inherit the setup-status writer.
+            if unsafe { libc::fcntl(writer, libc::F_GETFD) } != -1 {
+                // SAFETY: terminating the child with a descriptor-inheritance failure.
+                unsafe { libc::_exit(70) };
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EBADF)
+            );
+            // SAFETY: the workload exits after checking its inherited descriptor table.
+            unsafe { libc::_exit(0) };
+        }
+
+        // SAFETY: closing the parent's copy of the write end.
+        unsafe { libc::close(writer) };
+        {
+            use std::io::Read as _;
+            use std::os::fd::FromRawFd as _;
+
+            // SAFETY: `reader` is this test's own read end, and the `File` takes ownership.
+            let mut reader = unsafe { std::fs::File::from_raw_fd(reader) };
+            let mut received = [0];
+            reader
+                .read_exact(&mut received)
+                .expect("read exec-confirm byte");
+            assert_eq!(received, [EXEC_CONFIRM_BYTE]);
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(libc::WIFEXITED(status), "the child must exit normally");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "70 means the workload inherited the exec-confirm writer"
+        );
     }
 }
