@@ -44,6 +44,21 @@ pub(crate) fn close_inherited_descriptors(keep: &[libc::c_int]) -> Result<(), Co
     verify_closed(&candidates)
 }
 
+/// Refuse process-memory access through procfs before the workload starts.
+pub(crate) fn refuse_process_memory_access() -> Result<(), ContainmentError> {
+    // SAFETY: a prctl with scalar arguments and no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(ContainmentError::ApplyFailed {
+            backend: MECHANISM.to_string(),
+            reason: format!(
+                "making the namespace supervisor non-dumpable: {}",
+                std::io::Error::last_os_error()
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Refuse if any descriptor this pass tried to close is still open.
 fn verify_closed(attempted: &[libc::c_int]) -> Result<(), ContainmentError> {
     for descriptor in attempted {

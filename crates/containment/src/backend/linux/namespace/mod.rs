@@ -487,6 +487,15 @@ fn establish_pid_namespace_and_reaper(
         // SAFETY: as above.
         unsafe { libc::_exit(127) };
     }
+    if let Err(error) = authority::refuse_process_memory_access() {
+        eprintln!(
+            "strands-box: namespace reaper could not refuse process-memory access \
+             ({error:?}); killing the namespace rather than starting a workload \
+             from a reachable PID 1"
+        );
+        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
+        unsafe { libc::_exit(127) };
+    }
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };
