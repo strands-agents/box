@@ -1,7 +1,7 @@
 # Examples
 
 Run an agent with project operations through Strands Shell, where Box applies the policy.
-Each example states its dependencies and run commands.
+Runnable examples state their dependencies and run commands.
 
 [Strands CLI](./strands-cli/): runs the Strands CLI under a policy on macOS, with Shell and
 `web_fetch` as its tools. It holds the finished files from
@@ -24,6 +24,10 @@ of five tasks.
 [pi](./pi/): runs pi under a policy on macOS with the project out of its own reach, so each file
 it reads, writes, or deletes goes through the box's shell. The
 [tutorial](../docs/user/tutorials/pi.md) walks through it with the output of six tasks.
+
+[Cloud deployment profiles](./cloud-deployments/): reference configurations for Amazon Bedrock
+AgentCore Runtime managed code, Runtime customer containers, and Lambda MicroVM.
+These profiles record tested requirements and qualification limits. Deployment scripts remain pending.
 
 Agent runs require model access. Each tutorial states its platform requirements.
 For Box installation and configuration, follow [getting started](../docs/user/getting-started.md).
