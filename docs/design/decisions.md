@@ -73,10 +73,11 @@ constrains what the program does.
 
 Linux evaluation requires the operator to set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` before using the command line or library.
 Help and version checks remain available without consent.
-Linux archives belong to `-linux-preview.N` prereleases; stable releases continue to distribute macOS alone.
-A stable Linux download would imply readiness that the current qualification does not establish, so it is excluded.
+Stable releases distribute macOS and Linux ARM64 archives together.
+Versions ending in `-linux-preview.N` distribute the same platforms as prereleases without replacing the latest stable release.
+The release owner must establish readiness before approving publication; package availability alone does not establish security acceptance.
 Operators and test automation must opt in, and the flag does not grant filesystem access or establish security acceptance.
-Removing these controls requires a later readiness decision.
+Removing the runtime consent requirement requires a separate readiness decision.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection

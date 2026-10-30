@@ -3,8 +3,8 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS tarball and SHA256SUMS.txt to a stable GitHub Release. Linux preview
-# versions also publish the ARM64 Linux tarball, on a prerelease only.
+# the macOS and ARM64 Linux tarballs with SHA256SUMS.txt to a GitHub Release.
+# Linux preview versions publish the same platforms as a prerelease.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Stable: 0.1.1. Experimental Linux preview: 0.1.1-linux-preview.1. No leading v.'
+        description: 'macOS + Linux ARM64. Stable: 0.1.1. Preview: 0.1.1-linux-preview.1. No leading v.'
         required: true
         type: string
       sha:
@@ -577,10 +577,7 @@ jobs:
             echo "::error::missing the ARM64 Linux tarball $linux"
             exit 1
           fi
-          cp "$darwin" release/
-          if [ "$LINUX_PREVIEW" = "true" ]; then
-            cp "$linux" release/
-          fi
+          cp "$darwin" "$linux" release/
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
@@ -620,10 +617,10 @@ jobs:
             exit 1
           fi
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
-          release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
-          if [ "$LINUX_PREVIEW" = "true" ]; then
-            release_assets+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
-          fi
+          release_assets=(
+            "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          )
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
             echo "::error::release bundle has an unexpected asset set: $released"
@@ -732,7 +729,14 @@ jobs:
             cat >> body.md <<EOF
           ## Experimental Linux preview
 
-          Linux support is experimental and requires explicit opt-in. This preview does not establish security acceptance or production readiness.
+          This preview does not establish security acceptance or production readiness.
+          EOF
+          else
+            printf "\n## Linux ARM64\n" >> body.md
+          fi
+          cat >> body.md <<EOF
+
+          Linux startup requires explicit opt-in with \`EXPERIMENTAL_LINUX_SUPPORT=TRUE\`.
 
           For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
@@ -747,7 +751,6 @@ jobs:
 
           The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
           EOF
-          fi
           cat >> body.md <<EOF
           ## Assets
 
@@ -820,11 +823,9 @@ jobs:
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
             "SHA256SUMS.txt"
           )
-          if [ "$LINUX_PREVIEW" = "true" ]; then
-            expected+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
-          fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
               missing=0
