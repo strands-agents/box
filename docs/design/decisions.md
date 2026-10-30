@@ -785,9 +785,10 @@ as a bound name, and on a host bind a rename onto a symlink is refused beneath p
 There is no credential action in the schema. An operator declares a binding in `box.toml`, and that
 binding says only which secret is attached to a request the policy already permits. Reachability stays
 the policy's decision alone, so a binding never opens a destination, and the two must name the same
-host. There is no spelling for ambient credentials: an empty `aws://` body does not parse, because
-silent pickup of whatever credentials sit in the environment is exactly what a zero-trust box must not
-do. A secret rides TLS only; see [a secret rides only TLS](#a-secret-rides-only-tls).
+host. There is no *silent* pickup of ambient credentials: an empty `aws://` body does not parse, and
+the only host-provided identities are the two reserved tokens the operator names explicitly
+([the execution-role tokens](#aws-execution-role-tokens)), which warn on every use and which a
+deployment can refuse. A secret rides TLS only; see [a secret rides only TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 ### A temporal rule rides the same closed context as an ordinary rule
@@ -1801,6 +1802,25 @@ named is a silent authority change. A named profile resolves through the AWS pro
 exception refused by name: `credential_process`. Honouring it would make the box's trusted process run
 a program that `~/.aws/config` names, and no floor defends that file, so it is the
 never-run-a-workload-named-program rule applied to credentials.
+
+<a id="aws-execution-role-tokens"></a>
+### Two reserved tokens sign with the compute host's execution role
+
+`aws://@instance-role` and `aws://@container-role` sign with the identity the AWS compute host
+provides: the first reads EC2 instance metadata, which also serves the AgentCore microVM metadata
+service, and the second reads the ECS, Fargate, or EKS container-credentials endpoint. The box
+resolves both through the official AWS SDK's instance-metadata and container providers, and nothing
+else: it does not run the SDK default chain, which would also run `credential_process`, SSO, and
+assume-role, and would make the signing identity ambient and host-dependent rather than one the
+operator named. The SDK resolver runs in the `box` crate's trusted process and reaches the vault
+through a sealed `credentials` seam, so the `credentials` crate still links no HTTP client of its
+own. A reserved token rides the existing `aws://` vocabulary rather than a new scheme, and a profile
+name cannot begin with `@`, so a token and a profile never overlap; `aws://default` was rejected
+because `default` is a real profile and the overlap would be a silent identity substitution. The
+costs: the AWS SDK and an HTTP stack now link into the trusted process; the SDK caches and refreshes
+the temporary credentials, so plaintext session credentials live in that process's defended but
+un-wiped heap between requests; and the host role is usually broad, so an operator must scope the
+signed route's destination as tightly as the role allows.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

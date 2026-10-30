@@ -199,10 +199,16 @@ impl Vault {
         )
     }
 
-    /// Resolve one signed route's credentials, dispatching on the locator scheme.
+    /// Resolve one signed route's credentials, dispatching on the locator scheme and body.
+    ///
+    /// A `credsd://` locator routes to the credsd client; an `aws://@…` token routes to the
+    /// injected execution-role resolver; every other `aws://` locator is the scoped/ambient source.
     fn resolve_signed(&self, config: &Locator) -> Result<AwsResolution> {
         if config.scheme() == CREDSD_SCHEME {
             return self.resolve_credsd(config);
+        }
+        if let Some(role) = AwsSource::execution_role(config)? {
+            return self.resolve_execution_role(role);
         }
         AwsSource::with_policy(self.ambient_policy()).resolve(config)
     }

@@ -97,10 +97,17 @@ names the route.
 hex characters. `box.toml` calls it a phantom. The workload can read it, and so learn that a
 credential exists, but the value authenticates nothing anywhere.
 
-**A named AWS profile is the only identity.** An `aws://` route never falls back to the ambient
+**A named AWS profile names its identity.** An `aws://PROFILE` route never falls back to the ambient
 `AWS_*` variables, and it refuses a profile that uses `credential_process`, because that would make
 the box's trusted process run a program a configuration file names
 ([a provider refuses an identity it can't honour](./decisions.md#a-provider-refuses-an-identity-it-cannot-honour)).
+
+**Two reserved tokens name the compute host's execution role.** `aws://@instance-role` and
+`aws://@container-role` sign with the role the host provides, for a box deployed on AWS. These are
+explicit, named spellings, so the box still never picks up an identity silently, but the identity
+is host-provided rather than a scoped profile, so the box warns on each use. A deployment that
+requires a scoped profile refuses both tokens. A profile name cannot begin with `@`, so a token and
+a profile never overlap. [Signed routes](#signed-routes-aws) says how they resolve.
 
 ## On each request
 
@@ -212,8 +219,17 @@ from the host, which must end in `.amazonaws.com` or `.api.aws`, and refuses a h
 The process gets placeholder AWS keys so that an AWS SDK builds and signs its own request. The
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
-**`aws://` signs with static keys.** The vault resolves the profile's access key and secret key
-on each request.
+**`aws://PROFILE` signs with static keys.** The vault resolves the profile's access key and secret
+key on each request.
+
+**`aws://@instance-role` and `aws://@container-role` sign with the host's execution role.** The box
+resolves them through the official AWS SDK — the instance-metadata provider (IMDS, which also
+answers the AgentCore MMDS endpoint) and the container-credentials provider (ECS, Fargate, and
+EKS). The SDK runs in the box's `run` process, not in the credentials crate, which links no HTTP
+client of its own. The SDK's provider caches the temporary credentials and refreshes them on
+expiry, so a steady stream of requests makes no extra metadata call. A route that names a token
+resolves it once at startup, so a box on a host with no reachable endpoint or no attached role
+fails fast rather than at the first request.
 
 <a id="credentials-in-a-leaf-box"></a>
 

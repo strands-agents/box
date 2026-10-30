@@ -1004,6 +1004,106 @@ fn a_signed_route_strips_the_workloads_own_signing_headers() {
     clear_var("AWS_REGION");
 }
 
+/// A host execution-role token signs each request with the credentials the injected resolver
+/// returns, through the public seam alone — the box crate injects an SDK-backed resolver this same
+/// way. The resolver here is a fake; it stands in for the AWS SDK and proves the dispatch path.
+#[test]
+fn an_instance_role_token_signs_with_the_resolved_identity() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resolver = credentials::AwsExecutionRoleResolver::new(move |kind| {
+        assert_eq!(kind, credentials::AwsExecutionRoleKind::Instance);
+        seen.fetch_add(1, Ordering::Relaxed);
+        Ok(credentials::AwsExecutionRoleCredentials {
+            access_key_id: "ASIATESTONLYNOTREAL".to_string(),
+            secret_access_key: "test-only-not-real".to_string(),
+            session_token: "session-token-not-real".to_string(),
+        })
+    });
+
+    let store = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant-a")
+            .aws_execution_role_resolver(resolver)
+            .route(RouteSpec::signed_aws(
+                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                Locator::parse_uri("aws://@instance-role").unwrap(),
+            )),
+    )
+    .expect("the injected resolver answers at preflight")
+    .into_vault();
+
+    // The preflight resolved once at open.
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "one preflight resolve");
+
+    let attachment = store
+        .attach_for(Outbound {
+            destination: dest(
+                "bedrock-runtime.us-west-2.amazonaws.com",
+                443,
+                "/model/invoke",
+            ),
+            method: "POST",
+            url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/invoke",
+            query: "",
+            headers: &[],
+            body: b"{}",
+        })
+        .expect("the token route signs")
+        .expect("a credential is bound for this destination");
+
+    // The request resolved again (per-request), so two resolves total.
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        2,
+        "the request leg resolves per request"
+    );
+
+    let signed: Vec<(String, String)> = attachment
+        .set_headers()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    let rendered = format!("{signed:?}");
+
+    let authorization = signed
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+        .map(|(_, value)| value.as_str())
+        .expect("a token route sets Authorization");
+    assert!(
+        authorization.starts_with("AWS4-HMAC-SHA256 Credential=ASIATESTONLYNOTREAL/"),
+        "the box signs with the resolved host identity: {authorization}"
+    );
+    // The session token rides as a header, and the secret key never appears in any value.
+    assert!(
+        signed.iter().any(
+            |(name, value)| name.eq_ignore_ascii_case("X-Amz-Security-Token")
+                && value == "session-token-not-real"
+        ),
+        "the session token is attached: {rendered}"
+    );
+    assert!(
+        !rendered.contains("test-only-not-real"),
+        "the secret access key must never reach a header: {rendered}"
+    );
+}
+
+/// With no resolver injected, a token route fails the open closed — never an ambient substitute.
+#[test]
+fn a_token_route_without_a_resolver_fails_the_open() {
+    let err = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
+        RouteSpec::signed_aws(
+            DestinationPattern::parse("*.amazonaws.com").unwrap(),
+            Locator::parse_uri("aws://@container-role").unwrap(),
+        ),
+    ))
+    .expect_err("no resolver means the token cannot resolve");
+    assert!(!err.is_soft());
+    assert!(err.to_string().contains("@container-role"), "{err}");
+}
+
 /// The `Backend::resolve` door: one locator to plaintext, with no destination, tenant, or request.
 ///
 /// This is the ingress front door's whole integration with the crate, and the one place a plaintext

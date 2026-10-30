@@ -338,7 +338,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, or `aws://PROFILE` for SigV4 signing. Required. A literal value is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` for SigV4 signing, or `aws://@instance-role` / `aws://@container-role` to sign with the compute host's execution role. Required. A literal value is refused. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |

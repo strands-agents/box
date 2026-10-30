@@ -14,9 +14,12 @@ mod file;
 mod op;
 
 pub(crate) use aws::{
-    AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
-    sign_request,
+    AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, ExecutionRole,
+    credsd_session_credentials, sign_request,
 };
+// The three names the box supplies to inject the SDK-backed execution-role resolver cross the
+// crate façade, so they are re-exported publicly here and again from `lib.rs`.
+pub use aws::{AwsExecutionRoleCredentials, AwsExecutionRoleKind, AwsExecutionRoleResolver};
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
 pub(crate) use env::EnvSource;
 pub(crate) use file::FileSource;

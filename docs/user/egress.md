@@ -50,7 +50,7 @@ when { context.input.host == "api.github.com" };
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
-| `secret.ref` | string | required | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `secret.ref` | string | required | Where the credential comes from: `env://NAME`, `aws://PROFILE`, `aws://@instance-role`, or `aws://@container-role`. See [Credential sources](#credential-sources). |
 | `secret.placement` | string | `header` | For `env://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
 | `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` with `placement = "header"`: the text before the credential. |
@@ -93,11 +93,21 @@ paths in policy.
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
+| `aws://@instance-role` | The host's instance role, over the AWS SDK: EC2 instance metadata (IMDS), or the AgentCore microVM metadata service (MMDS). | On each request. The box caches the credentials and refreshes them on expiry. |
+| `aws://@container-role` | The host's container role, over the AWS SDK: the ECS, Fargate, or EKS container-credentials endpoint. | On each request. The box caches the credentials and refreshes them on expiry. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The agent gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
 values, and the gateway signs each request to the destinations. The service and region come from
 the host, which ends in `.amazonaws.com` or `.api.aws`.
+
+The two `@`-tokens sign with the identity the compute host provides, for a box deployed on AWS.
+This is a host-provided identity, not one you named, so the box prints a warning on each use and
+the role is often broad: scope the route's destinations as tightly as the role allows. Run the box
+on the host whose role you want; the box reads the role through the AWS SDK and never from a file.
+A deployment can refuse these tokens entirely. The box denies the workload its own route to the
+metadata endpoint, so the box stays the only path to the role. A `box.toml` profile name cannot
+begin with `@`; that prefix is reserved for these tokens.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.

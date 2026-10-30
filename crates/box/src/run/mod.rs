@@ -13,6 +13,7 @@
 //! | [`telemetry`] | this box's own collector and effective decision recorder |
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
 
+pub(crate) mod aws_role;
 pub(crate) mod broker;
 pub(crate) mod configure;
 pub(crate) mod contain;
