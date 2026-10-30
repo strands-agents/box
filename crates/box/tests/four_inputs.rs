@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds nine keys, and the four inputs still stand
+//! # The configuration holds ten keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
@@ -151,7 +151,9 @@ fn the_stored_record_carries_every_authored_key() {
         "the field reader found nothing: authored={authored:?} stored={stored:?}"
     );
 
-    for key in &authored {
+    // `upstream-ca-file` is read from `box.toml` on every `run` and reaches the gateway through
+    // `ConfigureRequest`, so the stored record has nothing to keep.
+    for key in authored.iter().filter(|key| *key != "upstream_ca_file") {
         assert!(
             stored.contains(key),
             "`Record` has no `{key}`, so `configure` drops that authored key and the operator's \
@@ -197,10 +199,12 @@ fn the_config_record_carries_only_the_four_inputs() {
             "name",
             "policy",
             "telemetry",
-            "tool"
+            "tool",
+            "upstream_ca_file"
         ],
-        "the nine config keys include explicit experimental enforcement selection. \
+        "the ten config keys include explicit experimental enforcement selection. \
          `experimental-features` adds native policy checks without granting filesystem reach. \
+         `upstream-ca-file` adds trust roots for upstream TLS and authorizes nothing. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }

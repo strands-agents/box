@@ -127,7 +127,8 @@ encoded, removes `.` and `..` segments, and leaves out the query.
 
 **The gateway opens TLS to the server last.** Only after `http:request` permits does it connect TLS
 to the server, verify the server's certificate against a compiled-in set of public root
-certificates, and forward the request. Each connection carries one request.
+certificates plus the operator's `upstream-ca-file`
+([why](./decisions.md#extra-upstream-roots-come-from-one-operator-file)), and forward the request. Each connection carries one request.
 
 **A refusal is marked.** A request the gateway refuses gets a 403 with the header
 `x-strands-box-egress: refused`, and a body that says why. A `net:connect` refusal of a `CONNECT`
