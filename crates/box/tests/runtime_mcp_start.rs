@@ -206,3 +206,27 @@ fn a_start_is_decided_on_the_canonical_program_and_its_arguments() {
         "the refused start is recorded against its canonical program"
     );
 }
+
+#[test]
+fn a_refused_server_ends_its_alias_while_the_client_keeps_writing() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-start-refused-flood");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    box_.write_workspace_as_authored(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    let exit = box_
+        .open_client("alpha-mcp")
+        .flood_and_wait(&request, 2_000, SHUTDOWN);
+    assert!(!exit.status.success(), "{}", exit.stderr);
+    assert!(exit.stderr.contains("may not start"), "{}", exit.stderr);
+
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}

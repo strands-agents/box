@@ -660,11 +660,46 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
-  frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
-  the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
-  deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
-  as `the call exceeded its deadline`. Two things worth not repeating:
+- **The alias forwards its stdin, and ends it with `StdinEof` while the connection stands.** Every
+  alias sends one frame sequence: `Open`, `Call` for a submission, the alias's stdin as `Input`
+  frames, then **`StdinEof`**. A harness hook reads its payload on stdin, so a hook rewritten to
+  `zsh -c` needs that input. One `pump_stdin` sends it, in one of three `StdinMode`s:
+  - **`Grace`, for a Shell Call** (see `STDIN_GRACE` below).
+  - **`Stream`, for an MCP server**, with no grace, because a quiet client between requests must
+    not get an EOF.
+  - **`Closed`, for a Python Call**, which is the zero-`Input` case of the same sequence. Monty has
+    no `input()` and no `sys.stdin`, and reading the alias's stdin would take bytes from the
+    commands after it, which breaks `while read f; do python3 …; done < list`.
+    `box_shell.rs::a_python_call_leaves_stdin_to_the_commands_after_it` pins it. The broker also
+    takes `Input` and `StdinEof` for a Python Program and drops them, so a client that sends them
+    gets no refusal; `host.rs::a_python_program_drops_input_and_refuses_signal_by_name` pins that.
+
+  **An MCP alias lives until its client closes stdin, or until a write after the session fails.**
+  A client expects its stdio server process to stay up, and
+  `runtime_mcp_policy_staging.rs::one_failure_reaps_all_live_leader_and_follower_groups_before_exchange_close`
+  asserts it. While it waits, the alias drains the socket, so the broker never blocks on a frame
+  nobody reads. A `Denied` frame ends the alias at once. The `Input` writes carry no timeout,
+  because a cancelled write leaves part of a frame on the socket and no `StdinEof` can follow it.
+  The EOF is not optional. Without it the Program's stdin channel stays open, and any command that
+  pre-reads stdin blocks to its deadline — the `lua` builtin does exactly that, so **every** `lua`
+  call took 34–36s and came back as `the call exceeded its deadline`. That is also why
+  `STDIN_GRACE` exists: a harness can hold the alias's stdin open and write nothing, so a stdin
+  that yields no byte and no EOF within 200 ms is treated as empty. The cost is that a writer
+  silent for longer before its first byte loses its input.
+  `box_shell.rs::a_silent_open_stdin_does_not_hold_a_command_that_pre_reads_it` pins the grace,
+  and `box_cardinality.rs::e5a_stdin_reaches_a_shell_command` pins the forwarding.
+
+  **The broker holds at most `MAX_BUFFERED_INPUT_BYTES` (1 MiB) of unread stdin per Program,
+  counted in bytes.** There is no flow-control frame, so the alias sends as fast as it reads, and
+  `feed_stdin` refuses past the budget with `Denied { FlowControl }`, which the alias treats as
+  terminal. Each queued chunk is a `Bytes::from_owner(BufferedInput)` whose `Drop` releases its
+  bytes when the reader takes it. The vendored `FdReader` copies a partly read chunk into its own
+  remainder, so the real hold is the budget plus one chunk. A count of chunks would not bound
+  memory, because a raw client sends `Input` frames up to `MAX_FRAME_BYTES`; the 256-slot channel
+  binds first only for chunks under 4 KiB, which a slow writer of short lines can produce.
+  `host.rs::unread_stdin_is_held_up_to_the_byte_budget` pins the budget, and
+  `box_shell.rs::read_stdin_releases_its_bytes_from_the_broker_budget` pins the release.
+  Two things worth not repeating:
   - **`close_stdin` must drop the sender, not send an empty frame.** The vendored `ChannelReader`
     reaches end-of-stream only on `Poll::Ready(None)` — every sender gone. A zero-length recv is a
     successful 0-byte read, so `read_to_string_limited` loops on it forever. `ProgramControl` holds

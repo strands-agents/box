@@ -37,6 +37,10 @@ const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bound on waiting for the daemon's Shell to answer.
 const SERVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// How long a stdin that yields neither a byte nor end-of-file is waited for before the alias
+/// closes the command's stdin.
+const STDIN_GRACE: Duration = Duration::from_millis(200);
+
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
 struct Mode {
@@ -240,7 +244,7 @@ fn parse_script_alias(executable: &Path, arguments: Vec<OsString>) -> io::Result
 
 /// Pump one MCP server's traffic: stdin to the box, the box's output to stdout.
 async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Result<i32> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncWriteExt as _;
 
     write_frame(
         &mut stream,
@@ -255,36 +259,9 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
     let (mut readable, mut writable) = stream.into_split();
 
     // stdin -> the box. Its own task, because the two directions are independent: a client may send
-    // a request while a previous answer is still arriving.
-    let inbound = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = match stdin.read(&mut buffer).await {
-                Ok(0) | Err(_) => break,
-                Ok(read) => read,
-            };
-            let frame = Frame {
-                version: PROTOCOL_VERSION,
-                program: ALIAS_PROGRAM,
-                body: Body::Input {
-                    data: encode_payload(&buffer[..read]),
-                },
-            };
-            if write_frame(&mut writable, &frame).await.is_err() {
-                return;
-            }
-        }
-        let _ = write_frame(
-            &mut writable,
-            &Frame {
-                version: PROTOCOL_VERSION,
-                program: ALIAS_PROGRAM,
-                body: Body::InputEof,
-            },
-        )
-        .await;
-    });
+    // a request while a previous answer is still arriving. No grace, because an MCP client may stay
+    // quiet between requests. The task drops the write half at end-of-file, which ends the session.
+    let inbound = tokio::spawn(async move { pump_stdin(&mut writable, StdinMode::Stream).await });
 
     // The box -> stdout.
     let mut stdout = tokio::io::stdout();
@@ -301,8 +278,7 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
                 stdout.write_all(&bytes).await?;
                 stdout.flush().await?;
             }
-            // A refusal is a failure exit and is terminal. Printing the reason and looping left
-            // `status` at 0, so a refused MCP server closed the connection and the alias exited
+            // A refusal is a failure exit, and it ends the alias at once.
             Body::Denied { reason, .. } => {
                 eprintln!("strands-box: {reason}");
                 return Ok(i32::from(SHELL_FAILURE_EXIT));
@@ -314,8 +290,17 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
             _ => {}
         }
     }
-    inbound.abort();
-    Ok(status)
+    // A stdio server process lives until its client closes stdin. The socket is drained meanwhile,
+    // so the broker never blocks on a frame nobody reads.
+    let draining = async { while let Ok(Some(_)) = read_frame::<Frame, _>(&mut readable).await {} };
+    tokio::pin!(inbound, draining);
+    let mut drained = false;
+    loop {
+        tokio::select! {
+            _ = &mut inbound => return Ok(status),
+            () = &mut draining, if !drained => drained = true,
+        }
+    }
 }
 
 /// Derive a socket path from the alias's grandparent, never from an argument.
@@ -367,15 +352,13 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
         return stream_mcp(stream, interpreter).await;
     }
 
-    // `InputEof` immediately after the Call, because this alias forwards no input: a harness
-    // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
+    let reads_stdin = reads_stdin(&interpreter);
     for body in [
         Body::Open { mode: interpreter },
         Body::Call {
             source,
             correlation: Box::new(call_correlation()),
         },
-        Body::InputEof,
     ] {
         tokio::time::timeout(
             SERVE_IO_TIMEOUT,
@@ -393,15 +376,118 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
     }
 
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
-    // while it runs.
+    // while it runs. The write half is held until the Program exits, because dropping it shuts the
+    // socket's write side, which the broker reads as a disconnect.
+    let (mut readable, mut writable) = stream.into_split();
+    let relaying = relay(&mut readable);
+    let mode = if reads_stdin {
+        StdinMode::Grace(STDIN_GRACE)
+    } else {
+        StdinMode::Closed
+    };
+    let feeding = pump_stdin(&mut writable, mode);
+    tokio::pin!(relaying, feeding);
+    let mut fed = false;
     loop {
-        let frame =
-            tokio::time::timeout(SERVE_RESPONSE_TIMEOUT, read_frame::<Frame, _>(&mut stream))
-                .await
-                .map_err(|_| timed_out("read a transport frame"))??
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed")
-                })?;
+        tokio::select! {
+            result = &mut relaying => return result,
+            () = &mut feeding, if !fed => fed = true,
+        }
+    }
+}
+
+/// How [`pump_stdin`] treats this alias's stdin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdinMode {
+    /// Forward every byte until end-of-file, terminal included.
+    Stream,
+    /// Forward stdin, except a terminal or a stdin silent this long before its first byte.
+    Grace(Duration),
+    /// Read nothing and send `InputEof` at once.
+    Closed,
+}
+
+/// Whether a Call on `interpreter` reads this alias's stdin. Monty has no `input()` and no
+/// `sys.stdin`, so a Python Call leaves stdin to the commands after it.
+fn reads_stdin(interpreter: &Interpreter) -> bool {
+    !matches!(interpreter, Interpreter::Python)
+}
+
+/// Send this alias's stdin to the Program as `Input` frames, then `InputEof`.
+async fn pump_stdin(writable: &mut tokio::net::unix::OwnedWriteHalf, mode: StdinMode) {
+    use std::io::{IsTerminal as _, Read as _};
+
+    let grace = match mode {
+        StdinMode::Grace(grace) => Some(grace),
+        StdinMode::Stream | StdinMode::Closed => None,
+    };
+    let (chunks, mut received) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let reads = match mode {
+        StdinMode::Stream => true,
+        StdinMode::Grace(_) => !std::io::stdin().is_terminal(),
+        StdinMode::Closed => false,
+    };
+    if reads {
+        // A detached thread, so a stdin that never closes cannot hold the process open at exit.
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if chunks.blocking_send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        drop(chunks);
+    }
+    let mut next = match grace {
+        Some(grace) => tokio::time::timeout(grace, received.recv())
+            .await
+            .unwrap_or(None),
+        None => received.recv().await,
+    };
+    while let Some(chunk) = next {
+        let frame = Frame {
+            version: PROTOCOL_VERSION,
+            program: ALIAS_PROGRAM,
+            body: Body::Input {
+                data: encode_payload(&chunk),
+            },
+        };
+        // No timeout here: a cancelled write would leave part of a frame on the socket.
+        if write_frame(&mut *writable, &frame).await.is_err() {
+            return;
+        }
+        next = received.recv().await;
+    }
+    let _ = write_frame(
+        &mut *writable,
+        &Frame {
+            version: PROTOCOL_VERSION,
+            program: ALIAS_PROGRAM,
+            body: Body::InputEof,
+        },
+    )
+    .await;
+}
+
+/// Relay the Program's output to this process until it exits.
+async fn relay(readable: &mut tokio::net::unix::OwnedReadHalf) -> io::Result<i32> {
+    loop {
+        let frame = tokio::time::timeout(
+            SERVE_RESPONSE_TIMEOUT,
+            read_frame::<Frame, _>(&mut *readable),
+        )
+        .await
+        .map_err(|_| timed_out("read a transport frame"))??
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
         match frame.body {
             Body::Output {
                 stream: which,

@@ -991,19 +991,19 @@ async fn serve_transport(
                 }
                 // **A Python Program is asked about before `control_for`.** It lives in its own set, and
                 // `control_for` consults only `programs` and `running` — so `Input` reported "not open"
-                // for a Program that was open, and `InputEof` and `Signal` were dropped in silence,
-                // leaving no way to interrupt a running script.
-                Body::Input { .. } | Body::InputEof | Body::Signal { .. }
-                    if python.contains(&id) =>
-                {
+                // for a Program that was open, and `Signal` was dropped in silence, leaving no way to
+                // interrupt a running script. Every alias sends the same frame sequence, so a Python
+                // Program takes `Input` and `InputEof` and drops them, because it reads no input.
+                Body::Input { .. } | Body::InputEof if python.contains(&id) => {}
+                Body::Signal { .. } if python.contains(&id) => {
                     deny(
-                    &frames,
-                    id,
-                    DeniedKind::TransportError,
-                    "a Python program reads no input and observes no signal: it runs one Call to \
-                     completion and reports its output",
-                )
-                .await?;
+                        &frames,
+                        id,
+                        DeniedKind::TransportError,
+                        "a Python program observes no signal: it runs one Call to completion and \
+                         reports its output",
+                    )
+                    .await?;
                 }
                 Body::Input { data } => {
                     let bytes = decode_payload(&data)?;
@@ -3782,6 +3782,71 @@ done"#;
         }));
     }
 
+    /// A Program that reads no stdin holds up to its byte budget, and the next chunk is refused.
+    #[test]
+    fn unread_stdin_is_held_up_to_the_byte_budget() {
+        use crate::run::broker::program::MAX_BUFFERED_INPUT_BYTES;
+        use crate::run::broker::protocol::MAX_CHUNK_BYTES;
+
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(short_connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "sleep 60".to_string(),
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let chunk = encode_payload(&vec![b'x'; MAX_CHUNK_BYTES]);
+            let within = MAX_BUFFERED_INPUT_BYTES / MAX_CHUNK_BYTES;
+            for _ in 0..within {
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: chunk.clone(),
+                    },
+                )
+                .await;
+            }
+            let early = tokio::time::timeout(
+                Duration::from_millis(500),
+                read_frame::<Frame, _>(&mut reader),
+            )
+            .await;
+            assert!(
+                early.is_err(),
+                "{within} chunks fit the budget, so nothing may be refused: {early:?}"
+            );
+
+            put(&mut writer, 1, Body::Input { data: chunk }).await;
+            let frame = read_frame::<Frame, _>(&mut reader)
+                .await
+                .expect("read")
+                .expect("a frame");
+            match frame.body {
+                Body::Denied { kind, .. } => assert_eq!(kind, DeniedKind::FlowControl),
+                other => panic!("expected a flow-control refusal, got {other:?}"),
+            }
+        }));
+    }
+
     /// Closing a Program mid-Call is final: a later `Open` at the same id is not clobbered.
     #[test]
     fn closing_a_running_program_does_not_resurrect_it() {
@@ -4035,14 +4100,14 @@ done"#;
         }));
     }
 
-    /// **A Python Program refuses `Input`, `InputEof` and `Signal` by name.**
+    /// **A Python Program drops `Input` and `InputEof`, and refuses `Signal` by name.**
     ///
+    /// Every alias sends `Input…` and `InputEof`, so a Python Program takes them and reads none.
     /// A Python Program lives in its own set and `control_for` consults only `programs` and
-    /// `running`, so `Input` answered "transport program 3 is not open" for a Program that was open,
-    /// and `InputEof` and `Signal` were dropped in silence — no way to interrupt a running script and
-    /// no frame saying so. Nothing covered any of the three.
+    /// `running`, so `Signal` was once dropped in silence — no way to interrupt a running script and
+    /// no frame saying so.
     #[test]
-    fn a_python_program_refuses_input_and_signal_by_name() {
+    fn a_python_program_drops_input_and_refuses_signal_by_name() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4057,38 +4122,66 @@ done"#;
                 },
             )
             .await;
-
-            for body in [
+            put(
+                &mut writer,
+                3,
                 Body::Input {
                     data: encode_payload(b"ignored"),
                 },
-                Body::InputEof,
+            )
+            .await;
+            put(&mut writer, 3, Body::InputEof).await;
+            let quiet = tokio::time::timeout(
+                Duration::from_millis(300),
+                read_frame::<Frame, _>(&mut reader),
+            )
+            .await;
+            assert!(
+                quiet.is_err(),
+                "Input and InputEof must be dropped with no answer: {quiet:?}"
+            );
+
+            put(
+                &mut writer,
+                3,
                 Body::Signal {
                     kind: SignalKind::Interrupt,
                 },
-            ] {
-                let named = format!("{body:?}");
-                put(&mut writer, 3, body).await;
-                let outcome = read_frame::<Frame, _>(&mut reader).await;
-                let Ok(Some(frame)) = outcome else {
-                    panic!("{named} must be answered, not dropped: {outcome:?}");
-                };
-                match frame.body {
-                    Body::Denied { kind, reason } => {
-                        assert_eq!(kind, DeniedKind::TransportError, "{named}");
-                        assert!(
-                            !reason.contains("not open"),
-                            "{named}: the Program IS open; that message was the defect: {reason}"
-                        );
-                        assert!(
-                            reason.contains("no input") || reason.contains("no signal"),
-                            "{named}: the refusal must say what a Python program does not take: \
-                             {reason}"
-                        );
-                    }
-                    other => panic!("{named} must be refused by name, got {other:?}"),
+            )
+            .await;
+            let outcome =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<Frame, _>(&mut reader))
+                    .await;
+            let Ok(Ok(Some(frame))) = outcome else {
+                panic!("Signal must be answered, not dropped: {outcome:?}");
+            };
+            match frame.body {
+                Body::Denied { kind, reason } => {
+                    assert_eq!(kind, DeniedKind::TransportError);
+                    assert!(
+                        !reason.contains("not open"),
+                        "the Program IS open; that message was the defect: {reason}"
+                    );
+                    assert!(
+                        reason.contains("no signal"),
+                        "the refusal must say what a Python program does not take: {reason}"
+                    );
                 }
+                other => panic!("Signal must be refused by name, got {other:?}"),
             }
+
+            put(
+                &mut writer,
+                3,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "print(6 * 7)".to_string(),
+                },
+            )
+            .await;
+            let (text, status) = collect(&mut reader, 3).await;
+            assert!(text.contains("42"), "the Program still runs: {text:?}");
+            assert_eq!(status, 0, "{text:?}");
         }));
     }
 
