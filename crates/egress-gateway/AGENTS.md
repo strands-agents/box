@@ -40,7 +40,7 @@ The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and retur
 ### One thing here is deliberately not authorization
 
 The gateway holds no destination deny list. A metadata or link-local address is refused by a policy
-`forbid` on `context.input.ip`, decided on the pinned address
+`forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
 - **`CapabilitySet` holds the credential mutators, not a second authority.** `CapabilityOutcome` is

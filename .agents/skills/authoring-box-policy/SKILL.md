@@ -335,7 +335,8 @@ Point the operator at the bundled `examples/`; these are the patterns that recur
 - Do not rely on an `[egress.*]` binding to make a host reachable — write the `net:connect` and
   `http:request` rules.
 - Do not try to re-open a floor, or expect a permit to beat a `forbid`.
-- Do not key a temporal step-up on `::request`, and do not read `ip` in a temporal predicate.
+- Do not key a temporal step-up on `::request`, and do not read `ip4` or `ip6` in a temporal
+  predicate.
 - Do not write a budget as a `permit` beside another permit for the same action; the box refuses it
   at load, because the permit cannot narrow the other one.
 - Do not present a policy you have not loaded into the box.
