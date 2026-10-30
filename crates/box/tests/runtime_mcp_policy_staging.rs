@@ -1774,7 +1774,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["missing"]"#),
+        stderr.contains(r#"discovery left a per-tool rule inert for ["missing"]"#),
         "{stderr}"
     );
     drop(client);
@@ -2263,7 +2263,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["stale"]"#),
+        stderr.contains(r#"discovery left a per-tool rule inert for ["stale"]"#),
         "the stale-only action must degrade rather than adopt a stored schema: {stderr}"
     );
     assert!(
@@ -2290,7 +2290,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     assert!(
         String::from_utf8_lossy(&second_output.stderr)
-            .contains(r#"discovery denied tools/list for ["stale"]"#),
+            .contains(r#"discovery left a per-tool rule inert for ["stale"]"#),
         "the second run must also degrade the stale-only action: {}",
         String::from_utf8_lossy(&second_output.stderr)
     );

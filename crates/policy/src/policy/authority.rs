@@ -15,7 +15,7 @@ use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
-use crate::schema::{ActionIdentity, GovernedBox, mcp_action_namespace, mcp_tool_action};
+use crate::schema::{ActionIdentity, GovernedBox, mcp_tool_action};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
 
@@ -338,8 +338,10 @@ impl Authority {
     /// never arrived are returned so the caller can warn. Only a genuine durable fault is an `Err`.
     ///
     /// The tools held and the servers named answer different questions, so they come from different
-    /// scans: a rule decides no call to a tool it only reads from history, and yet it still waits
-    /// for that server's catalog.
+    /// scans. A rule decides no call to a tool it only reads from history, and yet it still waits
+    /// for that tool to be declared. A server is named when a pending rule names a tool on it that
+    /// the committed schema does not declare, which covers both a catalog that never arrived and
+    /// one that arrived without that tool.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -360,10 +362,12 @@ impl Authority {
         live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
-        let servers = proposal
-            .as_ref()
-            .map(servers_without_a_catalog)
-            .unwrap_or_default();
+        let named = proposal.as_ref().map(named_typed_tools).unwrap_or_default();
+        let servers: BTreeSet<String> = named
+            .into_iter()
+            .filter(|(namespace, tool)| !declares(&live.engine, namespace, tool))
+            .map(|(namespace, _)| namespace)
+            .collect();
         Ok(servers.into_iter().collect())
     }
 
@@ -704,32 +708,34 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     out
 }
 
-/// The namespaces of the servers that a proposal still needs a catalog for: every server a pending
-/// rule names, including through a history reference, less every server whose schema staged. A rule
-/// stays pending until each server it names stages, so what is left is exactly the servers whose
-/// catalog never arrived.
-fn servers_without_a_catalog(proposal: &ProposalState) -> BTreeSet<String> {
-    let staged: BTreeSet<String> = proposal
-        .schemas
-        .keys()
-        .map(|server| mcp_action_namespace(server))
-        .collect();
-    let mut named = BTreeSet::new();
+/// Every `(namespace, tool)` a pending rule names, in its head, in a condition, or through a
+/// `when temporal` history reference. A rule waits for each of these to become declared, so one
+/// that is not declared is a reason the rule is still pending.
+fn named_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
         if let Some(candidate) = proposal.candidates.get(ordinal) {
-            named.extend(candidate.head_tools.iter().cloned());
+            out.extend(candidate.head_tools.iter().cloned());
             collect_typed_actions(
                 &candidate.expanded_source,
                 HistoryReferences::Named,
-                &mut named,
+                &mut out,
             );
         }
     }
-    named
-        .into_iter()
-        .map(|(namespace, _)| namespace)
-        .filter(|namespace| !staged.contains(namespace))
-        .collect()
+    out
+}
+
+/// Whether the committed schema declares `<namespace>::Action::"<tool>"`. A name the engine cannot
+/// parse counts as undeclared, so the server reaches the warning rather than going quiet.
+fn declares(engine: &DogwoodEngine, namespace: &str, tool: &str) -> bool {
+    let identity = ActionIdentity::McpTool {
+        namespace: namespace.to_string(),
+        tool: tool.to_string(),
+    };
+    EntityUid::from_str(&identity.observer_action())
+        .map(|action| engine.declares_tool_action(&action))
+        .unwrap_or(false)
 }
 
 /// Whether a scan keeps the tool names that only a `when temporal` history reference spells.

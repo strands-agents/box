@@ -88,9 +88,10 @@ impl DiscoveryCoordinator {
                 // and warns, so a customer's contradictory policy blocks one server, never the box.
                 Ok(degraded) if !degraded.is_empty() => {
                     eprintln!(
-                        "strands-box: warning: discovery denied tools/list for {degraded:?}; each \
-                         server's per-tool rule is inert and its tool calls are denied — permit \
-                         tools/list for it or remove the per-tool rule"
+                        "strands-box: warning: discovery left a per-tool rule inert for \
+                         {degraded:?}; each rule names a tool the server does not declare, so the \
+                         calls it decides are denied — permit tools/list for the server, correct \
+                         the tool name, or remove the per-tool rule"
                     );
                     self.control(
                         ControlRecord::completed(ControlOperation::DiscoveryComplete, "policy")

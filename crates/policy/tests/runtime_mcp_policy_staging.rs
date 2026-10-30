@@ -559,14 +559,35 @@ when { context.input.server == "srv" };"#;
     }
 }
 
-/// stderr must name every server whose catalog never arrived, and no server whose catalog did. The
-/// tools a rule decides answer which calls to hold, and they are the wrong answer to this question:
-/// a rule waits for each server it names, including one it only reads from history.
+/// stderr must name every server a pending rule still waits for, and no other. A rule waits for a
+/// tool to be declared, which fails both when the catalog never arrives and when it arrives without
+/// that tool. The tools a rule decides answer which calls to hold, and they are the wrong answer
+/// here, because a rule also waits for a tool it only reads from history.
 #[test]
-fn discovery_names_each_server_whose_catalog_never_arrived_and_no_other() {
+fn discovery_names_each_server_a_pending_rule_still_waits_for() {
     // Each case is one pending rule. `staged` is the server whose catalog arrives, and `expected`
     // is what stderr must name.
     for (rule, staged, expected) in [
+        // The catalog arrives and does not offer the tool the rule names: a misspelling, or a tool
+        // the server dropped. The server is healthy, so a check on the catalog alone goes quiet.
+        (
+            r#"forbid(principal, action == alpha::Action::"raed", resource);"#,
+            Some(("alpha", "read", "path")),
+            vec!["alpha"],
+        ),
+        // The same, named by a condition rather than the head.
+        (
+            r#"forbid(principal, action, resource) when { action == alpha::Action::"raed" };"#,
+            Some(("alpha", "read", "path")),
+            vec!["alpha"],
+        ),
+        // The same, named only by a history reference, beside a head the catalog does declare.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+unless temporal { formerly within 600s ( alpha::Action::"raed"::response{ input.path: _ } ) };"#,
+            Some(("alpha", "read", "path")),
+            vec!["alpha"],
+        ),
         // The rule decides a denied server's tool and reads a healthy server's from history.
         (
             r#"forbid(principal, action == alpha::Action::"deploy", resource)
@@ -618,13 +639,14 @@ unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ inp
                 .finish_mcp_discovery()
                 .expect("discovery completes"),
             expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            "stderr must name each server whose catalog never arrived, for rule: {rule}"
+            "stderr must name each server this rule still waits for, for rule: {rule}"
         );
     }
 }
 
 /// A server name that is not a Cedar identifier reaches a rule as a normalized namespace. stderr
-/// must not name such a server once its catalog arrives, although the two spellings differ.
+/// must not name such a server once its catalog declares the tool, although the two spellings
+/// differ.
 #[test]
 fn a_staged_server_whose_name_needs_normalizing_is_not_named() {
     let history = tempfile::tempdir().expect("history directory");

@@ -190,12 +190,17 @@ belongs to a server that will never stage, so that server is degraded, stderr na
 engine becomes `Ready` for the rest of the run.
 
 Box names those servers from a different set than the one it holds calls for. It holds the tools an
-inert rule decides, and it names every server such a rule mentions — in its head, in a condition, or
-in a history reference — less every server whose catalog arrived. A rule waits for each server it
-mentions, so what is left is the servers whose catalog never came, and stderr names those and no
-others. A healthy server is never named, which is what [a server whose discovery a policy denies
-degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone) requires. A
-rule that only reads a tool from history still decides no call to it, so that tool is not held.
+inert rule decides, and it names the server of every tool such a rule mentions — in its head, in a
+condition, or in a history reference — that the committed schema does not declare. A rule waits for
+each tool it mentions to be declared, so an undeclared one is why the rule is still pending.
+
+That covers both causes. A server whose `tools/list` a rule refused declares nothing, so every tool
+the rule names on it is undeclared. A server whose catalog arrived declares its own tools, so it is
+named only when the rule asks for a tool it does not offer — a misspelling, or a tool the server
+dropped. A server that declares every tool the pending rules ask of it is never named, which is what
+[a server whose discovery a policy denies degrades
+alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone) requires. A rule that
+only reads a tool from history still decides no call to it, so that tool is not held.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays

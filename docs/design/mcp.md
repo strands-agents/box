@@ -227,12 +227,17 @@ that did load — usually the coarse `mcp:call` permit. A rule that only reads a
 decides no call to it, so that tool is not held.
 
 **Which tools are held and which servers are named are different questions, and Box answers them
-separately.** It holds the tools an inert rule decides. It names the servers that rule waits for,
-which is every server the rule mentions — through its head, a condition, or a history reference —
-less the servers whose catalog arrived. A rule waits for each server it names, so what is left is
-exactly the servers whose catalog never came. One rule can therefore hold a tool on one server and
-name a different server, and that is the honest pair: the held tool is the one the rule constrains,
-and the named server is the one to fix.
+separately.** It holds the tools an inert rule decides. It names the server of every tool such a
+rule mentions — in its head, in a condition, or in a history reference — that the committed schema
+does not declare. A rule waits for each tool it mentions to be declared, so an undeclared one is
+why that rule is still pending, and its server is the one to fix.
+
+Naming the server of an undeclared tool covers both ways a rule stays pending. The catalog never
+arrived, because a rule refused the server's `tools/list`. Or the catalog arrived and does not offer
+that tool, because the rule misspells the name or the server dropped it. The second is a healthy
+server, so a check on whether the catalog arrived reports nothing for it, and the rule would ship
+inert and silent. One rule can therefore hold a tool on one server and name a different server, and
+that is the honest pair.
 
 One limit remains. A rule that constrains every tool call, because its head is the coarse
 `mcp:call` or it names no action at all, cannot be expressed as a set of tools. stderr names the
