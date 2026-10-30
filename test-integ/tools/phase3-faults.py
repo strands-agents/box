@@ -76,7 +76,7 @@ def main():
             env.pop("RUST_TEST_NOCAPTURE", None)
             result = subprocess.run(
                 [str(args.binary.resolve()), "--test-threads=1",
-                 *[f"{name}::{name}" for name, _ in selected.values()]],
+                 *[f"{name}::" for name, _ in selected.values()]],
                 env=env, capture_output=True, text=True, timeout=120,
             )
             (rows / "run.log").write_text(result.stdout + result.stderr)
