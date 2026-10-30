@@ -17,7 +17,7 @@ pub enum PolicyError {
     #[error("policy references unknown action: {0}")]
     UnknownAction(String),
 
-    /// A path or program literal that no reported spelling can match, so the rule is inert.
+    /// A literal that no reported spelling can match, so the rule is inert.
     #[error("policy compares an inert literal: {0}")]
     Spelling(String),
 

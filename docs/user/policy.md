@@ -582,6 +582,45 @@ Two other host spellings each get their own refusal:
 - **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
   write `xn--bcher-kva.example`.
 
+A pinned address reaches policy in one spelling too. An IPv6 form that carries an IPv4 address
+reads as that IPv4 address, and any other IPv6 address reads compressed and in lowercase. So a
+`when` or `unless` condition that names an IPv6 encoding of an IPv4 address is refused, and the
+refusal names the dotted quad:
+
+```text
+@id("block_metadata")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip && context.input.ip == "64:ff9b::a9fe:a9fe" };
+```
+
+```text
+policy compares an inert literal: rule @id("block_metadata") compares context.input.ip with "64:ff9b::a9fe:a9fe", and an address is spelled as the IPv4 address an IPv6 form carries, or compressed and in lowercase; write "169.254.169.254"
+```
+
+**If a box that used to start now refuses with this message, that is the rule to rewrite.** Write
+the form the refusal names. One dotted quad covers every IPv6 encoding of that address, so you need
+no separate clause per encoding — and the reverse was never true, because a rule written in an IPv6
+form does not cover the dotted quad. Three more address spellings each get their own refusal:
+
+- **An address that carries a port**, such as `169.254.169.254:80` or `[2001:db8::1]:443`. Write the
+  address alone, and compare `context.input.port` for the port.
+- **An address in brackets**, such as `[2001:db8::1]`. Write it without them.
+- **Anything that is no IP address**, such as `metadata.example` or `169.254.169.254/32`. `ip` holds
+  the address the gateway pinned; compare `context.input.host` to pin a name.
+
+A `like` pattern that holds a wildcard is not judged, because the addresses a wildcard admits
+cannot be listed. So `context.input.ip like "169.254.*"` loads as written. Write a pattern against
+the spelling a decision reads: `like "fe8*"` reaches an `fe80::` address, and `like "64:ff9b::*"`
+reaches nothing, because an address on that prefix reads as its dotted quad.
+
+Two IPv6 encodings of an IPv4 address are **not** read as the dotted quad, and for those an
+IPv6-form rule is the only one that works: the NAT64 local-use prefix `64:ff9b:1::/48`, and a NAT64
+prefix a network chose for itself, which Box takes as no configuration and so cannot recognize.
+Those spellings load, because they are the spelling a decision reads.
+
+A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
+with, so a temporal clause can still need an older one.
+
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
 path is in `program_path`:

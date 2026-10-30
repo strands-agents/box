@@ -96,6 +96,20 @@ fn connects(engine: &PolicyEngine, host: &str) -> bool {
         .is_allow()
 }
 
+fn connects_to(engine: &PolicyEngine, address: &str) -> bool {
+    engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::Connect {
+                host: "metadata.example",
+                ip: Some(address.parse().expect("an address")),
+                port: 443,
+            },
+        )
+        .is_allow()
+}
+
 fn spawns(engine: &PolicyEngine, program: &str) -> bool {
     engine
         .decide(
@@ -541,4 +555,42 @@ fn a_trailing_dot_and_an_internationalized_host_are_refused_and_punycode_loads()
         .open("punycode-host", &ace)
         .expect("the punycode spelling loads");
     assert!(!connects(&engine, "xn--bcher-kva.example"));
+}
+
+/// A decision reads one spelling of a pinned address, so an IPv6 encoding of an IPv4 address is
+/// refused at load and the dotted quad is the spelling that forbids.
+#[test]
+fn an_ipv6_encoding_of_an_address_literal_is_refused_and_the_dotted_quad_forbids_the_connect() {
+    let home = Home::new();
+    let encoded = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip && context.input.ip == "64:ff9b::a9fe:a9fe" }};"#
+    );
+    let reason = refusal(home.open("nat64-address", &encoded));
+    assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
+    assert!(reason.contains("write \"169.254.169.254\""), "{reason}");
+
+    let control = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip && context.input.ip == "169.254.169.254" }};"#
+    );
+    let engine = home
+        .open("dotted-address", &control)
+        .expect("the dotted quad loads");
+    for encoding in [
+        "169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "::ffff:0:a9fe:a9fe",
+        "::ffff:a9fe:a9fe",
+        "2002:a9fe:a9fe::",
+    ] {
+        assert!(
+            !connects_to(&engine, encoding),
+            "the spelling the judge names must be the spelling that denies {encoding}"
+        );
+    }
+    assert!(connects_to(&engine, "203.0.113.7"));
 }

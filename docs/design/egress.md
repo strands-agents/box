@@ -103,7 +103,13 @@ flowchart TD
 **An address is one spelling.** The gateway gives policy the address as a string, in one canonical
 form: an IPv6 spelling of an IPv4 address, such as `::ffff:169.254.169.254`, becomes the IPv4
 address, and other IPv6 addresses are compressed and lowercase. A rule matches it with `==` or
-`like`.
+`like`. An address literal that a `when` or `unless` condition compares is held to that form at
+load, as a host literal is, and the refusal names the form to write ([a rule that cannot fire is
+refused at
+load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). Two
+shapes are not held to it: a `like` pattern that holds a wildcard, because the addresses the
+wildcard admits cannot be listed, and a `when temporal` clause, because history keeps the spelling
+each event was recorded with.
 
 **The host is one spelling too.** The gateway lowercases it and removes a trailing dot, so a request
 for `API.GitHub.com.` and a request for `api.github.com` reach policy as the same host. A rule
