@@ -8,8 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::attach::{Attachment, Outbound, extract_slot, header_value, query_value};
 use crate::sources::{
-    AwsAcquisition, AwsResolution, AwsSource, CREDSD_SCHEME, CredsdClient,
-    credsd_session_credentials,
+    AwsAcquisition, AwsResolution, CREDSD_SCHEME, CredsdClient, credsd_session_credentials,
 };
 use crate::vault::OpaqueBinding;
 use crate::{
@@ -204,7 +203,7 @@ impl Vault {
         if config.scheme() == CREDSD_SCHEME {
             return self.resolve_credsd(config);
         }
-        AwsSource::with_policy(self.ambient_policy()).resolve(config)
+        self.aws_source().resolve(config)
     }
 
     /// Resolve a `credsd://<environment>` locator to AWS session credentials.

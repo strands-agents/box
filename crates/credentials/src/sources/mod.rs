@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use crate::{CredentialError, Locator, Result, Secret};
 
 mod aws;
-mod aws_profile;
 mod credsd;
 mod env;
 mod file;
 mod op;
+mod prototype_aws_sdk;
 
 pub(crate) use aws::{
     AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,

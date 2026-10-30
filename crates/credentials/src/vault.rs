@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
-use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
+use crate::sources::{AwsSource, CREDSD_SCHEME, resolve_credsd_socket};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
     Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, Result, RouteSpec, Secret,
@@ -96,10 +96,8 @@ pub struct Vault {
     /// The backend, retained because a signed route resolves its credentials per request (they
     /// expire), unlike an opaque secret which is resolved once at open.
     backend: Backend,
-    /// Whether a signed route may fall back to the ambient AWS provider chain when it declares no
-    /// scoped profile. Held here because the resolve happens per request, so the policy has to outlive
-    /// the open that chose it.
-    ambient_policy: AmbientFallbackPolicy,
+    /// The AWS source and the credential helpers captured before the workload starts.
+    aws_source: AwsSource,
     /// The acquisition-audit sink. Every resolve emits one record through it, success or
     /// failure; the default discards, since the shared L2 lane does not exist yet.
     emitter: Box<dyn crate::Emitter>,
@@ -125,13 +123,14 @@ impl Vault {
             opaque: Vec::new(),
             signed_aws: Vec::new(),
             backend,
-            ambient_policy,
+            aws_source: AwsSource::with_policy(ambient_policy),
             emitter,
             credsd_socket: None,
         };
         // A `credsd://` route needs a socket, resolved and validated absolute once here — a relative
         // path is a configuration error the vault refuses at open, not a runtime failure.
         let mut declares_credsd = false;
+        let mut declares_aws_chain = false;
         let mut phantoms = Vec::new();
         let mut skipped = Vec::new();
         // Every minted phantom, to enforce vault-wide uniqueness: a collision is a
@@ -148,6 +147,18 @@ impl Vault {
                 RouteKind::SignedAws { config } => {
                     if config.scheme() == CREDSD_SCHEME {
                         declares_credsd = true;
+                    } else if config.scheme() == "aws-chain" && !declares_aws_chain {
+                        crate::audit_resolve(
+                            vault.emitter.as_ref(),
+                            &vault.tenant,
+                            config.scheme(),
+                            "aws-chain://structured",
+                            &RequestId::new(LOAD_CORRELATION),
+                            || vault.aws_source.prepare(config),
+                        )?;
+                        declares_aws_chain = true;
+                    } else if matches!(config.scheme(), "aws" | "aws-chain") {
+                        vault.aws_source.prepare(config)?;
                     }
                     vault
                         .signed_aws
@@ -268,9 +279,9 @@ impl Vault {
         self.emitter.as_ref()
     }
 
-    /// The ambient-fallback policy a signed route's credentials are resolved under.
-    pub(crate) fn ambient_policy(&self) -> AmbientFallbackPolicy {
-        self.ambient_policy
+    /// The retained AWS credential source.
+    pub(crate) fn aws_source(&self) -> &AwsSource {
+        &self.aws_source
     }
 
     /// The resolved `credsd` socket, for the per-request credsd resolve in `legs`. `Some` whenever a
@@ -584,6 +595,29 @@ mod tests {
     }
 
     // --- audit ---------------------------------------------------------------
+
+    #[test]
+    fn a_refused_sdk_chain_startup_emits_one_acquisition_record() {
+        let recorder = Recorder::new();
+        let locator = Locator::structured(BTreeMap::from([(
+            "source".to_string(),
+            "aws-chain".to_string(),
+        )]))
+        .unwrap();
+        let config = VaultConfig::new(Backend::local(), "chain-test")
+            .require_scoped_aws_profile()
+            .route(RouteSpec::signed_aws(
+                DestinationPattern::parse("sts.us-east-1.amazonaws.com").unwrap(),
+                locator,
+            ));
+        assert!(Vault::open_with_emitter(config, Box::new(recorder.clone())).is_err());
+        let records = recorder.records();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].ok);
+        assert_eq!(records[0].source, "aws-chain");
+        assert_eq!(records[0].credential_ref, "aws-chain://[REDACTED]");
+        assert_eq!(records[0].request_id, RequestId::new(LOAD_CORRELATION));
+    }
 
     /// A successful resolve emits exactly one record, carrying the redacted reference.
     #[test]
