@@ -560,6 +560,7 @@ impl HostedBox {
         policy: Arc<PolicyEngine>,
         collector: Arc<telemetry::Collector>,
         protected_sources: &[AuthoritySource],
+        upstream_ca_pems: &[String],
         owned: Lock,
         workspace: &Path,
         home: &Path,
@@ -637,6 +638,7 @@ impl HostedBox {
                 credential_env: projection.phantom_environment,
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
+                upstream_ca_pems: upstream_ca_pems.to_vec(),
                 ..MitmConfig::default()
             },
             capabilities.build(),
@@ -967,6 +969,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             policy,
             Arc::clone(&collector),
             &[],
+            &[],
             owned,
             &workspace,
             &workspace,
@@ -1030,6 +1033,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 &record,
                 policy,
                 collector,
+                &[],
                 &[],
                 owned,
                 &workspace,
