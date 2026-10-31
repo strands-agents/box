@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 
 use super::Pack;
 
-/// One resolved program file: its canonical path, and the device and inode found there.
+/// The most links Box records from one spelling.
+const MAXIMUM_LINKS: usize = 40;
+
+/// One resolved program file: the device and inode found there, and each spelling that led to it.
 #[derive(Debug, Clone)]
 pub struct ProgramFile {
     identity: FileIdentity,
     path: PathBuf,
-    named: PathBuf,
+    spellings: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,14 +39,20 @@ impl ProgramFile {
         let read = std::fs::canonicalize(&path)
             .and_then(|canonical| std::fs::metadata(&canonical).map(|found| (canonical, found)));
         match read {
-            Ok((canonical, metadata)) => Ok(Self {
-                identity: FileIdentity {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                },
-                path: canonical,
-                named: path,
-            }),
+            Ok((canonical, metadata)) => {
+                let mut spellings = links_from(&path);
+                if !spellings.contains(&canonical) {
+                    spellings.push(canonical.clone());
+                }
+                Ok(Self {
+                    identity: FileIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                    path: canonical,
+                    spellings,
+                })
+            }
             Err(reason) => Err(UnreadableProgramFile { path, reason }),
         }
     }
@@ -54,7 +63,7 @@ impl ProgramFile {
         Self {
             identity: FileIdentity { device: 0, inode },
             path: PathBuf::from(path),
-            named: PathBuf::from(path),
+            spellings: vec![PathBuf::from(path)],
         }
     }
 
@@ -64,23 +73,40 @@ impl ProgramFile {
     }
 }
 
-/// The installed tool packs, and the (program file, called name) pairs each one covers.
+/// `path`, then the path each link on the way names, as the host follows them.
+fn links_from(path: &Path) -> Vec<PathBuf> {
+    let mut spellings = vec![path.to_path_buf()];
+    let mut current = path.to_path_buf();
+    while spellings.len() <= MAXIMUM_LINKS {
+        let Ok(target) = std::fs::read_link(&current) else {
+            break;
+        };
+        current = match current.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+        spellings.push(current.clone());
+    }
+    spellings
+}
+
+/// The installed tool packs, the (program file, called name) pairs each one covers, and the file
+/// identity that each bound spelling led to when it was bound.
 #[derive(Debug, Default)]
 pub struct PackBindings {
     packs: Vec<Pack>,
     bound: BTreeMap<(FileIdentity, String), usize>,
-    bound_files: BTreeSet<FileIdentity>,
-    bound_paths: BTreeSet<PathBuf>,
-    bound_links: BTreeSet<PathBuf>,
+    spellings: BTreeMap<PathBuf, FileIdentity>,
     declared: BTreeSet<(FileIdentity, String)>,
 }
 
 /// How the installed packs cover one spawn.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum PackCoverage<'a> {
     /// The file and the name are bound to this pack, so the command parses with its grammar.
-    Parsed(&'a Pack),
-    /// A pack binds the file, and Box refuses the spawn before any policy decides it.
+    Parsed { pack: &'a Pack, file: ProgramFile },
+    /// A pack binds the file or a spelling of it, and Box refuses the spawn before any policy
+    /// decides it.
     Refused(CoverageRefusal),
 }
 
@@ -131,6 +157,14 @@ pub enum BindingRefusal {
     },
 }
 
+/// The name a program was called by: the last component of its spelling.
+pub(crate) fn called_name(spelling: &str) -> &str {
+    Path::new(spelling)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(spelling)
+}
+
 impl PackBindings {
     /// Hold the installed `packs`, each with a distinct name, and no binding yet.
     pub fn new(packs: Vec<Pack>) -> Result<Self, BindingRefusal> {
@@ -179,10 +213,10 @@ impl PackBindings {
                 pack: pack.to_string(),
             });
         }
-        self.bound_files.insert(program.identity);
-        self.bound_paths.insert(program.path.clone());
-        if program.named != program.path {
-            self.bound_links.insert(program.named.clone());
+        for spelling in &program.spellings {
+            self.spellings
+                .entry(spelling.clone())
+                .or_insert(program.identity);
         }
         self.bound.insert(pair, index);
         Ok(())
@@ -193,39 +227,72 @@ impl PackBindings {
         self.bound.is_empty()
     }
 
-    /// Whether a pack bound the file that was at `path`, or that a bound link led to, when the
-    /// binding read it.
-    pub(crate) fn binds_path(&self, path: &Path) -> bool {
-        self.bound_paths.contains(path)
-            || self
-                .bound_links
-                .iter()
-                .any(|link| std::fs::canonicalize(link).is_ok_and(|now| now == path))
+    fn binds_file(&self, identity: FileIdentity) -> bool {
+        self.bound
+            .range((identity, String::new())..)
+            .next()
+            .is_some_and(|((bound, _), _)| *bound == identity)
     }
 
-    /// How the packs cover a spawn of `program` called by `name`, or `None` when no pack does.
-    pub(crate) fn coverage(&self, program: &ProgramFile, name: &str) -> Option<PackCoverage<'_>> {
+    /// Whether a bound spelling now leads somewhere other than the file it was bound to: a
+    /// spelling of `program` itself, or a bound spelling that now resolves to `program` where its
+    /// bound file covered `name`.
+    fn replaced(&self, program: &ProgramFile, name: &str) -> bool {
+        let moved = |identity: &FileIdentity| *identity != program.identity;
+        let covered = |identity: FileIdentity| {
+            let pair = (identity, name.to_string());
+            self.bound.contains_key(&pair)
+                || (!self.declared.contains(&pair) && !self.binds_file(program.identity))
+        };
+        program
+            .spellings
+            .iter()
+            .any(|spelling| self.spellings.get(spelling).is_some_and(moved))
+            || self.spellings.iter().any(|(spelling, identity)| {
+                moved(identity)
+                    && covered(*identity)
+                    && std::fs::canonicalize(spelling).is_ok_and(|now| now == program.path)
+            })
+    }
+
+    /// How the packs cover a spawn spelled `spelling` of the program file that `read` found, or
+    /// `None` when no pack does.
+    pub(crate) fn coverage(
+        &self,
+        read: Result<ProgramFile, UnreadableProgramFile>,
+        spelling: &str,
+    ) -> Option<PackCoverage<'_>> {
+        let name = called_name(spelling);
+        let refused = |refusal: fn(String, PathBuf) -> CoverageRefusal, path: &Path| {
+            Some(PackCoverage::Refused(refusal(
+                name.to_string(),
+                path.to_path_buf(),
+            )))
+        };
+        let replaced = |name, program_path| CoverageRefusal::ReplacedFile { name, program_path };
+        let undeclared =
+            |name, program_path| CoverageRefusal::UndeclaredName { name, program_path };
+        let program = match read {
+            Ok(program) => program,
+            Err(unreadable) if self.spellings.contains_key(&unreadable.path) => {
+                return refused(replaced, &unreadable.path);
+            }
+            Err(_) => return None,
+        };
+        if self.replaced(&program, name) {
+            return refused(replaced, &program.path);
+        }
         let pair = (program.identity, name.to_string());
         if let Some(&index) = self.bound.get(&pair) {
-            return Some(PackCoverage::Parsed(&self.packs[index]));
+            return Some(PackCoverage::Parsed {
+                pack: &self.packs[index],
+                file: program,
+            });
         }
-        let refusal = if self.bound_files.contains(&program.identity) {
-            if self.declared.contains(&pair) {
-                return None;
-            }
-            CoverageRefusal::UndeclaredName {
-                name: pair.1,
-                program_path: program.path.clone(),
-            }
-        } else if self.binds_path(&program.path) {
-            CoverageRefusal::ReplacedFile {
-                name: pair.1,
-                program_path: program.path.clone(),
-            }
-        } else {
-            return None;
-        };
-        Some(PackCoverage::Refused(refusal))
+        if self.binds_file(program.identity) && !self.declared.contains(&pair) {
+            return refused(undeclared, &program.path);
+        }
+        None
     }
 }
 
@@ -313,7 +380,7 @@ mod tests {
 
     fn answer(coverage: Option<PackCoverage<'_>>) -> Option<Answer> {
         coverage.map(|coverage| match coverage {
-            PackCoverage::Parsed(pack) => Answer::Parsed(pack.name.clone()),
+            PackCoverage::Parsed { pack, .. } => Answer::Parsed(pack.name.clone()),
             PackCoverage::Refused(CoverageRefusal::UndeclaredName { .. }) => Answer::Undeclared,
             PackCoverage::Refused(CoverageRefusal::ReplacedFile { .. }) => Answer::Replaced,
         })
@@ -395,7 +462,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                answer(bindings.coverage(&host.program(program), name)),
+                answer(bindings.coverage(Ok(host.program(program)), name)),
                 expected,
                 "{case}: {program} called as {name}"
             );
@@ -422,7 +489,7 @@ mod tests {
             ("an undeclared name", "python", REFUSED),
         ] {
             assert_eq!(
-                answer(bindings.coverage(&mise, name)),
+                answer(bindings.coverage(Ok(mise.clone()), name)),
                 expected,
                 "{case}: {MISE} called as {name}"
             );
@@ -440,7 +507,7 @@ mod tests {
             ("an undeclared name", "python"),
         ] {
             assert!(
-                bindings.coverage(&host.program(MISE), name).is_none(),
+                bindings.coverage(Ok(host.program(MISE)), name).is_none(),
                 "{case}: {MISE} called as {name}"
             );
         }
@@ -470,7 +537,7 @@ mod tests {
                 ("git-hard", REFUSED),
             ] {
                 assert_eq!(
-                    answer(bindings.coverage(&program, name)),
+                    answer(bindings.coverage(Ok(program.clone()), name)),
                     expected,
                     "{case}: {at} called as {name}"
                 );
@@ -502,10 +569,10 @@ mod tests {
         for name in ["git", "git-lfs", "gitk"] {
             assert_eq!(
                 bindings
-                    .coverage(&replaced, name)
+                    .coverage(Ok(replaced.clone()), name)
                     .map(|coverage| match coverage {
                         PackCoverage::Refused(refusal) => Some(refusal),
-                        PackCoverage::Parsed(_) => None,
+                        PackCoverage::Parsed { .. } => None,
                     }),
                 Some(Some(CoverageRefusal::ReplacedFile {
                     name: name.to_string(),
@@ -515,8 +582,6 @@ mod tests {
                 replaced.path().display()
             );
         }
-        assert!(bindings.binds_path(original.path()));
-        assert!(!bindings.binds_path(&host.path("usr/bin/ls")));
     }
 
     #[test]
@@ -533,12 +598,12 @@ mod tests {
         std::os::unix::fs::symlink(upgraded.path(), host.path("opt/bin/git")).expect("a new link");
 
         assert_eq!(
-            answer(bindings.coverage(&upgraded, "git")),
+            answer(bindings.coverage(Ok(upgraded.clone()), "git")),
             Some(Answer::Replaced),
             "the file that the bound link leads to now"
         );
         assert_eq!(
-            answer(bindings.coverage(&host.program("opt/cellar/git/3/bin/git"), "git")),
+            answer(bindings.coverage(Ok(host.program("opt/cellar/git/3/bin/git")), "git")),
             None,
             "a file that no bound path leads to"
         );
@@ -677,7 +742,7 @@ mod tests {
             ("the accepted name", GIT, "git-upload-pack", parsed("git")),
         ] {
             assert_eq!(
-                answer(bindings.coverage(&host.program(program), name)),
+                answer(bindings.coverage(Ok(host.program(program)), name)),
                 expected,
                 "{case}: {program} called as {name}"
             );

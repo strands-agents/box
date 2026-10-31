@@ -147,50 +147,15 @@ impl ShellPolicyInterceptor {
         })
     }
 
-    /// The gate that decides a spawn of `program_path` called as `program`.
-    fn spawn_gate(&self, program: &str, program_path: &str) -> SpawnGate<'_> {
+    /// How the installed packs cover a spawn of `program_path` spelled `program`, or `None` when
+    /// `shell:spawn` decides it (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
+    fn pack_coverage(&self, program: &str, program_path: &str) -> Option<PackCoverage<'_>> {
         if self.pack_bindings.is_empty() {
-            return SpawnGate::Spawn;
+            return None;
         }
-        let name = called_name(program);
-        let file = match ProgramFile::read(program_path) {
-            Ok(file) => file,
-            Err(_) if self.pack_bindings.binds_path(Path::new(program_path)) => {
-                return SpawnGate::Refused(CoverageRefusal::ReplacedFile {
-                    name: name.to_string(),
-                    program_path: program_path.into(),
-                });
-            }
-            Err(_) => return SpawnGate::Spawn,
-        };
-        match self.pack_bindings.coverage(&file, name) {
-            None => SpawnGate::Spawn,
-            Some(PackCoverage::Parsed(pack)) => SpawnGate::Pack { pack, file },
-            Some(PackCoverage::Refused(refusal)) => SpawnGate::Refused(refusal),
-        }
+        self.pack_bindings
+            .coverage(ProgramFile::read(program_path), program)
     }
-}
-
-/// The one gate that decides a host-binary spawn
-/// (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
-enum SpawnGate<'a> {
-    /// No pack covers the program, so `shell:spawn` decides it.
-    Spawn,
-    /// A pack binds the program file and its called name, so the pack action decides it.
-    Pack {
-        pack: &'a crate::pack::Pack,
-        file: ProgramFile,
-    },
-    /// A pack binds the program file, and Box refuses this spawn of it.
-    Refused(CoverageRefusal),
-}
-
-/// The name a program was called by: the last component of its spelling.
-fn called_name(program: &str) -> &str {
-    Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(program)
 }
 
 fn denied(decision: &Decision) -> io::Error {
@@ -331,10 +296,12 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             ..
         } = effect
         {
-            match self.spawn_gate(program, program_path) {
-                SpawnGate::Spawn => {}
-                SpawnGate::Refused(refusal) => return Err(refused_spawn(program_path, &refusal)),
-                SpawnGate::Pack { pack, file } => {
+            match self.pack_coverage(program, program_path) {
+                None => {}
+                Some(PackCoverage::Refused(refusal)) => {
+                    return Err(refused_spawn(program_path, &refusal));
+                }
+                Some(PackCoverage::Parsed { pack, file }) => {
                     let invocation = PackInvocation::new(
                         pack,
                         program,
@@ -1234,6 +1201,13 @@ mod tests {
             std::fs::write(&staged, "a new build").expect("a new program file");
             std::fs::rename(&staged, self.0.path().join(name)).expect("the rename");
         }
+
+        /// Put a symlink to `target` at `name`, in one rename over what was there.
+        fn link(&self, name: &str, target: &str) {
+            let staged = self.0.path().join(format!("{name}.link"));
+            std::os::unix::fs::symlink(self.path(target), &staged).expect("a symlink");
+            std::fs::rename(&staged, self.0.path().join(name)).expect("the rename");
+        }
     }
 
     fn pack(name: &str) -> crate::pack::Pack {
@@ -1468,6 +1442,129 @@ mod tests {
                 .map(|error| error.to_string());
             assert_eq!(decided, expected, "{case}");
         }
+    }
+
+    fn replaced_message(name: &str, program_path: &str) -> String {
+        format!(
+            "policy denied this operation on '{program_path}' [tool-pack]: `{name}` runs \
+             `{program_path}`, which a tool pack bound, but the file at that path is no longer the \
+             file it bound. No policy can permit it."
+        )
+    }
+
+    /// **A bound regular file replaced by a symlink is refused**, whether the symlink leads to a
+    /// file that no pack binds or to another bound file, and a `shell:spawn` permit does not
+    /// admit it.
+    #[tokio::test]
+    async fn a_bound_file_replaced_by_a_symlink_is_refused() {
+        for (case, target) in [
+            ("an unbound file", "planted"),
+            ("another bound file", "cargo"),
+        ] {
+            let programs = Programs::new();
+            let planted = programs.path("planted");
+            let cargo = programs.path("cargo");
+            let interceptor = interceptor_with_packs(
+                r#"permit (principal, action == Box::Action::"shell:spawn", resource);
+                   permit (principal, action in Tool::git::Action::"*", resource);
+                   permit (principal, action in Tool::cargo::Action::"*", resource);"#,
+                &["git", "cargo"],
+                |bindings| {
+                    bindings
+                        .bind(&programs.file("git"), "git", "git")
+                        .expect("git binds");
+                    bindings
+                        .bind(&programs.file("cargo"), "cargo", "cargo")
+                        .expect("cargo binds");
+                },
+            );
+            programs.link("git", target);
+            let resolved = if target == "cargo" { &cargo } else { &planted };
+
+            let refused = interceptor
+                .intercept(&spawn("git", resolved, &words(&["status"])))
+                .await
+                .err()
+                .map(|error| error.to_string());
+
+            assert_eq!(refused, Some(replaced_message("git", resolved)), "{case}");
+        }
+    }
+
+    /// **A shim binary that packs bind under other names, replaced by a symlink, is refused** for
+    /// a bound name and for an undeclared name, and a `shell:spawn` permit does not admit it.
+    #[tokio::test]
+    async fn a_replaced_shim_binary_is_refused_under_each_name_it_covered() {
+        let programs = Programs::new();
+        let planted = programs.path("planted");
+        let interceptor = interceptor_with_packs(
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+            &["cargo"],
+            |bindings| {
+                let shim = programs.file("mise");
+                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
+                bindings.declare(&shim, "node");
+            },
+        );
+        programs.link("mise", "planted");
+
+        for (name, expected) in [
+            ("cargo", Some(replaced_message("cargo", &planted))),
+            ("python", Some(replaced_message("python", &planted))),
+            ("node", None),
+        ] {
+            let decided = interceptor
+                .intercept(&spawn(name, &planted, &words(&[])))
+                .await
+                .err()
+                .map(|error| error.to_string());
+
+            assert_eq!(decided, expected, "{name}");
+        }
+    }
+
+    /// **A bound link retargeted to another bound file is refused**, and is never decided as the
+    /// other file's pack action.
+    #[tokio::test]
+    async fn a_bound_link_retargeted_to_another_bound_file_is_refused() {
+        let programs = Programs::new();
+        let cargo = programs.path("cargo");
+        programs.path("git-2.50");
+        programs.link("git", "git-2.50");
+        let interceptor = interceptor_with_packs(
+            "permit (principal, action, resource);",
+            &["git", "cargo"],
+            |bindings| {
+                let linked =
+                    ProgramFile::read(programs.0.path().join("git")).expect("the link reads");
+                bindings.bind(&linked, "git", "git").expect("git binds");
+                let cargo = programs.file("cargo");
+                bindings
+                    .bind(&cargo, "cargo", "cargo")
+                    .expect("cargo binds");
+                bindings
+                    .bind(&cargo, "git", "cargo")
+                    .expect("cargo binds a second name on its own file");
+            },
+        );
+        programs.link("git", "cargo");
+
+        for program in ["git", &programs.0.path().join("git").display().to_string()] {
+            let refused = interceptor
+                .intercept(&spawn(program, &cargo, &words(&["test"])))
+                .await
+                .err()
+                .map(|error| error.to_string());
+
+            assert_eq!(refused, Some(replaced_message("git", &cargo)), "{program}");
+        }
+        assert!(
+            interceptor
+                .intercept(&spawn("cargo", &cargo, &words(&["test"])))
+                .await
+                .is_ok(),
+            "the other file, by its own bound name, still decides as its pack action"
+        );
     }
 
     /// **A spawn spelled as the path of a bound file that is gone is refused**, and does not fall
