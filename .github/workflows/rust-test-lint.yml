@@ -218,10 +218,7 @@ jobs:
             -p strands-box-telemetry
 
       - name: cargo clippy
-        # `-D warnings` is the gate, but the vendored `strands-shell` carries
-        # warnings we do not fix here:
-        # the root `AGENTS.md` says "owned clippy warnings are not expected;
-        # vendored ones are", and a fix here would diverge from upstream.
+        # Follow the root AGENTS.md verification rules for owned and vendored warnings.
         # `cargo clippy -p` / `--exclude` cannot skip a
         # workspace crate that is a build dependency of an owned crate, so the
         # lints are allowed at the driver level. The set was measured against

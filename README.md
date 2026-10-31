@@ -232,7 +232,7 @@ the `test-support` feature.
 | [`docs/user/`](docs/user) | How to install Box and run a box. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
 
-See [AGENTS.md](AGENTS.md) for the repository rules and the current state.
+See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 
