@@ -322,10 +322,23 @@ impl PolicyEngine {
         principal: &Principal,
         invocation: &crate::pack::PackInvocation<'_>,
     ) -> (Decision, Option<crate::pack::PendingPackResponse>) {
-        invocation.decide(|identity, input| {
-            let decision = self.authority.decide_input(principal, identity, input);
-            self.conclude(identity, invocation.program_path().to_string(), decision)
-        })
+        invocation.decide(self, principal)
+    }
+
+    /// Decide one action whose `input` is a JSON record, and name `resource` on the verdict.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller decides a pack action yet")
+    )]
+    pub(crate) fn decide_input(
+        &self,
+        principal: &Principal,
+        identity: &crate::schema::ActionIdentity,
+        input: &serde_json::Value,
+        resource: String,
+    ) -> Decision {
+        let decision = self.authority.decide_input(principal, identity, input);
+        self.conclude(identity, resource, decision)
     }
 
     /// Record the `::response` that an allowed pack action owes, with the program's exit status.

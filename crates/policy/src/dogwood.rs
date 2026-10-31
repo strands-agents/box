@@ -448,8 +448,7 @@ impl DogwoodEngine {
         }
         match self.submit(build) {
             Ok(Some(decision)) => decision,
-            // A decision-kind event that produced no response, or a poisoned lock:
-            // neither is a permit.
+            // A decision-kind event that produced no response is not a permit.
             Ok(None) => Decision::internal_fault(),
             Err(error) => {
                 eprintln!("policy: warn: {error}; denying");
