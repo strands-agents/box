@@ -3,6 +3,7 @@
 use super::Pack;
 use super::grammar::{BASE_FIELDS, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
+use crate::Decision;
 use crate::schema::ActionIdentity;
 
 /// One spawn of a pack-bound program, and what its pack reads the command line as.
@@ -16,10 +17,20 @@ pub(crate) struct PackInvocation<'a> {
     credential_reads: &'a [String],
 }
 
-/// The `::response` of one decided pack action, held until the program exits.
-pub(crate) struct PackResponse {
-    pub(crate) identity: ActionIdentity,
-    pub(crate) input: serde_json::Value,
+/// The `::response` that an allowed pack action owes, holding the exact action and input decided.
+pub(crate) struct PendingPackResponse {
+    identity: ActionIdentity,
+    input: serde_json::Value,
+}
+
+impl PendingPackResponse {
+    /// Hand the decided action and input to `record`, once.
+    pub(crate) fn complete<T>(
+        self,
+        record: impl FnOnce(&ActionIdentity, &serde_json::Value) -> T,
+    ) -> T {
+        record(&self.identity, &self.input)
+    }
 }
 
 impl<'a> PackInvocation<'a> {
@@ -110,11 +121,18 @@ impl<'a> PackInvocation<'a> {
         serde_json::Value::Object(record)
     }
 
-    pub(crate) fn response(&self) -> PackResponse {
-        PackResponse {
-            identity: self.identity(),
-            input: self.input(),
-        }
+    /// Decide this action with `decide`, and when it allows, the `::response` that the action owes.
+    pub(crate) fn decide(
+        &self,
+        decide: impl FnOnce(&ActionIdentity, &serde_json::Value) -> Decision,
+    ) -> (Decision, Option<PendingPackResponse>) {
+        let identity = self.identity();
+        let input = self.input();
+        let decision = decide(&identity, &input);
+        let pending = decision
+            .is_allow()
+            .then_some(PendingPackResponse { identity, input });
+        (decision, pending)
     }
 }
 
@@ -125,7 +143,7 @@ mod tests {
 
     use super::super::corpus::{Engine, PACKS};
     use super::*;
-    use crate::{Decision, DecisionObserver, DenyReason, GovernedBox, Principal, Request};
+    use crate::{Decision, DecisionObserver, DenyReason, GovernedBox, Principal, Request, RuleId};
 
     fn valid(name: &str) -> Pack {
         Pack::load(
@@ -170,21 +188,67 @@ mod tests {
         let [git, cargo] = &packs;
         let push = argv(&["git", "push", "origin", "main"]);
         let test = argv(&["cargo", "test"]);
+        let tested = |cargo: &Pack, test: &[String], status: i32| {
+            let (decision, pending) = engine.invoke(cargo, test);
+            assert!(decision.is_allow(), "the test run is allowed: {decision:?}");
+            engine
+                .engine()
+                .record_pack_response(pending.expect("an allowed action owes a response"), status)
+                .expect("history records the response");
+        };
 
         assert!(
             forbidden_by(&engine.decide(git, &push), "push_after_a_passing_test"),
             "no test has run, so the push is refused"
         );
-        assert!(engine.invoke(cargo, &test, Some(1)).is_allow());
+        tested(cargo, &test, 1);
         assert!(
             forbidden_by(&engine.decide(git, &push), "push_after_a_passing_test"),
             "a test that exited 1 must not satisfy `output.status: 0`"
         );
-        assert!(engine.invoke(cargo, &test, Some(0)).is_allow());
+        tested(cargo, &test, 0);
         assert!(
             engine.decide(git, &push).is_allow(),
             "a test that exited 0 satisfies `output.status: 0`"
         );
+    }
+
+    #[test]
+    fn a_denied_pack_action_owes_no_response() {
+        let git = valid("git");
+        let engine = Engine::open(
+            r#"permit (principal, action == Tool::git::Action::"status", resource);"#,
+            std::slice::from_ref(&git),
+        )
+        .expect("the engine opens");
+
+        let (allowed, owed) = engine.invoke(&git, &argv(&["git", "status"]));
+        let (denied, none) = engine.invoke(&git, &argv(&["git", "push", "origin", "main"]));
+
+        assert!(allowed.is_allow() && owed.is_some(), "{allowed:?}");
+        assert!(!denied.is_allow() && none.is_none(), "{denied:?}");
+    }
+
+    #[test]
+    fn the_response_holds_the_action_and_the_input_that_were_decided() {
+        let git = valid("git");
+        let args = argv(&["push", "--force", "origin", "main"]);
+        let invocation = PackInvocation::new(&git, "git", "/usr/bin/git", "/work", &args, &[]);
+        let mut decided = None;
+
+        let (_, pending) = invocation.decide(|identity, input| {
+            decided = Some((identity.clone(), input.clone()));
+            Decision::Allow {
+                rule: RuleId::default_deny(),
+                attribution: Vec::new(),
+                resource: String::new(),
+            }
+        });
+        let recorded = pending
+            .expect("an allowed action owes a response")
+            .complete(|identity, input| (identity.clone(), input.clone()));
+
+        assert_eq!(Some(recorded), decided);
     }
 
     const NO_SPAWN_AFTER_A_PUSH: &str = r#"

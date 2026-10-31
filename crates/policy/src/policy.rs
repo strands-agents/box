@@ -321,26 +321,24 @@ impl PolicyEngine {
         &self,
         principal: &Principal,
         invocation: &crate::pack::PackInvocation<'_>,
-    ) -> Decision {
-        let identity = invocation.identity();
-        let decision = self
-            .authority
-            .decide_input(principal, &identity, &invocation.input());
-        self.conclude(&identity, invocation.program_path().to_string(), decision)
+    ) -> (Decision, Option<crate::pack::PendingPackResponse>) {
+        invocation.decide(|identity, input| {
+            let decision = self.authority.decide_input(principal, identity, input);
+            self.conclude(identity, invocation.program_path().to_string(), decision)
+        })
     }
 
-    /// Record the `::response` of one decided pack action, with the program's exit status.
+    /// Record the `::response` that an allowed pack action owes, with the program's exit status.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "no caller records a pack response yet")
     )]
     pub(crate) fn record_pack_response(
         &self,
-        response: &crate::pack::PackResponse,
+        response: crate::pack::PendingPackResponse,
         status: i32,
     ) -> Result<(), PolicyError> {
-        self.authority
-            .record_response(&response.identity, &response.input, status)
+        response.complete(|identity, input| self.authority.record_response(identity, input, status))
     }
 
     /// Name the resource on the verdict, then report it once.

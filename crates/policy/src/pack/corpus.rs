@@ -10,7 +10,7 @@ use serde::Deserialize;
 use super::grammar::{FieldKind, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
 use super::schema::pack_action_schema;
-use super::{Pack, PackInvocation};
+use super::{Pack, PackInvocation, PendingPackResponse};
 use crate::check::Refused;
 use crate::dogwood::check_against;
 use crate::spelling::Operator;
@@ -347,26 +347,20 @@ impl Engine {
 
     /// Parse `argv` with `pack`, and decide the pack action it gives.
     pub(super) fn decide(&self, pack: &Pack, argv: &[String]) -> Decision {
-        self.invoke(pack, argv, None)
+        self.invoke(pack, argv).0
     }
 
-    /// Parse `argv` with `pack` and decide its pack action, then, when the action is allowed and
-    /// `status` is given, record its `::response` with that exit status.
-    pub(super) fn invoke(&self, pack: &Pack, argv: &[String], status: Option<i32>) -> Decision {
+    /// Parse `argv` with `pack`, decide its pack action, and keep the `::response` it owes.
+    pub(super) fn invoke(
+        &self,
+        pack: &Pack,
+        argv: &[String],
+    ) -> (Decision, Option<PendingPackResponse>) {
         let program_path = format!("{PROGRAM_DIRECTORY}/{}", pack.program);
         let invocation =
             PackInvocation::new(pack, &pack.program, &program_path, CWD, &argv[1..], &[]);
-        let decision = self
-            .engine
-            .decide_pack_action(&Principal::agent(), &invocation);
-        if let Some(status) = status
-            && decision.is_allow()
-        {
-            self.engine
-                .record_pack_response(&invocation.response(), status)
-                .expect("history records the response");
-        }
-        decision
+        self.engine
+            .decide_pack_action(&Principal::agent(), &invocation)
     }
 }
 
