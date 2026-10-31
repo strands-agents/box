@@ -78,6 +78,10 @@ fn staged(sources: Vec<Policy>, history: &Path) -> PolicyEngine {
         .expect("the staged policy opens")
 }
 
+fn staged_engine(text: &str, history: &Path) -> PolicyEngine {
+    staged(vec![source("staged.dw", text)], history)
+}
+
 #[test]
 fn a_canonical_bundle_is_ready_without_an_mcp_schema() {
     let history = tempfile::tempdir().expect("history directory");
@@ -255,6 +259,685 @@ permit(principal, action == alpha::Action::"write", resource);
             )
             .is_allow(),
         "a degraded server's tool call is denied fail-closed after completion"
+    );
+}
+
+/// A tool name that carries a quote or a backslash must reach both fail-closed holds, and must
+/// still enforce its own rule once that rule's schema stages.
+#[test]
+fn an_escaped_tool_name_holds_and_degrades_like_a_plain_one() {
+    // `literal` is the name as a policy spells it; `raw` is the name a `tools/call` frame carries.
+    for (literal, raw) in [
+        ("foobar", "foobar"),
+        (r#"foo\"bar"#, "foo\"bar"),
+        (r#"foo\\bar"#, "foo\\bar"),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source(
+                "pending.dw",
+                &format!(
+                    r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when {{ context.input.server == "alpha" }};
+forbid(principal, action == alpha::Action::"{literal}", resource)
+when {{ context.input.path like "/secret/*" }};
+permit(principal, action == alpha::Action::"{literal}", resource);
+"#
+                ),
+            )],
+            &history.path().join("dogwood.redb"),
+        );
+
+        let arguments = json!({"path": "/secret/x"});
+        let call = |authority: &PolicyEngine| {
+            authority.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                raw,
+                &arguments,
+            )
+        };
+
+        assert!(
+            matches!(
+                call(&authority),
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            "{raw}: a call whose rule is still pending must be held, not ride the coarse permit"
+        );
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completion degrades the server"),
+            vec!["alpha".to_string()],
+            "{raw}: the server whose typed rule never staged is degraded"
+        );
+        assert!(
+            matches!(
+                call(&authority),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{raw}: a degraded tool call must be denied fail-closed"
+        );
+    }
+}
+
+/// A pending rule reaches a tool through its condition rather than its head. The hold must still
+/// cover that tool, and its server must still reach the degradation warning.
+#[test]
+fn a_tool_a_pending_condition_names_is_held_and_degrades() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "condition.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "srv" };
+forbid(principal, action, resource) when { action == srv::Action::"read" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    let arguments = json!({"path": "/secret/x"});
+    let call = || {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "srv",
+            "read",
+            &arguments,
+        )
+    };
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "a tool that only a pending condition names must still be held"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completion degrades the server"),
+        vec!["srv".to_string()],
+        "the server that only a pending condition names must reach the warning"
+    );
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the degraded hold must cover that tool too"
+    );
+}
+
+/// A pending rule reaches an escaped tool name through its condition. The hold must cover the name
+/// the operator wrote, and not a prefix that stops at the escape. Each case is one class of escape
+/// that the policy render emits, so the hold set reads back every name the render can give it.
+#[test]
+fn a_condition_that_names_an_escaped_tool_holds_the_whole_name() {
+    // `literal` is the name as a policy spells it; `raw` is the name a `tools/call` frame carries.
+    for (literal, raw) in [
+        ("foobar", "foobar"),
+        (r#"foo\"bar"#, "foo\"bar"),
+        (r#"foo\\bar"#, "foo\\bar"),
+        (r#"foo\'bar"#, "foo'bar"),
+        (r#"foo\nbar"#, "foo\nbar"),
+        (r#"foo\tbar"#, "foo\tbar"),
+        (r#"foo\rbar"#, "foo\rbar"),
+        (r#"foo\0bar"#, "foo\0bar"),
+        // A name the render re-spells: the operator's escape is not the render's escape, so a
+        // reader that keeps the rendered text rather than decoding it holds the wrong name.
+        (r#"caf\u{00e9}"#, "café"),
+        (r#"a\u{0007}b"#, "a\u{7}b"),
+        (r#"a\u{200b}b"#, "a\u{200b}b"),
+        ("foo😀bar", "foo😀bar"),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source(
+                "condition.dw",
+                &format!(
+                    r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when {{ context.input.server == "srv" }};
+forbid(principal, action, resource) when {{ action == srv::Action::"{literal}" }};
+"#
+                ),
+            )],
+            &history.path().join("dogwood.redb"),
+        );
+
+        let arguments = json!({"path": "/secret/x"});
+        let call = || {
+            authority.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "srv",
+                raw,
+                &arguments,
+            )
+        };
+        assert!(
+            matches!(
+                call(),
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            "{raw}: a tool that only a pending condition names must still be held"
+        );
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completion degrades the server"),
+            vec!["srv".to_string()],
+            "{raw}: the server that only a pending condition names must reach the warning"
+        );
+        assert!(
+            matches!(
+                call(),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{raw}: the degraded hold must cover that tool too"
+        );
+    }
+}
+
+/// One tool name, stated once in a head and once in a condition. Both ways of asking which tool a
+/// rule is about must answer the same, in every discovery window.
+#[test]
+fn a_head_and_a_condition_agree_on_an_escaped_tool_name() {
+    let literal = r#"foo\"bar"#;
+    let raw = "foo\"bar";
+    let coarse = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "srv" };"#;
+
+    let histories = [
+        tempfile::tempdir().expect("head history directory"),
+        tempfile::tempdir().expect("condition history directory"),
+    ];
+    let authorities: Vec<PolicyEngine> = [
+        format!(r#"forbid(principal, action == srv::Action::"{literal}", resource);"#),
+        format!(
+            r#"forbid(principal, action, resource) when {{ action == srv::Action::"{literal}" }};"#
+        ),
+    ]
+    .iter()
+    .zip(&histories)
+    .map(|(rule, history)| {
+        staged(
+            vec![source("agree.dw", &format!("{coarse}\n{rule}\n"))],
+            &history.path().join("dogwood.redb"),
+        )
+    })
+    .collect();
+
+    let arguments = json!({"path": "/secret/x"});
+    let call = |authority: &PolicyEngine| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "srv",
+            raw,
+            &arguments,
+        )
+    };
+
+    assert_eq!(
+        call(&authorities[0]),
+        call(&authorities[1]),
+        "the head and the condition must hold the same call while the schema is pending"
+    );
+    // The values as well as the agreement, because two paths that agree can agree on an allow.
+    for authority in &authorities {
+        assert!(
+            matches!(
+                call(authority),
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            "both must hold the call, and not agree on an allow"
+        );
+    }
+
+    let degraded: Vec<_> = authorities
+        .iter()
+        .map(|authority| {
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completion degrades the server")
+        })
+        .collect();
+    assert_eq!(
+        degraded[0], degraded[1],
+        "the head and the condition must degrade the same server"
+    );
+    assert_eq!(
+        degraded[0],
+        vec!["srv".to_string()],
+        "both must name the server whose typed rule never staged"
+    );
+
+    assert_eq!(
+        call(&authorities[0]),
+        call(&authorities[1]),
+        "the head and the condition must deny the same call once the server degrades"
+    );
+    for authority in &authorities {
+        assert!(
+            matches!(
+                call(authority),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "both must deny the call fail-closed once the server degrades"
+        );
+    }
+}
+
+/// stderr must name every server a pending rule still waits for, and no other. A rule waits for a
+/// tool to be declared, which fails both when the catalog never arrives and when it arrives without
+/// that tool. The tools a rule decides answer which calls to hold, and they are the wrong answer
+/// here, because a rule also waits for a tool it only reads from history.
+#[test]
+fn discovery_names_each_server_a_pending_rule_still_waits_for() {
+    // Each case is one pending rule. `staged` is the server whose catalog arrives, and `expected`
+    // is what stderr must name.
+    for (rule, staged, expected) in [
+        // Every tool the rule names is declared, and the rule is pending for another reason: it
+        // compares an argument against the wrong type. A check on the named tools alone goes quiet.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path > 3 };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, naming an argument the server does not declare.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.pth == "/x" };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, where the wrong argument name sits in a history reference on a second server.
+        // Both servers are healthy and both are named, because the rule waits on both.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+unless temporal { formerly within 600s ( beta::Action::"fetch"::response{ input.url: _ } ) };"#,
+            &[("alpha", "read", "path"), ("beta", "fetch", "path")][..],
+            vec!["alpha", "beta"],
+        ),
+        // The catalog arrives and does not offer the tool the rule names: a misspelling, or a tool
+        // the server dropped. The server is healthy, so a check on the catalog alone goes quiet.
+        (
+            r#"forbid(principal, action == alpha::Action::"raed", resource);"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, named by a condition rather than the head.
+        (
+            r#"forbid(principal, action, resource) when { action == alpha::Action::"raed" };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, named only by a history reference, beside a head the catalog does declare.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+unless temporal { formerly within 600s ( alpha::Action::"raed"::response{ input.path: _ } ) };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The rule decides a denied server's tool and reads a healthy server's from history.
+        (
+            r#"forbid(principal, action == alpha::Action::"deploy", resource)
+unless temporal { formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } ) };"#,
+            &[("beta", "approve", "id")][..],
+            vec!["alpha"],
+        ),
+        // The mirror: the rule decides a healthy server's tool and reads a denied server's.
+        (
+            r#"forbid(principal, action == beta::Action::"ship", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            &[("beta", "ship", "id")][..],
+            vec!["alpha"],
+        ),
+        // The only tool name a coarse-headed rule spells is the history reference.
+        (
+            r#"forbid(principal, action == Box::Action::"mcp:call", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            &[][..],
+            vec!["alpha"],
+        ),
+        // The head names an action of another family, so it decides no tool call at all.
+        (
+            r#"forbid(principal, action == Box::Action::"shell:exec", resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            &[][..],
+            vec!["alpha"],
+        ),
+        // The head constrains no action.
+        (
+            r#"forbid(principal, action, resource)
+unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
+            &[][..],
+            vec!["alpha"],
+        ),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged_engine(
+            &format!("permit(principal, action == Box::Action::\"mcp:call\", resource);\n{rule}\n"),
+            &history.path().join("dogwood.redb"),
+        );
+        for (server, tool, field) in staged {
+            authority
+                .stage_mcp_schema(server, generated(server, tool, field, "string"))
+                .expect("the healthy server stages");
+        }
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completes"),
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "stderr must name each server this rule still waits for, for rule: {rule}"
+        );
+    }
+}
+
+/// A server name that is not a Cedar identifier reaches a rule as a normalized namespace. stderr
+/// must not name such a server once its catalog declares the tool, although the two spellings
+/// differ.
+#[test]
+fn a_staged_server_whose_name_needs_normalizing_is_not_named() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged_engine(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == my_srv::Action::"read", resource)
+unless temporal { formerly within 600s ( other::Action::"fetch"::response{ input.url: _ } ) };
+"#,
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("my-srv", generated("my-srv", "read", "path", "string"))
+        .expect("the hyphenated server stages");
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["other".to_string()],
+        "a staged server must not be named, and the server with no catalog must be"
+    );
+}
+
+/// A pending rule reads one server's tool from history and decides another server's tool. The hold
+/// and the degradation must reach the server the rule decides, and must leave the other alone. An
+/// escaped name must read the same, because the reader that tells the two apart decodes the name.
+#[test]
+fn a_server_a_pending_rule_only_reads_from_history_is_neither_held_nor_degraded() {
+    // `literal` is the name as a policy spells it; `raw` is the name a `tools/call` frame carries.
+    for (literal, raw) in [("approve", "approve"), (r#"app\"rove"#, "app\"rove")] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source(
+                "approval.dw",
+                &format!(
+                    r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+@id("deploy-needs-approval")
+forbid(principal, action == alpha::Action::"deploy", resource)
+unless temporal {{
+    formerly within 600s ( beta::Action::"{literal}"::response{{ input.id: _ }} )
+}};
+"#
+                ),
+            )],
+            &history.path().join("dogwood.redb"),
+        );
+
+        let call = |server: &str, tool: &str, arguments: serde_json::Value| {
+            authority.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &arguments,
+            )
+        };
+
+        assert!(
+            matches!(
+                call("alpha", "deploy", json!({"target": "prod"})),
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            "{raw}: the tool the pending rule decides must be held"
+        );
+        assert!(
+            call("beta", raw, json!({"id": "x"})).is_allow(),
+            "{raw}: the tool the pending rule only reads from history must not be held"
+        );
+
+        let tools = json!({
+            "result": {
+                "tools": [{
+                    "name": raw,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                        "required": ["id"]
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            authority
+                .stage_mcp_schema(
+                    "beta",
+                    generate_mcp_schema("beta", &tools.to_string())
+                        .expect("the beta schema generates"),
+                )
+                .expect("beta stages"),
+            SchemaStage::Accepted {
+                authority_ready: false,
+            },
+            "{raw}: beta's schema arrives, and the rule still waits for alpha's"
+        );
+        assert!(
+            call("beta", raw, json!({"id": "x"})).is_allow(),
+            "{raw}: a fully discovered server's tool must not be held by another server's pending rule"
+        );
+
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery completes"),
+            vec!["alpha".to_string()],
+            "{raw}: only the server whose schema never arrived degrades"
+        );
+        assert!(
+            matches!(
+                call("alpha", "deploy", json!({"target": "prod"})),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{raw}: the degraded server's tool stays denied fail-closed"
+        );
+        assert!(
+            call("beta", raw, json!({"id": "x"})).is_allow(),
+            "{raw}: the healthy server's tool must not be refused"
+        );
+    }
+}
+
+/// One pending rule both decides a tool and reads another tool of the same server from history.
+/// The hold must cover the tool it decides and must not grow to the tool it only reads.
+#[test]
+fn a_pending_rule_holds_the_tool_it_decides_and_not_the_tool_it_reads() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "review.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == svc::Action::"push", resource)
+when { context.input.branch == "main" }
+unless temporal {
+    formerly within 600s ( svc::Action::"review"::response{ input.id: _ } )
+};
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    let call = |tool: &str, arguments: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "svc",
+            tool,
+            &arguments,
+        )
+    };
+
+    assert!(
+        matches!(
+            call("push", json!({"branch": "main"})),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "the tool the pending rule decides must be held"
+    );
+    assert!(
+        call("review", json!({"id": "x"})).is_allow(),
+        "the tool the same rule only reads from history must not be held"
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["svc".to_string()],
+        "the server whose typed rule never staged degrades"
+    );
+    assert!(
+        matches!(
+            call("push", json!({"branch": "main"})),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the degraded hold must cover the tool the rule decides"
+    );
+    assert!(
+        call("review", json!({"id": "x"})).is_allow(),
+        "the degraded hold must not cover the tool the rule only reads"
+    );
+}
+
+/// The hold above is transient: once the schema stages, an argument-constrained rule over a
+/// quote-bearing tool name decides the call itself.
+#[test]
+fn an_escaped_tool_name_enforces_its_own_rule_once_its_schema_stages() {
+    let tool = "foo\"bar";
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+forbid(principal, action == alpha::Action::"foo\"bar", resource)
+when { context.input.path like "/secret/*" };
+permit(principal, action == alpha::Action::"foo\"bar", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [{
+                "name": tool,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "alpha",
+                generate_mcp_schema("alpha", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty(),
+        "a staged tool degrades no server"
+    );
+
+    let refine = |path: &str| {
+        let arguments = json!({"path": path});
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            tool,
+            &arguments,
+        )
+    };
+    assert!(
+        matches!(
+            refine("/secret/x"),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the argument-constrained forbid must deny the forbidden argument"
+    );
+    assert!(
+        refine("/public/x").is_allow(),
+        "the forbid must not reach an argument it does not name"
     );
 }
 

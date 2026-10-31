@@ -3,17 +3,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
+use cedar_policy::EntityUid;
 use dogwood_local_engine::DurableError;
 
 use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
-    DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
+    DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
-use crate::schema::{ActionIdentity, GovernedBox};
+use crate::schema::{ActionIdentity, GovernedBox, mcp_tool_action};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
 
@@ -21,6 +23,8 @@ use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Reque
 struct CandidatePolicy {
     ordinal: usize,
     expanded_source: String,
+    /// The per-tool actions the head names, decoded at parse time.
+    head_tools: BTreeSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,14 +119,7 @@ impl Authority {
         sources: Vec<Policy>,
         mut engine: DogwoodEngine,
     ) -> Result<Self, PolicyStagingError> {
-        let candidates = parse_policy_source(&authored(&sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect::<Vec<_>>();
+        let candidates = candidates(&authored(&sources)).map_err(Refused::into_error)?;
         let mut proposal = ProposalState {
             operator: operator.clone(),
             candidates,
@@ -215,14 +212,7 @@ impl Authority {
         };
         let mut proposed = current.clone();
         // The operator and the discovered schemas carry over; only the authored rules change.
-        proposed.candidates = parse_policy_source(&authored(sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect();
+        proposed.candidates = candidates(&authored(sources)).map_err(Refused::into_error)?;
         proposed.ready = BTreeSet::new();
         proposed.pending = BTreeMap::new();
 
@@ -344,8 +334,13 @@ impl Authority {
     /// Every door has drained, so a candidate still pending means its server's `tools/list` was
     /// denied and its schema will never arrive. Rather than fatally refuse the whole box, the still
     /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
-    /// schema-independent subset becomes the final `Ready` authority, and the degraded server
-    /// namespaces are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    /// schema-independent subset becomes the final `Ready` authority, and the servers whose catalog
+    /// never arrived are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    ///
+    /// The tools held and the servers named answer different questions, so they come from different
+    /// scans. A rule decides no call to a tool it only reads from history, and yet it still waits
+    /// for that tool to be declared. `servers_a_pending_rule_waits_for` states which servers reach
+    /// the warning.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -363,13 +358,13 @@ impl Authority {
             .as_ref()
             .map(pending_typed_tools)
             .unwrap_or_default();
-        live.degraded_tools = degraded.clone();
+        live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
-        let servers: BTreeSet<String> = degraded
-            .into_iter()
-            .map(|(namespace, _)| namespace)
-            .collect();
+        let servers = proposal
+            .as_ref()
+            .map(|proposal| servers_a_pending_rule_waits_for(proposal, &live.engine))
+            .unwrap_or_default();
         Ok(servers.into_iter().collect())
     }
 
@@ -634,10 +629,15 @@ impl ProposalState {
 
     /// Whether a candidate names a per-tool action. A rule over the fixed vocabulary alone cannot
     /// become valid when a tool schema stages, so its load error is a refusal and not a pending state.
+    /// A history reference counts, because a rule that only reads one still waits for that schema.
     fn names_a_typed_action(&self, ordinal: usize) -> bool {
         let mut typed = BTreeSet::new();
         if let Some(candidate) = self.candidates.get(ordinal) {
-            collect_typed_actions(&candidate.expanded_source, &mut typed);
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Named,
+                &mut typed,
+            );
         }
         !typed.is_empty()
     }
@@ -672,23 +672,111 @@ impl ProposalState {
     }
 }
 
-/// The pending typed `(namespace, tool)` pairs a proposal still needs a discovered schema for.
+/// Parse and macro-expand an authored bundle into one candidate per rule.
+fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
+    Ok(expand_policy_source(source)?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, policy)| CandidatePolicy {
+            ordinal,
+            expanded_source: policy.source,
+            head_tools: policy.head_tools,
+        })
+        .collect())
+}
+
+/// The typed `(namespace, tool)` pairs whose calls a proposal holds back, from each pending rule's
+/// decoded head and from a scan of its rendered text. A tool that a pending rule only reads from
+/// history is left out: that rule decides no call to it, so holding it would refuse a healthy
+/// server's tool over another rule's mistake
+/// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
         if let Some(candidate) = proposal.candidates.get(ordinal) {
-            collect_typed_actions(&candidate.expanded_source, &mut out);
+            out.extend(candidate.head_tools.iter().cloned());
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Skipped,
+                &mut out,
+            );
         }
     }
     out
 }
 
+/// Every `(namespace, tool)` one candidate names, in its head, in a condition, or through a
+/// `when temporal` history reference.
+fn named_typed_tools(candidate: &CandidatePolicy) -> BTreeSet<(String, String)> {
+    let mut out: BTreeSet<(String, String)> = candidate.head_tools.iter().cloned().collect();
+    collect_typed_actions(
+        &candidate.expanded_source,
+        HistoryReferences::Named,
+        &mut out,
+    );
+    out
+}
+
+/// The servers each pending rule still waits for, which is what the operator must fix. A rule waits
+/// for every tool it names to be declared, so an undeclared tool names its own server. A rule that
+/// stays pending for another reason — an argument name or a type its server declares differently —
+/// leaves every tool declared, and then every server it names is what it waits on. Falling back
+/// that way is what keeps the warning from going silent, because `names_a_typed_action` parks a
+/// rule only when it names at least one typed tool, so no pending rule contributes nothing.
+fn servers_a_pending_rule_waits_for(
+    proposal: &ProposalState,
+    engine: &DogwoodEngine,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for &ordinal in proposal.pending.keys() {
+        let Some(candidate) = proposal.candidates.get(ordinal) else {
+            continue;
+        };
+        let named = named_typed_tools(candidate);
+        let undeclared: BTreeSet<String> = named
+            .iter()
+            .filter(|(namespace, tool)| !declares(engine, namespace, tool))
+            .map(|(namespace, _)| namespace.clone())
+            .collect();
+        if undeclared.is_empty() {
+            out.extend(named.into_iter().map(|(namespace, _)| namespace));
+        } else {
+            out.extend(undeclared);
+        }
+    }
+    out
+}
+
+/// Whether the committed schema declares `<namespace>::Action::"<tool>"`. A name the engine cannot
+/// parse counts as undeclared, so the server reaches the warning rather than going quiet.
+fn declares(engine: &DogwoodEngine, namespace: &str, tool: &str) -> bool {
+    let identity = ActionIdentity::McpTool {
+        namespace: namespace.to_string(),
+        tool: tool.to_string(),
+    };
+    EntityUid::from_str(&identity.observer_action())
+        .map(|action| engine.declares_tool_action(&action))
+        .unwrap_or(false)
+}
+
+/// Whether a scan keeps the tool names that only a `when temporal` history reference spells.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryReferences {
+    /// Keep them: such a rule still needs that tool's schema before it can load.
+    Named,
+    /// Drop them: such a rule reads that tool's history and decides no call to it.
+    Skipped,
+}
+
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
-/// excluding the fixed `Box::Action` vocabulary. A per-tool rule's head is
-/// `action == <ns>::Action::"<tool>"`, and `<ns>` is a single normalized identifier
-/// ([`mcp_action_namespace`](crate::schema::mcp_action_namespace)), so a scan for the marker
-/// recovers `(namespace, tool)`.
-fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
+/// excluding the fixed `Box::Action` vocabulary, including one that only a condition names, and
+/// treating a `when temporal` history reference as `references` says. The scan finds the candidate
+/// text, and `decoded_tool_action` is the one decoder that says which tool it names.
+fn collect_typed_actions(
+    source: &str,
+    references: HistoryReferences,
+    out: &mut BTreeSet<(String, String)>,
+) {
     const MARKER: &str = "::Action::\"";
     let mut rest = source;
     while let Some(pos) = rest.find(MARKER) {
@@ -701,16 +789,47 @@ fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
             .rev()
             .collect();
         let after = &rest[pos + MARKER.len()..];
-        match after.find('"') {
+        match closing_quote(after) {
             Some(end) => {
-                if !namespace.is_empty() && namespace != "Box" {
-                    out.insert((namespace, after[..end].to_string()));
-                }
+                let literal = &after[..end];
                 rest = &after[end + 1..];
+                // A name that `::` follows is an event a `when temporal` predicate reads
+                // (`::request{`, `::response{`, `::error{`), and not an action the rule decides.
+                let history = rest.starts_with("::");
+                let keep = !history || references == HistoryReferences::Named;
+                if keep {
+                    out.extend(decoded_tool_action(&namespace, literal));
+                }
             }
             None => break,
         }
     }
+}
+
+/// The offset of the quote that ends a Cedar string literal, where `\` escapes the character
+/// after it.
+fn closing_quote(literal: &str) -> Option<usize> {
+    let mut characters = literal.char_indices();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '"' => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `(namespace, tool)` that a rendered `<ns>::Action::"<literal>"` names, through the decoder
+/// a parsed head uses, or `None` for the fixed `Box::Action` vocabulary.
+fn decoded_tool_action(namespace: &str, literal: &str) -> Option<(String, String)> {
+    if namespace.is_empty() {
+        return None;
+    }
+    let action = EntityUid::from_str(&format!("{namespace}::Action::\"{literal}\"")).ok()?;
+    mcp_tool_action(&action)
 }
 
 /// What `open_staged` refuses in `sources`, or its warnings and the rules it holds pending.
@@ -718,15 +837,7 @@ pub(super) fn check_staged(
     operator: &Operator,
     sources: &[Policy],
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
-    let candidates = check_policy_source(&authored(sources))
-        .map_err(|refused| refused.findings)?
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, expanded_source)| CandidatePolicy {
-            ordinal,
-            expanded_source,
-        })
-        .collect::<Vec<_>>();
+    let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
         candidates,

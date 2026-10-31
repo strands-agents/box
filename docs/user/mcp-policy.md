@@ -161,10 +161,16 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
-When a rule refuses `tools/list` for a server that a per-tool rule names, the box starts and that
-server has no tools. Each call to its tools is refused, and stderr names the server:
-`discovery denied tools/list for ["<server>"]`. Permit the server's `tools/list`, or remove its
-per-tool rule.
+When a per-tool rule cannot load, the box starts and that rule never takes effect. stderr names the
+servers it was waiting for: `a per-tool rule never loaded for ["<server>"]`. Three things cause it.
+A rule refuses `tools/list` for the server, so the server has no tools at all — permit its
+`tools/list`. Or the server's catalog does not offer the tool the rule names, because the name is
+misspelled or the server dropped it — correct the tool name. Or the rule reads an argument the
+server names differently, or compares it against another type — correct the argument. Removing the
+per-tool rule also clears the warning.
+
+The warning names every server the rule was waiting for, so when a rule reads one server's tool from
+history it names that server too, even when that server is answering correctly.
 
 ## See also
 

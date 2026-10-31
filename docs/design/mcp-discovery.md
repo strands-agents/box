@@ -72,8 +72,9 @@ refused, or never connects adds no commit.
 
 While the engine is `Discovering`, the committed rules decide each request ([discovery serves the
 schema-independent subset](decisions.md#discovery-serves-the-schema-independent-subset)). A tool
-call whose per-tool rule still waits is refused as pending. A call to a tool of a degraded server,
-one whose per-tool rule can never load, is refused.
+call whose per-tool rule still waits is refused as pending. A call to a tool that an inert rule
+decides, on a server whose per-tool rule can never load, is refused. Both holds are per tool: a call
+to a tool that no waiting rule decides is decided by the rules that did load.
 
 ## How a server is discovered
 
@@ -187,6 +188,23 @@ http servers. The gateway reports only when `box.toml` declares an http server. 
 reports, the coordinator finishes discovery once. A per-tool rule that still hasn't validated
 belongs to a server that will never stage, so that server is degraded, stderr names it, and the
 engine becomes `Ready` for the rest of the run.
+
+Box names those servers from a different set than the one it holds calls for, and it works one rule
+at a time. It holds the tools an inert rule decides. It names the servers that rule still waits for.
+
+A rule waits for every tool it mentions — in its head, in a condition, or in a history reference —
+to be declared, so an undeclared tool names its own server. A server whose `tools/list` a rule
+refused declares nothing, so every tool named on it is undeclared. A server whose catalog arrived is
+named when the rule asks for a tool it does not offer, which is a misspelling or a tool the server
+dropped.
+
+When every tool a pending rule mentions is declared, the rule failed for another reason — an argument
+name or a type the server declares differently — and Box names every server that rule mentions. That
+can name a server answering correctly, which is weaker than
+[a server whose discovery a policy denies degrades
+alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone) asks for, and it is the
+deliberate trade against an inert rule that warns about nothing. A rule that only reads a tool from
+history still decides no call to it, so that tool is not held.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays
