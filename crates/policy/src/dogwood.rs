@@ -430,14 +430,23 @@ impl DogwoodEngine {
         // The schema is the single source of truth for both engines, which is why this
         // reuses the same request-construction gate rather than restating the
         // principal/action pairings.
-        if let Err(error) =
-            crate::schema::to_cedar_request(principal, request, identity, &self.request_schema)
-        {
+        self.gated_decision(
+            crate::schema::to_cedar_request(principal, request, identity, &self.request_schema),
+            || request_event(governed, principal, request, identity),
+        )
+    }
+
+    /// Deny with an internal fault unless `gate` typed the request, then decide the event of `build`.
+    fn gated_decision<T>(
+        &self,
+        gate: Result<T, PolicyError>,
+        build: impl FnOnce() -> EventBuilder,
+    ) -> Decision {
+        if let Err(error) = gate {
             eprintln!("policy: warn: {error}; denying");
             return Decision::internal_fault();
         }
-
-        match self.submit(|| request_event(governed, principal, request, identity)) {
+        match self.submit(build) {
             Ok(Some(decision)) => decision,
             // A decision-kind event that produced no response, or a poisoned lock:
             // neither is a permit.
@@ -472,21 +481,15 @@ impl DogwoodEngine {
         identity: &ActionIdentity,
         input: &serde_json::Value,
     ) -> Decision {
-        if let Err(error) =
-            crate::schema::to_cedar_input_request(principal, identity, input, &self.request_schema)
-        {
-            eprintln!("policy: warn: {error}; denying");
-            return Decision::internal_fault();
-        }
-        let input = entity_json_value(input);
-        match self.submit(|| with_input(identity.event_builder(KIND_REQUEST), input)) {
-            Ok(Some(decision)) => decision,
-            Ok(None) => Decision::internal_fault(),
-            Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
-                Decision::internal_fault()
-            }
-        }
+        self.gated_decision(
+            crate::schema::to_cedar_input_request(principal, identity, input, &self.request_schema),
+            || {
+                with_input(
+                    identity.event_builder(KIND_REQUEST),
+                    entity_json_value(input),
+                )
+            },
+        )
     }
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
