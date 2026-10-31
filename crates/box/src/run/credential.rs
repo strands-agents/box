@@ -36,9 +36,6 @@ pub(crate) struct Projection {
     /// The credential capabilities the proxy drives.
     pub(crate) capabilities: Vec<(credentials::DestinationPattern, Arc<Vault>)>,
 
-    /// The phantom values, for the proxy to recognize on the way out.
-    pub(crate) phantom_environment: Vec<(String, String)>,
-
     /// What every process's environment receives: every phantom, plus the signing placeholders.
     pub(crate) workload_environment: Vec<ProvisionedVariable>,
 }
@@ -62,7 +59,6 @@ const SIGNING_PLACEHOLDERS: [(&str, &str); 2] = [
 /// Resolve every declared binding, minting one phantom per opaque route.
 pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
-    let mut phantom_environment = Vec::new();
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
     for binding in bindings {
         // `require_every_route` is the box's fail-closed stance, now owned by the vault:
@@ -85,7 +81,6 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
         // match); an opaque one mints exactly one.
         match (binding.provisioned_name(), opened.phantoms()) {
             (Some(name), [phantom]) => {
-                phantom_environment.push((name.to_string(), phantom.token().to_string()));
                 workload_environment.push(ProvisionedVariable {
                     name: name.to_string(),
                     value: phantom.token().to_string(),
@@ -128,7 +123,6 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
     Ok(Projection {
         workload_environment,
         capabilities,
-        phantom_environment,
     })
 }
 
@@ -162,16 +156,6 @@ mod tests {
         let projection = workspace(&binding).expect("the locator resolves");
 
         assert_eq!(projection.capabilities.len(), 1);
-        let placed: Vec<(String, String)> = projection
-            .workload_environment
-            .iter()
-            .map(|variable| (variable.name.clone(), variable.value.clone()))
-            .collect();
-        assert_eq!(
-            projection.phantom_environment, placed,
-            "with no signed route the two sets are equal: the proxy and the workload must watch \
-             for the same literal"
-        );
         let variable = &projection.workload_environment[0];
         let (name, value) = (&variable.name, &variable.value);
         assert_eq!(
@@ -243,10 +227,9 @@ mod tests {
 
         assert!(projection.capabilities.is_empty());
         assert!(projection.workload_environment.is_empty());
-        assert!(projection.phantom_environment.is_empty());
     }
 
-    /// **A signed route gives the workload placeholder AWS credentials, and the proxy none.**
+    /// **A signed route gives the workload placeholder AWS credentials.**
     ///
     /// The two sets differ here and are equal for an opaque route. That asymmetry is the whole
     #[test]
@@ -267,10 +250,6 @@ mod tests {
             return;
         };
 
-        assert!(
-            projection.phantom_environment.is_empty(),
-            "a signed route places nothing for the proxy to match"
-        );
         let names: Vec<&str> = projection
             .workload_environment
             .iter()
@@ -306,10 +285,6 @@ mod tests {
         let projection =
             workspace(&bindings).expect("a credsd route opens without contacting the daemon");
 
-        assert!(
-            projection.phantom_environment.is_empty(),
-            "a signed route places nothing for the proxy to match"
-        );
         let names: Vec<&str> = projection
             .workload_environment
             .iter()

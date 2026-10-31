@@ -1,6 +1,4 @@
-//! Audit records and the fast in-memory log.
-
-use std::sync::{Arc, Mutex};
+//! Audit records.
 
 /// A request correlation id, tying every record about one exchange together.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,50 +150,6 @@ pub enum Decision {
     Deny,
 }
 
-/// A fast, secret-free connection/decision audit line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetworkAuditEvent {
-    /// The destination host.
-    pub host: String,
-    /// The destination port.
-    pub port: u16,
-    /// The allow/deny outcome.
-    pub decision: Decision,
-    /// A non-secret reason (e.g. the deny reason), or empty for a plain allow.
-    pub reason: String,
-    /// The correlation id tying this to the matching [`EgressDecision`] and `CredentialAcquire`.
-    pub correlation: RequestId,
-}
-
-impl NetworkAuditEvent {
-    /// Build an allow line for `host:port`.
-    pub fn allow(host: impl Into<String>, port: u16, correlation: RequestId) -> Self {
-        Self {
-            host: host.into(),
-            port,
-            decision: Decision::Allow,
-            reason: String::new(),
-            correlation,
-        }
-    }
-
-    /// Build a deny line for `host:port` with a non-secret `reason`.
-    pub fn deny(
-        host: impl Into<String>,
-        port: u16,
-        reason: impl Into<String>,
-        correlation: RequestId,
-    ) -> Self {
-        Self {
-            host: host.into(),
-            port,
-            decision: Decision::Deny,
-            reason: reason.into(),
-            correlation,
-        }
-    }
-}
-
 /// One final connection or outbound request decision emitted before its result is applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressDecision {
@@ -215,68 +169,12 @@ pub struct EgressDecision {
     pub correlation: RequestId,
 }
 
-/// A fast, in-memory, **not** tamper-evident audit log.
-#[derive(Debug, Clone, Default)]
-pub struct SharedAuditLog {
-    events: Arc<Mutex<Vec<NetworkAuditEvent>>>,
-}
-
-impl SharedAuditLog {
-    /// An empty log.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Append an event (fire-and-forget; a poisoned lock is ignored so the audit can never block or
-    /// fail the request path).
-    pub fn push(&self, event: NetworkAuditEvent) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push(event);
-        }
-    }
-
-    /// Drain and return every buffered event, leaving the log empty.
-    pub fn drain(&self) -> Vec<NetworkAuditEvent> {
-        match self.events.lock() {
-            Ok(mut events) => std::mem::take(&mut *events),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// The number of buffered events (for tests/diagnostics).
-    pub fn len(&self) -> usize {
-        self.events.lock().map(|e| e.len()).unwrap_or(0)
-    }
-
-    /// Whether the log is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn corr() -> RequestId {
         RequestId::new("turn-1")
-    }
-
-    #[test]
-    fn shared_log_appends_and_drains() {
-        let log = SharedAuditLog::new();
-        log.push(NetworkAuditEvent::allow("api.example.com", 443, corr()));
-        log.push(NetworkAuditEvent::deny(
-            "metadata.google.internal",
-            443,
-            "connect effect denied",
-            corr(),
-        ));
-        assert_eq!(log.len(), 2);
-        let drained = log.drain();
-        assert_eq!(drained.len(), 2);
-        assert!(log.is_empty(), "drain leaves the log empty");
-        assert_eq!(drained[1].decision, Decision::Deny);
     }
 
     #[test]
@@ -334,13 +232,5 @@ mod tests {
         let request = corr().with_headers(&headers);
         assert!(request.context("traceparent").is_some());
         assert_eq!(request.context("tracestate"), None);
-    }
-
-    #[test]
-    fn records_are_secret_free_by_construction() {
-        // There is no constructor path or field that accepts a secret — the audit line carries only
-        // host/port/decision/reason/correlation. This test documents the type-level guarantee.
-        let ev = NetworkAuditEvent::deny("h", 443, "reason", corr());
-        assert!(!format!("{ev:?}").contains("secret"));
     }
 }

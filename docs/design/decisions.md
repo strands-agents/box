@@ -581,9 +581,9 @@ On every mediated path (the interpreters and egress), exactly one component deci
 the policy engine, reached through the `EffectInterceptor` seam. Every other mechanism on those paths
 is either a deny-only floor that policy cannot widen, which runs before policy on the network path
 and after it on the interpreter path, or a mutator that carries no vote. Any code path
-that could return "allowed" without asking the engine is deleted, and the types carry the rule:
-`CapabilityOutcome` holds `Applied` and `Unavailable`, with no `Allow` and no `Deny`, so a capability
-cannot authorize. `egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
+that could return "allowed" without asking the engine is deleted, and the types carry the rule: a
+capability returns its edits or a refusal (`Result<Vec<Mutation>, String>`) and never an allow.
+`egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
 path, and do not give a mechanism its own verdict to save a round trip.
 
 <a id="no-connection-is-opaque-to-the-boundary"></a>

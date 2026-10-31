@@ -3,6 +3,8 @@
 use fluent_uri::{ParseErrorKind, UriRef};
 use serde_json::Value;
 
+use crate::boundary::hex_value;
+
 /// Rewrite a `resources/read` frame's `params.uri` to its canonical form, or `None` when nothing changes.
 pub(crate) fn canonicalize_frame_uri(frame: &[u8]) -> Option<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(frame).ok()?;
@@ -228,16 +230,6 @@ fn decode_unreserved(path: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The value of one hex digit, or `None` if `byte` is not a hex digit.
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Whether `byte` is an RFC 3986 unreserved octet — the only octets safe to percent-decode without changing how the URI parses.

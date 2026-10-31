@@ -3,7 +3,7 @@
 use http_body_util::BodyExt;
 use zeroize::Zeroizing;
 
-use crate::boundary::HeaderMap;
+use crate::boundary::{HeaderMap, InterceptedResponse};
 use crate::error::{ProxyError, Result};
 
 /// A parsed HTTP/1.1 request read off the wire.
@@ -22,12 +22,8 @@ pub(crate) struct ParsedRequest {
 /// A parsed HTTP/1.1 response read off the wire.
 #[derive(Debug)]
 pub(crate) struct ParsedResponse {
-    /// The status code.
-    pub(super) status: u16,
-    /// The response headers.
-    pub(super) headers: HeaderMap,
-    /// The response body (materialized, bounded by the read limit).
-    pub(crate) body: Vec<u8>,
+    /// The status, headers, and body (materialized, bounded by the read limit).
+    pub(crate) response: InterceptedResponse,
     /// The header case the upstream sent, which hyper writes back to the workload.
     pub(super) header_case: hyper::http::Extensions,
 }
@@ -158,38 +154,31 @@ fn connection_nominated_headers(headers: &HeaderMap) -> Result<Vec<String>> {
     Ok(nominated)
 }
 
+/// The fields that describe only the current transport hop.
+const HOP_BY_HOP: [&str; 9] = [
+    "connection",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "te",
+    "transfer-encoding",
+    "upgrade",
+    "trailer",
+];
+
 /// Whether a header describes only the current transport hop.
 fn is_hop_by_hop_header(name: &str, nominated: &[String]) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "proxy-connection"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "keep-alive"
-            | "te"
-            | "transfer-encoding"
-            | "upgrade"
-            | "trailer"
-    ) || nominated
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+    HOP_BY_HOP.iter().any(|hop| hop.eq_ignore_ascii_case(name))
+        || nominated
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 /// Remove hop-by-hop fields before controls or credential signing inspect the message.
 fn strip_hop_by_hop_headers(headers: &mut HeaderMap) -> Result<()> {
     let nominated = connection_nominated_headers(headers)?;
-    for name in [
-        "connection",
-        "proxy-connection",
-        "proxy-authorization",
-        "proxy-authenticate",
-        "keep-alive",
-        "te",
-        "transfer-encoding",
-        "upgrade",
-        "trailer",
-    ] {
+    for name in HOP_BY_HOP {
         headers.remove(name);
     }
     for name in nominated {
@@ -313,9 +302,7 @@ pub(crate) async fn read_response(
     // Pass on the header case, not the upstream's reason phrase.
     head.extensions.remove::<hyper::ext::ReasonPhrase>();
     Ok(ParsedResponse {
-        status,
-        headers,
-        body,
+        response: InterceptedResponse::http(status, headers, body),
         header_case: head.extensions,
     })
 }

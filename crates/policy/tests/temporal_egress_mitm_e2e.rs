@@ -24,7 +24,9 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egress_gateway::{AuditDecision, CapabilitySet, MitmConfig, MitmHandle, MitmInterceptor};
+use egress_gateway::{
+    AuditDecision, CapabilitySet, MitmConfig, MitmHandle, MitmInterceptor, StubEmitter,
+};
 use policy::{EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal};
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -79,8 +81,15 @@ fn the_byte_budget_denies_a_later_request_through_the_real_proxy() {
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         ..MitmConfig::default()
     };
-    let handle = MitmInterceptor::start(config, CapabilitySet::default(), interceptor)
-        .expect("proxy starts");
+    let records = StubEmitter::new();
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        interceptor,
+        Box::new(records.clone()),
+        None,
+    )
+    .expect("proxy starts");
 
     // One connection carries one request: the proxy answers `Connection: close` and
     // handles a single request/response pair per tunnel. So each iteration is a fresh
@@ -131,13 +140,13 @@ fn the_byte_budget_denies_a_later_request_through_the_real_proxy() {
         "a denied request must never reach the upstream: {statuses:?}"
     );
 
-    // The denial is audited.
-    let events = handle.drain_audit_events();
+    // The denial is recorded.
     assert!(
-        events
+        records
+            .records()
             .iter()
-            .any(|event| event.decision == AuditDecision::Deny),
-        "the request-leg denial must be audited"
+            .any(|record| record.decision == AuditDecision::Deny),
+        "the request-leg denial must be recorded"
     );
 }
 

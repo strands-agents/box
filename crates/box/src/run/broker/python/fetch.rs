@@ -818,7 +818,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         );
     }
 
-    /// A `bytes` body is sent as-is (not just a `str`), at parity with the gateway's `BodyRef`.
+    /// A `bytes` body is sent as-is (not just a `str`), at parity with the gateway's request body.
     #[tokio::test]
     async fn a_bytes_body_is_sent_as_is() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");

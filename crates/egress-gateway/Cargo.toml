@@ -44,9 +44,6 @@ thiserror = "2"
 # `Zeroizing` so plaintext is wiped on drop; never logged, never disked.
 zeroize = { version = "1", features = ["derive"] }
 
-# Base64 for BasicAuth credential injection (`Authorization: Basic <base64>`).
-base64 = { version = "0.23", default-features = false, features = ["std"] }
-
 # HTTP/1.1 request/response parsing on the intercepted plaintext leg.
 httparse = "1"
 
