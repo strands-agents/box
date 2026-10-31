@@ -505,7 +505,7 @@ impl Boundary {
         }
 
         // The mediation plumbing, for the agent alone: the five interpreter aliases, one alias per
-        // declared MCP server, and the one broker socket. Every process gets the CA.
+        // declared MCP program, and the one broker socket. Every process gets the CA.
         if mediated {
             for alias in layout
                 .shell_aliases()
@@ -4154,7 +4154,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
         }
     }
 
-    /// The agent's boundary ignores tool and MCP grants, and adds one alias per added MCP server.
+    /// The agent's boundary ignores tool and MCP grants, and adds one alias per added MCP program.
     #[test]
     fn the_agent_boundary_is_identical_with_and_without_tool_and_mcp_grants() {
         let mut fixture = Fixture::new();

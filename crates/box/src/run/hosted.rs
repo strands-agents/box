@@ -402,6 +402,16 @@ impl McpLeafLauncher {
             .unwrap_or_default()
     }
 
+    /// `server`'s fixed arguments as its leaf starts them, or `None` when they do not expand.
+    pub(crate) fn launched_arguments(&self, server: &str) -> Option<Vec<String>> {
+        let contained = self.record.contained_mcp.get(server)?;
+        crate::run::contain::boundary::environment::expanded_arguments(
+            &contained.spec,
+            &self.attachment,
+        )
+        .ok()
+    }
+
     /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
     pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
         let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
@@ -693,6 +703,16 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
+            match record.contained_mcp.get(&server.name) {
+                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                    &contained.spec,
+                    &attachment,
+                )
+                .ok(),
+                None => Some(server.arguments().to_vec()),
+            }
+        })?;
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
         let broker_listener = BrokerHost::bind(root)?;
@@ -1105,6 +1125,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     async fn initialized_mcp_client(
         root: &BoxRoot,
         program: &str,
+        arguments: &[String],
     ) -> (
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
@@ -1118,6 +1139,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             crate::run::broker::protocol::Body::Open {
                 mode: crate::run::broker::protocol::Interpreter::Mcp {
                     server: program.to_string(),
+                    arguments: arguments.to_vec(),
                 },
             },
         )
@@ -1279,9 +1301,11 @@ wait"#;
             .as_ref()
             .expect("the discovery host exists")
             .registry();
-        let (mut leader_reader, mut leader_writer) = initialized_mcp_client(&root, "/bin/sh").await;
+        let arguments = record.mcp[0].arguments().to_vec();
+        let (mut leader_reader, mut leader_writer) =
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh").await;
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");

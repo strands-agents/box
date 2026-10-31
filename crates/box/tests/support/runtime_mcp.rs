@@ -155,6 +155,9 @@ impl<'a> Server<'a> {
     }
 }
 
+/// One workspace's stdio servers, each as `(program, arguments)`.
+type DeclaredCommands = Vec<(String, Vec<String>)>;
+
 pub struct RuntimeMcpBox {
     home: tempfile::TempDir,
     workspace: PathBuf,
@@ -163,6 +166,10 @@ pub struct RuntimeMcpBox {
     name: String,
     /// `[tool.<label>]` tables the box declares, as `(label, table)`.
     tools: Vec<(String, String)>,
+    /// Each written workspace's stdio servers, oldest first.
+    declared: std::cell::RefCell<Vec<DeclaredCommands>>,
+    /// The index in `declared` of the workspace the run that owns the box started from.
+    addressed: std::cell::Cell<Option<usize>>,
 }
 
 impl RuntimeMcpBox {
@@ -190,6 +197,8 @@ impl RuntimeMcpBox {
             control,
             name: name.to_string(),
             tools: Vec::new(),
+            declared: std::cell::RefCell::new(Vec::new()),
+            addressed: std::cell::Cell::new(None),
         }
     }
 
@@ -209,7 +218,7 @@ impl RuntimeMcpBox {
 
     pub fn install_server(&self, server: &Server<'_>) {
         if server.behavior.uses_release_fifo() {
-            make_fifo(&self.release_path(server.program));
+            make_fifo(&self.release_path(server.executable));
         }
         let python = fixture_python();
         let sleep = fixture_sleep();
@@ -458,7 +467,7 @@ while True:
             control = self.control.to_string_lossy(),
             python = python.display(),
             sleep = sleep.to_string_lossy(),
-            program = server.program,
+            program = server.executable,
             server = server.name,
             tool = server.tool,
             behavior = server.behavior.as_str(),
@@ -537,6 +546,12 @@ while True:
             config.push('\n');
             config.push_str(table);
         }
+        self.declared.borrow_mut().push(
+            servers
+                .iter()
+                .map(|server| (server.program.to_string(), server.arguments.clone()))
+                .collect(),
+        );
         for server in servers {
             let command = std::iter::once(server.program.to_string())
                 .chain(server.arguments.iter().cloned())
@@ -633,32 +648,54 @@ while True:
     }
 
     pub fn spawn(&self) -> RunningBox {
-        let child = self.command().spawn().expect("spawn strands-box run");
-        RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
+        self.address_the_newest_workspace();
+        self.spawn_attempt()
     }
 
     pub fn spawn_from_operator_home(&self) -> RunningBox {
         let mut command = self.command();
         command.current_dir(self.home.path());
+        self.address_the_newest_workspace();
         let child = command
             .spawn()
             .expect("spawn strands-box run outside the workspace");
         RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
     }
 
+    /// Start a run that is not expected to own the box.
     pub fn spawn_attempt(&self) -> RunningBox {
-        self.spawn()
+        let child = self.command().spawn().expect("spawn strands-box run");
+        RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
+    }
+
+    /// Mark the newest written workspace as the one the owning run starts from.
+    fn address_the_newest_workspace(&self) {
+        self.addressed
+            .set(self.declared.borrow().len().checked_sub(1));
     }
 
     pub fn spawn_without_trusted_path(&self) -> RunningBox {
         let mut command = self.command();
         command.env_remove("PATH");
+        self.address_the_newest_workspace();
         let child = command.spawn().expect("spawn strands-box run without PATH");
         RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
     }
 
+    /// Launch the one server declared on `program` the way a harness does, with its full command.
     pub fn open_client(&self, program: &str) -> RunningMcpClient {
+        let arguments = self.declared_arguments(program);
+        self.open_client_with(program, &arguments)
+    }
+
+    /// Launch `bin/<program>` with exactly `arguments`.
+    pub fn open_client_with(
+        &self,
+        program: &str,
+        arguments: &[impl AsRef<std::ffi::OsStr>],
+    ) -> RunningMcpClient {
         let mut command = self.alias_command(program);
+        command.args(arguments);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -711,6 +748,38 @@ while True:
 
     pub fn invoke_refused_open(&self, program: &str, timeout: Duration) -> ClientExit {
         self.open_client(program).wait(timeout)
+    }
+
+    /// Launch `bin/<program>` with exactly `arguments`, and wait for the refusal.
+    pub fn invoke_refused_open_with(
+        &self,
+        program: &str,
+        arguments: &[impl AsRef<std::ffi::OsStr>],
+        timeout: Duration,
+    ) -> ClientExit {
+        self.open_client_with(program, arguments).wait(timeout)
+    }
+
+    /// The arguments of the one server on `program` in the workspace of the owning run.
+    fn declared_arguments(&self, program: &str) -> Vec<String> {
+        let workspaces = self.declared.borrow();
+        let addressed = self
+            .addressed
+            .get()
+            .or_else(|| workspaces.len().checked_sub(1));
+        let Some(declared) = addressed.and_then(|index| workspaces.get(index)) else {
+            return Vec::new();
+        };
+        let mut on_program = declared.iter().filter(|(declared, _)| declared == program);
+        let arguments = on_program
+            .next()
+            .map(|(_, arguments)| arguments.clone())
+            .unwrap_or_default();
+        assert!(
+            on_program.next().is_none(),
+            "two servers are declared on {program}; launch one with open_client_with"
+        );
+        arguments
     }
 
     pub fn release_server(&self, program: &str) {

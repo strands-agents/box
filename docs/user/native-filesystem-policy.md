@@ -90,13 +90,14 @@ Production use still requires further review and tests for those failures.
 
 Configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 Any explicit process override requires record version 23.
+A configuration where two stdio MCP servers share a program requires record version 24, whatever the setting and the overrides.
 Older binaries refuse unsupported versions rather than silently losing the selection.
 
 To disable the experiment, change the global setting to `false`.
-Remove all process overrides before returning to a binary that supports only version 21.
+Remove all process overrides, and give each stdio MCP server its own program, before returning to a binary that supports only version 21.
 Run once with the native-capable build before returning to an older binary.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing version 22 or 23 record.
+Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, or 24 record.
 
 ## FAQ
 
@@ -160,7 +161,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22 or 23 record that the older binary does not support.
+No, if the box has a version 22, 23, or 24 record that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 

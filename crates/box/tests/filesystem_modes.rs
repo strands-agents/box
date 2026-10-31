@@ -74,7 +74,13 @@ impl Fixture {
                 target.clone(),
                 sibling.clone(),
             ],
-            "server" => vec![agent, "server-client".to_string()],
+            "server" => vec![
+                agent,
+                "server-client".to_string(),
+                mode.to_string(),
+                target.clone(),
+                sibling.clone(),
+            ],
             _ => unreachable!(),
         };
         let grants = self.grants(shape, mode != "write-only", mode != "read-only");

@@ -106,7 +106,7 @@ configuration](decisions.md#a-credential-binding-is-configuration-not-a-policy-a
 The MCP broker is the broker's third leg. The other two legs are interpreters. The MCP broker is the
 broker's own code, and it is the enforcement point for a request to a local MCP server. Each stdio
 server runs in its own sandbox, separate from the agent's, and it starts only when the agent runs
-the server's alias and a `shell:spawn` permit admits it ([every MCP server is one configuration
+the server's full command through its alias and a `shell:spawn` permit admits it ([every MCP server is one configuration
 table](decisions.md#an-mcp-server-is-one-configuration-table)). After that, the MCP broker raises
 `mcp:call` on each request the agent sends to the server. A permit on `mcp:call` covers every tool
 on that server, and a rule on a tool's own action can narrow it ([an MCP tool call passes two
@@ -162,7 +162,8 @@ differ.
 A harness expects to run a shell and Python from its `PATH`, and Box's interpreters run outside the
 sandbox. The alias bridges that, and it holds no power of its own: it can't open the policy, and it
 can't serve a request. Box places it in the box directory's `bin/` as `zsh`, `bash`, `sh`,
-`python3`, and `python`, and as one name for each local MCP server, taken from the server's program.
+`python3`, and `python`, and as one name for each program a local MCP server starts from. Servers
+that share a program share its alias.
 Nothing a caller passes can point it at another socket ([the box binaries](binaries.md)). A tool's
 sandbox and a local MCP server's sandbox get no alias, so a `python3` there is the host OS's
 Python.

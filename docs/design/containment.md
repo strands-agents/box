@@ -28,7 +28,7 @@ Box restricts the agent in two ways, and they cover different paths to a resourc
 | When it's decided | Once, before the process starts. | On every request. |
 
 **How the agent sends a request to Box.** The agent's sandbox holds a few **aliases**: programs named
-`zsh`, `bash`, `sh`, `python3`, `python`, and one per declared MCP server. When the agent runs one,
+`zsh`, `bash`, `sh`, `python3`, `python`, and one per program that a declared MCP server starts from. When the agent runs one,
 the alias forwards the request over a local socket to the **broker** in Box's trusted process. The
 broker hands it to Strands Shell (Box's shell interpreter), Monty (Box's Python interpreter), or the
 MCP server. The alias itself authorizes nothing. Outbound network traffic takes its own route,

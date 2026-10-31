@@ -173,8 +173,7 @@ impl BrokerHost {
             )
             .map_err(|source| ShellError::Serve { source })?,
         );
-        // The declared MCP servers, from the same record. The box places one alias per entry, so
-        // this set and the alias set in `bin/` are the same list — a name outside it names nothing
+        // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
@@ -251,6 +250,22 @@ impl Drop for BrokerHost {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+impl ShellSpec {
+    /// `server`'s arguments as its start passes them, or `None` when they do not expand.
+    fn launched_arguments(
+        &self,
+        server: &crate::record::config::mcp::McpServer,
+    ) -> Option<Vec<String>> {
+        #[cfg(unix)]
+        if let Some(launcher) = self.mcp_leaf_launcher.as_deref()
+            && launcher.contains(&server.name)
+        {
+            return launcher.launched_arguments(&server.name);
+        }
+        Some(server.arguments().to_vec())
     }
 }
 
@@ -774,16 +789,27 @@ async fn serve_transport(
                         continue;
                     }
                     // One MCP server, started outside the cage.
-                    if let Interpreter::Mcp { server } = &interpreter {
-                        let admitted =
-                            match crate::run::broker::mcp::admit_server(&spec.mcp, server) {
-                                Ok(admitted) => admitted,
-                                Err(error) => {
-                                    deny(&frames, id, DeniedKind::Internal, &error.to_string())
-                                        .await?;
-                                    continue;
-                                }
-                            };
+                    if let Interpreter::Mcp { server, arguments } = &interpreter {
+                        let admitted = match crate::run::broker::mcp::admit_server(
+                            &spec.mcp,
+                            server,
+                            arguments,
+                            |declared| spec.launched_arguments(declared),
+                        ) {
+                            Ok(admitted) => admitted,
+                            Err(error) => {
+                                spec.recorder.record(
+                                    crate::run::telemetry::EffectiveDecision::enforcement_deny(
+                                        r#"Box::Action::"shell:spawn""#,
+                                        server.as_str(),
+                                        "mcp-command",
+                                        error.to_string(),
+                                    ),
+                                );
+                                deny(&frames, id, DeniedKind::Internal, &error.to_string()).await?;
+                                continue;
+                            }
+                        };
                         if let Err(error) = spec.mcp_registry.admit_open(&admitted.name) {
                             deny(&frames, id, DeniedKind::Internal, &error.to_string()).await?;
                             return Ok(());
@@ -2892,6 +2918,7 @@ done"#;
                 started.to_string_lossy().into_owned(),
             ];
             let spec = mcp_spec_with_server(marker.path(), command);
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (_reader, mut writer) = transport(&socket).await;
 
@@ -2901,6 +2928,7 @@ done"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -2935,6 +2963,7 @@ exit 17"#;
                 ],
             );
             let registry = Arc::clone(&spec.mcp_registry);
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut leader_reader, mut leader_writer) = transport(&socket).await;
 
@@ -2944,6 +2973,7 @@ exit 17"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -2992,6 +3022,7 @@ exit 17"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3092,6 +3123,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3101,6 +3133,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3178,6 +3211,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
             let socket = directory.path().join("box.sock");
             let listener = UnixListener::bind(&socket).expect("bind test broker");
             let (stop, stopped) = oneshot::channel();
+            let declared = spec.mcp[0].arguments().to_vec();
             let serving = tokio::task::spawn_local(async move {
                 serve(listener, spec, async {
                     let _ = stopped.await;
@@ -3191,6 +3225,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3250,7 +3285,9 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 "fake-mcp".to_string(),
                 child_pid.to_string_lossy().into_owned(),
             ];
-            let (_directory, socket) = serving_socket(mcp_spec_with_server(marker.path(), command));
+            let spec = mcp_spec_with_server(marker.path(), command);
+            let declared = spec.mcp[0].arguments().to_vec();
+            let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
             put(
                 &mut writer,
@@ -3258,6 +3295,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3391,6 +3429,7 @@ done"#,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3400,6 +3439,7 @@ done"#,
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3545,6 +3585,7 @@ done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3554,6 +3595,7 @@ done"#;
                 Body::Open {
                     mode: Interpreter::Mcp {
                         server: "/bin/sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
