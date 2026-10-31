@@ -227,17 +227,20 @@ that did load — usually the coarse `mcp:call` permit. A rule that only reads a
 decides no call to it, so that tool is not held.
 
 **Which tools are held and which servers are named are different questions, and Box answers them
-separately.** It holds the tools an inert rule decides. It names the server of every tool such a
-rule mentions — in its head, in a condition, or in a history reference — that the committed schema
-does not declare. A rule waits for each tool it mentions to be declared, so an undeclared one is
-why that rule is still pending, and its server is the one to fix.
-
-Naming the server of an undeclared tool covers both ways a rule stays pending. The catalog never
-arrived, because a rule refused the server's `tools/list`. Or the catalog arrived and does not offer
-that tool, because the rule misspells the name or the server dropped it. The second is a healthy
-server, so a check on whether the catalog arrived reports nothing for it, and the rule would ship
-inert and silent. One rule can therefore hold a tool on one server and name a different server, and
+separately.** It holds the tools an inert rule decides. It names, per rule, the servers that rule
+still waits for. One rule can therefore hold a tool on one server and name a different server, and
 that is the honest pair.
+
+A rule waits for every tool it mentions — in its head, in a condition, or in a history reference —
+to be declared, so an undeclared tool names its own server. That covers a catalog that never
+arrived, because a rule refused the server's `tools/list` and it declares nothing, and a catalog
+that arrived without that tool, because the rule misspells the name or the server dropped it.
+
+A rule can also stay pending while every tool it mentions is declared, when it compares an argument
+the server names differently or declares with another type. Then Box names every server that rule
+mentions. That is a weaker statement — one of those servers may be answering correctly — and it is
+the deliberate trade, because the alternative is a rule that never loads and says nothing. Box
+parks a rule only when it names at least one tool, so no inert rule is silent.
 
 One limit remains. A rule that constrains every tool call, because its head is the coarse
 `mcp:call` or it names no action at all, cannot be expressed as a set of tools. stderr names the

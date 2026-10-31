@@ -568,59 +568,82 @@ fn discovery_names_each_server_a_pending_rule_still_waits_for() {
     // Each case is one pending rule. `staged` is the server whose catalog arrives, and `expected`
     // is what stderr must name.
     for (rule, staged, expected) in [
+        // Every tool the rule names is declared, and the rule is pending for another reason: it
+        // compares an argument against the wrong type. A check on the named tools alone goes quiet.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path > 3 };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, naming an argument the server does not declare.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.pth == "/x" };"#,
+            &[("alpha", "read", "path")][..],
+            vec!["alpha"],
+        ),
+        // The same, where the wrong argument name sits in a history reference on a second server.
+        // Both servers are healthy and both are named, because the rule waits on both.
+        (
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+unless temporal { formerly within 600s ( beta::Action::"fetch"::response{ input.url: _ } ) };"#,
+            &[("alpha", "read", "path"), ("beta", "fetch", "path")][..],
+            vec!["alpha", "beta"],
+        ),
         // The catalog arrives and does not offer the tool the rule names: a misspelling, or a tool
         // the server dropped. The server is healthy, so a check on the catalog alone goes quiet.
         (
             r#"forbid(principal, action == alpha::Action::"raed", resource);"#,
-            Some(("alpha", "read", "path")),
+            &[("alpha", "read", "path")][..],
             vec!["alpha"],
         ),
         // The same, named by a condition rather than the head.
         (
             r#"forbid(principal, action, resource) when { action == alpha::Action::"raed" };"#,
-            Some(("alpha", "read", "path")),
+            &[("alpha", "read", "path")][..],
             vec!["alpha"],
         ),
         // The same, named only by a history reference, beside a head the catalog does declare.
         (
             r#"forbid(principal, action == alpha::Action::"read", resource)
 unless temporal { formerly within 600s ( alpha::Action::"raed"::response{ input.path: _ } ) };"#,
-            Some(("alpha", "read", "path")),
+            &[("alpha", "read", "path")][..],
             vec!["alpha"],
         ),
         // The rule decides a denied server's tool and reads a healthy server's from history.
         (
             r#"forbid(principal, action == alpha::Action::"deploy", resource)
 unless temporal { formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } ) };"#,
-            Some(("beta", "approve", "id")),
+            &[("beta", "approve", "id")][..],
             vec!["alpha"],
         ),
         // The mirror: the rule decides a healthy server's tool and reads a denied server's.
         (
             r#"forbid(principal, action == beta::Action::"ship", resource)
 unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
-            Some(("beta", "ship", "id")),
+            &[("beta", "ship", "id")][..],
             vec!["alpha"],
         ),
         // The only tool name a coarse-headed rule spells is the history reference.
         (
             r#"forbid(principal, action == Box::Action::"mcp:call", resource)
 unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
-            None,
+            &[][..],
             vec!["alpha"],
         ),
         // The head names an action of another family, so it decides no tool call at all.
         (
             r#"forbid(principal, action == Box::Action::"shell:exec", resource)
 unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
-            None,
+            &[][..],
             vec!["alpha"],
         ),
         // The head constrains no action.
         (
             r#"forbid(principal, action, resource)
 unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ input.id: _ } ) };"#,
-            None,
+            &[][..],
             vec!["alpha"],
         ),
     ] {
@@ -629,7 +652,7 @@ unless temporal { formerly within 600s ( alpha::Action::"approve"::response{ inp
             &format!("permit(principal, action == Box::Action::\"mcp:call\", resource);\n{rule}\n"),
             &history.path().join("dogwood.redb"),
         );
-        if let Some((server, tool, field)) = staged {
+        for (server, tool, field) in staged {
             authority
                 .stage_mcp_schema(server, generated(server, tool, field, "string"))
                 .expect("the healthy server stages");

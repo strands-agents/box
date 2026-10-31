@@ -339,9 +339,8 @@ impl Authority {
     ///
     /// The tools held and the servers named answer different questions, so they come from different
     /// scans. A rule decides no call to a tool it only reads from history, and yet it still waits
-    /// for that tool to be declared. A server is named when a pending rule names a tool on it that
-    /// the committed schema does not declare, which covers both a catalog that never arrived and
-    /// one that arrived without that tool.
+    /// for that tool to be declared. `servers_a_pending_rule_waits_for` states which servers reach
+    /// the warning.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -362,12 +361,10 @@ impl Authority {
         live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
-        let named = proposal.as_ref().map(named_typed_tools).unwrap_or_default();
-        let servers: BTreeSet<String> = named
-            .into_iter()
-            .filter(|(namespace, tool)| !declares(&live.engine, namespace, tool))
-            .map(|(namespace, _)| namespace)
-            .collect();
+        let servers = proposal
+            .as_ref()
+            .map(|proposal| servers_a_pending_rule_waits_for(proposal, &live.engine))
+            .unwrap_or_default();
         Ok(servers.into_iter().collect())
     }
 
@@ -708,19 +705,43 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     out
 }
 
-/// Every `(namespace, tool)` a pending rule names, in its head, in a condition, or through a
-/// `when temporal` history reference. A rule waits for each of these to become declared, so one
-/// that is not declared is a reason the rule is still pending.
-fn named_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
+/// Every `(namespace, tool)` one candidate names, in its head, in a condition, or through a
+/// `when temporal` history reference.
+fn named_typed_tools(candidate: &CandidatePolicy) -> BTreeSet<(String, String)> {
+    let mut out: BTreeSet<(String, String)> = candidate.head_tools.iter().cloned().collect();
+    collect_typed_actions(
+        &candidate.expanded_source,
+        HistoryReferences::Named,
+        &mut out,
+    );
+    out
+}
+
+/// The servers each pending rule still waits for, which is what the operator must fix. A rule waits
+/// for every tool it names to be declared, so an undeclared tool names its own server. A rule that
+/// stays pending for another reason — an argument name or a type its server declares differently —
+/// leaves every tool declared, and then every server it names is what it waits on. Falling back
+/// that way is what keeps the warning from going silent, because `names_a_typed_action` parks a
+/// rule only when it names at least one typed tool, so no pending rule contributes nothing.
+fn servers_a_pending_rule_waits_for(
+    proposal: &ProposalState,
+    engine: &DogwoodEngine,
+) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
-        if let Some(candidate) = proposal.candidates.get(ordinal) {
-            out.extend(candidate.head_tools.iter().cloned());
-            collect_typed_actions(
-                &candidate.expanded_source,
-                HistoryReferences::Named,
-                &mut out,
-            );
+        let Some(candidate) = proposal.candidates.get(ordinal) else {
+            continue;
+        };
+        let named = named_typed_tools(candidate);
+        let undeclared: BTreeSet<String> = named
+            .iter()
+            .filter(|(namespace, tool)| !declares(engine, namespace, tool))
+            .map(|(namespace, _)| namespace.clone())
+            .collect();
+        if undeclared.is_empty() {
+            out.extend(named.into_iter().map(|(namespace, _)| namespace));
+        } else {
+            out.extend(undeclared);
         }
     }
     out
