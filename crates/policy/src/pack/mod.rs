@@ -2,7 +2,7 @@
 //!
 //! | Module | Owns |
 //! |---|---|
-//! | `bindings` | which installed pack covers a resolved program file and its called name |
+//! | `bindings` | which installed pack covers a program file's identity and its called name |
 //! | `format` | the `*.pack.toml` document as written |
 //! | `model` | the checked pack that loading builds from that document |
 //! | `usage` | one `usage` line, read into the shape of its command lines |
