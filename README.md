@@ -91,6 +91,23 @@ Call it before starting application threads or loading secrets, and use one Box 
 per host process. Later `run` calls fail, even if the first call failed.
 Ship the matching Box helper binaries beside the host application.
 
+To replace the running box's policy from a host thread:
+
+```rust,no_run
+strands_box::reload(&[strands_box::Policy {
+    origin: "policy.dw".into(),
+    text: new_policy_text,
+}])?;
+```
+
+`reload` waits until the change takes effect. Invalid policy returns `BoxError` and leaves
+the current policy in place. An empty list denies all policy requests. Policy files and the
+OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
+Use `BoxError::is_not_running()` to distinguish that case from a rejected policy.
+During MCP discovery, rules awaiting tool definitions stay pending and their tools stay blocked.
+Reload refuses undeclared MCP server names and unresolved rules that also apply to non-tool actions.
+After discovery, the complete replacement must validate.
+
 To generate policy schemas:
 
 ```rust,no_run

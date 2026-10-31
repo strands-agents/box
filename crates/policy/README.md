@@ -52,6 +52,9 @@ PolicyEngine::record(&GovernedBox, &Principal, &Outcome<'_>) -> Result<(), Polic
 PolicyEngine::effective() -> &EffectivePolicy
 ```
 
+`reload(&policies, &mcp_servers)` replaces the rules. During discovery, tool rules can wait
+for the configured servers.
+
 `decide` and `record` each take the box that owns the authority. Construct one with
 `GovernedBox::assigned("<box name>")` from the endpoint you own. The value remains
 integration metadata and does not change the policy resource.

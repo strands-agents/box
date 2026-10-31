@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use command::cli::{Cli, Command, PolicyCommand};
 
-pub use policy::{Finding, Location, PolicyCheck, RuleRef};
+pub use error::BoxError;
+pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -49,6 +50,11 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
         },
         options,
     )
+}
+
+/// Replace the running box's authored policies with the supplied text.
+pub fn reload(sources: &[Policy]) -> Result<(), BoxError> {
+    run::hosted::reload(sources)
 }
 
 /// Check the policy that a Box configuration selects, as a box checks it when it opens.

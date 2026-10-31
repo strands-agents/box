@@ -23,6 +23,23 @@ pub(crate) use telemetry::Collector;
 /// Re-exported on the same terms, because this module shadows the crate's own name.
 pub(crate) use telemetry::{ControlOperation, ControlRecord};
 
+/// Which policy a control record names, by file name rather than by path.
+pub(crate) fn policy_subject(sources: &[policy::Policy]) -> String {
+    if sources.is_empty() {
+        return "<no authored policy>".to_string();
+    }
+    sources
+        .iter()
+        .map(|source| {
+            source.origin.file_name().map_or_else(
+                || source.origin.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The effective decision that one policy enforcement point applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectiveDecision {

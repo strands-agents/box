@@ -536,6 +536,26 @@ pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> 
         .collect())
 }
 
+pub(crate) fn policy_is_tool_scoped(source: &str) -> Result<bool, PolicyError> {
+    use dogwood_language::ActionConstraint;
+
+    let parsed = dogwood_language::ParsedPolicySet::parse(source, &service_schema()?)
+        .map_err(|error| parse_refused(source, &error, false).into_error())?;
+    let is_tool = |uid: &cedar_policy::EntityUid| {
+        let kind = uid.type_name().to_string();
+        kind.ends_with("::Action") && kind != "Box::Action"
+    };
+    Ok(parsed
+        .policies()
+        .all(|policy| match policy.scope().action() {
+            ActionConstraint::Any => false,
+            ActionConstraint::Eq(uid) => is_tool(uid),
+            ActionConstraint::In(uids) => uids.first().is_some_and(|first| {
+                is_tool(first) && uids.iter().all(|uid| uid.type_name() == first.type_name())
+            }),
+        }))
+}
+
 /// Parse and macro-expand a source bundle, and refuse a read of `context.input` without one
 /// action family, without an MCP action schema.
 pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {

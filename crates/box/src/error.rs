@@ -2,9 +2,16 @@
 
 use std::path::PathBuf;
 
-/// Why a box refused to run, or stopped running.
+/// Why a box refused to run or reload, or stopped running.
 #[derive(Debug)]
-pub(crate) struct BoxError(Internal);
+pub struct BoxError(Internal);
+
+impl BoxError {
+    /// Whether no box is open for reload in this process.
+    pub fn is_not_running(&self) -> bool {
+        matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
+    }
+}
 
 impl std::fmt::Display for BoxError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -381,6 +388,9 @@ impl std::fmt::Display for HistoryFound {
 /// A trusted Box operation could not start, run, or stop.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DaemonError {
+    #[error("no box is running in this process")]
+    NotRunning,
+
     #[error("cannot parse the box's live record: {source}")]
     LiveParse { source: serde_json::Error },
 

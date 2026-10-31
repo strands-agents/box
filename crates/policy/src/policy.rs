@@ -268,8 +268,12 @@ impl PolicyEngine {
     /// The caller owns the question of *who* may ask for this. Nothing here authenticates a
     /// request: the contained agent must never reach a reload, and the only thing that keeps
     /// it out is where the trigger lives.
-    pub fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
-        self.authority.reload(sources)
+    pub fn reload(
+        &self,
+        sources: &[Policy],
+        mcp_servers: &[String],
+    ) -> Result<(), PolicyStagingError> {
+        self.authority.reload(sources, mcp_servers)
     }
 
     /// Decide whether `principal` may perform `request`.
@@ -287,7 +291,7 @@ impl PolicyEngine {
         let identity = crate::schema::ActionIdentity::for_request(request);
         let decision = self
             .authority
-            .decide(governed, principal, request, &identity);
+            .decide(governed, principal, request, &identity, false);
         self.conclude(&identity, request, decision)
     }
 
@@ -331,10 +335,6 @@ impl PolicyEngine {
         self.authority.warnings()
     }
 
-    pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        self.authority.declares_tool_action(action)
-    }
-
     /// The per-tool refinement for one `tools/call`.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
@@ -358,45 +358,9 @@ impl PolicyEngine {
             uri: None,
             arguments: Some(arguments),
         };
-        let action = match identity.cedar_uid() {
-            Ok(action) => action,
-            Err(_) => return self.conclude(&identity, &request, Decision::internal_fault()),
-        };
-        if !self.declares_tool_action(&action) {
-            // A tool with no declared per-tool action can be one of three things while its schema is
-            // absent: degraded (its server's `tools/list` was denied, so it never stages) →
-            // deny fail-closed, so a hardcoded call cannot ride the coarse allow with its argument
-            // constraint unenforceable; pending (still discovering) → hold transiently; or a
-            // genuinely unruled tool → ride the coarse allow as before.
-            let decision = if self.authority.is_tool_degraded(&identity) {
-                Decision::no_match()
-            } else if self.authority.is_tool_pending(&identity) {
-                Decision::policy_pending()
-            } else {
-                Decision::Allow {
-                    rule: crate::RuleId::default_deny(),
-                    attribution: Vec::new(),
-                    resource: String::new(),
-                }
-            };
-            return self.conclude(&identity, &request, decision);
-        }
-        let decision = match self
+        let decision = self
             .authority
-            .decide(governed, principal, &request, &identity)
-        {
-            // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
-            Decision::Deny {
-                reason: crate::DenyReason::NoMatch,
-                ..
-            } => Decision::Allow {
-                rule: crate::RuleId::default_deny(),
-                attribution: Vec::new(),
-                resource: String::new(),
-            },
-            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
-            other => other,
-        };
+            .decide(governed, principal, &request, &identity, true);
         self.conclude(&identity, &request, decision)
     }
 }
@@ -474,7 +438,7 @@ mod tests {
                 r#"{{
                     "result": {{
                         "tools": [{{
-                            "name": "{tool}",
+                            "name": {tool},
                             "inputSchema": {{
                                 "type": "object",
                                 "properties": {{"path": {{"type": "string"}}}},
@@ -482,7 +446,8 @@ mod tests {
                             }}
                         }}]
                     }}
-                }}"#
+                }}"#,
+                tool = serde_json::to_string(tool).unwrap()
             ),
         )
         .expect("the MCP schema generates")
@@ -1248,7 +1213,7 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         );
 
         engine
-            .reload(&read_and_write)
+            .reload(&read_and_write, &[])
             .expect("the second policy reloads onto the live engine");
 
         assert!(
@@ -1274,12 +1239,137 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         );
 
         engine
-            .reload(&source("this is not a policy {{{"))
+            .reload(&source("this is not a policy {{{"), &[])
             .expect_err("a policy that does not parse is refused");
 
         assert!(
             write_allowed(&engine, &target),
             "the refused reload validated before the live lock, so the previous policy serves"
         );
+    }
+
+    #[test]
+    fn reload_rejects_invalid_tool_rules_and_preserves_the_forbid() {
+        let mcp_servers = ["alpha".into(), "beta".into()];
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source("permit(principal, action, resource);"),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        let alpha = mcp_fragment("alpha", "read");
+        let beta = mcp_fragment("beta", "read");
+        engine.stage_mcp_schema("alpha", alpha.clone()).unwrap();
+        engine
+            .reload(
+                &source(
+                    r#"permit(principal, action, resource);
+                       forbid(principal, action == alpha::Action::"read", resource);"#,
+                ),
+                &mcp_servers,
+            )
+            .unwrap();
+        let call = || {
+            engine.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                "read",
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+        };
+        assert!(!call().is_allow());
+
+        for rule in [
+            r#"forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+            r#"forbid(principal, action in [beta::Action::"read", alpha::Action::"read"], resource);"#,
+            r#"forbid(principal, action == alpah::Action::"read", resource);"#,
+            r#"forbid(principal, action == extra::beta::Action::"read", resource);"#,
+        ] {
+            let replacement = source(&format!("permit(principal, action, resource);\n{rule}"));
+            assert!(
+                PolicyEngine::validate_with_mcp_schemas(
+                    &Operator::unanchored(),
+                    &replacement,
+                    &[alpha.clone(), beta.clone()],
+                )
+                .is_err()
+            );
+            assert!(engine.reload(&replacement, &mcp_servers).is_err(), "{rule}");
+            assert!(!call().is_allow(), "the original forbid must remain active");
+        }
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !call().is_allow(),
+            "discovery must preserve the original forbid"
+        );
+    }
+
+    #[test]
+    fn a_reloaded_pending_forbid_stays_denied_after_discovery() {
+        let mcp_servers = ["alpha".into(), "beta".into()];
+        let tool = r#"read."wiki":item"#;
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source("permit(principal, action, resource);"),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        let alpha = mcp_fragment("alpha", tool);
+        let beta = mcp_fragment("beta", "read");
+        engine.stage_mcp_schema("alpha", alpha.clone()).unwrap();
+        let replacement = source(
+            r#"permit(principal, action, resource);
+               forbid(principal, action == alpha::Action::"read.\"wiki\":item", resource)
+               when temporal {
+                   formerly within 60s (beta::Action::"read"::request{ input.path: _ })
+               };"#,
+        );
+        PolicyEngine::validate_with_mcp_schemas(
+            &Operator::unanchored(),
+            &replacement,
+            &[alpha, beta],
+        )
+        .unwrap();
+        engine.reload(&replacement, &mcp_servers).unwrap();
+        let call = || {
+            engine.refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                tool,
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+        };
+        assert!(matches!(
+            call(),
+            Decision::Deny {
+                reason: crate::DenyReason::PolicyPending,
+                ..
+            }
+        ));
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !call().is_allow(),
+            "an unresolved forbid must keep the tool blocked"
+        );
+        assert!(engine.reload(&replacement, &mcp_servers).is_err());
+        assert!(
+            !call().is_allow(),
+            "a refused reload must preserve the block"
+        );
+        for replacement in [
+            "permit(principal, action, resource);",
+            r#"permit(principal, action, resource);
+               permit(principal, action == alpha::Action::"read.\"wiki\":item", resource);"#,
+        ] {
+            engine.reload(&source(replacement), &mcp_servers).unwrap();
+            assert!(
+                call().is_allow(),
+                "the old block must not survive a valid replacement"
+            );
+        }
     }
 }

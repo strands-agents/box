@@ -595,7 +595,7 @@ const BOX_NAMESPACE: &str = "Box";
 pub enum ControlOperation {
     /// The box installed its authored policy.
     PolicyInstalled,
-    /// The box refused an authored policy, so it did not start.
+    /// The box refused an authored policy.
     PolicyRefused,
     /// One MCP server's generated tool vocabulary joined the policy.
     SchemaInstalled,
