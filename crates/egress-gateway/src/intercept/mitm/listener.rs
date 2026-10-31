@@ -1,8 +1,7 @@
 //! The accept loop and per-connection handler.
 
 use std::io;
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixListener;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -12,8 +11,9 @@ use super::SharedState;
 use super::connect::ConnectRequest;
 use super::l7::{self, WorkloadResponse};
 use super::resolve::PinnedDestination;
-use crate::audit::{Decision as AuditDecision, EgressDecision, NetworkAuditEvent};
+use crate::audit::Decision as AuditDecision;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
+use crate::transport::socket::Socket;
 
 /// A counting semaphore bounding the number of in-flight connection threads, with no external
 /// dependency. `acquire` blocks the accept loop until a slot frees, so
@@ -66,12 +66,20 @@ impl Drop for Permit {
     }
 }
 
-/// Run the accept loop until `stop` is set. Each connection is handled on its own thread,
-/// **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting more, so
-/// an untrusted workload cannot exhaust the host with unbounded threads.
-pub(super) fn accept_loop(listener: TcpListener, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
+/// Run an accept loop over `incoming` until `stop` is set. Each connection is handled on its own
+/// thread, **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting
+/// more, so an untrusted workload cannot exhaust the host with unbounded threads.
+///
+/// The TCP and AF_UNIX listeners share this loop. `connect_only` is set for AF_UNIX, whose workload
+/// is under the egress pin and has no plain-HTTP client.
+pub(super) fn accept_loop<S: Socket + Send + 'static>(
+    incoming: impl Iterator<Item = io::Result<S>>,
+    state: Arc<SharedState>,
+    stop: Arc<AtomicBool>,
+    connect_only: bool,
+) {
     let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
+    for incoming in incoming {
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -86,55 +94,7 @@ pub(super) fn accept_loop(listener: TcpListener, state: Arc<SharedState>, stop: 
         std::thread::spawn(move || {
             // The permit lives for the duration of the connection; dropping it frees the slot.
             let _permit = permit;
-            if let Err(err) = crate::proxy::server::serve_connection(stream, &state, false) {
-                // Never silently swallow a handler failure — record it (secret-free) so a broken
-                // connection is observable rather than a mystery. `host`/`port` are unknown this
-                // early, so the audit line names the failure with a placeholder target.
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
-            }
-        });
-    }
-}
-
-/// Run the AF_UNIX accept loop until `stop` is set. A near-duplicate of
-/// [`accept_loop`] with `UnixStream` in place of `TcpStream`: same [`ConnectionLimiter`] backpressure,
-/// same per-connection thread model, same audit-on-handler-error. It exists because the workload under
-/// the AF_UNIX egress pin cannot create an `AF_INET` socket at all — a TCP listener would serve no one —
-/// so the proxy binds only the AF_UNIX socket and speaks the identical CONNECT/TLS/L7 protocol over it.
-/// It duplicates rather than adds a `TcpStream`/`UnixStream` trait, to keep the change local and
-/// the diff small (revisit if a third transport ever appears).
-pub(super) fn accept_loop_unix(
-    listener: UnixListener,
-    state: Arc<SharedState>,
-    stop: Arc<AtomicBool>,
-) {
-    let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // Same backpressure as the TCP loop: block on a free slot before accepting more.
-        let permit = limiter.acquire();
-        let state = state.clone();
-        std::thread::spawn(move || {
-            let _permit = permit;
-            if let Err(err) = crate::proxy::server::serve_connection(stream, &state, true) {
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
-            }
+            let _ = crate::proxy::server::serve_connection(stream, &state, connect_only);
         });
     }
 }
@@ -152,13 +112,6 @@ impl OpenUpstreamError {
         match self {
             Self::Denied(error) => l7::interceptor_error(error, None),
             Self::Failed => WorkloadResponse::bare(502),
-        }
-    }
-
-    fn audit_reason(&self) -> &'static str {
-        match self {
-            Self::Denied(_) => "connect effect denied",
-            Self::Failed => "connect effect or outcome recording failed",
         }
     }
 }
@@ -192,12 +145,6 @@ pub(crate) fn open_governed_upstream(
             } else {
                 OpenUpstreamError::Failed
             };
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                refusal.audit_reason().to_string(),
-                correlation.clone(),
-            ));
             return Err(refusal);
         }
     }
@@ -224,18 +171,7 @@ pub(crate) fn open_governed_upstream(
     // (`EffectAttempt::Connect`) before the socket opens — there is no allow/deny authority in this
     // crate. Every connection is terminated and inspected; see `open_upstream`'s `http_visibility` for
     // why no route is an opaque tunnel.
-    match open_upstream(state, connect, &pinned, correlation) {
-        Ok(upstream) => Ok(upstream),
-        Err(error) => {
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                error.audit_reason().to_string(),
-                correlation.clone(),
-            ));
-            Err(error)
-        }
-    }
+    open_upstream(state, connect, &pinned, correlation)
 }
 
 /// Claim and perform pinned upstream socket attempts shared by TLS and opaque paths.
@@ -318,6 +254,7 @@ fn open_upstream(
     Err(OpenUpstreamError::Failed)
 }
 
+/// Emit the connection decision for `connect`: no method, and the all-paths `/`.
 fn emit_connect_decision(
     state: &SharedState,
     connect: &ConnectRequest,
@@ -325,15 +262,7 @@ fn emit_connect_decision(
     reason: &str,
     correlation: RequestId,
 ) {
-    state.emitter.emit(EgressDecision {
-        host: connect.host.clone(),
-        port: connect.port,
-        method: String::new(),
-        path: "/".to_string(),
-        decision,
-        reason: reason.to_string(),
-        correlation,
-    });
+    l7::emit_decision(state, connect, ("", "/"), decision, reason, correlation);
 }
 
 #[cfg(test)]
@@ -579,10 +508,8 @@ mod tests {
             config: super::super::MitmConfig::default(),
             ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
             upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
-            audit: crate::audit::SharedAuditLog::new(),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
-            expected_token: None,
         }
     }
 

@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use crate::audit::{NetworkAuditEvent, SharedAuditLog};
-
 /// Which transport the adapter actually bound.
 pub(super) enum BoundTransport {
     /// A TCP listener on `127.0.0.1:<port>` (the default mode).
@@ -21,7 +19,6 @@ pub(super) enum BoundTransport {
 pub struct MitmHandle {
     transport: BoundTransport,
     ca_path: Option<PathBuf>,
-    audit: SharedAuditLog,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
     shutdown_connection: OnceLock<OwnedFd>,
@@ -32,14 +29,12 @@ impl MitmHandle {
     pub(super) fn new(
         transport: BoundTransport,
         ca_path: Option<PathBuf>,
-        audit: SharedAuditLog,
         stop: Arc<AtomicBool>,
         accept_thread: JoinHandle<()>,
     ) -> Self {
         Self {
             transport,
             ca_path,
-            audit,
             stop,
             accept_thread: Some(accept_thread),
             shutdown_connection: OnceLock::new(),
@@ -86,11 +81,6 @@ impl MitmHandle {
             vars.push(("SSL_CERT_FILE".to_string(), cert.display().to_string()));
         }
         vars
-    }
-
-    /// Drain the buffered fast-lane audit events. Leaves the log empty.
-    pub fn drain_audit_events(&self) -> Vec<NetworkAuditEvent> {
-        self.audit.drain()
     }
 
     /// Shut the adapter down: flip the stop flag and unblock the accept loop by poking the
@@ -165,7 +155,6 @@ mod tests {
         let handle = MitmHandle::new(
             BoundTransport::Unix(path.clone()),
             None,
-            SharedAuditLog::new(),
             stop,
             accept_thread,
         );
@@ -188,13 +177,7 @@ mod tests {
                 }
             })
         };
-        MitmHandle::new(
-            BoundTransport::Tcp(port),
-            None,
-            SharedAuditLog::new(),
-            stop,
-            accept_thread,
-        )
+        MitmHandle::new(BoundTransport::Tcp(port), None, stop, accept_thread)
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.

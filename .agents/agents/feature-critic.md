@@ -119,7 +119,7 @@ files (`git status --short`) — new crates/specs are part of the feature.
    is written against, so weakening one invalidates that review: one `Policy` per box and the
    authored policy as sole authorizer; interpreters outside the Agent's Seatbelt domain
    with the SBPL minimums unchanged; deny-only floors beneath policy and never beside it
-   (SSRF floor, Shell mount scope, `CapabilityOutcome` with no `Allow`); the workload
+   (SSRF floor, Shell mount scope, a capability that returns edits or a refusal and never an allow); the workload
    untrusted and its home workload-writable (every resolver check that assumes a planted
    symlink, hardlink, or launcher registry); validate-once-then-act-on-the-approved-identity
    (`confine` returning a canonical path, never validating one spelling and reopening

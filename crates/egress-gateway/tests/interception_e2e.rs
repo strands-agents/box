@@ -180,7 +180,18 @@ fn start_gateway(
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         ..MitmConfig::default()
     };
-    MitmInterceptor::start(config, controls, policy).unwrap()
+    let records = Box::new(RECORDS.with(Clone::clone));
+    MitmInterceptor::start_with(config, controls, policy, records, None).unwrap()
+}
+
+thread_local! {
+    /// The decision records of the gateways this test thread starts.
+    static RECORDS: StubEmitter = StubEmitter::new();
+}
+
+/// The decision records of this test's gateways.
+fn records() -> Vec<egress_gateway::EgressDecision> {
+    RECORDS.with(StubEmitter::records)
 }
 
 // ============================================================================================
@@ -198,9 +209,7 @@ fn opaque_swap_reaches_upstream_with_real_secret() {
     let (store, phantom) = opaque_store(host, port, "sk_live_REALSECRET");
 
     // gateway: the PDP authorizes the host; the credential control performs the swap.
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     // (3) workload sends an HTTPS request carrying the PHANTOM token through the proxy
@@ -226,9 +235,9 @@ fn opaque_swap_reaches_upstream_with_real_secret() {
         "the phantom token must not survive to the upstream"
     );
 
-    // The real secret must not appear anywhere in the audit log.
-    for ev in handle.drain_audit_events() {
-        assert!(!format!("{ev:?}").contains("sk_live_REALSECRET"));
+    // The real secret must not appear anywhere in the decision records.
+    for record in records() {
+        assert!(!format!("{record:?}").contains("sk_live_REALSECRET"));
     }
 }
 
@@ -356,9 +365,7 @@ fn aws_sigv4_signs_and_reaches_upstream() {
             .into_vault(),
     );
 
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     // (3) workload sends an HTTPS request with a DUMMY inbound signature (as an SDK would).
@@ -428,9 +435,7 @@ fn aws_sigv4_signs_the_accept_encoding_that_reaches_upstream() {
         .unwrap()
         .into_vault(),
     );
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     let signed_as = |headers: &[(&str, &str)]| {
@@ -479,9 +484,15 @@ fn policy_denied_host_is_refused_at_connect() {
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         ..MitmConfig::default()
     };
-    let handle =
-        MitmInterceptor::start(config, CapabilitySet::default(), FixedPolicy::denying_all())
-            .unwrap();
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        FixedPolicy::denying_all(),
+        emitter,
+        None,
+    )
+    .unwrap();
 
     let mut client = WorkloadClient::connect_raw(proxy_port(&handle));
     let reply = client.raw_connect(host, 443);
@@ -490,8 +501,11 @@ fn policy_denied_host_is_refused_at_connect() {
         "a policy-denied host must be refused at the gate: {reply:?}"
     );
 
-    let events = handle.drain_audit_events();
-    assert!(events.iter().any(|e| e.decision == AuditDecision::Deny));
+    assert!(
+        records()
+            .iter()
+            .any(|record| record.decision == AuditDecision::Deny)
+    );
 }
 
 /// The PDP governs the L7 legs too: it sees the request effect for an authorized host, and its verdict
@@ -544,9 +558,7 @@ fn phantom_mismatch_fails_closed() {
     let upstream = TlsUpstream::start(host);
     let port = upstream.port();
     let (store, _real_phantom) = opaque_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     // The PDP ALLOWS this host — the deny below comes purely from credential integrity.
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
@@ -578,9 +590,7 @@ fn missing_phantom_fails_closed() {
     let upstream = TlsUpstream::start(host);
     let port = upstream.port();
     let (store, _phantom) = opaque_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     // No Authorization header at all → no phantom found → deny (fail-closed).
@@ -602,9 +612,7 @@ fn advisory_route_injects_without_a_matching_phantom() {
     let upstream = TlsUpstream::start(host);
     let port = upstream.port();
     let store = advisory_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     // Capture the decision journal so the advisory allow is asserted to be reconstructable.
     let emitter = StubEmitter::new();
     let config = MitmConfig {
@@ -612,11 +620,12 @@ fn advisory_route_injects_without_a_matching_phantom() {
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         ..MitmConfig::default()
     };
-    let handle = MitmInterceptor::start_with_emitter(
+    let handle = MitmInterceptor::start_with(
         config,
         controls,
         FixedPolicy::allowing(&[host]),
         Box::new(emitter.clone()),
+        None,
     )
     .unwrap();
 
@@ -671,10 +680,10 @@ fn duplicate_credential_pattern_is_rejected_at_config_load() {
     let port = 443;
     let (store_a, _a) = opaque_store(host, port, "sk_live_A");
     let (store_b, _b) = opaque_store(host, port, "sk_live_B");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store_a))
-        .add_credential(CredentialCapability::new(pat(host, port), store_b))
-        .build();
+    let controls = CapabilitySet::new(vec![
+        CredentialCapability::new(pat(host, port), store_a),
+        CredentialCapability::new(pat(host, port), store_b),
+    ]);
 
     // start() runs CapabilitySet::validate against the adapter's max visibility; two controls on
     // one pattern would collide on `Authorization` for every request, so it is rejected before a socket
@@ -721,9 +730,7 @@ fn a_gzip_echo_of_the_real_secret_is_refused_not_delivered() {
     let upstream = TlsUpstream::start_with_response(host, GZIP_ECHO_RESPONSE);
     let port = upstream.port();
     let (store, phantom) = opaque_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
@@ -760,9 +767,7 @@ fn a_plain_echo_of_the_real_secret_is_redacted() {
     let upstream = TlsUpstream::start_with_response(host, PLAIN_ECHO_RESPONSE);
     let port = upstream.port();
     let (store, phantom) = opaque_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(pat(host, port), store))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
@@ -922,12 +927,10 @@ fn a_path_scoped_secret_is_not_attached_to_a_path_the_origin_resolves_outside_th
     let port = upstream.port();
     let pattern = DestinationPattern::parse(&format!("{host}:{port}/v1/")).unwrap();
     let (store, phantom) = opaque_store_for(pattern, "sk_live_REALSECRET");
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            DestinationPattern::parse(&format!("{host}:{port}/v1/")).unwrap(),
-            store,
-        ))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        DestinationPattern::parse(&format!("{host}:{port}/v1/")).unwrap(),
+        store,
+    )]);
     let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
     let bearer = format!("Bearer {phantom}");
 
@@ -1022,17 +1025,23 @@ fn a_path_scoped_secret_never_rides_plain_http() {
         DestinationPattern::parse(&format!("{host}:{port}/v1/chat")).unwrap(),
         "sk_live_REALSECRET",
     );
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            DestinationPattern::parse(&format!("{host}:{port}/v1/chat")).unwrap(),
-            store,
-        ))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        DestinationPattern::parse(&format!("{host}:{port}/v1/chat")).unwrap(),
+        store,
+    )]);
     let config = MitmConfig {
         dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
         ..MitmConfig::default()
     };
-    let handle = MitmInterceptor::start(config, controls, FixedPolicy::allowing(&[host])).unwrap();
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[host]),
+        emitter,
+        None,
+    )
+    .unwrap();
 
     for path in ["/v1/chat", "/%76%31/chat", "/%%3761/chat"] {
         let reply = plain_exchange(
@@ -1060,7 +1069,7 @@ fn a_path_scoped_secret_never_rides_plain_http() {
         Vec::<String>::new(),
         "no request reached the origin"
     );
-    let audit = format!("{:?}", handle.drain_audit_events());
-    assert!(audit.contains("a secret must ride TLS"), "{audit}");
-    assert!(audit.contains("not RFC 3986"), "{audit}");
+    let reasons = format!("{:?}", records());
+    assert!(reasons.contains("a secret must ride TLS"), "{reasons}");
+    assert!(reasons.contains("not RFC 3986"), "{reasons}");
 }

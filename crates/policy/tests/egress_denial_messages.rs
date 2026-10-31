@@ -75,7 +75,7 @@ fn gateway(source: &str, mut config: MitmConfig) -> (MitmHandle, StubEmitter) {
     .unwrap();
     config.dns_overrides = vec![(HOST.to_string(), "127.0.0.1".parse().unwrap())];
     let emitter = StubEmitter::new();
-    let handle = MitmInterceptor::start_with_emitter(
+    let handle = MitmInterceptor::start_with(
         config,
         CapabilitySet::default(),
         EgressPolicyInterceptor::into_handle(
@@ -84,6 +84,7 @@ fn gateway(source: &str, mut config: MitmConfig) -> (MitmHandle, StubEmitter) {
             GovernedBox::assigned("denial-messages"),
         ),
         Box::new(emitter.clone()),
+        None,
     )
     .unwrap();
     (handle, emitter)
@@ -155,17 +156,13 @@ fn connect_refusals_reach_tcp_and_unix_workloads_without_opening_upstream() {
                     upstream.accept().unwrap_err().kind(),
                     std::io::ErrorKind::WouldBlock
                 );
-                let events = handle.drain_audit_events();
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0].decision, AuditDecision::Deny);
-                assert_eq!(events[0].host, HOST);
-                assert_eq!(events[0].port, port);
-                let correlation = events[0].correlation.as_str();
-                assert!(!correlation.is_empty());
                 let decisions = emitter.records();
                 assert_eq!(decisions.len(), exchange + 1);
                 assert_eq!(decisions[exchange].decision, AuditDecision::Deny);
-                assert_eq!(decisions[exchange].correlation.as_str(), correlation);
+                assert_eq!(decisions[exchange].host, HOST);
+                assert_eq!(decisions[exchange].port, port);
+                let correlation = decisions[exchange].correlation.as_str();
+                assert!(!correlation.is_empty());
                 assert!(
                     correlations.insert(correlation.to_owned()),
                     "separate exchanges must have distinct correlation IDs"
@@ -216,30 +213,16 @@ fn http_refusals_reach_the_workload_without_forwarding_the_request() {
                 format!("http:request gate: {expected}")
             );
             assert_eq!(upstream.request_count(), 0);
-            let events = handle.drain_audit_events();
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| event.decision == AuditDecision::Deny)
-                    .count(),
-                1
-            );
-            assert!(
-                events
-                    .iter()
-                    .all(|event| event.host == HOST && event.port == upstream.port())
-            );
-            let correlation = events[0].correlation.as_str();
-            assert!(!correlation.is_empty());
-            assert!(
-                events
-                    .iter()
-                    .all(|event| event.correlation.as_str() == correlation),
-                "related events must share the exchange correlation ID"
-            );
             let decisions = emitter.records();
             assert_eq!(decisions.len(), 2 * (exchange + 1));
             let current = &decisions[2 * exchange..];
+            assert!(
+                current
+                    .iter()
+                    .all(|decision| decision.host == HOST && decision.port == upstream.port())
+            );
+            let correlation = current[0].correlation.as_str();
+            assert!(!correlation.is_empty());
             assert_eq!(current[0].decision, AuditDecision::Allow);
             assert_eq!(current[1].decision, AuditDecision::Deny);
             assert_eq!(current[1].method, "POST");

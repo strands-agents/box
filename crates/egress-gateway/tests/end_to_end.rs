@@ -255,7 +255,7 @@ fn config_load_visibility_gate() {
     );
     let cred =
         CredentialCapability::new(DestinationPattern::parse("api.example.com").unwrap(), store);
-    let set = CapabilitySet::builder().add_credential(cred).build();
+    let set = CapabilitySet::new(vec![cred]);
 
     // Every connection is terminated and inspected, so a credential mutator is always
     // satisfiable and validation turns only on the one-control-per-pattern rule.

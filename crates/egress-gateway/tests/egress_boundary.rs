@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use egress_gateway::{
     AuditDecision, CapabilitySet, EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit,
-    MitmConfig, MitmHandle, MitmInterceptor,
+    EgressDecision, Emitter, MitmConfig, MitmHandle, MitmInterceptor,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -579,7 +579,27 @@ fn proxy_port(handle: &MitmHandle) -> u16 {
 }
 
 fn start(config: MitmConfig, policy: Arc<RecordingPolicy>) -> MitmHandle {
-    MitmInterceptor::start(config, CapabilitySet::default(), policy).unwrap()
+    let records = Box::new(RECORDS.with(Clone::clone));
+    MitmInterceptor::start_with(config, CapabilitySet::default(), policy, records, None).unwrap()
+}
+
+/// The decision records of the gateways one test thread starts.
+#[derive(Clone, Default)]
+struct Records(Arc<Mutex<Vec<EgressDecision>>>);
+
+impl Emitter for Records {
+    fn emit(&self, record: EgressDecision) {
+        self.0.lock().unwrap().push(record);
+    }
+}
+
+thread_local! {
+    static RECORDS: Records = Records::default();
+}
+
+/// Take the decision records this test's gateways emitted since the last call.
+fn take_records() -> Vec<EgressDecision> {
+    RECORDS.with(|records| std::mem::take(&mut *records.0.lock().unwrap()))
 }
 
 /// One plaintext proxy exchange: write `request` to the proxy and read its whole reply to close.
@@ -624,19 +644,14 @@ enum Outcome {
     Unresolvable,
 }
 
-/// Classify the proxy's reply to a CONNECT for `authority`, cross-checked against the audit log and
-/// the authority's recorded attempts, and require the evidence to be internally consistent.
-fn classify_connect(
-    handle: &MitmHandle,
-    policy: &RecordingPolicy,
-    authority: &str,
-    reply: &str,
-) -> Outcome {
-    let events = handle.drain_audit_events();
-    let denies: Vec<String> = events
+/// Classify the proxy's reply to a CONNECT for `authority`, cross-checked against the decision
+/// records and the authority's recorded attempts, and require the evidence to be internally
+/// consistent.
+fn classify_connect(policy: &RecordingPolicy, authority: &str, reply: &str) -> Outcome {
+    let denies: Vec<String> = take_records()
         .iter()
-        .filter(|e| e.decision == AuditDecision::Deny)
-        .map(|e| e.reason.clone())
+        .filter(|record| record.decision == AuditDecision::Deny)
+        .map(|record| record.reason.clone())
         .collect();
     let connects = policy.connects();
     if reply.contains("200 Connection Established") {
@@ -752,7 +767,7 @@ fn a_rebound_answer_is_refused_by_the_address_bound_authority_and_never_dialed()
     let authority = bracketed(host, port);
     let reply = raw_connect(proxy_port(&handle), &authority);
     assert_eq!(
-        classify_connect(&handle, &policy, &authority, &reply),
+        classify_connect(&policy, &authority, &reply),
         Outcome::PolicyDenied,
         "the rebound address is refused by the address-bound authority: {reply:?}"
     );
@@ -789,7 +804,7 @@ fn a_rebound_answer_is_refused_by_the_address_bound_authority_and_never_dialed()
     );
     let reply = raw_connect(proxy_port(&handle), &authority);
     assert_eq!(
-        classify_connect(&handle, &permissive, &authority, &reply),
+        classify_connect(&permissive, &authority, &reply),
         Outcome::Tunneled,
         "under a permissive fault the rebound address is dialed"
     );
@@ -927,7 +942,7 @@ fn loopback_respellings_reach_the_recorder_only_through_the_resolver_and_the_aut
     let authority = format!("127.0.0.1:{port}");
     let reply = raw_connect(proxy_port(&handle), &authority);
     assert_eq!(
-        classify_connect(&handle, &policy, &authority, &reply),
+        classify_connect(&policy, &authority, &reply),
         Outcome::Tunneled
     );
     assert_eq!(
@@ -949,7 +964,7 @@ fn loopback_respellings_reach_the_recorder_only_through_the_resolver_and_the_aut
         let before = recorder.connections();
         let authority = format!("{spelling}:{port}");
         let reply = raw_connect(proxy_port(&handle), &authority);
-        let outcome = classify_connect(&handle, &policy, &authority, &reply);
+        let outcome = classify_connect(&policy, &authority, &reply);
         match observed.as_deref() {
             None => {
                 assert_eq!(
@@ -1023,7 +1038,7 @@ fn loopback_respellings_reach_the_recorder_only_through_the_resolver_and_the_aut
         let handle = start(MitmConfig::default(), policy.clone());
         let before = recorder.connections();
         let reply = raw_connect(proxy_port(&handle), &authority);
-        let outcome = classify_connect(&handle, &policy, &authority, &reply);
+        let outcome = classify_connect(&policy, &authority, &reply);
         let expected = if observed.is_some() {
             Outcome::PolicyDenied
         } else {
@@ -1075,7 +1090,7 @@ fn a_spelling_the_resolver_reads_off_loopback_is_refused_before_any_dial() {
     );
     let reply = raw_connect(proxy_port(&handle), &authority);
     assert_eq!(
-        classify_connect(&handle, &policy, &authority, &reply),
+        classify_connect(&policy, &authority, &reply),
         Outcome::PolicyDenied,
         "{spelling} read as {elsewhere} is refused by the loopback-only authority: {reply:?}"
     );
@@ -1103,7 +1118,7 @@ fn a_spelling_the_resolver_reads_off_loopback_is_refused_before_any_dial() {
     );
     let reply = raw_connect(proxy_port(&handle), &authority);
     assert_eq!(
-        classify_connect(&handle, &policy, &authority, &reply),
+        classify_connect(&policy, &authority, &reply),
         Outcome::Tunneled
     );
     assert_eq!(
@@ -1129,7 +1144,7 @@ fn every_spelling_of_the_metadata_address_reaches_the_authority_as_that_address(
         let reply = raw_connect(proxy, &authority);
         let denoted: IpAddr = denoted.parse().unwrap();
         assert_eq!(
-            classify_connect(&handle, &policy, &authority, &reply),
+            classify_connect(&policy, &authority, &reply),
             Outcome::PolicyDenied,
             "{spelling}: a literal spelling needs no resolver and reaches the authority: {reply:?}"
         );
@@ -1148,7 +1163,7 @@ fn every_spelling_of_the_metadata_address_reaches_the_authority_as_that_address(
     for spelling in METADATA_RESOLVER_SPELLINGS {
         let authority = format!("{spelling}:80");
         let reply = raw_connect(proxy, &authority);
-        match classify_connect(&handle, &policy, &authority, &reply) {
+        match classify_connect(&policy, &authority, &reply) {
             Outcome::PolicyDenied => assert!(
                 policy.connects().iter().all(
                     |c| matches!(c, Seen::Connect { address, .. } if address.ip() == metadata)
@@ -1322,12 +1337,6 @@ fn an_upload_aborted_mid_body_delivers_nothing_and_the_gateway_keeps_serving() {
         policy.requests().is_empty(),
         "no request effect was raised for an incomplete upload"
     );
-    let audited = wait_for_audit(&handle, "connection handler error");
-    assert!(
-        audited,
-        "the aborted connection is audited, not silently swallowed"
-    );
-
     assert_still_serving(&handle, host, &upstream, "/after-abort");
 }
 
@@ -1352,7 +1361,6 @@ fn a_chunked_upload_aborted_before_its_terminator_delivers_nothing() {
 
     assert_eq!(recorder.bytes(), 0, "no chunk reached the destination");
     assert!(policy.requests().is_empty());
-    assert!(wait_for_audit(&handle, "connection handler error"));
     assert_still_serving(&handle, host, &upstream, "/after-chunked-abort");
 }
 
@@ -1456,10 +1464,6 @@ fn framing_ambiguity_is_refused_before_any_upstream_request() {
             policy.requests().is_empty(),
             "{name}: no request effect was raised: {:?}",
             policy.requests()
-        );
-        assert!(
-            wait_for_audit(&handle, "connection handler error"),
-            "{name}: the refused frame is audited"
         );
     }
 
@@ -1841,20 +1845,4 @@ fn the_recorder_reads_a_delayed_request_whole_from_its_nonblocking_listener() {
         vec!["GET /late HTTP/1.1".to_string()]
     );
     assert!(snapshot.incomplete().is_empty(), "{snapshot:?}");
-}
-
-/// Poll the audit log for a deny whose reason contains `needle`; the handler thread audits after
-/// the client has already gone.
-fn wait_for_audit(handle: &MitmHandle, needle: &str) -> bool {
-    for _ in 0..50 {
-        if handle
-            .drain_audit_events()
-            .iter()
-            .any(|e| e.decision == AuditDecision::Deny && e.reason.contains(needle))
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
 }

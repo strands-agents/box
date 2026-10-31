@@ -129,7 +129,7 @@ fn admit(
     token: Option<&str>,
     correlation: &RequestId,
 ) -> std::result::Result<TcpStream, WorkloadResponse> {
-    if !connect::token_ok(state.expected_token.as_deref(), token) {
+    if !connect::token_ok(state.config.expected_token.as_deref(), token) {
         return Err(WorkloadResponse::bare(407));
     }
     open_governed_upstream(state, connect, correlation).map_err(|error| error.response())
