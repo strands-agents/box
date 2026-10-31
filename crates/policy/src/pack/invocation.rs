@@ -3,8 +3,8 @@
 use super::Pack;
 use super::grammar::{BASE_FIELDS, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
+use crate::Decision;
 use crate::schema::ActionIdentity;
-use crate::{Decision, PolicyEngine, Principal};
 
 /// One spawn of a pack-bound program, and what its pack reads the command line as.
 pub(crate) struct PackInvocation<'a> {
@@ -34,6 +34,43 @@ impl PendingPackResponse {
     }
 }
 
+/// One pack action as the engine decides it: its identity, its input, and the program it names.
+pub(crate) struct PackRequest {
+    identity: ActionIdentity,
+    input: serde_json::Value,
+    program_path: String,
+}
+
+impl PackRequest {
+    pub(crate) fn identity(&self) -> &ActionIdentity {
+        &self.identity
+    }
+
+    /// The `context.input` record in Cedar's JSON form, with each effect as an `__entity` escape.
+    pub(crate) fn input(&self) -> &serde_json::Value {
+        &self.input
+    }
+
+    /// The resource that the verdict names: the resolved program, as on a `shell:spawn`.
+    pub(crate) fn resource(&self) -> &str {
+        &self.program_path
+    }
+
+    /// This request with `input` in place of the record its command line gives.
+    #[cfg(test)]
+    pub(crate) fn with_input(self, input: serde_json::Value) -> Self {
+        Self { input, ..self }
+    }
+
+    /// The `::response` that this action owes when `decision` allows it.
+    pub(crate) fn allowed_by(self, decision: &Decision) -> Option<PendingPackResponse> {
+        decision.is_allow().then_some(PendingPackResponse {
+            identity: self.identity,
+            input: self.input,
+        })
+    }
+}
+
 impl<'a> PackInvocation<'a> {
     /// Read `args`, the words after `program`, with the shell grammar of `pack`.
     pub(crate) fn new(
@@ -56,22 +93,21 @@ impl<'a> PackInvocation<'a> {
     }
 
     /// The action the parse names: its own action, or `unmodeled`.
-    pub(crate) fn action(&self) -> &str {
+    fn action(&self) -> &str {
         match &self.parsed {
             Parsed::Action { action, .. } => action.as_str(),
             Parsed::Unmodeled => UNMODELED_ACTION,
         }
     }
 
-    pub(crate) fn identity(&self) -> ActionIdentity {
+    fn identity(&self) -> ActionIdentity {
         ActionIdentity::PackAction {
             namespace: self.pack.namespace(),
             action: self.action().to_string(),
         }
     }
 
-    /// The `context.input` record in Cedar's JSON form, with each effect as an `__entity` escape.
-    pub(crate) fn input(&self) -> serde_json::Value {
+    fn input(&self) -> serde_json::Value {
         let [
             program,
             program_path,
@@ -118,20 +154,13 @@ impl<'a> PackInvocation<'a> {
         serde_json::Value::Object(record)
     }
 
-    /// Decide this action through `engine`, and when it allows, the `::response` that the action owes.
-    pub(crate) fn decide(
-        &self,
-        engine: &PolicyEngine,
-        principal: &Principal,
-    ) -> (Decision, Option<PendingPackResponse>) {
-        let identity = self.identity();
-        let input = self.input();
-        let decision =
-            engine.decide_input(principal, &identity, &input, self.program_path.to_string());
-        let pending = decision
-            .is_allow()
-            .then_some(PendingPackResponse { identity, input });
-        (decision, pending)
+    /// The pack action this command line raises, with its exact `context.input` record.
+    pub(crate) fn request(&self) -> PackRequest {
+        PackRequest {
+            identity: self.identity(),
+            input: self.input(),
+            program_path: self.program_path.to_string(),
+        }
     }
 }
 
@@ -239,15 +268,21 @@ mod tests {
         let args = argv(&["push", "--force", "origin", "main"]);
         let invocation = PackInvocation::new(&git, "git", "/usr/bin/git", "/work", &args, &[]);
 
-        let (decision, pending) = engine
-            .engine()
-            .decide_pack_action(&Principal::agent(), &invocation);
+        let (decision, pending) = engine.engine().decide_pack_action(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &invocation,
+        );
         let recorded = pending
             .expect("an allowed action owes a response")
             .complete(|identity, input| (identity.clone(), input.clone()));
 
         assert!(decision.is_allow(), "{decision:?}");
-        assert_eq!(recorded, (invocation.identity(), invocation.input()));
+        let request = invocation.request();
+        assert_eq!(
+            recorded,
+            (request.identity().clone(), request.input().clone())
+        );
     }
 
     const NO_SPAWN_AFTER_A_PUSH: &str = r#"

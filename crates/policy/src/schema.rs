@@ -692,10 +692,6 @@ pub(crate) fn to_cedar_request(
 }
 
 /// Build a schema-bound Cedar authorization request whose `input` is the JSON record `input`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no caller decides a pack action yet")
-)]
 pub(crate) fn to_cedar_input_request(
     principal: &Principal,
     identity: &ActionIdentity,

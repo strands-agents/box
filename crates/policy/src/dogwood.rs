@@ -26,7 +26,7 @@ use dogwood_local_engine::{
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
-use crate::request::{Principal, Request};
+use crate::request::{ActionRequest, Principal, Request};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
     UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema,
@@ -397,24 +397,13 @@ impl DogwoodEngine {
     }
 
     /// Decide one request at the current point in history.
-    #[cfg(test)]
     pub(crate) fn decide(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        request: &Request<'_>,
+        request: ActionRequest<'_>,
     ) -> Decision {
-        let identity = ActionIdentity::for_request(request);
-        self.decide_with_identity(governed, principal, request, &identity)
-    }
-
-    pub(crate) fn decide_with_identity(
-        &self,
-        governed: &GovernedBox,
-        principal: &Principal,
-        request: &Request<'_>,
-        identity: &ActionIdentity,
-    ) -> Decision {
+        let identity = request.identity();
         // Validate the (principal, action, context) tuple against the shipped schema
         // BEFORE deciding.
         //
@@ -428,25 +417,35 @@ impl DogwoodEngine {
         // *policy* against the schema but not the *request*, so the check belongs here.
         //
         // The schema is the single source of truth for both engines, which is why this
-        // reuses the same request-construction gate rather than restating the
+        // builds each request through a schema-bound gate rather than restating the
         // principal/action pairings.
-        self.gated_decision(
-            crate::schema::to_cedar_request(principal, request, identity, &self.request_schema),
-            || request_event(governed, principal, request, identity),
-        )
-    }
-
-    /// Deny with an internal fault unless `gate` typed the request, then decide the event of `build`.
-    fn gated_decision<T>(
-        &self,
-        gate: Result<T, PolicyError>,
-        build: impl FnOnce() -> EventBuilder,
-    ) -> Decision {
+        let gate = match request {
+            ActionRequest::Request(request) => {
+                crate::schema::to_cedar_request(principal, request, &identity, &self.request_schema)
+                    .map(|_| ())
+            }
+            ActionRequest::Pack(request) => crate::schema::to_cedar_input_request(
+                principal,
+                &identity,
+                request.input(),
+                &self.request_schema,
+            )
+            .map(|_| ()),
+        };
         if let Err(error) = gate {
             eprintln!("policy: warn: {error}; denying");
             return Decision::internal_fault();
         }
-        match self.submit(build) {
+        let event = || match request {
+            ActionRequest::Request(request) => {
+                request_event(governed, principal, request, &identity)
+            }
+            ActionRequest::Pack(request) => with_input(
+                identity.event_builder(KIND_REQUEST),
+                entity_json_value(request.input()),
+            ),
+        };
+        match self.submit(event) {
             Ok(Some(decision)) => decision,
             // A decision-kind event that produced no response is not a permit.
             Ok(None) => Decision::internal_fault(),
@@ -467,28 +466,6 @@ impl DogwoodEngine {
         self.submit(|| outcome_event(governed, principal, outcome))
             .map(|_| ())
             .map_err(PolicyError::Evaluation)
-    }
-
-    /// Decide one action whose `input` is the JSON record `input`, at the current point in history.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller decides a pack action yet")
-    )]
-    pub(crate) fn decide_input(
-        &self,
-        principal: &Principal,
-        identity: &ActionIdentity,
-        input: &serde_json::Value,
-    ) -> Decision {
-        self.gated_decision(
-            crate::schema::to_cedar_input_request(principal, identity, input, &self.request_schema),
-            || {
-                with_input(
-                    identity.event_builder(KIND_REQUEST),
-                    entity_json_value(input),
-                )
-            },
-        )
     }
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
@@ -1359,10 +1336,6 @@ fn json_value(value: &serde_json::Value) -> Value {
 }
 
 /// A Cedar JSON record that Box builds, as a dogwood `Value` with each `__entity` escape an entity.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no caller decides a pack action yet")
-)]
 fn entity_json_value(value: &serde_json::Value) -> Value {
     match value {
         serde_json::Value::Object(values) => {
@@ -1835,12 +1808,21 @@ when temporal {
         let args = ["push".to_string(), "origin".to_string()];
         let invocation =
             crate::pack::PackInvocation::new(&pack, "git", "/usr/bin/git", "/work", &args, &[]);
-        let typed = invocation.input();
-        let mut mistyped = typed.clone();
-        mistyped["force"] = serde_json::json!("yes");
+        let typed = invocation.request();
+        let mut input = typed.input().clone();
+        input["force"] = serde_json::json!("yes");
+        let mistyped = invocation.request().with_input(input);
 
-        let typed = engine.decide_input(&Principal::agent(), &invocation.identity(), &typed);
-        let mistyped = engine.decide_input(&Principal::agent(), &invocation.identity(), &mistyped);
+        let typed = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Pack(&typed),
+        );
+        let mistyped = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Pack(&mistyped),
+        );
 
         assert!(typed.is_allow(), "the typed input is allowed: {typed:?}");
         assert!(
@@ -1926,7 +1908,11 @@ when temporal {
                 .map(|entry| entry.token.to_string())
                 .collect();
             let offset = authority.log_offset();
-            let decision = authority.decide(&governed(), &Principal::agent(), &http());
+            let decision = authority.decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&http()),
+            );
             assert_eq!(authority.log_offset(), offset + 1);
             assert_eq!(decision.is_allow(), effect == "permit");
             let rule = match &decision {
@@ -1978,7 +1964,11 @@ when temporal {
             let authority = DogwoodEngine::open(&source, &history.path().join("dogwood.redb"))
                 .expect("policy loads");
             let offset = authority.log_offset();
-            let decision = authority.decide(&governed(), &Principal::agent(), &http());
+            let decision = authority.decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&http()),
+            );
             assert_eq!(authority.log_offset(), offset + 1);
             assert!(matches!(
                 decision,
@@ -2002,7 +1992,11 @@ when temporal {
             }
             authority.poison_scope_for_test();
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority.decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                ),
                 Decision::internal_fault(),
             );
         }
@@ -2063,13 +2057,21 @@ when temporal {
                 }
             };
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority.decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                ),
                 expected
             );
             drop(authority);
             authority = DogwoodEngine::open_for_staging(&path).expect("history recovers");
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority.decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                ),
                 expected
             );
         }
@@ -2111,7 +2113,11 @@ when temporal {
                 .expect("fault-injection open"),
             };
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority.decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                ),
                 Decision::Deny {
                     reason: DenyReason::NoMatch,
                     rule: RuleId::default_deny(),
@@ -2302,7 +2308,11 @@ when temporal {
         let engine = engine();
         assert!(
             engine
-                .decide(&governed(), &Principal::agent(), &http())
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                )
                 .is_allow()
         );
 
@@ -2319,7 +2329,11 @@ when temporal {
 
         // Every subsequent verdict is a denial, not a permit.
         for _ in 0..3 {
-            let verdict = engine.decide(&governed(), &Principal::agent(), &http());
+            let verdict = engine.decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&http()),
+            );
             assert!(
                 matches!(
                     verdict,
@@ -2365,20 +2379,28 @@ when temporal {
 
         // Exhaust the budget with real deliveries.
         for _ in 0..2 {
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            assert!(
+                engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow()
+            );
             engine
                 .observe_outcome(&governed(), &egress, &delivered(60))
                 .expect("records");
         }
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "budget closed"
         );
 
         // Now make noise: many denied requests, no clock movement, nothing delivered.
         for _ in 0..500 {
             assert!(
-                !engine.decide(&governed(), &egress, &http()).is_allow(),
+                !engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow(),
                 "a denied request must not reopen the budget"
             );
         }
@@ -2392,27 +2414,37 @@ when temporal {
         let egress = Principal::agent();
 
         for _ in 0..2 {
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            assert!(
+                engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow()
+            );
             engine
                 .observe_outcome(&governed(), &egress, &delivered(60))
                 .expect("records");
         }
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "budget closed"
         );
 
         // Still inside the 60s window.
         engine.advance_clock(59);
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "the window has not elapsed yet"
         );
 
         // Past it: the old deliveries fall out of the sum.
         engine.advance_clock(2);
         assert!(
-            engine.decide(&governed(), &egress, &http()).is_allow(),
+            engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "the budget must reopen once the window truly elapses"
         );
     }
@@ -2436,7 +2468,11 @@ when temporal {
         };
         assert!(
             engine
-                .decide(&governed(), &Principal::agent(), &http())
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                )
                 .is_allow()
         );
         engine
@@ -2444,7 +2480,11 @@ when temporal {
             .expect("records");
         assert!(
             !engine
-                .decide(&governed(), &Principal::agent(), &http())
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                )
                 .is_allow(),
             "a recorded 150-byte delivery must exhaust a 100-byte budget; if this \
              allows, the predicate is not matching the recorded event at all"
@@ -2501,7 +2541,11 @@ when temporal {{
             let started = std::time::Instant::now();
             for _ in 0..count {
                 engine.advance_clock(1);
-                assert!(engine.decide(&governed(), &agent, &exec()).is_allow());
+                assert!(
+                    engine
+                        .decide(&governed(), &agent, ActionRequest::Request(&exec()))
+                        .is_allow()
+                );
             }
             started.elapsed()
         };
@@ -2601,7 +2645,11 @@ when temporal {{
 
         let offset_before_reopen = {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            assert!(
+                engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow()
+            );
             engine
                 .observe_outcome(&governed(), &egress, &delivered(150))
                 .expect("history records");
@@ -2615,7 +2663,9 @@ when temporal {{
             "reopening an unchanged policy must not append another install record"
         );
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "the recovered delivery must keep the budget closed"
         );
     }
@@ -2788,12 +2838,18 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(MACRO_BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            assert!(
+                engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow()
+            );
             engine
                 .observe_outcome(&governed(), &egress, &delivered(150))
                 .expect("history records");
             assert!(
-                !engine.decide(&governed(), &egress, &http()).is_allow(),
+                !engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow(),
                 "a 150-byte delivery must exhaust a 100-byte budget"
             );
         }
@@ -2802,7 +2858,9 @@ when temporal {
         assert_ne!(reformatted, MACRO_BUDGET, "the edit must change the source");
         let recovered = DogwoodEngine::open(&reformatted, &path).expect("reformatted bundle loads");
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "a whitespace-only edit must not reopen an exhausted budget"
         );
     }
@@ -2815,7 +2873,11 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            assert!(
+                engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .is_allow()
+            );
             engine
                 .observe_outcome(&governed(), &egress, &delivered(150))
                 .expect("history records");
@@ -2829,7 +2891,9 @@ when temporal {
         );
         let recovered = DogwoodEngine::open(&changed, &path).expect("changed bundle loads");
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .is_allow(),
             "inserting an unrelated statement must not reset an unchanged budget"
         );
     }

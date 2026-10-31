@@ -8,6 +8,7 @@ mod authority;
 
 use crate::check::{Finding, PolicyCheck};
 use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
+use crate::request::ActionRequest;
 use crate::schema::GovernedBox;
 use crate::{
     Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
@@ -303,11 +304,18 @@ impl PolicyEngine {
         principal: &Principal,
         request: &Request<'_>,
     ) -> Decision {
-        let identity = crate::schema::ActionIdentity::for_request(request);
-        let decision = self
-            .authority
-            .decide(governed, principal, request, &identity);
-        self.conclude(&identity, request.resource(), decision)
+        self.decide_request(governed, principal, ActionRequest::Request(request))
+    }
+
+    /// Decide one request through the one authority, then name and report the verdict.
+    fn decide_request(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: ActionRequest<'_>,
+    ) -> Decision {
+        let decision = self.authority.decide(governed, principal, request);
+        self.conclude(&request.identity(), request.resource(), decision)
     }
 
     /// Decide one parsed command line as its pack action, in the box's one history
@@ -319,26 +327,14 @@ impl PolicyEngine {
     )]
     pub(crate) fn decide_pack_action(
         &self,
+        governed: &GovernedBox,
         principal: &Principal,
         invocation: &crate::pack::PackInvocation<'_>,
     ) -> (Decision, Option<crate::pack::PendingPackResponse>) {
-        invocation.decide(self, principal)
-    }
-
-    /// Decide one action whose `input` is a JSON record, and name `resource` on the verdict.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller decides a pack action yet")
-    )]
-    pub(crate) fn decide_input(
-        &self,
-        principal: &Principal,
-        identity: &crate::schema::ActionIdentity,
-        input: &serde_json::Value,
-        resource: String,
-    ) -> Decision {
-        let decision = self.authority.decide_input(principal, identity, input);
-        self.conclude(identity, resource, decision)
+        let request = invocation.request();
+        let decision = self.decide_request(governed, principal, ActionRequest::Pack(&request));
+        let pending = request.allowed_by(&decision);
+        (decision, pending)
     }
 
     /// Record the `::response` that an allowed pack action owes, with the program's exit status.
@@ -446,22 +442,23 @@ impl PolicyEngine {
             };
             return self.conclude(&identity, request.resource(), decision);
         }
-        let decision = match self
-            .authority
-            .decide(governed, principal, &request, &identity)
-        {
-            // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
-            Decision::Deny {
-                reason: crate::DenyReason::NoMatch,
-                ..
-            } => Decision::Allow {
-                rule: crate::RuleId::default_deny(),
-                attribution: Vec::new(),
-                resource: String::new(),
-            },
-            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
-            other => other,
-        };
+        let decision =
+            match self
+                .authority
+                .decide(governed, principal, ActionRequest::Request(&request))
+            {
+                // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
+                Decision::Deny {
+                    reason: crate::DenyReason::NoMatch,
+                    ..
+                } => Decision::Allow {
+                    rule: crate::RuleId::default_deny(),
+                    attribution: Vec::new(),
+                    resource: String::new(),
+                },
+                // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
+                other => other,
+            };
         self.conclude(&identity, request.resource(), decision)
     }
 }

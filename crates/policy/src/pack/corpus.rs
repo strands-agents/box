@@ -14,7 +14,10 @@ use super::{Pack, PackInvocation, PendingPackResponse};
 use crate::check::Refused;
 use crate::dogwood::check_against;
 use crate::spelling::Operator;
-use crate::{Decision, DecisionObserver, DenyReason, Policy, PolicyEngine, PolicyError, Principal};
+use crate::{
+    Decision, DecisionObserver, DenyReason, GovernedBox, Policy, PolicyEngine, PolicyError,
+    Principal,
+};
 
 pub(super) const PACKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/packs");
 
@@ -359,8 +362,11 @@ impl Engine {
         let program_path = format!("{PROGRAM_DIRECTORY}/{}", pack.program);
         let invocation =
             PackInvocation::new(pack, &pack.program, &program_path, CWD, &argv[1..], &[]);
-        self.engine
-            .decide_pack_action(&Principal::agent(), &invocation)
+        self.engine.decide_pack_action(
+            &GovernedBox::assigned("corpus"),
+            &Principal::agent(),
+            &invocation,
+        )
     }
 }
 

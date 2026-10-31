@@ -28,7 +28,7 @@ mod fuzz;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub(crate) use invocation::{PackInvocation, PendingPackResponse};
+pub(crate) use invocation::{PackInvocation, PackRequest, PendingPackResponse};
 pub(crate) use model::Pack;
 pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;
