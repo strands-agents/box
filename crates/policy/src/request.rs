@@ -284,8 +284,8 @@ impl Request<'_> {
 pub(crate) enum ActionRequest<'a> {
     Request(&'a Request<'a>),
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller decides a pack action yet")
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter decides a pack action")
     )]
     Pack(&'a crate::pack::PackRequest),
 }

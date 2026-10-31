@@ -13,7 +13,7 @@ mod error;
 mod mcp_schema;
 mod observe;
 mod outcome;
-#[expect(dead_code, reason = "no caller loads a tool pack yet")]
+#[expect(dead_code, reason = "no caller opens an engine with a tool pack yet")]
 mod pack;
 mod path;
 mod policy;
@@ -44,6 +44,7 @@ pub use mcp_schema::{
 };
 pub use observe::DecisionObserver;
 pub use outcome::{Delivery, FsResult, Outcome};
+pub use pack::{BindingRefusal, Pack, PackBindings, PackError, ProgramFile, UnreadableProgramFile};
 pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,

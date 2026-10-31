@@ -444,8 +444,8 @@ impl Authority {
 
     /// Records the `::response` of one completed action whose `input` is a JSON record.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller records a pack response yet")
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter records a pack response")
     )]
     pub(super) fn record_response(
         &self,
@@ -1032,9 +1032,16 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
         .expect("authority opens");
         let decide = |words: &[&str]| {
             let args: Vec<String> = words.iter().map(ToString::to_string).collect();
-            let request =
-                crate::pack::PackInvocation::new(&pack, "git", "/usr/bin/git", "/work", &args, &[])
-                    .request();
+            let request = crate::pack::PackInvocation::new(
+                &pack,
+                "git",
+                &crate::pack::ProgramFile::fixed("/usr/bin/git", 1),
+                None,
+                "/work",
+                &args,
+                &[],
+            )
+            .request();
             authority.decide(
                 &governed(),
                 &Principal::agent(),

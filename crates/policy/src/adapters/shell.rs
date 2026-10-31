@@ -14,6 +14,9 @@ use strands_shell::{
 
 use crate::GovernedBox;
 use crate::outcome::FsResult;
+use crate::pack::{
+    CoverageRefusal, PackBindings, PackCoverage, PackInvocation, PendingPackResponse, ProgramFile,
+};
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
 use crate::{Decision, Outcome, PolicyEngine, Principal, Request};
@@ -34,6 +37,7 @@ pub struct ShellPolicyInterceptor {
     home: Option<std::path::PathBuf>,
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
+    pack_bindings: Arc<PackBindings>,
 }
 
 impl ShellPolicyInterceptor {
@@ -49,6 +53,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
+            pack_bindings: Arc::default(),
         })
     }
 
@@ -69,6 +74,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
+            pack_bindings: Arc::default(),
         })
     }
 
@@ -85,6 +91,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
+            pack_bindings: Arc::default(),
         })
     }
 
@@ -102,12 +109,103 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
+            pack_bindings: Arc::default(),
+        })
+    }
+
+    /// Construct the handle that decides a spawn of a program a tool pack binds as its pack action
+    /// (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
+    pub fn into_handle_with_pack_bindings(
+        policy: Arc<PolicyEngine>,
+        principal: Principal,
+        governed: GovernedBox,
+        home: Option<std::path::PathBuf>,
+        spawn_credentials: BTreeMap<String, Vec<String>>,
+        pack_bindings: PackBindings,
+    ) -> Arc<dyn EffectInterceptor> {
+        Arc::new(Self {
+            policy,
+            principal,
+            governed,
+            home,
+            spawn_credentials: Arc::new(spawn_credentials),
+            pack_bindings: Arc::new(pack_bindings),
         })
     }
 
     fn credential_reads(&self, program_path: &str) -> &[String] {
         credential_reads_for(&self.spawn_credentials, program_path)
     }
+
+    fn permit(&self, admitted: Admitted) -> Box<dyn EffectPermit> {
+        Box::new(PolicyEffectPermit {
+            policy: Arc::clone(&self.policy),
+            principal: self.principal.clone(),
+            governed: self.governed.clone(),
+            admitted,
+            home: self.home.clone(),
+        })
+    }
+
+    /// The gate that decides a spawn of `program_path` called as `program`.
+    fn spawn_gate(&self, program: &str, program_path: &str) -> SpawnGate<'_> {
+        if self.pack_bindings.is_empty() {
+            return SpawnGate::Spawn;
+        }
+        let name = called_name(program);
+        let file = match ProgramFile::read(program_path) {
+            Ok(file) => file,
+            Err(_) if self.pack_bindings.binds_path(Path::new(program_path)) => {
+                return SpawnGate::Refused(CoverageRefusal::ReplacedFile {
+                    name: name.to_string(),
+                    program_path: program_path.into(),
+                });
+            }
+            Err(_) => return SpawnGate::Spawn,
+        };
+        match self.pack_bindings.coverage(&file, name) {
+            None => SpawnGate::Spawn,
+            Some(PackCoverage::Parsed(pack)) => SpawnGate::Pack { pack, file },
+            Some(PackCoverage::Refused(refusal)) => SpawnGate::Refused(refusal),
+        }
+    }
+}
+
+/// The one gate that decides a host-binary spawn
+/// (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
+enum SpawnGate<'a> {
+    /// No pack covers the program, so `shell:spawn` decides it.
+    Spawn,
+    /// A pack binds the program file and its called name, so the pack action decides it.
+    Pack {
+        pack: &'a crate::pack::Pack,
+        file: ProgramFile,
+    },
+    /// A pack binds the program file, and Box refuses this spawn of it.
+    Refused(CoverageRefusal),
+}
+
+/// The name a program was called by: the last component of its spelling.
+fn called_name(program: &str) -> &str {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+}
+
+fn denied(decision: &Decision) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, decision.to_string())
+}
+
+/// The denial for a spawn that Box refuses before any policy decides it.
+fn refused_spawn(program_path: &str, refusal: &CoverageRefusal) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "policy denied this operation on '{program_path}' [tool-pack]: {refusal}. \
+             No policy can permit it."
+        ),
+    )
 }
 
 /// The spelling a rule reads as `context.input.program_path`: home-relative under the operator's
@@ -225,6 +323,39 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             }
             _ => None,
         };
+        if let EffectAttempt::ShellSpawn {
+            program,
+            program_path,
+            args,
+            cwd,
+            ..
+        } = effect
+        {
+            match self.spawn_gate(program, program_path) {
+                SpawnGate::Spawn => {}
+                SpawnGate::Refused(refusal) => return Err(refused_spawn(program_path, &refusal)),
+                SpawnGate::Pack { pack, file } => {
+                    let invocation = PackInvocation::new(
+                        pack,
+                        program,
+                        &file,
+                        self.home.as_deref(),
+                        cwd,
+                        args,
+                        credential_reads,
+                    );
+                    let (decision, pending) = self.policy.decide_pack_action(
+                        &self.governed,
+                        &self.principal,
+                        &invocation,
+                    );
+                    return match pending {
+                        Some(pending) => Ok(self.permit(Admitted::Pack(pending))),
+                        None => Err(denied(&decision)),
+                    };
+                }
+            }
+        }
         let decision = match effect {
             // One resolved command. The Shell has already parsed, expanded, and resolved
             // it, so `program` is what will run rather than what was typed.
@@ -374,21 +505,12 @@ impl EffectInterceptor for ShellPolicyInterceptor {
         };
 
         match decision {
-            Decision::Allow { .. } => Ok(Box::new(PolicyEffectPermit {
-                policy: Arc::clone(&self.policy),
-                principal: self.principal.clone(),
-                governed: self.governed.clone(),
-                admitted: Admitted::capture(
-                    effect,
-                    credential_reads,
-                    reported_program_path.as_deref(),
-                ),
-                home: self.home.clone(),
-            })),
-            Decision::Deny { .. } => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                decision.to_string(),
-            )),
+            Decision::Allow { .. } => Ok(self.permit(Admitted::capture(
+                effect,
+                credential_reads,
+                reported_program_path.as_deref(),
+            ))),
+            Decision::Deny { .. } => Err(denied(&decision)),
         }
     }
 }
@@ -425,6 +547,8 @@ enum Admitted {
         destination_removal: Option<FsOperation>,
         operation: FsOperation,
     },
+    /// One host binary that a pack action decided, which owes that action's `::response`.
+    Pack(PendingPackResponse),
     /// An attempt this adapter does not map. It is only ever admitted if the
     /// authorization arm above allowed it, and it records nothing.
     Unmapped,
@@ -547,8 +671,11 @@ impl PolicyEffectPermit {
     }
 
     /// Submit this effect as history.
-    fn submit(&self, result: FsResult, reported_status: Option<i32>) -> io::Result<()> {
-        let recorded = match &self.admitted {
+    fn submit(mut self, result: FsResult, reported_status: Option<i32>) -> io::Result<()> {
+        let recorded = match std::mem::replace(&mut self.admitted, Admitted::Unmapped) {
+            Admitted::Pack(pending) => self
+                .policy
+                .record_pack_response(pending, reported_status.unwrap_or(-1)),
             Admitted::Run {
                 command,
                 program,
@@ -558,10 +685,10 @@ impl PolicyEffectPermit {
                 &self.governed,
                 &self.principal,
                 &Outcome::ShellRun {
-                    command,
-                    program,
-                    args,
-                    cwd,
+                    command: &command,
+                    program: &program,
+                    args: &args,
+                    cwd: &cwd,
                     status: reported_status.unwrap_or(-1),
                 },
             ),
@@ -576,12 +703,12 @@ impl PolicyEffectPermit {
                 &self.governed,
                 &self.principal,
                 &Outcome::ShellSpawn {
-                    command,
-                    program,
-                    program_path,
-                    credential_reads,
-                    args,
-                    cwd,
+                    command: &command,
+                    program: &program,
+                    program_path: &program_path,
+                    credential_reads: &credential_reads,
+                    args: &args,
+                    cwd: &cwd,
                     status: reported_status.unwrap_or(-1),
                 },
             ),
@@ -596,7 +723,7 @@ impl PolicyEffectPermit {
             // host path. Egress stayed open after the secret was read, which is the one thing that
             // rule exists to close.
             Admitted::Filesystem { path, operation } => {
-                self.record_fs_outcome(path, *operation, result)
+                self.record_fs_outcome(&path, operation, result)
             }
             Admitted::FilesystemPair {
                 source_read_path,
@@ -611,10 +738,10 @@ impl PolicyEffectPermit {
                 })
                 .and_then(|()| {
                     destination_removal.map_or(Ok(()), |removal| {
-                        self.record_fs_outcome(target_path, removal, result)
+                        self.record_fs_outcome(&target_path, removal, result)
                     })
                 })
-                .and_then(|()| self.record_fs_outcome(target_path, *operation, result)),
+                .and_then(|()| self.record_fs_outcome(&target_path, operation, result)),
             Admitted::Unmapped => Ok(()),
         };
 
@@ -633,12 +760,12 @@ impl EffectPermit for PolicyEffectPermit {
     async fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
         match outcome {
             EffectOutcome::ShellCommand { reported_status } => {
-                self.submit(FsResult::Completed, Some(reported_status))
+                (*self).submit(FsResult::Completed, Some(reported_status))
             }
-            EffectOutcome::Kernel(result) => self.submit(fs_result(result), None),
+            EffectOutcome::Kernel(result) => (*self).submit(fs_result(result), None),
             // An outcome variant added upstream is recorded as unknown rather than
             // dropped: a rule must see that the effect ended, even unclassifiable.
-            _ => self.submit(FsResult::Indeterminate, None),
+            _ => (*self).submit(FsResult::Indeterminate, None),
         }
     }
 
@@ -646,7 +773,7 @@ impl EffectPermit for PolicyEffectPermit {
         // An admitted effect whose execution ended with no outcome. Record it as
         // indeterminate rather than dropping it: a rule that counts attempts must still
         // see one happened.
-        let _ = self.submit(FsResult::Indeterminate, None);
+        let _ = (*self).submit(FsResult::Indeterminate, None);
     }
 }
 
@@ -1075,6 +1202,388 @@ mod tests {
             reported_program_path(&program.to_string_lossy(), None),
             program.to_string_lossy()
         );
+    }
+
+    /// A host directory that holds the program files a spawn names.
+    struct Programs(tempfile::TempDir);
+
+    impl Programs {
+        fn new() -> Self {
+            Self(tempfile::tempdir().expect("a program directory"))
+        }
+
+        /// The canonical path of a program file at `name`, written when absent.
+        fn path(&self, name: &str) -> String {
+            let path = self.0.path().join(name);
+            if !path.exists() {
+                std::fs::write(&path, name).expect("a program file");
+            }
+            path.canonicalize()
+                .expect("a canonical path")
+                .display()
+                .to_string()
+        }
+
+        fn file(&self, name: &str) -> ProgramFile {
+            ProgramFile::read(self.path(name)).expect("a readable program file")
+        }
+
+        /// Put a new file at `name`, as an update does: a rename over the old name.
+        fn replace(&self, name: &str) {
+            let staged = self.0.path().join(format!("{name}.new"));
+            std::fs::write(&staged, "a new build").expect("a new program file");
+            std::fs::rename(&staged, self.0.path().join(name)).expect("the rename");
+        }
+    }
+
+    fn pack(name: &str) -> crate::pack::Pack {
+        crate::pack::Pack::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/packs/valid/{name}.pack.toml")),
+        )
+        .expect("the fixture pack loads")
+    }
+
+    /// An interceptor over an engine that knows `packs`, with `bind` as its bindings.
+    fn interceptor_with_packs(
+        source: &str,
+        packs: &[&str],
+        bind: impl FnOnce(&mut PackBindings),
+    ) -> InterceptorFixture {
+        let history = tempfile::tempdir().expect("history directory");
+        let installed: Vec<_> = packs.iter().map(|name| pack(name)).collect();
+        let policy = PolicyEngine::open_with_packs(
+            vec![Policy {
+                origin: PathBuf::from("shell-adapter-test.dw"),
+                text: source.to_string(),
+            }],
+            &installed,
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens");
+        let mut bindings = PackBindings::new(installed).expect("distinct packs");
+        bind(&mut bindings);
+        InterceptorFixture {
+            interceptor: ShellPolicyInterceptor::into_handle_with_pack_bindings(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+                None,
+                BTreeMap::new(),
+                bindings,
+            ),
+            _history: history,
+        }
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    fn spawn<'a>(program: &'a str, program_path: &'a str, args: &'a [String]) -> EffectAttempt<'a> {
+        EffectAttempt::ShellSpawn {
+            command: program,
+            program,
+            program_path,
+            args,
+            literal: &[],
+            cwd: "/work",
+        }
+    }
+
+    /// **A bound program is decided only as its pack action**: a `shell:spawn` permit does not
+    /// admit it, and a `shell:spawn` forbid does not refuse it.
+    #[tokio::test]
+    async fn a_bound_spawn_is_decided_as_its_pack_action_and_never_as_shell_spawn() {
+        let programs = Programs::new();
+        let git = programs.path("git");
+        let status = words(&["status"]);
+        let push = words(&["push", "origin", "main"]);
+        let bound = |source: &str| {
+            interceptor_with_packs(source, &["git"], |bindings| {
+                bindings
+                    .bind(&programs.file("git"), "git", "git")
+                    .expect("git binds");
+            })
+        };
+
+        let spawn_permitted =
+            bound(r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#);
+        let refused = spawn_permitted
+            .intercept(&spawn("git", &git, &status))
+            .await
+            .err()
+            .expect("a shell:spawn permit does not admit a pack action");
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "policy denied this operation on '{git}' [default-deny]: No permit policy matched \
+                 this request."
+            )
+        );
+
+        let pack_permitted = bound(
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               forbid (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        assert!(
+            pack_permitted
+                .intercept(&spawn("git", &git, &status))
+                .await
+                .is_ok(),
+            "the pack action permit admits the spawn, and the shell:spawn forbid never sees it"
+        );
+        assert!(
+            pack_permitted
+                .intercept(&spawn("git", &git, &push))
+                .await
+                .is_err(),
+            "a pack action that no rule permits is denied"
+        );
+    }
+
+    const PUSH_AFTER_A_PASSING_TEST: &str = r#"
+        permit (principal, action in Tool::git::Action::"*", resource);
+        permit (principal, action in Tool::cargo::Action::"*", resource);
+        @id("push_after_a_passing_test")
+        forbid (principal, action == Tool::git::Action::"push", resource)
+        unless temporal {
+            formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+        };
+    "#;
+
+    /// **An admitted pack action records its `::response` with the exit status**, and a run that
+    /// ends with no status records `-1`.
+    #[tokio::test]
+    async fn an_admitted_pack_action_records_its_response_with_the_exit_status() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let interceptor =
+            interceptor_with_packs(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
+                b.bind(&programs.file("git"), "git", "git")
+                    .expect("git binds");
+                b.bind(&programs.file("cargo"), "cargo", "cargo")
+                    .expect("cargo binds");
+            });
+        let push = words(&["push", "origin", "main"]);
+        let test = words(&["test"]);
+        let (push, test) = (spawn("git", &git, &push), spawn("cargo", &cargo, &test));
+        let pushed = || interceptor.intercept(&push);
+        let tested = || interceptor.intercept(&test);
+
+        assert!(pushed().await.is_err(), "no test has run");
+        tested()
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 1 })
+            .await
+            .expect("outcome reporting is best effort");
+        tested()
+            .await
+            .expect("the test run is admitted")
+            .mark_indeterminate();
+        let refused = pushed().await.err().expect("no test has passed");
+        assert!(
+            refused
+                .to_string()
+                .contains("[policy: push_after_a_passing_test]"),
+            "{refused}"
+        );
+        tested()
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+        assert!(pushed().await.is_ok(), "a test exited 0");
+    }
+
+    /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
+    /// under a policy that permits every action, and a file that no pack binds stays a
+    /// `shell:spawn`.
+    #[tokio::test]
+    async fn an_undeclared_name_or_a_replaced_file_is_refused_whatever_the_policy_permits() {
+        let programs = Programs::new();
+        let (mise, git, make) = (
+            programs.path("mise"),
+            programs.path("git"),
+            programs.path("make"),
+        );
+        let interceptor = interceptor_with_packs(
+            "permit (principal, action, resource);",
+            &["git", "cargo", "aws"],
+            |bindings| {
+                let shim = programs.file("mise");
+                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
+                bindings.bind(&shim, "aws", "aws").expect("aws binds");
+                bindings.declare(&shim, "node");
+                bindings
+                    .bind(&programs.file("git"), "git", "git")
+                    .expect("git binds");
+            },
+        );
+        let none = words(&[]);
+        programs.replace("git");
+
+        for (case, program, program_path, expected) in [
+            (
+                "an undeclared name on the shim binary",
+                "python",
+                &mise,
+                Some(format!(
+                    "policy denied this operation on '{mise}' [tool-pack]: `python` runs \
+                     `{mise}`, which a tool pack covers, but no `[tool]` declares the name \
+                     `python`. No policy can permit it."
+                )),
+            ),
+            (
+                "an undeclared name spelled as a path",
+                "/opt/shims/python",
+                &mise,
+                Some(format!(
+                    "policy denied this operation on '{mise}' [tool-pack]: `python` runs \
+                     `{mise}`, which a tool pack covers, but no `[tool]` declares the name \
+                     `python`. No policy can permit it."
+                )),
+            ),
+            (
+                "a replaced bound file",
+                "git",
+                &git,
+                Some(format!(
+                    "policy denied this operation on '{git}' [tool-pack]: `git` runs `{git}`, \
+                     which a tool pack bound, but the file at that path is no longer the file \
+                     it bound. No policy can permit it."
+                )),
+            ),
+            ("the first pack on the shim binary", "cargo", &mise, None),
+            ("the second pack on the shim binary", "aws", &mise, None),
+            ("a declared name with no pack", "node", &mise, None),
+            ("a file that no pack binds", "make", &make, None),
+        ] {
+            let decided = interceptor
+                .intercept(&spawn(program, program_path, &none))
+                .await
+                .err()
+                .map(|error| error.to_string());
+            assert_eq!(decided, expected, "{case}");
+        }
+    }
+
+    /// **A spawn spelled as the path of a bound file that is gone is refused**, and does not fall
+    /// back to `shell:spawn`.
+    #[tokio::test]
+    async fn a_removed_bound_file_is_refused() {
+        let programs = Programs::new();
+        let git = programs.path("git");
+        let interceptor = interceptor_with_packs(
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+            &["git"],
+            |bindings| {
+                bindings
+                    .bind(&programs.file("git"), "git", "git")
+                    .expect("git binds");
+            },
+        );
+        std::fs::remove_file(&git).expect("the file is removed");
+
+        let refused = interceptor
+            .intercept(&spawn(&git, &git, &words(&["status"])))
+            .await
+            .err()
+            .expect("a removed bound file is refused");
+
+        assert!(refused.to_string().contains("[tool-pack]"), "{refused}");
+    }
+
+    /// **With empty bindings, every spawn decides exactly as `shell:spawn` decides it today**, and
+    /// so does every spawn that no binding covers.
+    #[tokio::test]
+    async fn empty_bindings_decide_every_spawn_as_the_shell_spawn_path_does() {
+        const POLICY: &str = r#"
+            permit (principal, action == Box::Action::"shell:spawn", resource)
+            when { context.input.program == "git" };
+            @id("no-push")
+            forbid (principal, action == Box::Action::"shell:spawn", resource)
+            when { context.input has arg1 && context.input.arg1 == "push" };
+            permit (principal, action == Box::Action::"shell:spawn", resource)
+            when { context.input.program_path like "*/make" };
+        "#;
+        let programs = Programs::new();
+        let (git, make, mise) = (
+            programs.path("git"),
+            programs.path("make"),
+            programs.path("mise"),
+        );
+        let absent = programs.0.path().join("absent").display().to_string();
+        let empty = |packs: &[&str]| interceptor_with_packs(POLICY, packs, |_| {});
+        let declared_only = interceptor_with_packs(POLICY, &["git"], |bindings| {
+            bindings.declare(&programs.file("mise"), "node");
+        });
+        let bound_elsewhere = interceptor_with_packs(POLICY, &["git"], |bindings| {
+            bindings
+                .bind(&programs.file("vendored-git"), "git", "git")
+                .expect("git binds another file");
+        });
+        let today = interceptor(POLICY);
+        let engine = {
+            let history = tempfile::tempdir().expect("history directory");
+            let engine = PolicyEngine::open(
+                vec![Policy {
+                    origin: PathBuf::from("shell-adapter-test.dw"),
+                    text: POLICY.to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("policy opens");
+            (engine, history)
+        };
+        let gates = [
+            ("no packs", empty(&[])),
+            ("installed packs and no binding", empty(&["git", "cargo"])),
+            ("a declared name and no binding", declared_only),
+            ("a binding on another file", bound_elsewhere),
+        ];
+
+        for (program, program_path, args) in [
+            ("git", &git, words(&["status"])),
+            ("git", &git, words(&["push", "--force", "origin", "main"])),
+            ("/opt/bin/git", &git, words(&["log"])),
+            ("make", &make, words(&["all"])),
+            ("node", &mise, words(&["index.js"])),
+            ("python", &mise, words(&[])),
+            ("ls", &absent, words(&["-l"])),
+        ] {
+            let attempt = spawn(program, program_path, &args);
+            let direct = engine.0.decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::ShellSpawn {
+                    command: program,
+                    program,
+                    program_path,
+                    credential_reads: &[],
+                    args: &args,
+                    cwd: "/work",
+                },
+            );
+            let expected = (!direct.is_allow()).then(|| direct.to_string());
+            let decided = |error: io::Result<Box<dyn EffectPermit>>| {
+                error.err().map(|error| error.to_string())
+            };
+            assert_eq!(
+                decided(today.intercept(&attempt).await),
+                expected,
+                "the default handle: {program} at {program_path}"
+            );
+            for (case, gate) in &gates {
+                assert_eq!(
+                    decided(gate.intercept(&attempt).await),
+                    expected,
+                    "{case}: {program} at {program_path}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

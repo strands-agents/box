@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **52 names with `--all-features`, and 46 by default.** The adapter features add
+The façade exports **58 names with `--all-features`, and 52 by default.** The adapter features add
 the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
@@ -41,6 +41,7 @@ the six names in the last row.
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
+| `Pack`, `PackError`, `PackBindings`, `BindingRefusal`, `ProgramFile`, `UnreadableProgramFile` | A loaded tool pack, why one fails to load, the binding of each pack to a program file and the name it is called by, and why a binding or a file read fails. No box configuration reaches them yet. |
 | `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:

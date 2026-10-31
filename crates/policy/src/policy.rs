@@ -322,8 +322,8 @@ impl PolicyEngine {
     /// (docs/design/decisions.md#a-pack-action-names-no-enforcement-point,
     /// docs/design/decisions.md#an-unmodeled-command-is-denied-by-default).
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller decides a pack action yet")
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter decides a pack action")
     )]
     pub(crate) fn decide_pack_action(
         &self,
@@ -339,8 +339,8 @@ impl PolicyEngine {
 
     /// Record the `::response` that an allowed pack action owes, with the program's exit status.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller records a pack response yet")
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter records a pack response")
     )]
     pub(crate) fn record_pack_response(
         &self,
