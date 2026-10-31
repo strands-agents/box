@@ -13,9 +13,10 @@ use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
     refuse_input_across_families_before_discovery, validate_canonical_policy_set,
 };
+use crate::request::ActionRequest;
 use crate::schema::{ActionIdentity, GovernedBox};
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
+use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
@@ -70,8 +71,19 @@ impl Authority {
         mcp_schemas: &[String],
         history: &Path,
     ) -> Result<Self, PolicyError> {
-        let (engine, warnings) = DogwoodEngine::open_with_mcp_schemas(
+        Self::open_complete_with_packs(sources, &[], mcp_schemas, history)
+    }
+
+    /// Opens a ready authority with a complete policy set, tool pack schemas, and MCP schemas.
+    pub(super) fn open_complete_with_packs(
+        sources: Vec<Policy>,
+        pack_schemas: &[String],
+        mcp_schemas: &[String],
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let (engine, warnings) = DogwoodEngine::open_with_schemas(
             &authored(&sources),
+            pack_schemas,
             mcp_schemas,
             history,
             &Operator::unanchored(),
@@ -378,9 +390,9 @@ impl Authority {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        request: &Request<'_>,
-        identity: &ActionIdentity,
+        request: ActionRequest<'_>,
     ) -> Decision {
+        let identity = &request.identity();
         match self.live.lock() {
             Ok(live) => {
                 // Fail-closed for a degraded tool: its schema will never stage, so its
@@ -406,12 +418,9 @@ impl Authority {
                         {
                             return Decision::policy_pending();
                         }
-                        live.engine
-                            .decide_with_identity(governed, principal, request, identity)
+                        live.engine.decide(governed, principal, request)
                     }
-                    Readiness::Ready => live
-                        .engine
-                        .decide_with_identity(governed, principal, request, identity),
+                    Readiness::Ready => live.engine.decide(governed, principal, request),
                 }
             }
             Err(_) => Decision::internal_fault(),
@@ -431,6 +440,24 @@ impl Authority {
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
         live.engine.observe_outcome(governed, principal, outcome)
+    }
+
+    /// Records the `::response` of one completed action whose `input` is a JSON record.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no caller records a pack response yet")
+    )]
+    pub(super) fn record_response(
+        &self,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine.observe_response(identity, input, status)
     }
 
     /// Returns whether the live authority declares a tool action, or true when its lock is unavailable.
@@ -795,7 +822,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{Delivery, DenyReason};
+    use crate::{Delivery, DenyReason, Request};
 
     fn source(text: &str) -> Vec<Policy> {
         vec![Policy {
@@ -849,8 +876,11 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
     }
 
     fn decide(authority: &Authority, request: &Request<'_>) -> Decision {
-        let identity = ActionIdentity::for_request(request);
-        authority.decide(&governed(), &Principal::agent(), request, &identity)
+        authority.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Request(request),
+        )
     }
 
     fn http_outcome() -> Outcome<'static> {
@@ -979,6 +1009,64 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             authority.stage_mcp_schema("alpha", generated("alpha", "read", "path")),
             Err(PolicyStagingError::Durable(_))
         ));
+    }
+
+    #[test]
+    fn a_pack_action_decides_the_same_while_mcp_discovery_holds_or_degrades_a_tool() {
+        let pack = crate::pack::Pack::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/packs/valid/git.pack.toml"
+        )))
+        .expect("the git pack loads");
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_complete_with_packs(
+            source(
+                r#"permit (principal, action == Tool::git::Action::"push", resource);
+                forbid (principal, action == Tool::git::Action::"push", resource)
+                when { context.input.force };"#,
+            ),
+            &[pack.schema()],
+            &[],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("authority opens");
+        let decide = |words: &[&str]| {
+            let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+            let request =
+                crate::pack::PackInvocation::new(&pack, "git", "/usr/bin/git", "/work", &args, &[])
+                    .request();
+            authority.decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Pack(&request),
+            )
+        };
+        let push = ["push", "origin", "main"];
+        let forced = ["push", "--force", "origin", "main"];
+        let before = (decide(&push), decide(&forced));
+
+        {
+            let mut live = authority.live.lock().expect("the live authority lock");
+            live.readiness = Readiness::Discovering;
+            let held = ("Tool::git".to_string(), "push".to_string());
+            live.pending_tools.insert(held.clone());
+            live.degraded_tools.insert(held);
+        }
+        let during = (decide(&push), decide(&forced));
+
+        assert!(before.0.is_allow(), "{:?}", before.0);
+        assert!(
+            matches!(
+                before.1,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "{:?}",
+            before.1
+        );
+        assert_eq!(during, before);
     }
 
     #[test]
@@ -1431,10 +1519,13 @@ permit(principal, action == issues_mcp::Action::"search", resource);"#,
             uri: None,
             arguments: Some(&serde_json::Value::Null),
         };
-        let identity = ActionIdentity::for_request(&call);
         assert!(
             !authority
-                .decide(&governed(), &Principal::agent(), &call, &identity)
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&call)
+                )
                 .is_allow(),
             "a hyphenated degraded server's tool call is denied fail-closed"
         );
