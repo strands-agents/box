@@ -350,6 +350,22 @@ fn a_launch_matching_no_declared_command_starts_no_server() {
     box_.release_workload();
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
+    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("read the drained policy telemetry");
+    assert!(
+        records
+            .lines()
+            .any(|line| line.contains("\"enforcement:mcp-command\"")
+                && line.contains("shell:spawn")
+                && line.contains("no MCP server declares")
+                && line.contains("servers on env: alpha")),
+        "the refused launch is recorded beside policy decisions, with the refusal the harness \
+         received: {records}"
+    );
+    assert!(
+        !records.contains("alpha-mcp --declared alpha"),
+        "the record must not print a declared command: {records}"
+    );
 }
 
 #[test]

@@ -107,11 +107,15 @@ flowchart TD
 command through the alias in the box's `bin/`, not when `box run` starts. The alias is named for
 the program, so servers that share a program, such as `npx`, share one alias. The alias sends its
 name and its arguments to the broker, and the broker picks the one server whose `command` in
-`box.toml` is those words, in that order. It compares each declared argument as the leaf starts
-it, with each `${OTEL_EXPORTER_OTLP_*}` token expanded (`McpLeafLauncher::launched_arguments`). When
+`box.toml` is those words, in that order, with each argument as written in `box.toml` or as the
+leaf starts it, each `${OTEL_EXPORTER_OTLP_*}` token expanded (`McpLeafLauncher::launched_arguments`).
+A harness with a fixed configuration relies on the written form, because an endpoint token expands to
+a port that is new on each run. When
 no `command` matches, the broker refuses the launch and starts no server, so a launch never reaches
 a server it didn't name. The refusal names the servers on that program and never their commands,
-because the agent cannot read `box.toml`. The arguments only select
+because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
+denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
+records. The arguments only select
 among the servers the operator declared: the agent could already start any of them.
 
 The broker then decides `shell:spawn` on the program and arguments from `box.toml`, before the

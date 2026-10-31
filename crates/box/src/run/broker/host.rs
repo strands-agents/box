@@ -798,6 +798,14 @@ async fn serve_transport(
                         ) {
                             Ok(admitted) => admitted,
                             Err(error) => {
+                                spec.recorder.record(
+                                    crate::run::telemetry::EffectiveDecision::enforcement_deny(
+                                        r#"Box::Action::"shell:spawn""#,
+                                        server.as_str(),
+                                        "mcp-command",
+                                        error.to_string(),
+                                    ),
+                                );
                                 deny(&frames, id, DeniedKind::Internal, &error.to_string()).await?;
                                 continue;
                             }
