@@ -37,48 +37,14 @@ In CI this is `.github/workflows/containment-deterministic.yml`, called from
 suite needs no secrets, so a fork PR runs it with a read-only token and no
 approval gate is required for safety.
 
-### macOS blocks; Linux is advisory
+### Both platforms block
 
-`continue-on-error` is set per platform:
-`continue-on-error: ${{ startsWith(matrix.os, 'ubuntu') }}`.
+The Ubuntu ARM64 and macOS jobs both affect `CI Gate`. The repository requires that status
+before merging. Linux uses ARM64 because the namespace backend refuses other architectures.
+The Linux job enables unprivileged user namespaces before the suite starts.
 
-**`macos-latest` — blocking.** This is the platform the suite was written
-against and the only one that binds `file-graft`, so a regression here is a real
-defect and stops the merge. No case is quarantined on macOS.
-
-**`ubuntu-24.04-arm` — advisory, and it must be an arm64 runner.** Linux
-containment is **aarch64-only by construction**. `crates/containment/src/facade.rs`
-maps `Platform::Linux if architecture == "aarch64"` to the namespace mechanism and
-refuses every other architecture, so on x86_64 the trampoline exits with
-
-```
-strands-box-contain-trampoline: platform Linux unsupported:
-  Linux containment supports ARM64 (aarch64), not x86_64
-```
-
-and all 73 cases error at the harness's positive control rather than reporting
-vacuous passes. A first CI run on `ubuntu-latest` confirmed this — 57 errors, 0
-passes. The leg is advisory because no arm64 run has gone green yet, not because
-the platform is expected to fail. Make it blocking by deleting the expression
-above once it has a green baseline.
-
-The AppArmor question is settled, and it was **not** the blocker. The workflow
-clears `kernel.apparmor_restrict_unprivileged_userns` and probes it with
-`unshare`, and that demonstrably works — the x86_64 run logged `before: 1` →
-`after: 0` and `unshare(CLONE_NEWUSER): OK` before failing on architecture. The
-step stays because Ubuntu 24.04 restricts unprivileged user namespaces on arm64
-too, and the cage needs that primitive on any Linux.
-
-### A red leg does not notify anyone
-
-Neither leg posts a comment, opens an issue, or sends mail on failure. The
-blocking leg fails `CI Gate`, which is visible on the PR; the advisory leg is
-visible only by opening the run. In both cases the per-case table is written to
-the job summary and the verdict plus logs upload as an artifact.
-
-`CI Gate` is not yet a *required* status check on the `block-main` ruleset, so a
-failure is visible but does not yet physically prevent a merge. Adding it is a
-repository-settings change and needs admin.
+Each job writes the per-case table to its summary and uploads the verdict and logs.
+A recorded platform exclusion remains a skip, not evidence that its assertions ran.
 
 ## Test an installed Linux package
 

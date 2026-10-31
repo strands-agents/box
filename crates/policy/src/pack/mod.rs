@@ -2,6 +2,7 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | `bindings` | which installed pack covers a program file's identity and its called name |
 //! | `format` | the `*.pack.toml` document as written |
 //! | `model` | the checked pack that loading builds from that document |
 //! | `usage` | one `usage` line, read into the shape of its command lines |
@@ -10,6 +11,7 @@
 //! | `schema` | the Cedar schema fragment that a checked pack generates |
 //! | `invocation` | one command line that a pack read, as the record its action decides |
 
+mod bindings;
 mod format;
 mod grammar;
 mod invocation;

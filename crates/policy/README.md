@@ -473,12 +473,12 @@ Rules written against history:
 | `Parse` | Parsing or source composition failed. |
 | `Schema` | A policy value, attribute, or entity type violates the schema. A deleted resource entity lands here. |
 | `UnknownAction` | A policy names an action outside the schema. |
-| `UnsupportedClause` | Reserved for API compatibility. |
+| `UnsupportedClause` | A temporal predicate names an action group. |
 | `Evaluation` | The durable engine could not open or recover the database, install sources, or submit an event. |
 
 `open` returns `Parse`, `Schema`, `UnknownAction`, or `Evaluation`. `record` returns
 `Evaluation` if durable submission fails after the effect.
-No current method constructs `UnsupportedClause`.
+The schema that `open` composes has no action group, so no current method returns `UnsupportedClause`.
 
 An information-provider invocation aborts startup with `Parse`.
 

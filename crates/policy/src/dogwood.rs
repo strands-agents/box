@@ -790,6 +790,7 @@ pub(crate) fn check_against(
         .map_err(|error| PolicyError::Schema(format!("dogwood lower: {error}")))?;
     refuse_shared_rule_ids(&lowered, positions)?;
     refuse_reserved_action_rules(&lowered, positions)?;
+    refuse_group_predicates(&parsed, &lowered, positions)?;
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &|cedar_policy_id| {
         rule_ref(&lowered, cedar_policy_id, positions)
     })?;
@@ -1064,6 +1065,131 @@ fn refuse_reserved_action_rules(
         )),
         findings,
     ))
+}
+
+/// Refuse a temporal predicate that names an action group
+/// (docs/design/decisions.md#a-temporal-rule-names-one-action).
+fn refuse_group_predicates(
+    parsed: &dogwood_language::ParsedPolicySet,
+    lowered: &LoweredPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    let groups: BTreeMap<(String, String), String> = lowered
+        .cedar_schema()
+        .action_groups()
+        .map(|uid| {
+            (
+                (
+                    uid.type_name().to_string(),
+                    uid.id().unescaped().to_string(),
+                ),
+                uid.to_string(),
+            )
+        })
+        .collect();
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let cedar = lowered.as_cedar();
+    let mut findings = Vec::new();
+    for policy in parsed.policies() {
+        let mut named = Vec::new();
+        for condition in policy.temporal_conditions() {
+            predicate_actions(condition, &mut named);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for key in named {
+            let Some(group) = groups.get(&key) else {
+                continue;
+            };
+            if !seen.insert(group) {
+                continue;
+            }
+            let cedar_policy = lowered
+                .rules()
+                .find(|rule| rule.rule_index == policy.index())
+                .and_then(|rule| rule.cedar_policy_id.parse::<cedar_policy::PolicyId>().ok())
+                .and_then(|policy_id| cedar.policy(&policy_id));
+            let index = authored_index(positions, policy.index());
+            let name =
+                cedar_policy.map_or_else(|| "the rule".to_string(), crate::spelling::rule_name);
+            findings.push(
+                Finding::new(format!(
+                    "{name} (rule {}): a temporal predicate names the action group {group}",
+                    index.saturating_add(1)
+                ))
+                .with_rules(vec![RuleRef::new(
+                    index,
+                    cedar_policy
+                        .and_then(|policy| policy.annotation("id"))
+                        .map(str::to_string),
+                )]),
+            );
+        }
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let named = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::UnsupportedClause(format!(
+            "{}; the history records each member action and never the group, so the predicate \
+             cannot match; write one predicate for each member action",
+            named.join("; ")
+        )),
+        findings,
+    ))
+}
+
+/// Collect the `(action type, action id)` of each predicate in a temporal condition.
+fn predicate_actions(
+    condition: &dogwood_language::temporal_ast::Condition,
+    out: &mut Vec<(String, String)>,
+) {
+    use dogwood_language::temporal_ast::ConditionKind;
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            predicate_actions(left, out);
+            predicate_actions(right, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => predicate_actions(body, out),
+        ConditionKind::Predicate(predicate) => {
+            out.push((predicate.namespace.join("::"), predicate.action.clone()));
+            for argument in &predicate.args {
+                term_actions(&argument.value, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            term_actions(left, out);
+            term_actions(right, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
+/// Collect the predicate actions inside an aggregate term.
+fn term_actions(term: &dogwood_language::temporal_ast::Term, out: &mut Vec<(String, String)>) {
+    use dogwood_language::temporal_ast::{AggExprKind, Term};
+    match term {
+        Term::Agg(aggregate) => match &aggregate.kind {
+            AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                predicate_actions(body, out);
+            }
+            AggExprKind::Call(_) => {}
+        },
+        Term::Array(items) => {
+            for item in items {
+                term_actions(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn reconcile_staged_policy_set(
