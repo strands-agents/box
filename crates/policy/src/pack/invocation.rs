@@ -5,15 +5,15 @@ use super::grammar::{BASE_FIELDS, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
 use crate::schema::ActionIdentity;
 
-/// One spawn of a pack-bound program, and what its pack read the command line as.
+/// One spawn of a pack-bound program, and what its pack reads the command line as.
 pub(crate) struct PackInvocation<'a> {
-    pub(crate) pack: &'a Pack,
-    pub(crate) parsed: &'a Parsed,
-    pub(crate) program: &'a str,
-    pub(crate) program_path: &'a str,
-    pub(crate) cwd: &'a str,
-    pub(crate) args: &'a [String],
-    pub(crate) credential_reads: &'a [String],
+    pack: &'a Pack,
+    parsed: Parsed,
+    program: &'a str,
+    program_path: &'a str,
+    cwd: &'a str,
+    args: &'a [String],
+    credential_reads: &'a [String],
 }
 
 /// The `::response` of one decided pack action, held until the program exits.
@@ -22,10 +22,34 @@ pub(crate) struct PackResponse {
     pub(crate) input: serde_json::Value,
 }
 
-impl PackInvocation<'_> {
+impl<'a> PackInvocation<'a> {
+    /// Read `args`, the words after `program`, with the shell grammar of `pack`.
+    pub(crate) fn new(
+        pack: &'a Pack,
+        program: &'a str,
+        program_path: &'a str,
+        cwd: &'a str,
+        args: &'a [String],
+        credential_reads: &'a [String],
+    ) -> Self {
+        Self {
+            pack,
+            parsed: pack.grammar().parse(args),
+            program,
+            program_path,
+            cwd,
+            args,
+            credential_reads,
+        }
+    }
+
+    pub(crate) fn program_path(&self) -> &str {
+        self.program_path
+    }
+
     /// The action the parse names: its own action, or `unmodeled`.
     pub(crate) fn action(&self) -> &str {
-        match self.parsed {
+        match &self.parsed {
             Parsed::Action { action, .. } => action.as_str(),
             Parsed::Unmodeled => UNMODELED_ACTION,
         }
@@ -59,7 +83,7 @@ impl PackInvocation<'_> {
         if !self.credential_reads.is_empty() {
             record.insert(credential_reads.to_string(), self.credential_reads.into());
         }
-        let (fields, effects) = match self.parsed {
+        let (fields, effects) = match &self.parsed {
             Parsed::Action {
                 fields, effects, ..
             } => (Some(fields), effects.iter().collect()),
@@ -160,54 +184,6 @@ mod tests {
         assert!(
             engine.decide(git, &push).is_allow(),
             "a test that exited 0 satisfies `output.status: 0`"
-        );
-    }
-
-    #[test]
-    fn an_input_that_its_action_schema_does_not_type_is_refused_as_a_fault() {
-        let git = valid("git");
-        let engine = Engine::open(
-            "permit (principal, action, resource);",
-            std::slice::from_ref(&git),
-        )
-        .expect("the engine opens");
-        let words = argv(&["git", "push", "--force", "origin", "main"]);
-        let Parsed::Action {
-            action,
-            mut fields,
-            effects,
-        } = git.grammar().parse(&words[1..])
-        else {
-            panic!("the push parses as an action");
-        };
-        fields.insert("force".to_string(), FieldValue::String("yes".to_string()));
-        let mistyped = Parsed::Action {
-            action,
-            fields,
-            effects,
-        };
-        let decision = engine.engine().decide_pack_action(
-            &Principal::agent(),
-            &PackInvocation {
-                pack: &git,
-                parsed: &mistyped,
-                program: "git",
-                program_path: "/usr/bin/git",
-                cwd: "/work",
-                args: &words[1..],
-                credential_reads: &[],
-            },
-        );
-
-        assert!(
-            matches!(
-                decision,
-                Decision::Deny {
-                    reason: DenyReason::InternalFault,
-                    ..
-                }
-            ),
-            "a `force` that is a string, not a bool, is refused: {decision:?}"
         );
     }
 

@@ -353,17 +353,9 @@ impl Engine {
     /// Parse `argv` with `pack` and decide its pack action, then, when the action is allowed and
     /// `status` is given, record its `::response` with that exit status.
     pub(super) fn invoke(&self, pack: &Pack, argv: &[String], status: Option<i32>) -> Decision {
-        let parsed = pack.grammar().parse(&argv[1..]);
         let program_path = format!("{PROGRAM_DIRECTORY}/{}", pack.program);
-        let invocation = PackInvocation {
-            pack,
-            parsed: &parsed,
-            program: &pack.program,
-            program_path: &program_path,
-            cwd: CWD,
-            args: &argv[1..],
-            credential_reads: &[],
-        };
+        let invocation =
+            PackInvocation::new(pack, &pack.program, &program_path, CWD, &argv[1..], &[]);
         let decision = self
             .engine
             .decide_pack_action(&Principal::agent(), &invocation);

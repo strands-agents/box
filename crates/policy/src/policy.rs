@@ -326,7 +326,7 @@ impl PolicyEngine {
         let decision = self
             .authority
             .decide_input(principal, &identity, &invocation.input());
-        self.conclude(&identity, invocation.program_path.to_string(), decision)
+        self.conclude(&identity, invocation.program_path().to_string(), decision)
     }
 
     /// Record the `::response` of one decided pack action, with the program's exit status.

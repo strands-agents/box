@@ -1689,6 +1689,45 @@ when temporal {
     }
 
     #[test]
+    fn an_action_input_that_its_schema_does_not_type_is_refused_as_a_fault() {
+        let pack = crate::pack::Pack::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/packs/valid/git.pack.toml"
+        )))
+        .expect("the git pack loads");
+        let history = tempfile::tempdir().expect("history directory");
+        let (engine, _) = DogwoodEngine::open_with_schemas(
+            "permit (principal, action, resource);",
+            &[pack.schema()],
+            &[],
+            &history.path().join("dogwood.redb"),
+            &Operator::unanchored(),
+        )
+        .expect("policy loads");
+        let args = ["push".to_string(), "origin".to_string()];
+        let invocation =
+            crate::pack::PackInvocation::new(&pack, "git", "/usr/bin/git", "/work", &args, &[]);
+        let typed = invocation.input();
+        let mut mistyped = typed.clone();
+        mistyped["force"] = serde_json::json!("yes");
+
+        let typed = engine.decide_input(&Principal::agent(), &invocation.identity(), &typed);
+        let mistyped = engine.decide_input(&Principal::agent(), &invocation.identity(), &mistyped);
+
+        assert!(typed.is_allow(), "the typed input is allowed: {typed:?}");
+        assert!(
+            matches!(
+                mistyped,
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a `force` that is a string, not a bool, is refused: {mistyped:?}"
+        );
+    }
+
+    #[test]
     fn staged_open_reports_an_incompatible_history_schema_as_durable() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
