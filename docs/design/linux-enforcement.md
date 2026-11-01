@@ -55,6 +55,10 @@ This rule also prevents directory creation outside the filesystem grants when an
 Enclosing mounts precede their descendants, and canonical source mounts precede aliases that depend on them.
 Box resolves permitted symbolic links within the staging root and verifies where each new mount attaches.
 Alias mounts retain the canonical grant's permissions when they reach that same mounted object.
+Write-protected files remain protected through permitted aliases.
+Box applies bind permissions through the retained mount reference, then verifies the flags and that same mount's placement.
+If the final checks cannot confirm the same mount at its verified location, startup refuses.
+Submount enumeration still uses mount-table pathnames; these checks do not establish protection against every concurrent descendant change.
 
 `read` exposes a file or directory tree without write access.
 `read_file` selects one existing file.

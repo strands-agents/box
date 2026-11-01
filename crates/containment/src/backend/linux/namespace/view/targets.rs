@@ -55,7 +55,6 @@ impl MountTarget {
         let create = (!matches!(entry.origin, MountOrigin::Protection { .. }))
             .then_some((view, bind.then_some(entry.target.as_path())));
         let aliases = bind
-            && !matches!(entry.origin, MountOrigin::Protection { .. })
             && entry
                 .source
                 .as_ref()
@@ -109,12 +108,7 @@ impl MountTarget {
             )?
             .0
         };
-        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", mounted.as_raw_fd()))
-            .map_err(|error| refusal(format!("reading the mounted target identity: {error}")))?;
-        let id = info
-            .lines()
-            .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse::<u64>().ok())
-            .ok_or_else(|| refusal("the mounted target has no mount identity".into()))?;
+        let id = mount_id(&mounted)?;
         let table = mount_table()?;
         let landed = table.lines().any(|line| {
             let mut fields = line.split_whitespace();
@@ -131,6 +125,30 @@ impl MountTarget {
         }
         Ok(mounted)
     }
+
+    pub(super) fn require_same_mount(
+        &self,
+        spelling: &Path,
+        previous: &BTreeSet<u64>,
+        expected: &File,
+    ) -> Result<(), ContainmentError> {
+        let mounted = self.require_new_mount(spelling, previous)?;
+        if mount_id(&mounted)? != mount_id(expected)? {
+            return Err(refusal(format!(
+                "mount for '{}' changed after placement verification",
+                spelling.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn mount_id(mounted: &File) -> Result<u64, ContainmentError> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", mounted.as_raw_fd()))
+        .map_err(|error| refusal(format!("reading the mounted target identity: {error}")))?;
+    info.lines()
+        .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse::<u64>().ok())
+        .ok_or_else(|| refusal("the mounted target has no mount identity".into()))
 }
 
 fn walk(
@@ -386,6 +404,7 @@ thread_local! {
     pub(super) static AFTER_BIND_TARGET_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(super) static AFTER_BIND_MOUNT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(super) static AFTER_BIND_SOURCE_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_BIND_VERIFICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -409,6 +428,15 @@ pub(super) fn after_bind_target_open() {
 #[cfg(test)]
 pub(super) fn after_bind_mount() {
     AFTER_BIND_MOUNT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(super) fn after_bind_verification() {
+    AFTER_BIND_VERIFICATION.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
             hook();
         }

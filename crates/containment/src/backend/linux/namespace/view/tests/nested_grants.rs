@@ -89,7 +89,7 @@ enum Replacement {
     DifferentSource,
 }
 
-fn with_private_namespace(action: impl FnOnce()) {
+pub(super) fn with_private_namespace(action: impl FnOnce()) {
     // SAFETY: the child uses private mounts and never returns to the test harness.
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0);

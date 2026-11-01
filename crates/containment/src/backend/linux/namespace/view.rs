@@ -776,39 +776,49 @@ impl MountView {
                 if let Some(identity) = expected {
                     require_grant_identity(&mounted_path, identity)?;
                 }
+                #[cfg(test)]
+                targets::after_bind_verification();
                 if let MountOrigin::Protection { device, inode } = entry.origin {
                     require_mounted_identity(&mounted_path, device, inode)?;
                     remount_protected(&mounted_path)?;
+                    require_mount_flags(&mounted, false, false, false)?;
+                    target_pin.require_same_mount(&target, &previous, &mounted)?;
                     return Ok(());
                 }
 
-                // Read-only and no-exec are a *second* operation. The bind above is `MS_REC`, so a
-                // granted directory containing a submount brings that submount in too.
+                // Retain the top mount while its pathname remains the submount scan prefix.
+                // A recursive bind also imports each submount's permissions.
                 let mountpoint = target_pin.location();
+                let kind = mounted
+                    .metadata()
+                    .map_err(|error| refusal(format!("inspecting the mounted object: {error}")))?
+                    .file_type();
+                let device = std::os::unix::fs::FileTypeExt::is_char_device(&kind)
+                    || std::os::unix::fs::FileTypeExt::is_block_device(&kind);
                 match (entry.writable, entry.executable) {
                     // An exec grant, its loader, or a library: read-only, and runnable.
-                    (false, true) => remount_read_only(mountpoint)?,
+                    (false, true) => remount_read_only(&mounted_path, mountpoint)?,
                     // Every other read-only bind: a read grant confers no exec.
-                    (false, false) => remount_read_only_noexec(mountpoint)?,
+                    (false, false) => remount_read_only_noexec(&mounted_path, mountpoint)?,
                     // The pair the floor warns about, lowered as stated.
-                    (true, true) => remount_writable_executable(mountpoint)?,
+                    (true, true) => remount_writable_executable(&mounted_path, mountpoint)?,
                     (true, false) => {
                         // W^X: a writable bind is the one surface whose bytes the workload chooses,
                         // so it must not also be executable.
-                        let is_device = std::fs::metadata(mount_source)
-                            .map(|meta| {
-                                let kind = meta.file_type();
-                                std::os::unix::fs::FileTypeExt::is_char_device(&kind)
-                                    || std::os::unix::fs::FileTypeExt::is_block_device(&kind)
-                            })
-                            .unwrap_or(false);
-                        if is_device {
-                            remount_writable_device_noexec(mountpoint)?;
+                        if device {
+                            remount_writable_device_noexec(&mounted_path, mountpoint)?;
                         } else {
-                            remount_writable_noexec(mountpoint)?;
+                            remount_writable_noexec(&mounted_path, mountpoint)?;
                         }
                     }
                 }
+                require_mount_flags(
+                    &mounted,
+                    entry.writable,
+                    entry.executable,
+                    device && entry.writable && !entry.executable,
+                )?;
+                target_pin.require_same_mount(&target, &previous, &mounted)?;
             }
         }
 
@@ -964,28 +974,28 @@ fn require_grant_identity(target: &Path, expected: ObjectIdentity) -> Result<(),
 }
 
 /// Remount `target` read-only, and every submount beneath it.
-fn remount_read_only(target: &Path) -> Result<(), ContainmentError> {
+fn remount_read_only(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "read-only")
+    remount_recursive(target, subtree, FLAGS, "read-only")
 }
 
 /// Remount `target` read-only and no-exec, and every submount beneath it.
-fn remount_read_only_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_read_only_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong = libc::MS_REMOUNT
         | libc::MS_BIND
         | libc::MS_RDONLY
         | libc::MS_NOEXEC
         | libc::MS_NOSUID
         | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "read-only no-exec")
+    remount_recursive(target, subtree, FLAGS, "read-only no-exec")
 }
 
 /// Remount `target` writable and runnable, and every submount beneath it.
-fn remount_writable_executable(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_executable(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "writable and executable")
+    remount_recursive(target, subtree, FLAGS, "writable and executable")
 }
 
 fn remount_protected(target: &Path) -> Result<(), ContainmentError> {
@@ -995,7 +1005,7 @@ fn remount_protected(target: &Path) -> Result<(), ContainmentError> {
         | libc::MS_NOEXEC
         | libc::MS_NOSUID
         | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "protected")
+    remount_recursive(target, target, FLAGS, "protected")
 }
 
 fn require_mounted_identity(
@@ -1021,28 +1031,27 @@ fn require_mounted_identity(
 }
 
 /// Remount a writable *device-node* bind no-exec, keeping the device usable.
-fn remount_writable_device_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_device_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOEXEC | libc::MS_NOSUID;
-    remount_recursive(target, FLAGS, "no-exec (device)")
+    remount_recursive(target, subtree, FLAGS, "no-exec (device)")
 }
 
 /// Remount `target` no-exec, and every submount beneath it, still writable.
-fn remount_writable_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "no-exec")
+    remount_recursive(target, subtree, FLAGS, "no-exec")
 }
 
 /// Remount `target` and every submount beneath it with `flags`.
 fn remount_recursive(
     target: &Path,
+    subtree: &Path,
     flags: libc::c_ulong,
     what: &str,
 ) -> Result<(), ContainmentError> {
-    // The target itself always gets remounted: it was just bound, so it is a mount
-    // point by construction whether or not the table has caught up.
-    let mut points = vec![target.to_path_buf()];
+    let mut points = Vec::new();
 
     // `/proc/self/mounts` is the view's own table here -- the mount namespace is already unshared,
     // so this cannot see host-only mounts.
@@ -1060,20 +1069,23 @@ fn remount_recursive(
             continue;
         };
         let point = PathBuf::from(unescape_mount_field(raw));
-        if point != target && point.starts_with(target) {
+        if point != subtree && point.starts_with(subtree) {
             points.push(point);
         }
     }
 
     points.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    // The top mount is retained separately from the mutable scan prefix.
+    points.push(target.to_path_buf());
 
     for point in points {
         let outcome = mount_syscall(None, &point, None, flags, None);
         // A *shadowed* submount cannot be remounted, and refusing on it would refuse a composition
         // that is already safe.
         if let Err(error) = outcome {
-            let shadowed = error.raw_os_error() == Some(libc::EINVAL)
-                && shadowing_mount(&point, target)?.is_some();
+            let shadowed = point != target
+                && error.raw_os_error() == Some(libc::EINVAL)
+                && shadowing_mount(&point, subtree)?.is_some();
             if !shadowed {
                 return Err(refusal(format!(
                     "remounting '{}' {what}: {error}",
@@ -1083,6 +1095,36 @@ fn remount_recursive(
         }
     }
 
+    Ok(())
+}
+
+/// Verify the restrictions on the retained mount after remounting it.
+fn require_mount_flags(
+    mounted: &std::fs::File,
+    writable: bool,
+    executable: bool,
+    device: bool,
+) -> Result<(), ContainmentError> {
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: mounted owns the descriptor, and status supplies writable storage.
+    if unsafe { libc::fstatvfs(mounted.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(refusal(format!(
+            "reading mounted filesystem permissions: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: fstatvfs initialized status on success.
+    let actual = unsafe { status.assume_init() }.f_flag;
+    let required = libc::ST_NOSUID
+        | if writable { 0 } else { libc::ST_RDONLY }
+        | if executable { 0 } else { libc::ST_NOEXEC }
+        | if device { 0 } else { libc::ST_NODEV };
+    let mask = libc::ST_RDONLY | libc::ST_NOEXEC | libc::ST_NOSUID | libc::ST_NODEV;
+    if actual & mask != required {
+        return Err(refusal(format!(
+            "mounted filesystem permissions differ from the grant: expected {required:#x}, got {actual:#x}"
+        )));
+    }
     Ok(())
 }
 
@@ -1795,7 +1837,9 @@ fn refusal(reason: String) -> ContainmentError {
 mod tests {
     mod loader_admission;
     mod nested_grants;
+    mod protection_alias;
     mod refusal;
+    mod remount_flags;
     use super::*;
 
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
@@ -2082,7 +2126,7 @@ mod tests {
             .expect("bind the read grant's directory over it");
 
         // The whole point: this must succeed rather than refuse on the shadowed submount.
-        if let Err(error) = remount_read_only(&view_tree) {
+        if let Err(error) = remount_read_only(&view_tree, &view_tree) {
             eprintln!("remount_read_only refused: {error}");
             return false;
         }
@@ -3028,7 +3072,13 @@ mod tests {
                 std::fs::create_dir_all(target).map_err(|e| refusal(format!("mkdir view: {e}")))?;
                 mount_syscall(Some(base), target, None, libc::MS_BIND | libc::MS_REC, None)
                     .map_err(|e| refusal(format!("bind: {e}")))?;
-                remount_read_only(target)?;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mounted = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                    .open(target)
+                    .map_err(|e| refusal(format!("pin recursive bind: {e}")))?;
+                remount_read_only(&targets::descriptor_path(&mounted), target)?;
 
                 // The bind itself must be read-only, and so must the submount.
                 let top_writable = std::fs::write(target.join("top_probe"), b"x").is_ok();
@@ -3968,7 +4018,7 @@ mod tests {
         super::super::failure_tests::in_fresh_process(|| {
             super::super::failure_tests::refuse_syscall(libc::SYS_openat, None);
             let target = Path::new("/fixture");
-            let error = remount_read_only(target).unwrap_err();
+            let error = remount_read_only(target, target).unwrap_err();
             assert!(
                 error.to_string().contains("reading the mount table"),
                 "{error}"
@@ -3986,7 +4036,7 @@ mod tests {
         super::super::failure_tests::in_fresh_process(|| {
             let directory = tempfile::tempdir().unwrap();
             super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
-            let error = remount_read_only(directory.path()).unwrap_err();
+            let error = remount_read_only(directory.path(), directory.path()).unwrap_err();
             assert!(error.to_string().contains("remounting"), "{error}");
         });
     }
