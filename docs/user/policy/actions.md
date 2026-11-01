@@ -30,9 +30,11 @@ A field marked `?` below is optional. Read it behind a guard, as
 `context.input has arg1 && context.input.arg1 == "-rf"`. A rule that reads an optional field with no
 guard refuses to load.
 
-The name `path` appears on two kinds of action: a filesystem path on `fs:*` and a URL path on
-`http:request`. A rule that names both kinds tells them apart with `context.input has operation`,
-because only `fs:*` carries `operation`.
+Some field names mean different things on different actions. `path` is a file on `fs:read` and
+the path part of a URL on `http:request`. So a rule that checks `context.input` covers actions of
+one family: actions whose names start the same way before the `:`, such as `fs:read` and
+`fs:write`. Each MCP tool action is a family of its own. A rule that checks `context.input` for
+`fs:read` and `http:request` together refuses to load, so write one rule for each.
 
 ## The ten actions
 
@@ -220,11 +222,14 @@ A `when temporal { … }` clause reads recorded events. The box records three ev
 | `A::response` | The operation ended, or its end is `indeterminate` | The `input` fields, plus `output` |
 | `A::error` | The operation did not happen | The `input` fields |
 
+To cap how many times the agent tries an action, count `A::request`, which also counts denied
+attempts. Use `A::response` when a later rule needs evidence that an earlier operation happened.
+
 What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A Shell `test -e`, `test -L`, or `test -r` that got an answer is a response even when the answer is "no", such as one of a missing path. A Shell check that Box itself refuses, at the reach floor or because the filesystem changed during the check, is an error. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |

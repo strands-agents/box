@@ -101,6 +101,33 @@ impl HeldPath {
         })
     }
 
+    /// Move the leaf only if the destination name is still unbound.
+    pub(super) fn rename_to_new(&self, destination: &Self) -> io::Result<()> {
+        // SAFETY: both parent and leaf pairs are owned, valid handles.
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                self.parent.as_raw_fd(),
+                self.leaf.as_ptr(),
+                destination.parent.as_raw_fd(),
+                destination.leaf.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        // SAFETY: both parent and leaf pairs are owned, valid handles.
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(
+                self.parent.as_raw_fd(),
+                self.leaf.as_ptr(),
+                destination.parent.as_raw_fd(),
+                destination.leaf.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        checked(result)
+    }
+
     /// The entry names of the leaf directory, without `.` and `..`.
     pub(super) fn entry_names(&self) -> io::Result<Vec<String>> {
         let directory = self.open(libc::O_RDONLY | libc::O_DIRECTORY)?;

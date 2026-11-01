@@ -4,56 +4,17 @@ use std::net::IpAddr;
 
 use crate::capability::{is_bindable_host, normalize_host};
 
-/// A parsed CONNECT request: the target `host` and `port`, plus any `Proxy-Authorization` value.
+/// A parsed CONNECT request: the target `host` and `port`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConnectRequest {
+pub(crate) struct ConnectRequest {
     /// The target host from the CONNECT authority.
-    pub(super) host: String,
+    pub(crate) host: String,
     /// The target port from the CONNECT authority.
-    pub(super) port: u16,
-    /// The `Proxy-Authorization` header value, if the client supplied one (best-effort).
-    pub(super) proxy_authorization: Option<String>,
-}
-
-/// Parse a raw HTTP/1.1 CONNECT request head (the bytes up to and including the blank line).
-pub(super) fn parse_connect(head: &str) -> Option<ConnectRequest> {
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next()?;
-    let mut parts = request_line.split_whitespace();
-    if !parts.next()?.eq_ignore_ascii_case("CONNECT") {
-        return None;
-    }
-    let authority = parts.next()?;
-    let version = parts.next()?;
-    if parts.next().is_some() || !version.starts_with("HTTP/") {
-        return None;
-    }
-    let (host, port) = parse_authority(authority, None)?;
-
-    Some(ConnectRequest {
-        host,
-        port,
-        proxy_authorization: proxy_authorization_from_head(head),
-    })
-}
-
-/// Extract a `Proxy-Authorization` value from a raw HTTP head (request line + headers, up to the
-/// blank line). The plain-HTTP path must read it from the RAW head, because `read_request` strips
-/// `Proxy-Authorization` as a hop-by-hop header before the parsed request is available.
-pub(super) fn proxy_authorization_from_head(head: &str) -> Option<String> {
-    head.split("\r\n")
-        .skip(1) // the request line
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("proxy-authorization")
-                .then(|| value.trim().to_string())
-        })
+    pub(crate) port: u16,
 }
 
 /// Parse an HTTP authority into an unbracketed host and port.
-pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Option<(String, u16)> {
+pub(crate) fn parse_authority(authority: &str, default_port: Option<u16>) -> Option<(String, u16)> {
     let authority = authority.trim_matches(|character| matches!(character, ' ' | '\t'));
     if authority.is_empty() {
         return None;
@@ -106,7 +67,7 @@ pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Opt
 /// request would send it in cleartext to an origin that expects TLS — a silent downgrade. A real
 /// HTTPS client reaches the proxy with CONNECT (the TLS path) and never here, so an `https://`
 /// absolute-form request is illegitimate rather than something to forward unencrypted.
-pub(super) fn parse_absolute_target(target: &str) -> Option<(String, u16, String)> {
+pub(crate) fn parse_absolute_target(target: &str) -> Option<(String, u16, String)> {
     let default_port = 80u16;
     let rest = target.strip_prefix("http://")?;
     // A fragment is a client-only construct (RFC 3986 §3.5) and must never reach an origin server, so
@@ -147,7 +108,7 @@ fn parse_port(port: &str) -> Option<u16> {
 }
 
 /// The best-effort session-token check.
-pub(super) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
+pub(crate) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
     match (expected, observed) {
         // No expected token configured → always ok.
         (None, _) => true,
@@ -161,31 +122,6 @@ pub(super) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_connect_authority_and_header() {
-        let head = "CONNECT api.example.com:443 HTTP/1.1\r\n\
-                    Host: api.example.com:443\r\n\
-                    Proxy-Authorization: Bearer tok123\r\n\
-                    \r\n";
-        let parsed = parse_connect(head).unwrap();
-        assert_eq!(parsed.host, "api.example.com");
-        assert_eq!(parsed.port, 443);
-        assert_eq!(parsed.proxy_authorization.as_deref(), Some("Bearer tok123"));
-    }
-
-    #[test]
-    fn rejects_non_connect() {
-        assert!(parse_connect("GET / HTTP/1.1\r\n\r\n").is_none());
-        assert!(parse_connect("CONNECT no-port HTTP/1.1\r\n\r\n").is_none());
-    }
-
-    #[test]
-    fn parses_bracketed_ipv6_without_leaking_brackets_into_host() {
-        let parsed = parse_connect("CONNECT [2001:db8::1]:8443 HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!(parsed.host, "2001:db8::1");
-        assert_eq!(parsed.port, 8443);
-    }
 
     #[test]
     fn authority_supports_default_and_explicit_ports() {
@@ -204,6 +140,12 @@ mod tests {
             Some(("2001:db8::1".to_string(), 443))
         );
         assert!(parse_authority("2001:db8::1:443", None).is_none());
+        // A CONNECT authority has no default port.
+        assert!(parse_authority("no-port", None).is_none());
+        assert_eq!(
+            parse_authority("[2001:db8::1]:8443", None),
+            Some(("2001:db8::1".to_string(), 8443))
+        );
     }
 
     /// FIX A (finding 2): a trailing-dot FQDN or mixed case must normalize to the one spelling the
@@ -289,23 +231,6 @@ mod tests {
         );
         // Not an absolute URL: an origin-form target names no destination and is refused.
         assert!(parse_absolute_target("/mcp?foo=bar").is_none());
-    }
-
-    #[test]
-    fn proxy_authorization_read_from_a_plain_http_head() {
-        // The plain-HTTP path reads the token from the raw head (before `read_request` strips the
-        // hop-by-hop header), so a non-CONNECT head must still yield the value.
-        let head = "GET http://api.example.com/ HTTP/1.1\r\n\
-                    Host: api.example.com\r\n\
-                    Proxy-Authorization: Bearer tok123\r\n\
-                    \r\n";
-        assert_eq!(
-            proxy_authorization_from_head(head).as_deref(),
-            Some("Bearer tok123")
-        );
-        // Absent header → None.
-        let without = "GET http://api.example.com/ HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
-        assert!(proxy_authorization_from_head(without).is_none());
     }
 
     #[test]

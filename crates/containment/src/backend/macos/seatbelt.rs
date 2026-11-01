@@ -992,6 +992,7 @@ impl ContainmentBackend for SeatbeltBackend {
         // Seatbelt execs in place, so a successful `exec` closes the status pipe (EOF); there is no
         // reaper to write a byte, and none is needed.
         _confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<()> {
         apply_validated_profile(config, apply_current_process)
     }

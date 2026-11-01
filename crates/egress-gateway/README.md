@@ -24,7 +24,6 @@ behind the `tls-intercept` feature:
 | Boundary values | `BodyRef`, `DenyReason`, `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target`, `Verdict` |
 | Credential mutators | `CapabilityContext`, `CapabilityFault`, `CapabilityOutcome`, `CapabilitySet`, `CapabilitySetBuilder`, `CredentialCapability` |
 | Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit` |
-| Interception port | `Interceptor` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `ProxyError`, `Result` |
 | Default adapter | `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
@@ -194,15 +193,13 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has eleven fields:
+`MitmConfig` has ten fields:
 
 | Field | Type | Default |
 |---|---|---|
 | `bind_addr` | `SocketAddr` | `127.0.0.1:0` |
 | `unix_socket_path` | `Option<PathBuf>` | `None` |
-| `external_proxy` | `Option<SocketAddr>` | `None` |
 | `intercept_ca_dir` | `Option<PathBuf>` | `None` |
-| `enable_h2` | `bool` | `false` |
 | `response_limits` | `ResponseLimits` | `max_body_bytes: 16 MiB` |
 | `expected_token` | `Option<String>` | `None` |
 | `credential_env` | `Vec<(String, String)>` | empty |
@@ -223,7 +220,7 @@ exchange whose request and reply together take longer than the deadline, with no
 workload; `box.toml` exposes no key for it.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
-`env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
+`env_vars()`, `drain_audit_events()`, and `shutdown()`.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `Drop` shuts the adapter down and

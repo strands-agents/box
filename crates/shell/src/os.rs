@@ -1387,6 +1387,12 @@ pub trait Kernel: Send + Sync {
     async fn lstat(&self, proc: &Process, path: Resolved) -> FileStat;
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: Resolved, mode: i32) -> bool;
+    /// Stat a file (follows symlinks), and report a refusal as an error.
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Stat a file (does not follow symlinks), and report a refusal as an error.
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Check access permissions, and report a refusal as an error.
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool>;
     /// Canonicalize a path (resolve symlinks).
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf>;
     /// Check if a path is an executable file.

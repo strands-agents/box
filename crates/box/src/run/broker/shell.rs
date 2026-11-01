@@ -99,7 +99,7 @@ impl ShellSpec {
 
     pub(super) fn backend(&self) -> io::Result<Arc<dyn strands_shell::os::Kernel>> {
         use strands_shell::vfs_config::{BindEntry, BindMode, VfsConfig, build_vfs};
-        use strands_shell::vfs_kernel::{EgressProxy, VfsKernel};
+        use strands_shell::vfs_kernel::VfsKernel;
 
         let config = VfsConfig {
             bind: self
@@ -119,14 +119,8 @@ impl ShellSpec {
         vfs.max_file_size = SHELL_MAX_FILE_SIZE;
         vfs.max_inodes = SHELL_MAX_INODES;
         let mut backend = VfsKernel::new(vfs);
-        backend.network_enabled = self.egress.is_some();
-        backend.egress_proxy = self.egress.as_ref().map(|egress| EgressProxy {
-            target: egress.proxy_target.clone(),
-            ca_pem: egress.ca_pem.as_ref().clone(),
-            // A refusal the gateway originates must reach a command as a refusal, not as the
-            // origin's answer.
-            refusal_header: Some(egress_gateway::PROXY_ORIGIN_HEADER.to_string()),
-        });
+        // `CallKernel` sends HTTP through the gateway, so the vendored client never dials.
+        backend.network_enabled = false;
         backend.script_interpreter = Some(self.script_interpreter());
         backend.host_spawner = self.host_spawner.clone();
         Ok(Arc::new(backend))
@@ -181,17 +175,17 @@ impl ShellSpec {
         // With no gateway the network stays off — a fail-closed refusal, never a direct dial
         // around the only governed route the box has.
         let builder = match &self.egress {
-            Some(egress) => builder
-                // Named before the proxy, which reads it: a refusal the gateway originates must
-                // reach a command as a refusal, not as the origin's answer.
-                .egress_refusal_header(egress_gateway::PROXY_ORIGIN_HEADER)
-                .egress_proxy_pem(egress.proxy_target.clone(), egress.ca_pem.as_ref().clone())?,
+            Some(egress) => {
+                super::kernel::verify_gateway_ca(egress)?;
+                builder
+            }
             None => builder.disable_network(),
         };
         let mut shell = builder
             .kernel(Arc::new(super::kernel::CallKernel::new(
                 backend,
                 recorder.request_context(),
+                self.egress.clone(),
             )))
             .build()?;
         verify_direct_binds(&shell, &binds)?;
@@ -946,6 +940,89 @@ mod tests {
         assert!(
             decision.attribution().is_empty(),
             "the permit the floor overrode is not what decided"
+        );
+    }
+
+    /// **A metadata read the reach floor refuses meets no `::response` precondition**, and an
+    /// answered one does.
+    #[tokio::test]
+    async fn a_metadata_read_the_floor_refuses_meets_no_response_precondition() {
+        let root = tempfile::tempdir().expect("a fixture root");
+        let shared = root.path().canonicalize().expect("the root resolves");
+        let box_root = shared.join("boxes/codex");
+        let refused = box_root.join("private/secret.txt");
+        std::fs::create_dir_all(refused.parent().expect("the refused parent"))
+            .expect("this box's private directory");
+        std::fs::write(&refused, "secret").expect("the refused file");
+        let gated = shared.join("gated.txt");
+        std::fs::write(&gated, "gated").expect("the gated file");
+        let checked = shared.join("checked.txt");
+        std::fs::write(&checked, "checked").expect("the checked file");
+        let reach = Arc::new(crate::test_support::with_operator_home(&shared, || {
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+                .expect("the reachable set is usable")
+        }));
+        let policy = Arc::new(open_policy(vec![Policy {
+            origin: PathBuf::from("precondition.dw"),
+            text: r#"permit(principal, action == Box::Action::"fs:read", resource)
+                     when { context.input.path != "~/gated.txt" };
+                     permit(principal, action == Box::Action::"fs:read", resource)
+                     when { context.input.path == "~/gated.txt" }
+                     when temporal {
+                         formerly within 60s
+                         Box::Action::"fs:read"::response{ input.path: _, input.operation: Box::FsReadOperation::"read_metadata" }
+                     };"#
+            .to_string(),
+        }]));
+        let floor = ReachFloor {
+            reach,
+            inner: ShellPolicyInterceptor::into_handle_reporting_under(
+                policy,
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                &shared,
+            ),
+            recorder: DecisionRecorder::discarding(),
+        };
+        let metadata = strands_shell::FsOperation::ReadMetadata {
+            follow_symlinks: true,
+        };
+        let refused_text = refused.to_string_lossy();
+        let gated_text = gated.to_string_lossy();
+        let checked_text = checked.to_string_lossy();
+        let read_gated = EffectAttempt::Filesystem {
+            path: &gated_text,
+            operation: strands_shell::FsOperation::ReadContent,
+        };
+
+        assert!(
+            floor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: &refused_text,
+                    operation: metadata,
+                })
+                .await
+                .is_err(),
+            "the floor refuses a metadata read of private state"
+        );
+        assert!(
+            floor.intercept(&read_gated).await.is_err(),
+            "a refused metadata read is not a response"
+        );
+
+        floor
+            .intercept(&EffectAttempt::Filesystem {
+                path: &checked_text,
+                operation: metadata,
+            })
+            .await
+            .expect("a metadata read of a reachable file is permitted")
+            .record_outcome(EffectOutcome::Kernel(EffectResult::Completed))
+            .await
+            .expect("outcome reporting is best effort");
+        assert!(
+            floor.intercept(&read_gated).await.is_ok(),
+            "an answered metadata read meets the precondition"
         );
     }
 

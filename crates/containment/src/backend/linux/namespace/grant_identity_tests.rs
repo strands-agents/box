@@ -424,7 +424,7 @@ fn read_only_and_writable_grants_keep_their_access_modes() {
                 };
                 let result = in_child(|| {
                     if let Err(error) =
-                        NamespaceBackend::with_probe_result(true).apply(&config, None, None)
+                        NamespaceBackend::with_probe_result(true).apply(&config, None, None, None)
                     {
                         let _ = writeln!(std::io::stderr(), "apply: {error}");
                         return REFUSED;
@@ -474,7 +474,7 @@ fn unchanged_symlinks_and_hardlinks_preserve_permitted_reads() {
                 .unwrap();
             let result = in_child(|| {
                 if let Err(error) =
-                    NamespaceBackend::with_probe_result(true).apply(&config, None, None)
+                    NamespaceBackend::with_probe_result(true).apply(&config, None, None, None)
                 {
                     let _ = writeln!(std::io::stderr(), "apply: {error}");
                     return REFUSED;
@@ -510,7 +510,7 @@ fn enclosing_bind_does_not_expose_the_symlink_target() {
 
 fn apply(fixture: &Fixture, config: &ContainmentConfig) -> (i32, String) {
     in_child(
-        || match NamespaceBackend::with_probe_result(true).apply(config, None, None) {
+        || match NamespaceBackend::with_probe_result(true).apply(config, None, None, None) {
             Ok(()) => fixture.inspect(),
             Err(error) => {
                 let _ = writeln!(std::io::stderr(), "apply: {error}");

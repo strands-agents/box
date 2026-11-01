@@ -614,6 +614,100 @@ when { is_alpha(action) };
 }
 
 #[test]
+fn a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages() {
+    for (name, text) in [
+        (
+            "mixed.dw",
+            r#"@id("mixed")
+               forbid(principal, action in [Box::Action::"fs:read", filesrv::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+        ),
+        (
+            "branched.dw",
+            r#"@id("branched")
+               forbid(principal, action, resource)
+               when {
+                   (action == svc::Action::"read" && context.input has path)
+                   || (action == Box::Action::"fs:read" && context.input.path like "*/secret")
+               };"#,
+        ),
+        (
+            "temporal_tool.dw",
+            r#"@id("temporal_tool")
+               forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( srv::Action::"read"::request{ input.path: _ } ) };"#,
+        ),
+        (
+            "temporal_box.dw",
+            r#"@id("temporal_box")
+               forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( Box::Action::"fs:read"::request{ input.path: "a}\"{" } ) };"#,
+        ),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let refusal = PolicyEngine::open_staged(
+            &policy::Operator::unanchored(),
+            vec![source(name, text)],
+            &history.path().join("dogwood.redb"),
+        )
+        .map(|_| ())
+        .expect_err("the rule is refused at open, not parked");
+        assert!(
+            matches!(
+                refusal,
+                policy::PolicyStagingError::Policy(policy::PolicyError::InputAcrossFamilies(_))
+            ),
+            "{name}: {refusal}"
+        );
+        assert!(
+            refusal.to_string().contains("reads context.input"),
+            "{name}: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn staged_validation_refuses_a_read_of_the_input_across_families() {
+    for (name, text) in [
+        (
+            "box.dw",
+            r#"forbid(principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+               when { context.input.path like "*/secret" };"#,
+        ),
+        (
+            "mixed.dw",
+            r#"forbid(principal, action in [Box::Action::"fs:read", filesrv::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+        ),
+        (
+            "unscoped.dw",
+            r#"forbid(principal, action, resource) when { context.input has path };"#,
+        ),
+        (
+            "temporal.dw",
+            r#"forbid(principal, action in [Box::Action::"fs:read", srv::Action::"read"], resource)
+               when { context.input.path like "*secret*" }
+               when temporal { formerly within 60s ( srv::Action::"read"::request{ input.path: _ } ) };"#,
+        ),
+    ] {
+        let refusal = PolicyEngine::validate_staged(&[source(name, text)])
+            .expect_err("staged validation refuses the rule before discovery");
+        assert!(
+            matches!(refusal, policy::PolicyError::InputAcrossFamilies(_)),
+            "{name}: {refusal}"
+        );
+    }
+    PolicyEngine::validate_staged(&[source(
+        "one.dw",
+        r#"forbid(principal, action == filesrv::Action::"read", resource)
+           when { context.input.path like "*/secret" };"#,
+    )])
+    .expect("a rule over one tool action passes staged validation");
+}
+
+#[test]
 fn staged_validation_checks_parse_macro_and_provider_without_weakening_strict_validation() {
     let unknown_action = source(
         "mcp.dw",
@@ -664,12 +758,8 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
         ),
         source(
             "path.dw",
-            r#"permit(principal, action, resource)
-               when {
-                   context has input
-                   && context.input has path
-                   && context.input.path like "*/secret"
-               };"#,
+            r#"permit(principal, action == Box::Action::"fs:read", resource)
+               when { context.input.path like "*/secret" };"#,
         ),
     ];
     {
@@ -696,12 +786,13 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
     };
 
     let authority = staged(sources.clone(), &path);
-    assert!(matches!(
-        authority
-            .stage_mcp_schema("bad", generated("bad", "read", "path", "integer"))
-            .expect("schema rejection is not terminal"),
-        SchemaStage::Rejected { .. }
-    ));
+    let SchemaStage::Rejected { reason } = authority
+        .stage_mcp_schema("bad", generated("other", "read", "path", "integer"))
+        .expect("schema rejection is not terminal")
+    else {
+        panic!("a schema for another namespace is rejected");
+    };
+    assert!(reason.contains("requires namespace"), "{reason}");
     let rejected_arguments = json!({"path": 7});
     assert!(matches!(
         authority.decide(
@@ -812,13 +903,8 @@ fn discovering_staging_revalidates_every_ready_candidate() {
         vec![
             source(
                 "alpha.dw",
-                r#"permit(principal, action, resource)
-                   when {
-                       context has input
-                       && context.input has path
-                       && context.input.path like "*/secret"
-                       && alpha::Action::"read" == alpha::Action::"read"
-                   };"#,
+                r#"permit(principal, action == alpha::Action::"read", resource)
+                   when { context.input.path like "*/secret" };"#,
             ),
             source(
                 "missing.dw",
@@ -841,12 +927,13 @@ fn discovering_staging_revalidates_every_ready_candidate() {
             authority_ready: false,
         }
     );
-    assert!(matches!(
-        authority
-            .stage_mcp_schema("beta", generated("beta", "read", "path", "integer"))
-            .expect("candidate rejection is not terminal"),
-        SchemaStage::Rejected { .. }
-    ));
+    let SchemaStage::Rejected { reason } = authority
+        .stage_mcp_schema("alpha", generated("alpha", "read", "path", "integer"))
+        .expect("candidate rejection is not terminal")
+    else {
+        panic!("a schema that conflicts with a ready candidate is rejected");
+    };
+    assert!(reason.contains("fails schema validation"), "{reason}");
     assert_eq!(
         authority
             .stage_mcp_schema("missing", generated("missing", "never", "query", "string"))
@@ -956,6 +1043,7 @@ fn partial_staging_retains_the_unchanged_authority_and_adds_the_staged_tool() {
                     path: "/v1",
                     delivery: Delivery::Completed { bytes: 10 },
                     status: Some(200),
+                    intercepted: true,
                 },
             )
             .expect("the existing authority records history");
@@ -1106,6 +1194,7 @@ fn discovering_record_observes_an_outcome() {
                 path: "/v1",
                 delivery: Delivery::Completed { bytes: 10 },
                 status: Some(200),
+                intercepted: true,
             },
         )
         .expect("record observes an outcome while discovering");
@@ -1487,6 +1576,7 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
                     path: "/v1",
                     delivery: Delivery::Completed { bytes: 150 },
                     status: Some(200),
+                    intercepted: true,
                 },
             )
             .expect("the delivery records");

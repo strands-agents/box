@@ -1,0 +1,45 @@
+# equals-flag pack corpus
+#
+# Each case is one argv, and what the shell grammar of `equals-flag.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# `-=` alone
+[[case]]
+argv = ["tool", "run", "-="]
+action = "run"
+fields = { equals = true }
+effects = ["equals"]
+
+# `-=` after a flag that takes no value, in one cluster
+[[case]]
+argv = ["tool", "run", "-a="]
+action = "run"
+fields = { all = true, equals = true }
+effects = ["equals"]
+
+# `-=` before a flag that takes no value, in one cluster
+[[case]]
+argv = ["tool", "run", "-=a"]
+action = "run"
+fields = { all = true, equals = true }
+effects = ["equals"]
+
+# A flag that takes a value, then `=`: the parser does not read `=x` as the value or as `-=`
+[[case]]
+argv = ["tool", "run", "-o=x"]
+action = "unmodeled"
+
+# A flag that takes a value, with the value attached
+[[case]]
+argv = ["tool", "run", "-ox"]
+action = "run"
+fields = { output = "x" }
+effects = ["output"]
+
+# `-=` before a flag that takes a value, in one cluster, and the value in the next word
+[[case]]
+argv = ["tool", "run", "-=o", "x"]
+action = "run"
+fields = { equals = true, output = "x" }
+effects = ["equals", "output"]

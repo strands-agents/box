@@ -1,5 +1,5 @@
-//! A rule whose only action is reserved, two rules with one `@id`, or a cap written as a permit
-//! beside a broader permit, refuse the load.
+//! A rule whose only action is reserved, two rules with one `@id`, a cap written as a permit
+//! beside a broader permit, or a read of the input across action families refuses the load.
 
 mod support;
 
@@ -390,4 +390,24 @@ fn a_temporal_permit_beside_an_unconditioned_permit_for_another_principal_loads_
     validate(&source).expect("another principal does not cover the budget");
     let engine = open(&source).expect("another principal loads");
     assert!(engine.warnings().is_empty(), "{:?}", engine.warnings());
+}
+
+#[test]
+fn a_read_of_the_input_across_families_refuses_validate_and_open() {
+    let source = r#"@id("across")
+forbid(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect"], resource)
+when { context.input has host };"#;
+    for (path, result) in [
+        ("validate", validate(source)),
+        ("open", open(source).map(|_| ())),
+    ] {
+        match result {
+            Err(PolicyError::InputAcrossFamilies(reason)) => assert!(
+                reason.contains("rule @id(\"across\") reads context.input.host"),
+                "{path}: {reason}"
+            ),
+            Err(other) => panic!("{path}: expected an action-family refusal, got {other}"),
+            Ok(()) => panic!("{path}: a read of the input across families must refuse the load"),
+        }
+    }
 }

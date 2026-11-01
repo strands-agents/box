@@ -114,6 +114,7 @@ impl ContainmentBackend for MockBackend {
         _config: &ContainmentConfig,
         _egress_handoff: Option<&std::os::unix::net::UnixStream>,
         _confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
         self.inner
             .records
@@ -165,7 +166,7 @@ impl MockContainment {
     pub fn apply(&self, config: &ContainmentConfig) -> Result<(), ContainmentError> {
         // Test harnesses do not exercise the egress handoff (the transport is proven in
         // `backend::linux::namespace::netns`'s own kernel test) nor the exec-confirm fd.
-        crate::facade::apply_backend(|| Ok(self.backend.as_ref()), config, None, None)
+        crate::facade::apply_backend(|| Ok(self.backend.as_ref()), config, None, None, None)
     }
 
     /// Snapshot every backend apply call in order.

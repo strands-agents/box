@@ -266,10 +266,7 @@ impl EffectInterceptor for RenameRecorder {
     }
 }
 
-/// The kernel does not host-back a dangling symlink, so a rename onto one on a host bind reads
-/// the destination as absent and is then refused by the kernel before any replacement. This
-/// states that limitation so it cannot be mistaken for the in-memory case, where the fact is true.
-/// A live host symlink is refused with the same error, so the refusal does not show its target.
+/// A rename onto a dangling host symlink reads the destination as the link itself, and the kernel refuses it.
 #[test]
 fn a_rename_onto_a_dangling_host_symlink_is_refused_by_the_kernel() {
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("host-rename-dangling-destination");
@@ -306,10 +303,10 @@ fn a_rename_onto_a_dangling_host_symlink_is_refused_by_the_kernel() {
     assert_eq!(
         seen,
         vec![strands_shell::FsPairOperation::Rename {
-            destination_exists: false,
+            destination_exists: true,
             destination_is_dir: false,
         }],
-        "a dangling host symlink is not host-backed, so the fact reads absent"
+        "the no-follow destination probe reads the link, not its missing target"
     );
     assert_ne!(
         out.status, 0,

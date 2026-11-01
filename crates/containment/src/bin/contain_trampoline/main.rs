@@ -260,14 +260,18 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
     // Pass the setup-status writer so the Linux reaper can signal "reached exec" with one byte: a
     // long-lived leaf (a streaming MCP server) never lets the pipe EOF during its life, so the
     // supervisor cannot rely on EOF alone to know containment came up.
-    Containment::apply(&config, egress_handoff.as_deref(), args.setup_status_fd).map_err(
-        |error| match error {
-            error @ ContainmentError::PlatformUnsupported { .. } => {
-                setup_status.fail(SetupStage::Apply, 2, error)
-            }
-            error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
-        },
-    )?;
+    Containment::apply(
+        &config,
+        egress_handoff.as_deref(),
+        args.setup_status_fd,
+        None,
+    )
+    .map_err(|error| match error {
+        error @ ContainmentError::PlatformUnsupported { .. } => {
+            setup_status.fail(SetupStage::Apply, 2, error)
+        }
+        error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
+    })?;
     // Enforcement is kernel-side and survives `exec`.
     Ok(())
 }

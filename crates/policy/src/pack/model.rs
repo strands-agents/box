@@ -1,51 +1,83 @@
 //! The checked tool pack that loading builds from the file.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
 
 use super::format::{OperandSpec, OptionSpec, PackFile, ShellActionSpec, ValueSpec, WhenSpec};
-use super::{PackRefusal, Place};
+use super::grammar::ShellGrammar;
+use super::{OptionFault, PackRefusal, Place};
 use crate::schema::cedar_identifier;
+
+/// The action that a command line raises when no shell action of its pack matches it.
+pub(crate) const UNMODELED_ACTION: &str = "unmodeled";
+
+/// The name of one `[shell.<action>]` table of a checked pack.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ActionName(String);
+
+/// The name of one `[effects]` entry of a checked pack.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EffectName(String);
+
+impl ActionName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl EffectName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for EffectName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
 
 /// One tool pack, read and checked.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(crate) struct Pack {
-    name: String,
-    version: u32,
-    program: String,
-    effects: BTreeSet<String>,
-    global_options: BTreeMap<String, ShellOption>,
-    actions: BTreeMap<String, ShellAction>,
+    pub(super) name: String,
+    pub(super) version: u32,
+    pub(super) program: String,
+    pub(super) effects: BTreeMap<EffectName, String>,
+    pub(super) global_options: BTreeMap<String, ShellOption>,
+    pub(super) actions: BTreeMap<ActionName, ShellAction>,
+    grammar: ShellGrammar,
 }
 
 /// One `[shell.<action>]` table.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(crate) struct ShellAction {
-    usage: String,
-    aliases: Vec<String>,
-    adds: Vec<String>,
-    options: BTreeMap<String, ShellOption>,
-    operands: BTreeMap<String, Operand>,
+    pub(super) usage: String,
+    pub(super) aliases: Vec<Vec<String>>,
+    pub(super) adds: Vec<EffectName>,
+    pub(super) options: BTreeMap<String, ShellOption>,
+    pub(super) operands: BTreeMap<String, Operand>,
 }
 
 /// One option of a shell action or of `[global]`.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(crate) struct ShellOption {
-    flags: Vec<String>,
-    value: OptionValue,
-    repeated: bool,
-    anywhere: bool,
-    effects: EffectChanges,
+    pub(super) flags: Vec<String>,
+    pub(super) value: OptionValue,
+    pub(super) repeated: bool,
+    pub(super) anywhere: bool,
+    pub(super) effects: EffectChanges,
 }
 
 /// One operand of a shell action.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
 pub(crate) struct Operand {
-    rest: bool,
-    effects: EffectChanges,
+    pub(super) rest: bool,
+    pub(super) effects: EffectChanges,
 }
 
 /// Whether an option takes a value.
@@ -59,21 +91,21 @@ pub(crate) enum OptionValue {
 
 /// The patterns an option or operand value is like, and the declared effects it adds or removes.
 #[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct EffectChanges {
-    like: Vec<String>,
-    adds: Vec<String>,
-    removes: Vec<String>,
-    when: Vec<WhenChanges>,
+    pub(super) like: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
+    pub(super) removes: Vec<EffectName>,
+    pub(super) when: Vec<WhenChanges>,
 }
 
 /// The effects one `when` entry adds or removes when a value is like its patterns.
 #[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WhenChanges {
-    like: Vec<String>,
-    adds: Vec<String>,
-    removes: Vec<String>,
+    pub(super) like: Vec<String>,
+    pub(super) adds: Vec<EffectName>,
+    pub(super) removes: Vec<EffectName>,
 }
 
 impl Pack {
@@ -93,22 +125,36 @@ impl Pack {
         {
             return Err(PackRefusal::BadProgram(file.program));
         }
-        let mut effects = BTreeSet::new();
-        for effect in file.effects.into_keys() {
+        let mut effects = BTreeMap::new();
+        for (effect, description) in file.effects {
             identifier(Place::Effect(effect.clone()), &effect)?;
-            effects.insert(effect);
+            effects.insert(EffectName(effect), description);
         }
         let mut global_options = BTreeMap::new();
+        let mut global_flags = BTreeMap::new();
         for (name, spec) in file.global.options {
             let place = Place::GlobalOption(name.clone());
             identifier(place.clone(), &name)?;
-            global_options.insert(name, ShellOption::read(spec, &place, &effects)?);
+            let option = ShellOption::read(spec, &place, &effects, true)?;
+            claim_flags(&mut global_flags, &option, &place)?;
+            global_options.insert(name, option);
         }
         let mut actions = BTreeMap::new();
+        let mut spellings: BTreeMap<Vec<String>, String> = BTreeMap::new();
         for (name, spec) in file.shell {
             let action = ShellAction::read(&name, spec, &file.program, &effects)?;
-            actions.insert(name, action);
+            for alias in &action.aliases {
+                if let Some(other) = spellings.insert(alias.clone(), name.clone()) {
+                    return Err(PackRefusal::SpellingTaken {
+                        place: Place::ActionAliases(name),
+                        spelling: alias.join(" "),
+                        other: Box::new(Place::Action(other)),
+                    });
+                }
+            }
+            actions.insert(ActionName(name), action);
         }
+        let grammar = ShellGrammar::compile(&file.program, &global_options, &actions)?;
         Ok(Self {
             name: file.pack,
             version,
@@ -116,7 +162,13 @@ impl Pack {
             effects,
             global_options,
             actions,
+            grammar,
         })
+    }
+
+    /// The shell grammar compiled from the usage lines of this pack.
+    pub(crate) fn grammar(&self) -> &ShellGrammar {
+        &self.grammar
     }
 }
 
@@ -125,10 +177,13 @@ impl ShellAction {
         name: &str,
         spec: ShellActionSpec,
         program: &str,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<EffectName, String>,
     ) -> Result<Self, PackRefusal> {
         let place = Place::Action(name.to_string());
         identifier(place.clone(), name)?;
+        if name == UNMODELED_ACTION {
+            return Err(PackRefusal::ReservedAction { place });
+        }
         let first = spec.usage.split_whitespace().next().unwrap_or_default();
         if first != program {
             return Err(PackRefusal::UsageDisagrees {
@@ -137,15 +192,29 @@ impl ShellAction {
                 program: program.to_string(),
             });
         }
+        let mut aliases = Vec::new();
+        for alias in spec.aliases {
+            let words: Vec<String> = alias.split_whitespace().map(str::to_string).collect();
+            if words.is_empty() || !words.iter().all(|word| command_word(word)) {
+                return Err(PackRefusal::BadAlias {
+                    place: Place::ActionAliases(name.to_string()),
+                    alias,
+                });
+            }
+            aliases.push(words);
+        }
         let adds = declared(&Place::ActionAdds(name.to_string()), spec.adds, effects)?;
         let mut options = BTreeMap::new();
+        let mut flags = BTreeMap::new();
         for (option, option_spec) in spec.options {
             let place = Place::ActionOption {
                 action: name.to_string(),
                 option: option.clone(),
             };
             identifier(place.clone(), &option)?;
-            options.insert(option, ShellOption::read(option_spec, &place, effects)?);
+            let shell_option = ShellOption::read(option_spec, &place, effects, false)?;
+            claim_flags(&mut flags, &shell_option, &place)?;
+            options.insert(option, shell_option);
         }
         let mut operands = BTreeMap::new();
         for (operand, operand_spec) in spec.operands {
@@ -158,7 +227,7 @@ impl ShellAction {
         }
         Ok(Self {
             usage: spec.usage,
-            aliases: spec.aliases,
+            aliases,
             adds,
             options,
             operands,
@@ -170,16 +239,39 @@ impl ShellOption {
     fn read(
         spec: OptionSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<EffectName, String>,
+        global: bool,
     ) -> Result<Self, PackRefusal> {
+        let refuse = |fault| {
+            Err(PackRefusal::BadOption {
+                place: place.clone(),
+                fault,
+            })
+        };
+        if spec.flag.is_empty() {
+            return refuse(OptionFault::NoFlag);
+        }
+        if let Some(flag) = spec.flag.iter().find(|flag| !readable_flag(flag)) {
+            return refuse(OptionFault::MalformedFlag(flag.clone()));
+        }
+        let value = match spec.value {
+            ValueSpec::None => OptionValue::None,
+            ValueSpec::Required => OptionValue::Required,
+            ValueSpec::Optional => OptionValue::Optional,
+            ValueSpec::Many => OptionValue::Many,
+        };
+        if value == OptionValue::None && (!spec.like.is_empty() || !spec.when.is_empty()) {
+            return refuse(OptionFault::PatternWithoutValue);
+        }
+        if value == OptionValue::None && spec.repeated {
+            return refuse(OptionFault::RepeatedWithoutValue);
+        }
+        if spec.anywhere && !global {
+            return refuse(OptionFault::AnywhereOnAction);
+        }
         Ok(Self {
             flags: spec.flag,
-            value: match spec.value {
-                ValueSpec::None => OptionValue::None,
-                ValueSpec::Required => OptionValue::Required,
-                ValueSpec::Optional => OptionValue::Optional,
-                ValueSpec::Many => OptionValue::Many,
-            },
+            value,
             repeated: spec.repeated,
             anywhere: spec.anywhere,
             effects: EffectChanges::read(
@@ -198,7 +290,7 @@ impl Operand {
     fn read(
         spec: OperandSpec,
         place: &Place,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<EffectName, String>,
     ) -> Result<Self, PackRefusal> {
         Ok(Self {
             rest: spec.rest,
@@ -221,7 +313,7 @@ impl EffectChanges {
         adds: Vec<String>,
         removes: Vec<String>,
         when: Vec<WhenSpec>,
-        effects: &BTreeSet<String>,
+        effects: &BTreeMap<EffectName, String>,
     ) -> Result<Self, PackRefusal> {
         let adds = declared(place, adds, effects)?;
         let removes = declared(place, removes, effects)?;
@@ -244,8 +336,53 @@ impl EffectChanges {
     }
 }
 
+/// Whether `word` is a command word: lowercase ASCII letters, digits, and `-`, not first a `-`.
+pub(super) fn command_word(word: &str) -> bool {
+    let mut characters = word.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+/// Whether a command line can give `flag`: `--` and a name with no `=`, or `-` and one character.
+fn readable_flag(flag: &str) -> bool {
+    if let Some(long) = flag.strip_prefix("--") {
+        !long.is_empty() && !long.contains('=')
+    } else if let Some(short) = flag.strip_prefix('-') {
+        let mut characters = short.chars();
+        matches!((characters.next(), characters.next()), (Some(_), None))
+    } else {
+        false
+    }
+}
+
+fn claim_flags(
+    claimed: &mut BTreeMap<String, Place>,
+    option: &ShellOption,
+    place: &Place,
+) -> Result<(), PackRefusal> {
+    for flag in &option.flags {
+        if let Some(other) = claimed.insert(flag.clone(), place.clone()) {
+            return Err(PackRefusal::FlagTaken {
+                place: place.clone(),
+                flag: flag.clone(),
+                other: Box::new(other),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is an identifier that a Cedar name carries unchanged.
+pub(super) fn is_identifier(name: &str) -> bool {
+    !name.is_empty() && cedar_identifier(name) == name
+}
+
 fn identifier(place: Place, name: &str) -> Result<(), PackRefusal> {
-    if !name.is_empty() && cedar_identifier(name) == name {
+    if is_identifier(name) {
         Ok(())
     } else {
         Err(PackRefusal::NotIdentifier {
@@ -255,18 +392,22 @@ fn identifier(place: Place, name: &str) -> Result<(), PackRefusal> {
     }
 }
 
+/// The declared effect that each of `names` refers to.
 fn declared(
     place: &Place,
     names: Vec<String>,
-    effects: &BTreeSet<String>,
-) -> Result<Vec<String>, PackRefusal> {
-    match names.iter().find(|name| !effects.contains(*name)) {
-        None => Ok(names),
-        Some(name) => Err(PackRefusal::UndeclaredEffect {
-            place: place.clone(),
-            effect: name.clone(),
-        }),
-    }
+    effects: &BTreeMap<EffectName, String>,
+) -> Result<Vec<EffectName>, PackRefusal> {
+    names
+        .into_iter()
+        .map(|name| match effects.get_key_value(name.as_str()) {
+            Some((effect, _)) => Ok(effect.clone()),
+            None => Err(PackRefusal::UndeclaredEffect {
+                place: place.clone(),
+                effect: name,
+            }),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -277,11 +418,18 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    fn effects(values: &[&str]) -> Vec<EffectName> {
+        values
+            .iter()
+            .map(|value| EffectName(value.to_string()))
+            .collect()
+    }
+
     fn changes(like: &[&str], adds: &[&str], removes: &[&str]) -> EffectChanges {
         EffectChanges {
             like: strings(like),
-            adds: strings(adds),
-            removes: strings(removes),
+            adds: effects(adds),
+            removes: effects(removes),
             when: Vec::new(),
         }
     }
@@ -304,7 +452,7 @@ options.config = { flag = "-c", value = "required", repeated = true, adds = ["ov
 options.directory = { flag = "-C", value = "many", anywhere = true }
 
 [shell.push]
-usage = "git [global options] push [options] [<remote> [<refspec>...]]"
+usage = "git [global options] push [options] [<refspec>...]"
 aliases = ["send"]
 adds = ["network"]
 options.lease = { flag = ["--force-with-lease"], value = "optional", like = ["*:*", "*"], when = [{ like = "*", adds = ["force_push"], removes = ["network"] }] }
@@ -321,8 +469,8 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
         let lease = EffectChanges {
             when: vec![WhenChanges {
                 like: strings(&["*"]),
-                adds: strings(&["force_push"]),
-                removes: strings(&["network"]),
+                adds: effects(&["force_push"]),
+                removes: effects(&["network"]),
             }],
             ..changes(&["*:*", "*"], &[], &[])
         };
@@ -334,71 +482,85 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             }],
             ..changes(&["+*"], &["force_push"], &["network"])
         };
+        let global_options = BTreeMap::from([
+            (
+                "config".to_string(),
+                option(
+                    &["-c"],
+                    OptionValue::Required,
+                    true,
+                    false,
+                    changes(&[], &["override_config"], &[]),
+                ),
+            ),
+            (
+                "directory".to_string(),
+                option(
+                    &["-C"],
+                    OptionValue::Many,
+                    false,
+                    true,
+                    changes(&[], &[], &[]),
+                ),
+            ),
+        ]);
+        let actions = BTreeMap::from([(
+            ActionName("push".to_string()),
+            ShellAction {
+                usage: "git [global options] push [options] [<refspec>...]".to_string(),
+                aliases: vec![strings(&["send"])],
+                adds: effects(&["network"]),
+                options: BTreeMap::from([
+                    (
+                        "dry_run".to_string(),
+                        option(
+                            &["-n", "--dry-run"],
+                            OptionValue::None,
+                            false,
+                            false,
+                            changes(&[], &[], &["force_push"]),
+                        ),
+                    ),
+                    (
+                        "lease".to_string(),
+                        option(
+                            &["--force-with-lease"],
+                            OptionValue::Optional,
+                            false,
+                            false,
+                            lease,
+                        ),
+                    ),
+                ]),
+                operands: BTreeMap::from([(
+                    "refspec".to_string(),
+                    Operand {
+                        rest: true,
+                        effects: refspec,
+                    },
+                )]),
+            },
+        )]);
+        let grammar = ShellGrammar::compile("git", &global_options, &actions)
+            .expect("the expected pack compiles");
         let expected = Pack {
             name: "git".to_string(),
             version: 2,
             program: "git".to_string(),
-            effects: BTreeSet::from(["force_push", "network", "override_config"].map(String::from)),
-            global_options: BTreeMap::from([
-                (
-                    "config".to_string(),
-                    option(
-                        &["-c"],
-                        OptionValue::Required,
-                        true,
-                        false,
-                        changes(&[], &["override_config"], &[]),
+            effects: BTreeMap::from(
+                [
+                    ("force_push", "Replaces commits on a remote branch"),
+                    ("network", "Contacts a remote repository"),
+                    (
+                        "override_config",
+                        "Overrides git configuration for this one command",
                     ),
-                ),
-                (
-                    "directory".to_string(),
-                    option(
-                        &["-C"],
-                        OptionValue::Many,
-                        false,
-                        true,
-                        changes(&[], &[], &[]),
-                    ),
-                ),
-            ]),
-            actions: BTreeMap::from([(
-                "push".to_string(),
-                ShellAction {
-                    usage: "git [global options] push [options] [<remote> [<refspec>...]]"
-                        .to_string(),
-                    aliases: strings(&["send"]),
-                    adds: strings(&["network"]),
-                    options: BTreeMap::from([
-                        (
-                            "dry_run".to_string(),
-                            option(
-                                &["-n", "--dry-run"],
-                                OptionValue::None,
-                                false,
-                                false,
-                                changes(&[], &[], &["force_push"]),
-                            ),
-                        ),
-                        (
-                            "lease".to_string(),
-                            option(
-                                &["--force-with-lease"],
-                                OptionValue::Optional,
-                                false,
-                                false,
-                                lease,
-                            ),
-                        ),
-                    ]),
-                    operands: BTreeMap::from([(
-                        "refspec".to_string(),
-                        Operand {
-                            rest: true,
-                            effects: refspec,
-                        },
-                    )]),
-                },
-            )]),
+                ]
+                .map(|(name, description)| (EffectName(name.to_string()), description.to_string())),
+            ),
+            global_options,
+            actions,
+            grammar,
         };
 
         assert_eq!(Pack::parse(text).expect("the pack loads"), expected);

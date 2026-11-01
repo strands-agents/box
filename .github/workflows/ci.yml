@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, feature/native-filesystem-core]
+    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
@@ -46,6 +46,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/rust-*'
+              - 'scripts/check-linux-test-output.py'
+              - 'scripts/test_linux_test_output.py'
               - '.github/workflows/ci.yml'
             containment:
               - 'crates/**/!(*.md)'

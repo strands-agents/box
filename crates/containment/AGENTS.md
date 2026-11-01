@@ -15,7 +15,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
 `model.rs` the vocabulary · `config.rs` the request · `floors.rs` the deny-only floors ·
 `facade.rs` the pipeline · `backend/*` the mechanisms. One decision per module.
 
-- **One verb**, `Containment::apply(&config, egress_handoff)`. Add no tier report, status flag,
+- **One verb**, `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)`. Add no tier report, status flag,
   post-apply report, lifecycle handle, configure phase, or second entry point. Treat every error as
   incomplete containment: terminate, and never run the workload.
 - **A grant states what it authorizes, never who asked.** No provenance tag, no role name, no

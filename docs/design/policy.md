@@ -124,6 +124,12 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
+In the Shell, a metadata read is an operation that happened once the workload has its answer, so a
+`test -e`, `test -L`, or `test -r` of a missing path is a `::response`, not a `::error`. A Shell check that Box
+itself refuses, at the reach floor or because the filesystem changed between the decision and the
+check, stays a `::error`, so it can't satisfy a precondition keyed on `::response`. A cap on
+attempts counts `::request` instead, because that counts denied attempts too.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -172,18 +178,22 @@ outcome together, so if the process stops between the two, a `::response` count 
 ## What refuses to load
 
 A policy that's wrong stops the box. An inert `forbid` is a fail-open that passes review, so the
-load does two things: it strict-validates every name against the closed action vocabulary ([the
+load strict-validates every name against the closed action vocabulary ([the
 action vocabulary is closed and strict-validated at
 load](decisions.md#the-action-vocabulary-is-closed-and-strict-validated-at-load)), and it refuses
 every rule it can prove will never fire ([a rule that can't fire is refused at
-load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)).
+load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). It also
+refuses a rule that reads `context.input` under actions of more than one family, or under no
+action, because a field means what the action makes it mean ([a rule that reads the input names
+one action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family)).
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the
 later load does, so a policy that passes it loads at the next run.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
-front, `run` checks syntax, macro expansion, and provider use. The per-tool actions don't exist
+front, `run` checks syntax, macro expansion, provider use, and the action family of each rule that
+reads `context.input`. The per-tool actions don't exist
 until a server reports its tools, so `run` stages each server's schema as it arrives and validates
 the whole policy once more when every server has reported. Until then a tool call for that server is
 denied without reaching the engine ([discovery serves the schema-independent
@@ -191,6 +201,16 @@ subset](decisions.md#discovery-serves-the-schema-independent-subset)). A server 
 the policy refused degrades alone: its per-tool rules don't load, and the box starts without them
 ([a server whose discovery a policy denies degrades
 alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).
+
+A library caller checks a policy without a run through `check_policy`. It reads `box.toml` and the
+policy file it names with the reader that `run` uses, and it applies the same validation: the
+complete check when the box declares no local MCP server, and otherwise the classification that
+staging applies before any server reports. In the second case each per-tool rule is listed as
+unchecked, because only a running box can learn the server's tools, and every other rule is
+validated. The check starts no process, resolves no secret, writes no box state, and doesn't use the
+one run that a process allows. Each finding names its rules by their position in the authored file
+and their `@id`, the line and column when the engine reports a span, and the validator's hint, such
+as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them.

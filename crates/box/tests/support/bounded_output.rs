@@ -1,6 +1,6 @@
 use std::process::{Command, Output};
 
-pub fn bounded_output(mut command: Command) -> Output {
+pub(super) fn bounded_output(mut command: Command) -> Output {
     use std::io::{Read, Seek};
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;

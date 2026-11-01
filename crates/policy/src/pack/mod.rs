@@ -2,16 +2,33 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | `bindings` | which installed pack covers a program file's identity and its called name |
 //! | `format` | the `*.pack.toml` document as written |
 //! | `model` | the checked pack that loading builds from that document |
+//! | `usage` | one `usage` line, read into the shape of its command lines |
+//! | `grammar` | the shell grammar that compiling a pack builds |
+//! | `parse` | one command line, read against the shell grammar |
+//! | `schema` | the Cedar schema fragment that a checked pack generates |
 
+mod bindings;
 mod format;
+mod grammar;
 mod model;
+mod parse;
+mod schema;
+mod usage;
+
+#[cfg(test)]
+mod corpus;
+#[cfg(test)]
+mod fuzz;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub(crate) use model::Pack;
+pub(crate) use schema::PACK_NAMESPACE;
+use usage::UsageFault;
 
 /// The pack file formats this Box reads.
 const KNOWN_FORMATS: &[i64] = &[1];
@@ -53,6 +70,55 @@ pub(crate) enum PackRefusal {
     },
     #[error("{place}: names effect {effect:?}, which `[effects]` does not declare")]
     UndeclaredEffect { place: Place, effect: String },
+    #[error("{place}: {fault}")]
+    BadOption { place: Place, fault: OptionFault },
+    #[error("{place}: flag {flag:?} is also a flag of {other}")]
+    FlagTaken {
+        place: Place,
+        flag: String,
+        other: Box<Place>,
+    },
+    #[error("{place}: {alias:?} must be command words (lowercase ASCII letters, digits, and `-`)")]
+    BadAlias { place: Place, alias: String },
+    #[error("{place}: spells `{spelling}`, and {other} spells it too")]
+    SpellingTaken {
+        place: Place,
+        spelling: String,
+        other: Box<Place>,
+    },
+    #[error("{place}: usage {fault}")]
+    BadUsage { place: Place, fault: UsageFault },
+    #[error("{place}: declares `options`, but its usage has no `[options]`")]
+    OptionsNotInUsage { place: Place },
+    #[error("{place}: the usage does not name this operand")]
+    OperandNotInUsage { place: Place },
+    #[error(
+        "{place}: `rest` needs this operand alone in the usage, written as `<name>...` and not after a required `--`"
+    )]
+    BadRest { place: Place },
+    #[error("{place}: two fields have the name {field:?}")]
+    FieldTaken { place: Place, field: String },
+    #[error("{place}: the name is reserved for a command that no action matches")]
+    ReservedAction { place: Place },
+    #[error("{place}: field {field:?} has a name that the schema gives every action")]
+    ReservedField { place: Place, field: String },
+    #[error("{place}: field {field:?} starts with `__`, which Box reserves for Cedar record keys")]
+    CedarReservedField { place: Place, field: String },
+}
+
+/// Why Box refuses one option of a tool pack.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum OptionFault {
+    #[error("declares no flag")]
+    NoFlag,
+    #[error("flag {0:?} must be `--` and a name with no `=`, or `-` and one character")]
+    MalformedFlag(String),
+    #[error("takes no value, so it cannot carry `like` or `when`")]
+    PatternWithoutValue,
+    #[error("takes no value, so it cannot be `repeated`")]
+    RepeatedWithoutValue,
+    #[error("only a `[global]` option can set `anywhere`")]
+    AnywhereOnAction,
 }
 
 /// One location in a tool pack file.
@@ -63,6 +129,7 @@ pub(crate) enum Place {
     GlobalOption(String),
     Action(String),
     ActionAdds(String),
+    ActionAliases(String),
     ActionOption { action: String, option: String },
     Operand { action: String, operand: String },
 }
@@ -75,6 +142,7 @@ impl fmt::Display for Place {
             Self::GlobalOption(option) => write!(formatter, "`[global] options.{option}`"),
             Self::Action(action) => write!(formatter, "`[shell.{action}]`"),
             Self::ActionAdds(action) => write!(formatter, "`[shell.{action}] adds`"),
+            Self::ActionAliases(action) => write!(formatter, "`[shell.{action}] aliases`"),
             Self::ActionOption { action, option } => {
                 write!(formatter, "`[shell.{action}] options.{option}`")
             }
