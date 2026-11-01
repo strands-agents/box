@@ -52,21 +52,53 @@ impl MountTarget {
             .strip_prefix("/")
             .unwrap_or(&entry.target)
             .to_path_buf();
-        let create = (!matches!(entry.origin, MountOrigin::Protection { .. }))
-            .then_some((view, bind.then_some(entry.target.as_path())));
+        let protected = matches!(entry.origin, MountOrigin::Protection { .. });
+        let create = (!protected).then_some((view, bind.then_some(entry.target.as_path())));
         let aliases = bind
             && entry
                 .source
                 .as_ref()
                 .is_some_and(|source| source != &entry.target);
-        let (target, resolved) = walk(&root, &relative, directory, !bind, aliases, create)?;
+        let (target, resolved) = walk(
+            &root,
+            &relative,
+            directory,
+            !bind || protected,
+            aliases,
+            create,
+        )?;
+        let location = staging_root.join(resolved);
+        if protected && aliases {
+            let locations = view.mount_locations.borrow();
+            let expected = view.entries.iter().any(|grant| {
+                if grant.kind != MountKind::Bind || !grant.writable {
+                    return false;
+                }
+                let (Some(source), Some(granted)) = (&entry.source, &grant.source) else {
+                    return false;
+                };
+                let Ok(suffix) = source.strip_prefix(granted) else {
+                    return false;
+                };
+                grant.target.join(suffix) == entry.target
+                    && locations
+                        .get(&grant.target)
+                        .is_some_and(|granted| granted.join(suffix) == location)
+            });
+            if !expected {
+                return Err(refusal(format!(
+                    "write-protected mountpoint '{}' resolved to an unexpected location",
+                    entry.target.display()
+                )));
+            }
+        }
         Ok(Self {
             root,
             relative,
             directory,
             bind,
             aliases,
-            location: staging_root.join(resolved),
+            location,
             target,
         })
     }

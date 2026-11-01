@@ -72,6 +72,7 @@ pub(crate) struct MountView {
     grant_identities: BTreeMap<PathBuf, ObjectIdentity>,
     grant_pins: Vec<ObjectPin>,
     dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
+    mount_locations: RefCell<BTreeMap<PathBuf, PathBuf>>,
 }
 
 impl MountView {
@@ -482,6 +483,7 @@ impl MountView {
                 .filter_map(|grant| grant.pin.clone())
                 .collect(),
             dependency_sources: RefCell::new(dependency_sources),
+            mount_locations: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -517,6 +519,7 @@ impl MountView {
             ))
         })?;
 
+        self.mount_locations.borrow_mut().clear();
         for entry in &self.entries {
             self.establish(entry, root)?;
         }
@@ -742,6 +745,11 @@ impl MountView {
                         &target_pin.path(),
                         ObjectIdentity::from_metadata(&identity),
                     )?;
+                    if entry.writable {
+                        self.mount_locations
+                            .borrow_mut()
+                            .insert(entry.target.clone(), target_pin.location().to_path_buf());
+                    }
                     return Ok(());
                 }
                 if !directory && !target_pin.metadata()?.is_file() {
@@ -819,6 +827,11 @@ impl MountView {
                     device && entry.writable && !entry.executable,
                 )?;
                 target_pin.require_same_mount(&target, &previous, &mounted)?;
+                if entry.writable {
+                    self.mount_locations
+                        .borrow_mut()
+                        .insert(entry.target.clone(), target_pin.location().to_path_buf());
+                }
             }
         }
 
@@ -3626,6 +3639,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let mut entry = MountEntry {
             source: None,
@@ -3654,6 +3668,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: Some(source),
@@ -3694,6 +3709,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: None,
@@ -3754,6 +3770,7 @@ mod tests {
                 grant_identities: BTreeMap::from([(source.clone(), identity)]),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let entry = MountEntry {
                 source: Some(source),
@@ -3998,6 +4015,7 @@ mod tests {
                 grant_identities: BTreeMap::new(),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let error = view.pivot_into(&root).unwrap_err();
             assert!(
@@ -4077,6 +4095,7 @@ mod tests {
                 grant_identities,
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let argument =
                 (kind == MountKind::Bind && denied_call == libc::SYS_openat).then_some((
@@ -4192,6 +4211,7 @@ mod tests {
             grant_identities,
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let error = view.establish(&entry, root.path()).unwrap_err();
         assert!(

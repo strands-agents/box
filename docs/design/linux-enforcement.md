@@ -56,6 +56,8 @@ Enclosing mounts precede their descendants, and canonical source mounts precede 
 Box resolves permitted symbolic links within the staging root and verifies where each new mount attaches.
 Alias mounts retain the canonical grant's permissions when they reach that same mounted object.
 Write-protected files remain protected through permitted aliases.
+A protection alias must resolve to its producing writable grant's verified mount location plus the protected file's relative path.
+Box refuses a redirect to another location, including a replaced descendant link.
 Box applies bind permissions through the retained mount reference, then verifies the flags and that same mount's placement.
 If the final checks cannot confirm the same mount at its verified location, startup refuses.
 Submount enumeration still uses mount-table pathnames; these checks do not establish protection against every concurrent descendant change.
