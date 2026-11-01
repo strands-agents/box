@@ -201,3 +201,184 @@ fn when_an_environment_callback_panics_then_the_baseline_command_is_restored() {
     assert_child_reaped(tmp.path());
     assert_eq!(restored, "command = [\"bash\"]\n");
 }
+
+struct SeparateWorkload(std::path::PathBuf);
+
+impl Drop for SeparateWorkload {
+    fn drop(&mut self) {
+        if !self.0.join("shutdown.complete").exists()
+            && let Ok(pid) = std::fs::read_to_string(self.0.join("workload.pid"))
+        {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn descendant_fixture(root: &Path, ready: bool) -> (BoxFixture, SeparateWorkload) {
+    std::fs::write(
+        root.join("supervisor.py"),
+        r#"import os, pathlib, signal, subprocess, sys
+workload = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True)
+def stop(signum, frame):
+    os.killpg(workload.pid, signal.SIGTERM)
+    workload.wait(timeout=2)
+    pathlib.Path("shutdown.complete").write_text("workload reaped")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+pathlib.Path("workload.pid").write_text(str(workload.pid))
+pathlib.Path("workload.group").write_text(str(os.getpgid(workload.pid)))
+if sys.argv[1] == "ready":
+    pathlib.Path(".det-ready").touch()
+print("supervisor-output", flush=True)
+while True:
+    signal.pause()
+"#,
+    )
+    .unwrap();
+    let python = super::super::sh_quote(super::super::native_python().executable.to_str().unwrap());
+    let script = format!(
+        "exec {python} supervisor.py {}",
+        if ready { "ready" } else { "no-ready" }
+    );
+    (fixture(root, &script), SeparateWorkload(root.into()))
+}
+
+fn assert_shutdown_reaped_workload(root: &Path) {
+    let pid = std::fs::read_to_string(root.join("workload.pid")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("workload.group")).unwrap(),
+        pid,
+        "the fixture must put its workload in a separate process group"
+    );
+    let alive = Command::new("/bin/kill")
+        .args(["-0", &pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        root.join("shutdown.complete").exists() && !alive,
+        "shutdown must let the supervisor reap its separate workload; workload_alive={alive}"
+    );
+    assert_child_reaped(root);
+}
+
+#[test]
+fn when_the_callback_panics_then_shutdown_reaps_the_separate_workload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, _workload) = descendant_fixture(tmp.path(), true);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        b.spawn_meanwhile_with_timeouts(
+            "unused",
+            &[],
+            || panic!("callback failed"),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+    }));
+    assert_eq!(
+        super::super::panic_message(&result.unwrap_err()),
+        "callback failed"
+    );
+    assert_shutdown_reaped_workload(tmp.path());
+}
+
+#[test]
+fn when_readiness_times_out_then_shutdown_reaps_the_separate_workload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, _workload) = descendant_fixture(tmp.path(), false);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        b.spawn_meanwhile_with_timeouts(
+            "unused",
+            &[],
+            || panic!("callback must not run"),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+    }));
+    assert!(
+        super::super::panic_message(&result.unwrap_err())
+            .contains("never touched the ready marker")
+    );
+    assert_shutdown_reaped_workload(tmp.path());
+}
+
+#[test]
+fn when_exit_times_out_then_shutdown_reaps_the_workload_and_the_result_stays_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (b, _workload) = descendant_fixture(tmp.path(), true);
+    let result = b.spawn_meanwhile_with_timeouts(
+        "unused",
+        &[],
+        || {},
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    );
+    assert_ne!(
+        result.rc, 0,
+        "a graceful cleanup exit must not turn a timeout into a pass"
+    );
+    assert!(result.out.contains("box did not exit"));
+    assert!(result.out.contains("supervisor-output"));
+    assert_shutdown_reaped_workload(tmp.path());
+}
+
+#[test]
+fn when_the_child_ignores_shutdown_then_cleanup_force_stops_it_within_its_deadline() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("ignore_shutdown.py"),
+        r#"import pathlib, signal
+signal.signal(signal.SIGTERM, lambda signum, frame: pathlib.Path("term.requested").touch())
+pathlib.Path(".det-ready").touch()
+while True:
+    signal.pause()
+"#,
+    )
+    .unwrap();
+    let python = super::super::sh_quote(super::super::native_python().executable.to_str().unwrap());
+    let b = fixture(tmp.path(), &format!("exec {python} ignore_shutdown.py"));
+    let (finished, completion) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            b.spawn_meanwhile_with_timeouts(
+                "unused",
+                &[],
+                || panic!("callback failed"),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            );
+        }));
+        let _ = finished.send(result);
+    });
+    let completed = completion.recv_timeout(Duration::from_secs(12));
+    if completed.is_err() {
+        // Keep this test bounded even if the helper loses its forced-stop fallback.
+        if let Ok(pid) = std::fs::read_to_string(tmp.path().join("child.pid")) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        if completion.recv_timeout(Duration::from_secs(2)).is_ok() {
+            worker.join().unwrap();
+        }
+        panic!("cleanup exceeded its independently enforced twelve-second deadline");
+    }
+    worker.join().unwrap();
+    assert_eq!(
+        super::super::panic_message(&completed.unwrap().unwrap_err()),
+        "callback failed"
+    );
+    assert_child_reaped(tmp.path());
+    assert!(
+        tmp.path().join("term.requested").exists(),
+        "request shutdown before using force"
+    );
+}

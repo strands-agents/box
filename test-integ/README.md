@@ -115,6 +115,8 @@ Keep commands, interpreter checks, and route-specific refusal checks in each cas
 `MoveReplacement` shows this pattern for Shell and Monty.
 
 `src/process.rs` owns concurrent workload execution and child cleanup.
+Cleanup first requests normal shutdown, so Box can stop its workload groups.
+After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
 Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.
 These are harness unit tests, not integration evidence for Box containment.
 

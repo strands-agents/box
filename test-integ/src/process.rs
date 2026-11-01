@@ -29,10 +29,31 @@ impl std::ops::DerefMut for WorkloadChild {
     }
 }
 
+impl WorkloadChild {
+    fn stop(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(status) = self.0.try_wait()? {
+            return Ok(status);
+        }
+        let _ = Command::new("/bin/kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(status) = self.0.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = self.0.kill();
+        self.0.wait()
+    }
+}
+
 impl Drop for WorkloadChild {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.stop();
     }
 }
 
@@ -157,7 +178,7 @@ impl BoxFixture {
         }
         // Bound the wait: a box that will not exit (e.g. a contained-MCP teardown hang on Linux)
         // must fail observably with its captured output, not hang the whole suite forever. On the
-        // deadline, kill the box — which closes its pipes so the drain threads below can join.
+        // deadline, stop the box so its own teardown can close the workload's pipes.
         let mut hung = false;
         let status = match exited_early {
             Some(status) => Ok(status),
@@ -168,8 +189,7 @@ impl BoxFixture {
                         Ok(Some(status)) => break Ok(status),
                         Ok(None) if std::time::Instant::now() >= deadline => {
                             hung = true;
-                            let _ = child.kill();
-                            break child.wait();
+                            break child.stop();
                         }
                         Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
                         Err(e) => break Err(e),
@@ -188,11 +208,17 @@ impl BoxFixture {
                 out: if exited_early.is_some() {
                     format!("workload exited before the ready marker: {out}")
                 } else if hung {
-                    format!("box did not exit within 45s (killed; likely a teardown hang): {out}")
+                    format!(
+                        "box did not exit within {exit_timeout:?} (stopped; likely a teardown hang): {out}"
+                    )
                 } else {
                     out
                 },
-                rc: status.code().unwrap_or(-1),
+                rc: if hung {
+                    -1
+                } else {
+                    status.code().unwrap_or(-1)
+                },
                 decisions,
                 route: Route::Native,
             },
