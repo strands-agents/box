@@ -9,6 +9,9 @@ pub(super) struct MountTarget {
     root: File,
     relative: PathBuf,
     directory: bool,
+    bind: bool,
+    aliases: bool,
+    location: PathBuf,
     target: File,
 }
 
@@ -19,6 +22,26 @@ impl MountTarget {
         root: &Path,
         directory: bool,
     ) -> Result<Self, ContainmentError> {
+        Self::prepare_target(view, entry, root, directory, false)
+    }
+
+    pub(super) fn prepare_bind(
+        view: &MountView,
+        entry: &MountEntry,
+        root: &Path,
+        directory: bool,
+    ) -> Result<Self, ContainmentError> {
+        Self::prepare_target(view, entry, root, directory, true)
+    }
+
+    fn prepare_target(
+        view: &MountView,
+        entry: &MountEntry,
+        root: &Path,
+        directory: bool,
+        bind: bool,
+    ) -> Result<Self, ContainmentError> {
+        let staging_root = root.to_path_buf();
         let root = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -29,13 +52,34 @@ impl MountTarget {
             .strip_prefix("/")
             .unwrap_or(&entry.target)
             .to_path_buf();
-        let target = walk(&root, &relative, directory, Some(view))?;
+        let create = (!matches!(entry.origin, MountOrigin::Protection { .. }))
+            .then_some((view, bind.then_some(entry.target.as_path())));
+        let aliases = bind
+            && !matches!(entry.origin, MountOrigin::Protection { .. })
+            && entry
+                .source
+                .as_ref()
+                .is_some_and(|source| source != &entry.target);
+        let (target, resolved) = walk(&root, &relative, directory, !bind, aliases, create)?;
         Ok(Self {
             root,
             relative,
             directory,
+            bind,
+            aliases,
+            location: staging_root.join(resolved),
             target,
         })
+    }
+
+    pub(super) fn metadata(&self) -> Result<std::fs::Metadata, ContainmentError> {
+        self.target
+            .metadata()
+            .map_err(|error| refusal(format!("inspecting mount target: {error}")))
+    }
+
+    pub(super) fn location(&self) -> &Path {
+        &self.location
     }
 
     pub(super) fn path(&self) -> PathBuf {
@@ -55,7 +99,15 @@ impl MountTarget {
                 .open(spelling)
                 .map_err(|error| refusal(format!("opening the mounted root: {error}")))?
         } else {
-            walk(&self.root, &self.relative, self.directory, None)?
+            walk(
+                &self.root,
+                &self.relative,
+                self.directory,
+                !self.bind,
+                self.aliases,
+                None,
+            )?
+            .0
         };
         let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", mounted.as_raw_fd()))
             .map_err(|error| refusal(format!("reading the mounted target identity: {error}")))?;
@@ -69,7 +121,7 @@ impl MountTarget {
             fields.next().and_then(|value| value.parse::<u64>().ok()) == Some(id)
                 && fields
                     .nth(3)
-                    .is_some_and(|raw| Path::new(&unescape_mount_field(raw)) == spelling)
+                    .is_some_and(|raw| Path::new(&unescape_mount_field(raw)) == self.location)
         });
         if previous.contains(&id) || !landed {
             return Err(refusal(format!(
@@ -85,26 +137,46 @@ fn walk(
     root: &File,
     relative: &Path,
     directory: bool,
-    create: Option<&MountView>,
-) -> Result<File, ContainmentError> {
-    let mut parent = root
-        .try_clone()
-        .map_err(|error| refusal(format!("retaining the staging root: {error}")))?;
-    let components: Vec<_> = relative.components().collect();
-    let mut prefix = PathBuf::from("/");
-    for (index, component) in components.iter().enumerate() {
+    regular_file: bool,
+    aliases: bool,
+    create: Option<(&MountView, Option<&Path>)>,
+) -> Result<(File, PathBuf), ContainmentError> {
+    let retain_root = || {
+        root.try_clone()
+            .map_err(|error| refusal(format!("retaining the staging root: {error}")))
+    };
+    let mut parent = retain_root()?;
+    let mut parents = Vec::new();
+    let mut remaining = std::collections::VecDeque::new();
+    for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
             return Err(refusal(
                 "a mount target contains a non-normal component".into(),
             ));
         };
-        prefix.push(name);
-        let is_directory = directory || index + 1 != components.len();
-        let name = path_to_c(Path::new(name))?;
+        remaining.push_back(name.to_os_string());
+    }
+    let mut prefix = PathBuf::from("/");
+    let mut followed = 0;
+    while let Some(component) = remaining.pop_front() {
+        if component == ".." {
+            if let Some(previous) = parents.pop() {
+                parent = previous;
+                prefix.pop();
+            }
+            continue;
+        }
+        prefix.push(&component);
+        let is_directory = directory || !remaining.is_empty();
+        let name = path_to_c(Path::new(&component))?;
         let flags = libc::O_PATH
             | libc::O_NOFOLLOW
             | libc::O_CLOEXEC
-            | if is_directory { libc::O_DIRECTORY } else { 0 };
+            | if is_directory && !aliases {
+                libc::O_DIRECTORY
+            } else {
+                0
+            };
         let open = || {
             // SAFETY: parent owns the descriptor, and name is a live C string.
             let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
@@ -118,12 +190,12 @@ fn walk(
         let child = match open() {
             Ok(child) => child,
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) && create.is_some() => {
-                let view = create.unwrap();
-                if view
-                    .entries
-                    .iter()
-                    .any(|entry| entry.kind == MountKind::Bind && prefix.starts_with(&entry.target))
-                {
+                let (view, pending_bind) = create.unwrap();
+                if view.entries.iter().any(|entry| {
+                    entry.kind == MountKind::Bind
+                        && Some(entry.target.as_path()) != pending_bind
+                        && prefix.starts_with(&entry.target)
+                }) {
                     return Err(refusal(format!(
                         "'{}' is absent from the tree bound over it, and a mountpoint created there would be created on the host",
                         prefix.display()
@@ -176,25 +248,94 @@ fn walk(
                 )));
             }
         };
-        if !is_directory
-            && !child
-                .metadata()
-                .map_err(|error| {
-                    refusal(format!(
-                        "inspecting mountpoint '{}': {error}",
-                        prefix.display()
-                    ))
-                })?
-                .is_file()
-        {
+        let metadata = child.metadata().map_err(|error| {
+            refusal(format!(
+                "inspecting mountpoint '{}': {error}",
+                prefix.display()
+            ))
+        })?;
+        if metadata.is_symlink() && aliases {
+            followed += 1;
+            if followed > 40 {
+                return Err(refusal(
+                    "a mount target contains too many symbolic links".into(),
+                ));
+            }
+            let link = link_contents(&child)?;
+            prefix.pop();
+            let mut redirected = std::collections::VecDeque::new();
+            for component in link.components() {
+                match component {
+                    std::path::Component::RootDir => {
+                        parent = retain_root()?;
+                        parents.clear();
+                        prefix = PathBuf::from("/");
+                    }
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        redirected.push_back(std::ffi::OsString::from(".."))
+                    }
+                    std::path::Component::Normal(name) => redirected.push_back(name.to_os_string()),
+                    _ => {
+                        return Err(refusal(
+                            "a mount target link contains an invalid component".into(),
+                        ));
+                    }
+                }
+            }
+            redirected.append(&mut remaining);
+            remaining = redirected;
+            continue;
+        }
+        if is_directory && !metadata.is_dir() {
+            return Err(refusal(format!(
+                "mountpoint '{}' is not a directory",
+                prefix.display()
+            )));
+        }
+        if !is_directory && regular_file && !metadata.is_file() {
             return Err(refusal(format!(
                 "refused file mountpoint '{}' is not a regular file",
                 prefix.display()
             )));
         }
+        parents.push(parent);
         parent = child;
     }
-    Ok(parent)
+    Ok((
+        parent,
+        prefix.strip_prefix("/").unwrap_or(&prefix).to_path_buf(),
+    ))
+}
+
+fn link_contents(link: &File) -> Result<PathBuf, ContainmentError> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut bytes = vec![0u8; 256];
+    loop {
+        // SAFETY: link retains a symbolic link, and bytes supplies the writable buffer.
+        let length = unsafe {
+            libc::readlinkat(
+                link.as_raw_fd(),
+                c"".as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if length < 0 {
+            return Err(refusal(format!(
+                "reading a mount target link: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if (length as usize) < bytes.len() {
+            bytes.truncate(length as usize);
+            return Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)));
+        }
+        if bytes.len() >= 65536 {
+            return Err(refusal("a mount target link is too long".into()));
+        }
+        bytes.resize(bytes.len() * 2, 0);
+    }
 }
 
 pub(super) fn descriptor_path(file: &File) -> PathBuf {
@@ -234,6 +375,40 @@ pub(super) fn after_open() {
 #[cfg(test)]
 pub(super) fn after_mount() {
     AFTER_MOUNT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static AFTER_BIND_TARGET_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_BIND_MOUNT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_BIND_SOURCE_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn after_bind_source_pin() {
+    AFTER_BIND_SOURCE_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(super) fn after_bind_target_open() {
+    AFTER_BIND_TARGET_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(super) fn after_bind_mount() {
+    AFTER_BIND_MOUNT.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
             hook();
         }

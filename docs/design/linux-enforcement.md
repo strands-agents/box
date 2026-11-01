@@ -47,6 +47,15 @@ A bind mount exposes an existing file or directory at a path inside that view.
 An ungranted surrounding-OS path can therefore appear absent.
 It does not have to return the same error as a macOS refusal.
 
+Box retains open references to each validated source and its mount target during setup.
+It creates missing mount targets only in the isolated staging filesystem.
+If a nested target disappears from an exposed surrounding-OS tree, setup refuses instead of recreating that target.
+This rule also prevents directory creation outside the filesystem grants when an ancestor changes during setup.
+
+Enclosing mounts precede their descendants, and canonical source mounts precede aliases that depend on them.
+Box resolves permitted symbolic links within the staging root and verifies where each new mount attaches.
+Alias mounts retain the canonical grant's permissions when they reach that same mounted object.
+
 `read` exposes a file or directory tree without write access.
 `read_file` selects one existing file.
 Directory grants include their descendants.
