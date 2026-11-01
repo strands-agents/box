@@ -251,7 +251,7 @@ impl HostRecorder {
 
     /// Take a snapshot behind a drain barrier: ask the accept loop to sweep its backlog and
     /// acknowledge, then wait for every accepted connection to finish. Panics as `DET_ERROR` if the
-    /// loop does not acknowledge or a connection is still being read after [`SNAPSHOT_DEADLINE`],
+    /// loop does not acknowledge or a connection is still being read after `SNAPSHOT_DEADLINE`,
     /// so a hung delivery or a dead loop can never read as a clean count.
     pub fn snapshot(&self) -> Snapshot {
         let stopped = self.shared.stop.load(Ordering::SeqCst);
