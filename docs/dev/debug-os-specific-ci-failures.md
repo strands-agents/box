@@ -122,9 +122,9 @@ re-execs into the developer directory that `xcode-select` makes active.
   re-runs `xcodebuild` on every call; and Xcode license acceptance. The leaf provides none of them,
   so the leaf dies before Python runs a line, never writes `.started`, and the harness times out.
 
-The `no_containment_reaches_the_developer_directory` test in `os_paths.rs` pins that neither
+The `when_containment_reach_is_built_then_the_developer_directory_is_unreachable` test in `os_paths.rs` pins that neither
 runtime set reaches the active developer directory, so a tool grants it in its own table. The
-`a_leaf_carries_broad_exec_and_the_main_box_does_not` test in the macOS Seatbelt backend pins the
+`when_leaf_and_main_box_profiles_are_rendered_then_only_the_leaf_grants_broad_exec` test in the macOS Seatbelt backend pins the
 leaf's exec carve-out. Neither test observes the runner's full-Xcode environment, so the suite is
 green locally and the runner is not.
 

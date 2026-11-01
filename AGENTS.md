@@ -167,8 +167,8 @@ The macOS minimum for an agent invoking Shell as a child:
   macOS-only): it renders `process-exec*` so a tool runs its whole toolchain
   after `shell:spawn` admits the top-level program, and one `(allow file-map-executable …)` over its
   writable grants so a build loads what it compiles, while the agent keeps full W^X.
-  `seatbelt.rs::the_agent_profile_never_carries_broad_exec` pins the agent's count and the absence of
-  the broad form, and `a_leaf_carries_broad_exec_and_the_main_box_does_not` pins the leaf exception.
+  `seatbelt.rs::when_the_agent_profile_is_rendered_then_it_never_grants_broad_exec` pins the agent's count and the absence of
+  the broad form, and `when_leaf_and_main_box_profiles_are_rendered_then_only_the_leaf_grants_broad_exec` pins the leaf exception.
 - `process-fork` leaves fork-bomb risk as stated residual risk.
 - **Never execute a workload-named program from the box's trusted process.** That process is
   outside the cage, so `Command::new(name)` there is arbitrary code execution, and a `permit`

@@ -114,7 +114,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn termination_signals_reach_the_workload_and_determine_its_status() {
+    fn when_termination_signals_arrive_then_the_workload_receives_them_and_its_status_reflects_them()
+     {
         super::super::failure_tests::in_fresh_process(|| {
             for signal in [libc::SIGTERM, libc::SIGINT] {
                 let mut child = std::process::Command::new("/bin/sleep")
@@ -136,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_lifetime_acknowledgment_is_refused() {
+    fn when_a_lifetime_acknowledgment_is_invalid_then_it_is_refused() {
         use std::io::Write as _;
         let (parent, mut child) = std::os::unix::net::UnixStream::pair().unwrap();
         child.write_all(&[0]).unwrap();
@@ -144,14 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_lifetime_channel_refuses_confirmation() {
+    fn when_the_lifetime_channel_is_closed_then_confirmation_is_refused() {
         let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
         drop(child);
         assert!(!confirm_parent_death(&parent));
     }
 
     #[test]
-    fn a_reaper_cannot_start_after_its_lifetime_channel_closes() {
+    fn when_the_lifetime_channel_closes_before_start_then_the_reaper_cannot_start() {
         let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
         drop(parent);
         // SAFETY: the child uses syscalls and exits without returning into the test harness.
@@ -238,7 +239,7 @@ mod tests {
 
     /// The workload's exit status is the run's exit status.
     #[test]
-    fn the_workloads_exit_status_is_propagated() {
+    fn when_the_workload_exits_then_its_exit_status_is_propagated() {
         let Some(observed) = in_pid_namespace(|| {
             // SAFETY: forking inside the namespace; the child exits immediately.
             let workload = unsafe { libc::fork() };
@@ -262,7 +263,7 @@ mod tests {
     /// An orphaned grandchild is reaped rather than left a zombie, and its status
     /// is not mistaken for the workload's.
     #[test]
-    fn an_orphaned_grandchild_is_reaped_and_does_not_change_the_result() {
+    fn when_a_grandchild_is_orphaned_then_it_is_reaped_without_changing_the_result() {
         let Some(observed) = in_pid_namespace(|| {
             // SAFETY: forking inside the namespace.
             let workload = unsafe { libc::fork() };
@@ -294,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn an_adopted_child_is_reaped_before_the_workload_exits() {
+    fn when_an_adopted_child_exits_then_it_is_reaped_before_the_workload_exits() {
         let Some(observed) = in_pid_namespace(|| {
             // The workload cannot exit successfully until PID 1 reaps the adopted child.
             // Everything after these forks uses scalar syscalls and _exit.
@@ -369,7 +370,7 @@ mod tests {
 
     /// A descendant that outlives the workload does not outlive the namespace.
     #[test]
-    fn a_lingering_descendant_does_not_hold_the_run_open() {
+    fn when_a_descendant_lingers_then_it_does_not_hold_the_run_open() {
         let started = std::time::Instant::now();
 
         let Some(observed) = in_pid_namespace(|| {

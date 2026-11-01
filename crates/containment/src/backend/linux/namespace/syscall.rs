@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mediated_syscall_has_a_rule() {
+    fn when_mediated_syscalls_are_compiled_then_every_call_has_a_rule() {
         let filters = SyscallPolicy::for_config(&localhost())
             .compile()
             .expect("the shipped table must compile");
@@ -1103,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
+    fn when_the_permit_filter_is_built_then_it_has_111_workload_entries_and_one_installer_entry() {
         assert_eq!(WORKLOAD_PERMITTED.len(), 111);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn the_file_mode_calls_and_the_creation_mask_are_permitted() {
+    fn when_file_mode_calls_and_creation_mask_are_requested_then_they_are_permitted() {
         for required in ["fchmod", "fchmodat", "fchmodat2", "umask"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_permit_numbers_are_refused() {
+    fn when_permit_numbers_repeat_then_the_duplicate_is_refused() {
         let duplicate = [
             PermittedSyscall {
                 name: "first",
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn installer_syscall_cannot_also_be_a_workload_permit() {
+    fn when_an_installer_call_is_also_a_workload_permit_then_it_is_refused() {
         let entries = [PermittedSyscall {
             name: "seccomp",
             number: libc::SYS_seccomp,
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_rules_cannot_override_unrestricted_workload_permits() {
+    fn when_an_identity_rule_overlaps_an_unrestricted_workload_permit_then_it_cannot_override_it() {
         for (name, number) in [
             ("setresuid", libc::SYS_setresuid),
             ("setresgid", libc::SYS_setresgid),
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_permitted_argument_rule_is_refused_without_insertion() {
+    fn when_a_permitted_argument_rule_is_empty_then_it_is_refused_without_insertion() {
         let mut rules = BTreeMap::new();
         let error =
             insert_permitted_scoped(&mut rules, "setresuid", libc::SYS_setresuid, Vec::new())
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_scoped_rule_does_not_replace_an_existing_restriction() {
+    fn when_a_scoped_rule_is_empty_then_it_does_not_replace_an_existing_restriction() {
         let mut rules = BTreeMap::new();
         insert_scoped(&mut rules, libc::SYS_setpgid, setpgid_rules().unwrap());
         let before = format!("{rules:?}");
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mediated_syscall_states_its_reason() {
+    fn when_mediated_syscalls_are_listed_then_each_states_its_reason() {
         for entry in MEDIATED {
             assert!(
                 !entry.name.is_empty(),
@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mediated_table_has_no_duplicate_syscalls() {
+    fn when_the_mediated_table_is_built_then_no_syscall_is_duplicated() {
         let mut seen = std::collections::BTreeSet::new();
         for entry in MEDIATED {
             assert!(
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn the_syscalls_c_headers_omit_are_still_numbered_here() {
+    fn when_c_headers_omit_syscalls_then_the_local_table_still_numbers_them() {
         assert_eq!(libc::SYS_io_uring_setup, 425, "ARM64 io_uring_setup");
         assert_eq!(libc::SYS_openat2, 437, "ARM64 openat2");
         assert_eq!(FCHMODAT2, 452, "the generic table numbers fchmodat2 at 452");
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn every_network_mode_permits_only_unix_and_inet() {
+    fn when_network_filters_are_built_then_every_mode_permits_only_unix_and_inet_families() {
         for network in [Network::Blocked, localhost(), Network::AllowAll] {
             let policy = SyscallPolicy::for_config(&network);
             let rules = policy.socket_rules().expect("socket rules compile");
@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn socketpair_permits_only_unix() {
+    fn when_socketpair_is_filtered_then_only_unix_is_permitted() {
         let rules = unix_socketpair_rules().expect("socketpair rules compile");
         assert_eq!(rules.len(), 1);
         let filters = SyscallPolicy::for_config(&Network::Blocked)
@@ -1288,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_namespace_and_root_calls_are_permitted() {
+    fn when_accepted_namespace_and_root_calls_are_filtered_then_they_are_permitted() {
         for required in [
             "clone",
             "clone3",
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_signal_identity_and_access_queries_are_permitted() {
+    fn when_accepted_signal_identity_and_access_queries_are_filtered_then_they_are_permitted() {
         for required in [
             "rt_sigreturn",
             "geteuid",
@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_time_calls_are_permitted() {
+    fn when_accepted_time_calls_are_filtered_then_they_are_permitted() {
         for required in ["clock_gettime", "clock_nanosleep"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1339,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_usage_of_self_is_permitted_and_unmediated() {
+    fn when_self_resource_usage_is_queried_then_it_is_permitted_without_mediation() {
         assert!(
             WORKLOAD_PERMITTED
                 .iter()
@@ -1367,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn event_loop_timers_are_permitted_and_unmediated() {
+    fn when_event_loop_timers_are_used_then_they_are_permitted_without_mediation() {
         for required in ["timerfd_create", "timerfd_settime", "timerfd_gettime"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_duplication_is_permitted_and_unmediated() {
+    fn when_descriptors_are_duplicated_then_the_operation_is_permitted_without_mediation() {
         assert!(
             WORKLOAD_PERMITTED
                 .iter()
@@ -1426,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn file_mode_mask_is_permitted_and_unmediated() {
+    fn when_the_file_mode_mask_is_changed_then_it_is_permitted_without_mediation() {
         assert!(
             WORKLOAD_PERMITTED
                 .iter()
@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_file_mutation_calls_are_permitted() {
+    fn when_accepted_file_mutations_are_filtered_then_they_are_permitted() {
         for required in ["pwrite64", "fdatasync", "symlinkat"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1460,13 +1460,13 @@ mod tests {
     }
 
     #[test]
-    fn accepted_file_lock_call_is_permitted() {
+    fn when_the_accepted_file_lock_call_is_filtered_then_it_is_permitted() {
         assert!(WORKLOAD_PERMITTED.iter().any(|entry| entry.name == "flock"));
         assert!(!MEDIATED.iter().any(|entry| entry.name == "flock"));
     }
 
     #[test]
-    fn accepted_process_group_call_is_argument_scoped() {
+    fn when_the_process_group_call_is_filtered_then_its_arguments_are_scoped() {
         assert!(
             WORKLOAD_PERMITTED
                 .iter()
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_mount_entry_points_are_refused() {
+    fn when_retained_mount_entry_points_are_requested_then_they_are_refused() {
         for required in [
             "mount",
             "fsopen",
@@ -1502,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_namespace_calls_are_not_restricted() {
+    fn when_accepted_namespace_calls_are_requested_then_they_are_not_restricted() {
         for required in [
             "unshare",
             "clone",
@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn an_argument_scoped_entry_without_a_rule_is_refused() {
+    fn when_an_argument_scoped_entry_has_no_rule_then_it_is_refused() {
         let policy = SyscallPolicy::for_config(&localhost());
         let bogus = MediatedSyscall {
             name: "fictional",

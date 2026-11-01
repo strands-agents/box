@@ -460,7 +460,7 @@ mod descriptor_tests {
     /// the trampoline would notice: the workload would inherit every descriptor the box held open,
     /// against a stated premise. This is why the enumeration is asserted rather than assumed.
     #[test]
-    fn the_descriptor_directory_names_what_is_open() {
+    fn when_the_descriptor_directory_is_read_then_it_names_open_descriptors() {
         let open =
             open_descriptors().expect("this platform has a per-process descriptor directory");
         assert!(
@@ -476,7 +476,7 @@ mod descriptor_tests {
     /// stderr underneath it, which is also why the trampoline only ever calls it in a fresh process.
     /// Post-fork code here is syscall-only: no allocation, no panic, and `_exit` never `exit`.
     #[test]
-    fn an_inherited_descriptor_is_closed_unless_preserved() {
+    fn when_an_inherited_descriptor_is_not_preserved_then_it_is_closed() {
         let mut ends = [0 as libc::c_int; 2];
         // SAFETY: `pipe` writes two descriptors into a two-element array.
         assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "create a pipe");
@@ -525,7 +525,7 @@ mod descriptor_tests {
 mod tests {
     #[cfg(unix)]
     #[test]
-    fn launch_gate_requires_parent_acknowledgment_and_refuses_eof() {
+    fn when_a_launch_gate_waits_then_parent_acknowledgment_is_required_and_eof_is_refused() {
         use std::io::{Read, Write};
         use std::os::fd::IntoRawFd;
         use std::os::unix::net::UnixStream;
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn config_failures_report_the_stage_before_applying_containment() {
+    fn when_configuration_loading_fails_then_the_stage_is_reported_before_containment_apply() {
         use sha2::{Digest as _, Sha256};
         use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_only_config_descriptor_reports_a_read_failure() {
+    fn when_the_config_descriptor_is_write_only_then_a_read_failure_is_reported() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config");
         let mut args = request_at(&path);
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn target_setup_failures_report_environment_or_exec_stage() {
+    fn when_target_setup_fails_then_the_environment_or_exec_stage_is_reported() {
         use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
         use std::os::unix::net::UnixStream;
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_and_unwritable_status_channels_do_not_mask_failure() {
+    fn when_status_channels_are_absent_or_unwritable_then_the_original_failure_is_preserved() {
         let status = super::SetupStatus::arm(None).unwrap();
         assert_eq!(
             status.fail(super::SetupStage::Apply, 3, "test refusal"),
@@ -691,18 +691,18 @@ mod tests {
     }
 
     #[test]
-    fn launch_gate_refuses_a_non_socket_descriptor() {
+    fn when_a_launch_gate_descriptor_is_not_a_socket_then_it_is_refused() {
         let file = std::fs::File::open("/dev/null").unwrap();
         assert!(super::wait_for_launch(file.into_raw_fd()).is_err());
     }
 
     #[test]
-    fn closing_an_already_closed_descriptor_succeeds() {
+    fn when_a_descriptor_is_already_closed_then_closing_it_succeeds() {
         assert!(super::close_ignoring_ebadf(-1).is_ok());
     }
 
     #[test]
-    fn run_refuses_missing_configuration_in_a_fresh_process() {
+    fn when_configuration_is_missing_then_run_refuses_it_in_a_fresh_process() {
         const CHILD: &str = "BOX_UNIT_TRAMPOLINE_MISSING_CONFIG";
         if let Some(path) = std::env::var_os(CHILD) {
             let args = request_at(std::path::Path::new(&path));
@@ -717,7 +717,7 @@ mod tests {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "tests::run_refuses_missing_configuration_in_a_fresh_process",
+                "tests::when_configuration_is_missing_then_run_refuses_it_in_a_fresh_process",
                 "--nocapture",
             ])
             .env(CHILD, directory.path().join("absent-config"))
@@ -729,7 +729,8 @@ mod tests {
 
     /// The one warning the floors carry reaches stderr before apply, and a disjoint pair says nothing.
     #[test]
-    fn a_write_plus_exec_pair_is_disclosed_before_apply_and_a_disjoint_pair_is_not() {
+    fn when_write_and_exec_grants_overlap_then_the_pair_is_disclosed_before_apply_but_disjoint_pairs_are_not()
+     {
         use containment::{ContainmentConfig, Operation, Scope};
 
         let directory = tempfile::tempdir().expect("a directory");
@@ -771,7 +772,8 @@ mod tests {
     }
 
     #[test]
-    fn config_load_returns_exact_bytes_and_keeps_the_caller_owned_file() {
+    fn when_configuration_is_loaded_then_exact_bytes_are_returned_and_the_caller_owned_file_is_kept()
+     {
         let dir = tempfile::tempdir().expect("config directory");
         let path = dir.path().join("containment-config.json");
         let expected = b"\x00exact config bytes\xff";
@@ -793,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn inherited_config_read_uses_the_opened_file_after_a_path_swap() {
+    fn when_the_config_path_is_swapped_then_the_inherited_descriptor_reads_the_original_file() {
         let directory = tempfile::tempdir().expect("config directory");
         let path = directory.path().join("containment.json");
         std::fs::write(&path, b"opened").expect("opened config");
@@ -822,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_decode_preserves_exact_entries() {
+    fn when_the_target_environment_is_decoded_then_exact_entries_are_preserved() {
         let json = r#"{"EMPTY":"","EQUALS":"left=right","UNICODE":"Grüße"}"#;
         let expected = BTreeMap::from([
             ("EMPTY".to_owned(), String::new()),
@@ -837,14 +839,14 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_decode_rejects_empty_name() {
+    fn when_an_environment_name_is_empty_then_decoding_refuses_it() {
         let error = decode_target_environment(r#"{"":"value"}"#).expect_err("invalid name");
 
         assert!(error.contains("name is empty"));
     }
 
     #[test]
-    fn target_environment_decode_rejects_equals_in_name() {
+    fn when_an_environment_name_contains_equals_then_decoding_refuses_it() {
         let error =
             decode_target_environment(r#"{"INVALID=NAME":"value"}"#).expect_err("invalid name");
 
@@ -852,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_decode_rejects_nul_in_name() {
+    fn when_an_environment_name_contains_nul_then_decoding_refuses_it() {
         let error = decode_target_environment(r#"{"INVALID\u0000NAME":"value"}"#)
             .expect_err("invalid name");
 
@@ -860,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_decode_rejects_nul_in_value() {
+    fn when_an_environment_value_contains_nul_then_decoding_refuses_it() {
         let error = decode_target_environment(r#"{"NAME":"invalid\u0000value"}"#)
             .expect_err("invalid value");
 
@@ -868,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn target_environment_decode_rejects_malformed_json() {
+    fn when_environment_json_is_malformed_then_decoding_refuses_it() {
         assert!(decode_target_environment(r#"{"NAME":"value""#).is_err());
     }
 }

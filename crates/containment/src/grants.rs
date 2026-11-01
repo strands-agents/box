@@ -42,7 +42,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_require_content_reads_over_their_entire_scope() {
+    fn when_write_access_is_granted_then_content_reads_must_cover_its_entire_scope() {
         for (write_path, write_scope, read_path, read_operation, read_scope, accepted) in [
             (
                 "/project",
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn every_write_needs_coverage_and_empty_sets_are_valid() {
+    fn when_write_grants_are_checked_then_each_needs_coverage_and_empty_sets_are_valid() {
         assert!(require_read_for_writes(&[]).is_ok());
         let grants = [
             (Path::new("/project"), Operation::Read, Scope::Root),
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn the_host_check_preserves_macos_write_only_access() {
+    fn when_the_host_is_macos_then_write_only_access_is_preserved() {
         let grants = [(Path::new("/project"), Operation::Write, Scope::Root)];
         assert_eq!(validate_grants(&grants).is_err(), cfg!(target_os = "linux"));
     }

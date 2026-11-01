@@ -433,13 +433,13 @@ a host toolchain additionally reaches: the entropy devices, locale and terminal 
 linker-cache trees, the certificate-authority bundle directory, and the loader's library directories.
 The active developer directory is in neither set: a tool that runs an Apple `/usr/bin` stub states
 `read` on it in its own `filesystem` lists, which
-`os_paths.rs::no_containment_reaches_the_developer_directory` pins. The agent takes the first set
+`os_paths.rs::when_containment_reach_is_built_then_the_developer_directory_is_unreachable` pins. The agent takes the first set
 only, and every tool takes both,
 because a harness reads its own configuration and talks to a model, so a compiler toolchain is reach
 it never uses and an attacker who reaches it does. Neither set grants an exec cell or states a denial,
 and the only write in either is the null device, which
-`os_paths.rs::a_set_has_no_list_for_an_exec_grant_a_denial_or_a_write_tree` and
-`os_paths.rs::only_the_null_device_is_written` pin. A credential store (`~/.aws`,
+`os_paths.rs::when_a_path_set_is_built_then_it_contains_no_list_exec_deny_or_write_tree_grant` and
+`os_paths.rs::when_runtime_write_cells_are_built_then_only_the_null_device_is_writable` pin. A credential store (`~/.aws`,
 `~/.ssh`, a keychain, a browser profile) is refused when a list entry encloses it, and runs with a
 disclosure only when an entry names it exactly, because that entry is deliberate where an enclosing
 tree is an accident. **That floor covers the process's own syscalls and nothing else.** A read through
@@ -451,7 +451,7 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
-read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
+read. The agent never renders the broad exec form, which `when_the_agent_profile_is_rendered_then_it_never_grants_broad_exec`
 pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
 first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
 script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
@@ -1128,8 +1128,8 @@ over those exact bytes, and passes the open descriptor to the trampoline. The tr
 inherited descriptor and not the name, so replacing or truncating the file after the box opened it
 changes nothing that applies. A digest failure or a load failure stops apply and exec, so a swapped
 configuration becomes a refusal rather than a weaker boundary.
-`config_load_returns_exact_bytes_and_keeps_the_caller_owned_file` and
-`inherited_config_read_uses_the_opened_file_after_a_path_swap` pin the two halves.
+`when_configuration_is_loaded_then_exact_bytes_are_returned_and_the_caller_owned_file_is_kept` and
+`when_the_config_path_is_swapped_then_the_inherited_descriptor_reads_the_original_file` pin the two halves.
 
 <a id="a-grant-is-one-operation-at-one-scope"></a>
 ### A grant is one operation at one scope, and eight combinations are unrepresentable
@@ -1218,7 +1218,7 @@ One list states every path no grant may reach. A row holds four fields: an ancho
 relative to the operator's home), a match rule, the cells the row lets through, and a class that
 supplies the reason an operator reads in the refusal. The class is also the exemption gate: a
 credential store is the one class an operator can name exactly and punch through, and
-`only_a_credential_store_row_is_exemptible` pins that nothing else can. The match rule takes no default, because the two rules fail in opposite
+`when_a_floor_row_is_exempted_then_it_must_be_a_credential_store_row` pins that nothing else can. The match rule takes no default, because the two rules fail in opposite
 directions: exact match under-refuses silently, and overlap match over-refuses loudly. A row's
 permitted cells carry one authority, which is that a workload may stat what it cannot read, and every
 new row refuses all cells until somebody names one. This one list replaced a second credential-path

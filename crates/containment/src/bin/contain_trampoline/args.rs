@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_well_formed_invocation() {
+    fn when_an_invocation_is_well_formed_then_it_is_parsed() {
         let a = parse(&[
             "--config",
             "c.json",
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_argument_zero_beside_the_command() {
+    fn when_argument_zero_is_given_then_it_is_retained_beside_the_command() {
         let a = parse(&[
             "--config",
             "c.json",
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_setup_status_descriptor() {
+    fn when_a_setup_status_descriptor_is_given_then_it_is_parsed() {
         let a = parse(&[
             "--config",
             "c.json",
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_config_descriptor() {
+    fn when_a_config_descriptor_is_given_then_it_is_parsed() {
         let a = parse(&[
             "--config",
             "c.json",
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_status_descriptor_cannot_collide_with_stdio() {
+    fn when_a_setup_status_descriptor_collides_with_standard_streams_then_it_is_refused() {
         assert!(matches!(
             parse(&[
                 "--config",
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_one_word_command() {
+    fn when_a_command_has_one_word_then_it_is_parsed() {
         let a = parse(&[
             "--target-env-json",
             "{}",
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn everything_after_dashdash_is_the_command_verbatim() {
+    fn when_arguments_follow_dashdash_then_the_command_is_preserved_verbatim() {
         // The command may carry tokens that look like our own flags — they must
         // pass through untouched, never re-interpreted.
         let a = parse(&[
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn help_short_circuits() {
+    fn when_help_is_requested_then_parsing_short_circuits() {
         assert_eq!(parse(&["--help"]), Err(ParseError::HelpRequested));
         assert_eq!(
             parse(&["--config", "c", "-h", "--", "x"]),
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_command_is_invalid() {
+    fn when_the_command_is_missing_then_the_invocation_is_invalid() {
         assert!(matches!(
             parse(&[
                 "--config",
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_flags_are_invalid() {
+    fn when_required_flags_are_missing_then_the_invocation_is_invalid() {
         assert!(matches!(
             parse(&["--", "x"]),
             Err(ParseError::Invalid(m)) if m.contains("--config")
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_flag_value_is_invalid() {
+    fn when_a_flag_value_is_missing_then_the_invocation_is_invalid() {
         assert!(matches!(
             parse(&["--config"]),
             Err(ParseError::Invalid(m)) if m.contains("--config")
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_flag_before_dashdash_is_invalid() {
+    fn when_an_unknown_flag_precedes_dashdash_then_the_invocation_is_invalid() {
         assert!(matches!(
             parse(&["--bogus", "--config", "c", "--", "x"]),
             Err(ParseError::Invalid(m)) if m.contains("--bogus")
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_uppercase_digest_is_invalid() {
+    fn when_a_digest_is_malformed_or_uppercase_then_the_invocation_is_invalid() {
         for digest in [
             "",
             "00",
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_required_option_is_invalid() {
+    fn when_a_required_option_is_duplicated_then_the_invocation_is_invalid() {
         assert!(matches!(
             parse(&[
                 "--config",
@@ -503,7 +503,7 @@ mod tests {
 
     /// `--relay-control-fd` parses once, and a stdio descriptor or a second flag is refused.
     #[test]
-    fn relay_control_fd_parses_and_refuses_collisions() {
+    fn when_a_relay_control_descriptor_is_given_then_it_is_parsed_and_collisions_are_refused() {
         let invocation = |relay: &[&str]| {
             let mut argv = vec![
                 "--config",
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn every_descriptor_flag_refuses_standard_streams_and_invalid_numbers() {
+    fn when_descriptor_flags_name_standard_streams_or_invalid_numbers_then_they_are_refused() {
         for flag in [
             "--config-fd",
             "--setup-status-fd",
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_gate_is_retained_and_cannot_be_declared_twice() {
+    fn when_a_launch_gate_is_given_then_it_is_retained_and_duplicates_are_refused() {
         let mut argv = vec![
             "--config",
             "c.json",
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn every_value_flag_reports_a_missing_value() {
+    fn when_a_value_flag_has_no_value_then_the_missing_value_is_reported() {
         for flag in [
             "--config",
             "--config-sha256",
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_required_fields_name_the_missing_field() {
+    fn when_required_fields_are_incomplete_then_the_missing_field_is_named() {
         for (argv, expected) in [
             (vec!["--", "program"], "--config"),
             (
@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_rejects_uppercase_nonhex_and_multibyte_input() {
+    fn when_a_digest_contains_uppercase_nonhex_or_multibyte_input_then_it_is_refused() {
         for value in ["A".repeat(64), "g".repeat(64), "é".repeat(32)] {
             assert!(
                 matches!(parse_sha256(&value), Err(ParseError::Invalid(message)) if message.contains("lowercase hexadecimal"))

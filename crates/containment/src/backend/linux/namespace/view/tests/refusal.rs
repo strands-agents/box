@@ -288,7 +288,7 @@ fn exit_child(action: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>) -
 }
 
 #[test]
-fn a_panicking_refusal_child_cannot_report_success() {
+fn when_a_refusal_child_panics_then_it_cannot_report_success() {
     // SAFETY: the child exits through exit_child without returning to the test harness.
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0);
@@ -318,53 +318,53 @@ fn outside_contents(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn a_refusal_nobody_touches_lands_empty_and_read_only_in_the_view() {
+fn when_a_refusal_path_is_unchanged_then_it_lands_empty_and_read_only() {
     refusal_case(Replacement::None);
 }
 
 #[test]
-fn a_refusal_whose_path_was_re_pointed_creates_no_mountpoint_on_the_host() {
+fn when_a_refusal_source_path_is_redirected_then_no_host_mountpoint_is_created() {
     refusal_case(Replacement::Ancestor);
 }
 
 #[test]
-fn a_refusal_whose_mountpoint_was_re_pointed_still_lands_on_the_refused_tree() {
+fn when_a_refusal_mountpoint_is_redirected_then_the_refusal_still_lands_on_its_intended_tree() {
     refusal_case(Replacement::Leaf);
 }
 
 #[test]
-fn a_refusal_missing_beneath_a_writable_bind_creates_nothing() {
+fn when_a_refusal_is_missing_beneath_a_writable_bind_then_nothing_is_created() {
     refusal_case(Replacement::Missing);
 }
 
 #[test]
-fn a_refusal_absent_during_planning_creates_nothing_under_a_writable_bind() {
+fn when_a_refusal_is_absent_during_planning_then_nothing_is_created_under_a_writable_bind() {
     refusal_case(Replacement::MissingAtPlan);
 }
 
 #[test]
-fn an_existing_outside_directory_cannot_receive_a_redirected_refusal() {
+fn when_a_refusal_is_redirected_to_an_existing_outside_directory_then_it_is_refused() {
     refusal_case(Replacement::AncestorExisting);
 }
 
 #[test]
-fn replacing_an_ancestor_after_the_target_opens_refuses_startup() {
+fn when_an_ancestor_is_replaced_after_target_open_then_startup_is_refused() {
     let _ = run_case(Replacement::Ancestor, Timing::AfterOpen, false);
 }
 
 #[test]
-fn replacing_a_leaf_after_the_target_opens_refuses_startup() {
+fn when_a_leaf_is_replaced_after_target_open_then_startup_is_refused() {
     let _ = run_case(Replacement::Leaf, Timing::AfterOpen, false);
 }
 
 #[test]
-fn replacing_opened_targets_with_real_directories_cannot_fool_mount_verification() {
+fn when_opened_targets_are_replaced_with_real_directories_then_mount_verification_refuses_them() {
     let _ = run_case(Replacement::AncestorDirectory, Timing::AfterOpen, false);
     let _ = run_case(Replacement::LeafDirectory, Timing::AfterOpen, false);
 }
 
 #[test]
-fn file_refusals_reject_ancestor_and_leaf_replacement_before_and_after_open() {
+fn when_file_refusal_ancestors_or_leaves_are_replaced_before_or_after_open_then_they_are_refused() {
     let _ = run_case(Replacement::None, Timing::BeforeAssembly, true);
     for replacement in [Replacement::Ancestor, Replacement::Leaf] {
         for timing in [Timing::BeforeAssembly, Timing::AfterOpen] {
@@ -374,7 +374,7 @@ fn file_refusals_reject_ancestor_and_leaf_replacement_before_and_after_open() {
 }
 
 #[test]
-fn concurrent_replacements_cannot_redirect_directory_or_file_refusals() {
+fn when_replacements_are_concurrent_then_directory_and_file_refusals_cannot_be_redirected() {
     for file in [false, true] {
         for replacement in [Replacement::Ancestor, Replacement::Leaf] {
             let mut established = 0;

@@ -212,7 +212,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guidance_escapes_control_characters_and_never_changes_configuration() {
+    fn when_dependency_guidance_is_emitted_then_control_characters_are_escaped_and_configuration_is_unchanged()
+     {
         let mut missing = MissingReads::default();
         missing.add(
             Path::new("/vendor/quote\"\n\u{007f}"),
@@ -234,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_read_diagnostics_bound_the_complete_reason() {
+    fn when_missing_reads_are_reported_then_the_complete_reason_is_bounded() {
         let reason = |count: usize, padding: &str| {
             let mut missing = MissingReads::default();
             for index in 0..count {
@@ -277,7 +278,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_non_utf8_path_has_no_lossy_configuration_suggestion() {
+    fn when_a_dependency_path_is_non_utf8_then_no_lossy_configuration_suggestion_is_given() {
         use std::os::unix::ffi::OsStrExt as _;
         let mut missing = MissingReads::default();
         missing.add(
@@ -290,7 +291,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn write_access_follows_file_identity_across_hard_links() {
+    fn when_write_access_uses_a_hard_link_then_file_identity_still_determines_access() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let image = root.join("installed-program");

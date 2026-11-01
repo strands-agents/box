@@ -155,7 +155,7 @@ mod tests {
 
     /// The descriptors named in `keep` survive, and an unnamed one does not.
     #[test]
-    fn only_the_kept_descriptors_survive() {
+    fn when_inherited_descriptors_are_closed_then_only_preserved_descriptors_survive() {
         let temporary = tempfile::NamedTempFile::new().expect("temp file");
         let victim = std::fs::File::open(temporary.path()).expect("open a victim descriptor");
         let victim_number = {
@@ -197,7 +197,7 @@ mod tests {
 
     /// The post-condition refuses when a descriptor survives the close.
     #[test]
-    fn a_surviving_descriptor_is_refused_rather_than_ignored() {
+    fn when_a_descriptor_survives_cleanup_then_setup_is_refused_instead_of_ignoring_it() {
         let temporary = tempfile::NamedTempFile::new().expect("temp file");
         let victim = std::fs::File::open(temporary.path()).expect("open a victim descriptor");
         let victim_number = {
@@ -246,7 +246,7 @@ mod tests {
     /// Dropping capabilities and setting `no_new_privs` both succeed, and the
     /// process afterwards holds an empty bounding set.
     #[test]
-    fn dropping_authority_empties_every_capability_set() {
+    fn when_authority_is_dropped_then_every_capability_set_is_empty() {
         if !super::super::probe::user_namespace_is_permitted() {
             println!(
                 "skipping: this host forbids user namespaces, so the capability \

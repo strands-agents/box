@@ -48,7 +48,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   - **On Linux this refuses a configuration that used to run.** `MS_NOSUID` on every bind neutered
     the bit, so a set-user-ID workload program started and ran unprivileged; it is now a launch
     refusal. On macOS the same configuration was already dead, in the kernel, at exec.
-  - Guard: `an_execute_grant_that_changes_identity_is_refused`, which sets each bit in turn and
+  - Guard: `when_an_exec_grant_can_change_identity_then_it_is_refused`, which sets each bit in turn and
     **asserts the bit survived the `chmod`** — a host that drops it would otherwise leave the test
     passing while it proved nothing. It fails rather than skips, because a floor's own pin must not
     go quiet. What it does **not** pin is the call order inside `require_all`: swapping the two
@@ -71,7 +71,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   applies the config, and the workload's `HOME` is the operator's own home, unless `[agent] env.HOME`
   names another directory. A caller states its home with `anchored_at`, which adds an anchor beside the
   passwd one; a base that replaced it would be a floor the caller moves, and
-  `a_declared_home_never_replaces_the_passwd_anchor` refuses that. An entry joins lexically and is
+  `when_a_home_is_declared_then_it_adds_an_anchor_without_replacing_the_passwd_anchor` refuses that. An entry joins lexically and is
   never stat'd, so a path is refused whether or not the operator has that directory yet.
 
   **`permits` states the cells a row lets through, and the authority behind it is one sentence: a
@@ -86,7 +86,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   below `/etc` are what the row protects; what refuses the grant is the row's own shape. On macOS the
   operator's own spelling is refused earlier still, by the symbolic-link check on an
   `[agent.filesystem]` entry, and `/private/etc` is the spelling that reaches this row.
-  `a_metadata_grant_on_etc_clears_one_row_at_a_time` pins both halves. Empty is the default, and it means the path's own existence
+  `when_etc_metadata_is_granted_then_floor_rows_are_cleared_individually` pins both halves. Empty is the default, and it means the path's own existence
   is protected. **Never subtract by anything broader than a cell.** The earlier floor subtracted by
   shape — it skipped every non-directory grant — and that is why a grant on a credential *file* was
   never judged. A case that needs more than a cell is a third `Match` variant.
@@ -96,8 +96,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known, and
   `validate_grant(path, operator_home, operation, scope)` judges one composed grant and reports a
   named-exactly credential store in its `bool`. Two lists in two crates was the divergence this merge removed,
-  and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
-  `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
+  and `when_pack_loader_credential_paths_are_checked_then_the_floor_covers_every_path` is the guard. One case table,
+  `when_forbidden_paths_are_evaluated_then_declared_refusals_and_rendered_rules_match`, pins every classification; a per-entry
   witness cannot see that `/Users` renders a home only because no credential entry sits under it.
 - **Render `resolved`, and render every other node a lookup traverses.** Three cells emit a
   `file-read-metadata` rule per node: `Exec`/`File` (because `claude` is a symlink and 873 of
@@ -189,7 +189,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   - **`forbidden_path_refusal` on the bare literal `/var` answers nothing**, because the row's anchor
     resolves to `/private/var`. A **grant** is still judged, because `require_bounded_grant` sees the
     resolved spelling — which is why
-    `a_grant_on_the_var_system_root_is_refused_beyond_the_cell_it_permits` asserts at the grant level
+    `when_var_is_granted_beyond_its_permitted_cell_then_it_is_refused` asserts at the grant level
     and not through the predicate.
   - **The rendered subpath is version-pinned, and a tzdata update reverts the defect until restart.**
     `/usr/share/zoneinfo` resolves to `/private/var/db/timezone/tz/<version>/zoneinfo`, so the profile
@@ -319,7 +319,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
         the `require_owned` rule declines to produce a vacuous pass.
         `the_inherited_mach_bootstrap_right_reaches_no_service` fails its own **uncontained control**:
         `com.apple.pasteboard.1` answers 1102 on a headless host, which is exactly why that control
-        exists, and why the template arranges an automatic login. `floors::tests::the_list_refuses_what_it_claims_and_renders_what_it_must`
+        exists, and why the template arranges an automatic login. `floors::tests::when_forbidden_paths_are_evaluated_then_declared_refusals_and_rendered_rules_match`
         fails on macOS 26 too. Nothing in any of the four logs mentions `graft` or `unbound`.
     - **The two now state a test of their own name**, which is Apple's own idiom — `/System/Library/
       Sandbox/Profiles` uses it for `system-fsctl`, `system-package-check`, `process-codesigning*`,
@@ -468,8 +468,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   ([the leaf discovery decision](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated)).
   `discovery_roots` empty is the agent posture below; `render_profile` suppresses the home
   existence-deny only where a discovery root is at or above the home spelling. The leaf tests pin it
-  (`a_discovery_root_opens_home_existence_and_metadata_but_a_credential_store_stays_refused` and
-  siblings), and `without_a_discovery_root_the_home_existence_deny_survives` pins the agent's. Two
+  (`when_discovery_covers_the_home_then_existence_and_metadata_open_but_credential_stores_stay_refused` and
+  siblings), and `when_no_discovery_root_is_granted_then_the_home_existence_deny_survives` pins the agent's. Two
   operations answer "does this path exist", and the default deny leaves both usable:
   `access(path, F_OK)` succeeds where the path is there, and `stat` reports `EPERM` where it is
   there against `ENOENT` where it is not. `(deny file-test-existence (subpath X))` moves
@@ -484,7 +484,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     its subtree, a metadata read and an open included.** That is why the scope is the operator's home
     and not the filesystem, why every grant needs the operation allowed back, and why no
     `AnyOverlap` row may opt a cell back in — a row that did would render a grant enforcing nothing.
-    `no_credential_row_lets_a_cell_through` is the guard; without it nothing went red.
+    `when_a_credential_floor_row_is_checked_then_no_cell_is_permitted` is the guard; without it nothing went red.
   - **The home answers to more than one name.** `/usr/share/firmlinks` maps `/Users` onto the data
     volume, so `/Users/x` and `/System/Volumes/Data/Users/x` are one directory with one inode. The
     operation matches the pre-resolution path, so a deny on the canonical spelling alone left the
@@ -500,7 +500,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `/System/Volumes/Data/System/Volumes/Data/…` is `ENOENT`. Two guards, and both were written after
     the review found the first pins tautological: `every_spelling_of_the_operator_home_answers_nothing`
     names the prefix literally rather than reading it back from the code under test, and
-    `a_forbidden_path_named_through_the_data_volume_is_refused` covers one credential row and one
+    `when_a_forbidden_path_uses_a_data_volume_spelling_then_it_is_refused` covers one credential row and one
     system row.
   - **Three parts in one block, and the order is the mechanism.** The home deny, then one allow per
     distinct granted path plus its ancestor chain, then the credential denies last.
@@ -590,10 +590,10 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   refusal: `ContainmentWarning::WritableAndExecutable` names the two grants, and
   `lifecycle.rs::an_exec_grant_inside_a_write_root_warns_and_applies_beneath_every_backend` pins
   that the warning fires and the grants still apply. That the agent never renders broad exec is
-  pinned by `seatbelt.rs::the_agent_profile_never_carries_broad_exec` (one `process-exec` rule per
+  pinned by `seatbelt.rs::when_the_agent_profile_is_rendered_then_it_never_grants_broad_exec` (one `process-exec` rule per
   grant, never `process-exec*`), and the leaf carve-out by
-  `a_leaf_carries_broad_exec_and_the_main_box_does_not` and
-  `broad_exec_adds_a_map_exec_allow_overriding_the_write_cell_deny`.
+  `when_leaf_and_main_box_profiles_are_rendered_then_only_the_leaf_grants_broad_exec` and
+  `when_broad_exec_is_granted_then_map_exec_overrides_the_write_cell_deny`.
 - **Every write cell denies `file-map-executable`, and that is the fourth deny. It closes a measured
   write-xor-exec violation.** Before it, a contained workload wrote a valid dynamic library into its
   own home and `dlopen`ed it — measured 2026-08-30 on macOS 26.6.2 arm64, 100,512 bytes loaded
@@ -802,8 +802,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
 denies `memfd_create`, all `execveat`, and all `pkey_mprotect` calls. The restriction filter denies
 `mmap` with `PROT_WRITE|PROT_EXEC` and `mprotect` with `PROT_EXEC`. Scope `mmap` to both bits or the
-loader breaks (`a_read_execute_mapping_is_still_permitted`,
-`route_three_write_then_execute_is_refused`).
+loader breaks (`when_a_mapping_requests_read_and_execute_then_it_is_permitted`,
+`when_route_three_writes_then_executes_then_execution_is_refused`).
 
 **W^X protects the `fs:*` enforcement point, not the kernel boundary.** It does not stop the workload
 running code of its own choosing. An exec view is safe only when no reachable program is
@@ -844,8 +844,8 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   the headers and two segments, never the whole file — `codex` is 297 MB.
 - A read root on a loader directory is bound executable, because a mount cannot separate
   `mmap(PROT_EXEC)` from `execve`; a dependency beneath a planned exec-capable tree is not bound
-  again. `a_read_root_on_a_loader_directory_is_bound_executable_and_read_only` and
-  `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
+  again. `when_a_read_root_covers_a_loader_directory_then_its_planned_bind_is_executable_and_read_only` and
+  `when_a_loader_directory_covers_a_dependency_then_the_dependency_is_not_planned_twice` pin both.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
   Namespace PID 1 forwards `SIGTERM` and `SIGINT`, stores the workload pid *before* installing the
   handlers, and reaps in a loop.
@@ -1018,7 +1018,7 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   throughput there is still unmeasured. `PR_SET_MDWE` is unavailable on 5.10.
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
-  `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.
+  `when_network_mode_is_blocked_then_no_route_remains` must assert loopback is unreachable.
 - **Nothing here refuses or detects root.** `facade.rs` and `floors.rs` judge paths and never the
   caller, and the one `geteuid` in the tree is a permitted-syscall table entry in
   `backend/linux/namespace/syscall.rs` rather than a check. **A Seatbelt `deny` binds root**,
@@ -1067,7 +1067,7 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     `/Users/<operator>` against a passwd home of `/var/root`, so all 15 credential rows matched
     nothing and a read root on the operator's `~/.aws` applied. Three things not to re-derive. The
     union is **additive**, which is the whole safety argument — replacing the anchor is the floor the
-    caller moves and is what `a_declared_home_never_replaces_the_passwd_anchor` refuses; measured
+    caller moves and is what `when_a_home_is_declared_then_it_adds_an_anchor_without_replacing_the_passwd_anchor` refuses; measured
     under the override, the profile rendered `(allow file-read* (subpath "<passwd home>/.ssh"))`. The
     floor cannot read `$HOME` for itself, because the trampoline is spawned with `env_clear()`. And
     the residual is caller honesty: a config stating no home gets the passwd anchor alone. Two guards

@@ -446,8 +446,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   a file, and a subpath for a directory. The **agent box has no broad-exec carve-out** and gets one
   rule per grant; a **leaf** renders `process-exec*` (macOS-only,
   [a leaf runs its whole toolchain](../../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds))
-  so it runs its whole toolchain, which `containment`'s `the_agent_profile_never_carries_broad_exec`
-  and `a_leaf_carries_broad_exec_and_the_main_box_does_not` pin.
+  so it runs its whole toolchain, which `containment`'s `when_the_agent_profile_is_rendered_then_it_never_grants_broad_exec`
+  and `when_leaf_and_main_box_profiles_are_rendered_then_only_the_leaf_grants_broad_exec` pin.
 
   **This is a macOS property, and Linux does not enforce it.** Seatbelt renders one `process-exec`
   literal per grant, so the exec set *is* the grant count. The namespace launcher renders no exec
@@ -456,7 +456,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   against 5 grants**, the extras being the ELF loader, seven mode-`0755` libraries, and the
   workload bound under both spellings. None can run workload-authored bytes, because W^X's
   `noexec` refuses the mapping, so it is a premise gap rather than a hole.
-  `containment`'s `view.rs::the_view_leaves_exactly_the_intended_paths_executable` bounds it, and
+  `containment`'s `view.rs::when_the_view_is_planned_then_only_the_intended_paths_are_marked_executable` bounds it, and
   narrowing it is deferred. Do not restate this bullet as a cross-platform guarantee.
 
   **A relative path with a separator is refused, because no directory is its root.** An absolute

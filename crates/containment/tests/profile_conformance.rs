@@ -1825,7 +1825,7 @@ fn every_credential_store_refuses_an_existence_test() {
     );
     // At least one per row per home spelling. Not exact, because a row whose anchor is a symlink
     // renders two paths rather than one, and `floors.rs` pins the exact name set against a fixture
-    // home in `the_existence_deny_covers_exactly_these_credential_stores`.
+    // home in `when_credential_existence_denials_are_rendered_then_the_exact_expected_stores_are_covered`.
     assert!(
         protected.len() >= 12 * homes.len(),
         "twelve rows across {} home spellings is at least {}, not {}",

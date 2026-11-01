@@ -15,7 +15,8 @@ fn mount_namespace_is_available() -> bool {
 }
 
 #[test]
-fn a_pinned_dependency_keeps_original_bytes_and_refuses_a_replacement() {
+fn when_a_pinned_dependency_is_replaced_then_original_bytes_are_kept_and_the_replacement_is_refused()
+ {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().canonicalize().unwrap().join("library");
     std::fs::write(&source, b"admitted bytes").unwrap();
@@ -88,7 +89,7 @@ fn refuses_ungranted(config: &ContainmentConfig, note: &Path) {
 }
 
 #[test]
-fn writable_image_cannot_name_an_ungranted_direct_dependency() {
+fn when_a_writable_image_names_an_ungranted_direct_dependency_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         assert_eq!(config.warnings().len(), 1);
@@ -102,7 +103,7 @@ fn writable_image_cannot_name_an_ungranted_direct_dependency() {
 }
 
 #[test]
-fn writable_image_cannot_search_an_ungranted_directory() {
+fn when_a_writable_image_searches_an_ungranted_directory_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         std::fs::write(
@@ -115,7 +116,7 @@ fn writable_image_cannot_search_an_ungranted_directory() {
 }
 
 #[test]
-fn writable_image_cannot_name_an_ungranted_interpreter() {
+fn when_a_writable_image_names_an_ungranted_interpreter_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         std::fs::write(
@@ -128,7 +129,7 @@ fn writable_image_cannot_name_an_ungranted_interpreter() {
 }
 
 #[test]
-fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
+fn when_a_writable_dependency_extends_a_read_only_program_reach_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         let library = planted_image(
@@ -149,7 +150,7 @@ fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
 }
 
 #[test]
-fn a_read_only_program_cannot_import_a_writable_dependency_links_target() {
+fn when_a_read_only_program_imports_a_writable_dependency_link_target_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         let library = program.parent().unwrap().join("libbuilt.so");
@@ -167,7 +168,7 @@ fn a_read_only_program_cannot_import_a_writable_dependency_links_target() {
 }
 
 #[test]
-fn a_writable_parent_in_a_dependency_link_chain_cannot_import_operator_bytes() {
+fn when_a_dependency_link_chain_has_a_writable_parent_then_it_cannot_import_operator_bytes() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         let hop = program.parent().unwrap().join("hop");
@@ -187,7 +188,7 @@ fn a_writable_parent_in_a_dependency_link_chain_cannot_import_operator_bytes() {
 }
 
 #[test]
-fn writable_rpath_cannot_extend_a_read_only_dependency() {
+fn when_writable_rpath_extends_a_read_only_dependency_then_it_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         let library = planted_image(
@@ -213,7 +214,7 @@ fn writable_rpath_cannot_extend_a_read_only_dependency() {
 }
 
 #[test]
-fn a_dependency_symlink_inside_a_write_grant_does_not_authorize_its_target() {
+fn when_a_dependency_symlink_is_inside_a_write_grant_then_its_target_is_not_authorized() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
         let link = program.parent().unwrap().join("libnote.so");
@@ -228,7 +229,7 @@ fn a_dependency_symlink_inside_a_write_grant_does_not_authorize_its_target() {
 }
 
 #[test]
-fn a_replaceable_image_parent_cannot_supply_ungranted_dependencies() {
+fn when_an_image_parent_can_be_replaced_then_it_cannot_supply_ungranted_dependencies() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (directory, program, note, config) = fixture();
         let parent = program.parent().unwrap();
@@ -258,7 +259,7 @@ fn a_replaceable_image_parent_cannot_supply_ungranted_dependencies() {
 }
 
 #[test]
-fn metadata_and_directory_entries_do_not_authorize_dependency_bytes() {
+fn when_only_metadata_or_directory_entries_are_granted_then_dependency_bytes_are_not_authorized() {
     super::super::super::failure_tests::in_fresh_process(|| {
         for (operation, scope) in [
             (Operation::Metadata, Scope::Root),
@@ -282,7 +283,7 @@ fn metadata_and_directory_entries_do_not_authorize_dependency_bytes() {
 }
 
 #[test]
-fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
+fn when_a_loader_directory_is_a_symlink_then_it_does_not_authorize_operator_bytes() {
     super::super::super::failure_tests::in_fresh_process(|| {
         if !mount_namespace_is_available() {
             return;
@@ -312,7 +313,7 @@ fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
 }
 
 #[test]
-fn stated_byte_grants_admit_dependency_bytes() {
+fn when_dependency_bytes_have_explicit_grants_then_they_are_admitted() {
     super::super::super::failure_tests::in_fresh_process(|| {
         if !mount_namespace_is_available() {
             return;
@@ -349,7 +350,7 @@ fn stated_byte_grants_admit_dependency_bytes() {
 }
 
 #[test]
-fn dependency_mounts_refuse_leaf_or_parent_replacement() {
+fn when_a_dependency_leaf_or_parent_is_replaced_then_its_mount_is_refused() {
     super::super::super::failure_tests::in_fresh_process(|| {
         if !mount_namespace_is_available() {
             return;
@@ -397,7 +398,7 @@ fn dependency_mounts_refuse_leaf_or_parent_replacement() {
 }
 
 #[test]
-fn concurrent_dependency_replacement_never_changes_the_mounted_bytes() {
+fn when_dependency_replacement_is_concurrent_then_mounted_bytes_never_change() {
     super::super::super::failure_tests::in_fresh_process(|| {
         if !mount_namespace_is_available() {
             return;
@@ -506,7 +507,7 @@ fn race_dependency_replacement(parent: bool) {
 }
 
 #[test]
-fn startup_groups_missing_reads_across_executables_without_inspecting_them() {
+fn when_multiple_executables_lack_read_grants_then_startup_groups_them_without_inspection() {
     let (_directory, program, note, config) = fixture();
     let hidden = planted_image(note.parent().unwrap(), "hidden", b"private bytes");
     std::fs::write(
@@ -544,7 +545,7 @@ fn startup_groups_missing_reads_across_executables_without_inspecting_them() {
 }
 
 #[test]
-fn an_explicitly_denied_dependency_is_not_offered_as_a_read_grant() {
+fn when_a_dependency_is_explicitly_denied_then_no_read_grant_is_suggested() {
     let (_directory, program, note, config) = fixture();
     std::fs::write(
         &program,
@@ -560,7 +561,7 @@ fn an_explicitly_denied_dependency_is_not_offered_as_a_read_grant() {
 }
 
 #[test]
-fn a_writable_hard_link_restricts_an_image_selected_through_another_path() {
+fn when_an_image_has_a_writable_hard_link_then_selection_through_another_path_remains_restricted() {
     let (_directory, program, note, config) = fixture();
     let installed = planted_image(
         note.parent().unwrap(),

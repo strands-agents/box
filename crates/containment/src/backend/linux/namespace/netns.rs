@@ -209,7 +209,8 @@ mod tests {
     /// The whole transport claim, in one test: a listener created inside a fresh network namespace
     /// is accepted on from *outside* that namespace, while the namespace itself has no other route.
     #[test]
-    fn a_listener_made_inside_a_netns_is_accepted_from_outside_it() {
+    fn when_a_listener_is_created_inside_a_network_namespace_then_connections_from_outside_are_accepted()
+     {
         if !super::super::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;

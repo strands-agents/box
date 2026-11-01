@@ -440,7 +440,8 @@ pub(crate) mod tests {
     /// The walk follows `@rpath` through `@loader_path`, recurses into each image, and names no
     /// system image.
     #[test]
-    fn the_closure_follows_rpath_transitively_and_skips_the_shared_cache() {
+    fn when_an_image_uses_rpath_then_dependencies_are_followed_transitively_without_shared_cache_entries()
+     {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -475,7 +476,7 @@ pub(crate) mod tests {
     /// An executable run-path entry expands `@loader_path` against the executable's own directory,
     /// not against the directory of the image whose load is being resolved.
     #[test]
-    fn an_executable_run_path_expands_against_the_executable() {
+    fn when_a_run_path_uses_executable_path_then_it_expands_against_the_executable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -501,7 +502,7 @@ pub(crate) mod tests {
     /// A run-path entry spelled exactly `@loader_path`, with no trailing slash, names the directory
     /// of the image that carries it.
     #[test]
-    fn a_bare_loader_path_run_path_expands_to_the_owner_directory() {
+    fn when_a_run_path_is_bare_loader_path_then_it_expands_to_the_owner_directory() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -524,7 +525,7 @@ pub(crate) mod tests {
     /// A run-path entry spelled exactly `@executable_path`, with no trailing slash, names the
     /// directory of the executable rather than the directory of the image that carries the entry.
     #[test]
-    fn a_bare_executable_path_run_path_expands_to_the_executable_directory() {
+    fn when_a_run_path_is_bare_executable_path_then_it_expands_to_the_executable_directory() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -547,7 +548,7 @@ pub(crate) mod tests {
     /// A candidate that names a directory is not a resolution, so the walk takes the next run-path
     /// entry and the directory never enters the closure.
     #[test]
-    fn a_bare_run_path_candidate_that_is_a_directory_is_not_a_resolution() {
+    fn when_a_bare_run_path_candidate_is_a_directory_then_it_does_not_resolve_the_image() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -578,7 +579,7 @@ pub(crate) mod tests {
 
     /// A bare run-path entry that holds no candidate refuses the image by name, rather than drop it.
     #[test]
-    fn a_bare_run_path_entry_that_resolves_to_nothing_refuses_the_image() {
+    fn when_a_bare_run_path_entry_resolves_to_nothing_then_the_image_is_refused() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -601,7 +602,7 @@ pub(crate) mod tests {
 
     /// A strong load that resolves to nothing is refused by name rather than left for dyld.
     #[test]
-    fn an_unresolved_strong_load_is_refused_by_name() {
+    fn when_a_strong_load_cannot_be_resolved_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -623,7 +624,7 @@ pub(crate) mod tests {
 
     /// A script, a static binary, or a truncated file loads nothing and refuses nothing.
     #[test]
-    fn a_non_macho_file_loads_nothing() {
+    fn when_a_file_is_not_macho_then_it_loads_no_images() {
         let directory = tempfile::tempdir().expect("tempdir");
         for (name, bytes) in [
             ("script", b"#!/bin/sh\n".to_vec()),
@@ -644,7 +645,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn writable_chains_report_siblings_and_stop_before_unreadable_children() {
+    fn when_a_dependency_chain_is_writable_then_siblings_are_reported_and_unreadable_children_stop_the_walk()
+     {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let hidden = planted_image(&root, "outside/hidden", b"private marker");
@@ -692,7 +694,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_read_grant_on_an_intermediate_image_does_not_reset_writable_provenance() {
+    fn when_an_intermediate_image_has_a_read_grant_then_writable_provenance_is_preserved() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -717,7 +719,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn non_read_cells_cannot_authorize_macos_dependency_contents() {
+    fn when_a_cell_does_not_grant_read_then_it_cannot_authorize_dependency_contents() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -762,7 +764,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_explicit_deny_never_produces_a_read_file_suggestion() {
+    fn when_a_dependency_is_explicitly_denied_then_no_read_file_suggestion_is_produced() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -785,7 +787,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn writable_link_routes_cannot_import_ungranted_contents() {
+    fn when_a_link_route_is_writable_then_it_cannot_import_ungranted_contents() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -819,7 +821,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_replacement_symlink_is_never_opened_as_a_canonical_image() {
+    fn when_a_canonical_image_is_replaced_by_a_symlink_then_the_link_is_not_opened() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -831,7 +833,7 @@ pub(crate) mod tests {
         assert!(open_image(&ancestor.join("note")).is_err());
     }
     #[test]
-    fn a_prior_unrestricted_visit_does_not_hide_a_restricted_branch() {
+    fn when_an_image_was_visited_without_restriction_then_a_restricted_branch_is_still_checked() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = planted_image(&root, "outside/note", b"private bytes");
@@ -871,7 +873,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn missing_weak_images_are_optional_but_present_weak_images_need_read_access() {
+    fn when_a_weak_image_is_missing_then_it_is_optional_but_present_images_require_read_access() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let leaf = root.join("optional");

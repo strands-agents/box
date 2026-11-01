@@ -1054,7 +1054,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_escaping_rejects_injection_and_escapes_quotes() {
+    fn when_a_path_contains_profile_syntax_then_injection_is_rejected_and_quotes_are_escaped() {
         assert_eq!(
             escaped(std::path::Path::new("/tmp/a\\b\"c")).unwrap(),
             "/tmp/a\\\\b\\\"c"
@@ -1067,7 +1067,7 @@ mod tests {
     /// Read and write on one tree is two grants, and they must arrive as one group carrying both
     /// operations. Two scopes on one path, or one operation twice, is refused.
     #[test]
-    fn grouping_folds_one_path_into_one_rule_set() {
+    fn when_rules_share_a_path_then_they_are_grouped_into_one_rule_set() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().canonicalize().expect("canonical");
 
@@ -1109,7 +1109,7 @@ mod tests {
     /// It used to be refused, because the one write block also read. Each cell renders alone now, so
     /// the two are independent and the kernel takes the union.
     #[test]
-    fn a_write_root_renders_without_a_read_root() {
+    fn when_only_write_is_granted_then_the_profile_contains_no_read_root() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         // The program sits OUTSIDE the write root, or the conflict guard refuses the pair: a path
@@ -1157,7 +1157,7 @@ mod tests {
     /// **A regular file behind an inherited stream renders one metadata rule, before every
     /// refusal, and the plain render carries none.**
     #[test]
-    fn an_inherited_file_stream_renders_one_metadata_rule_before_the_refusals() {
+    fn when_an_inherited_stream_is_a_file_then_one_metadata_rule_precedes_refusals() {
         use std::os::fd::AsRawFd as _;
         let (_temp, base, config) = stream_fixture();
         let redirected = base.join("agent.out");
@@ -1191,7 +1191,7 @@ mod tests {
 
     /// **A pipe behind a stream renders nothing, because Seatbelt never path-checks one.**
     #[test]
-    fn a_pipe_behind_a_stream_renders_no_rule() {
+    fn when_an_inherited_stream_is_a_pipe_then_it_adds_no_rule() {
         let (_temp, _base, config) = stream_fixture();
         let mut ends = [0 as libc::c_int; 2];
         // SAFETY: `ends` holds the two descriptors `pipe` writes.
@@ -1210,7 +1210,7 @@ mod tests {
 
     /// **A stream path the profile cannot spell is refused rather than rendered.**
     #[test]
-    fn a_stream_path_the_profile_cannot_spell_is_refused() {
+    fn when_a_stream_path_cannot_be_spelled_in_the_profile_then_it_is_refused() {
         use std::os::fd::AsRawFd as _;
         let (_temp, base, config) = stream_fixture();
         let redirected = base.join("agent\n(allow default).out");
@@ -1244,7 +1244,7 @@ mod tests {
 
     /// **A stream adds one `file-read-metadata` to the census and nothing else.**
     #[test]
-    fn a_stream_adds_one_metadata_operation_and_nothing_else() {
+    fn when_a_file_stream_is_inherited_then_it_adds_only_one_metadata_operation() {
         use std::os::fd::AsRawFd as _;
         let (_temp, base, config) = stream_fixture();
         let file = std::fs::File::create(base.join("agent.out")).expect("redirect target");
@@ -1261,7 +1261,7 @@ mod tests {
     /// **A stream inside a credential store renders no rule, because the floor judges it as it
     /// judges a grant.**
     #[test]
-    fn a_stream_inside_a_credential_store_renders_no_rule() {
+    fn when_a_stream_is_inside_a_credential_store_then_it_adds_no_rule() {
         use std::os::fd::AsRawFd as _;
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
@@ -1285,7 +1285,8 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_exception_restores_existence_only_after_the_store_deny() {
+    fn when_a_credential_exception_is_rendered_then_it_restores_only_existence_after_the_store_deny()
+     {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -1322,7 +1323,7 @@ mod tests {
     /// metadata after that deny, so a leaf the operator let read the named credentials can still
     /// `stat` and `open` them rather than losing metadata to last-match.
     #[test]
-    fn a_granted_credential_store_keeps_metadata_under_discovery() {
+    fn when_a_credential_store_is_granted_then_metadata_stays_under_discovery() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -1364,7 +1365,7 @@ mod tests {
 
     /// **The operator home keeps its existence-deny and receives no broad metadata allow.**
     #[test]
-    fn the_home_keeps_its_existence_deny_and_grants_no_broad_metadata() {
+    fn when_the_home_is_rendered_then_existence_is_denied_without_broad_metadata_access() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -1398,7 +1399,7 @@ mod tests {
     /// **An exec literal renders its out-of-cache dylibs as read-file cells**: `file-read*` on each
     /// image's identity, nothing for a shared-cache image, and no `process-exec` on any image.
     #[test]
-    fn an_exec_literal_renders_its_out_of_cache_dylibs_as_read_files() {
+    fn when_an_exec_literal_loads_dylibs_outside_the_cache_then_they_are_rendered_as_read_files() {
         use crate::backend::macos::macho::tests::{planted_image, synthetic_macho};
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
@@ -1441,7 +1442,7 @@ mod tests {
     /// **An exec literal whose image the floor refuses fails the render**, so a forbidden image
     /// never becomes a read rule.
     #[test]
-    fn an_exec_literal_whose_image_the_floor_refuses_fails_the_render() {
+    fn when_the_floor_refuses_an_exec_image_then_profile_rendering_fails() {
         use crate::backend::macos::macho::tests::{planted_image, synthetic_macho};
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
@@ -1474,7 +1475,7 @@ mod tests {
     /// `file-read*` on its identity and metadata on the requested spelling, and no `file-read*` on
     /// the directory.
     #[test]
-    fn an_image_requested_through_a_linked_directory_renders_metadata_on_the_link() {
+    fn when_an_image_uses_a_linked_directory_then_the_profile_grants_metadata_on_the_link() {
         use crate::backend::macos::macho::tests::{planted_image, synthetic_macho};
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
@@ -1524,7 +1525,7 @@ mod tests {
     /// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); this
     /// pins that the agent never does.
     #[test]
-    fn the_agent_profile_never_carries_broad_exec() {
+    fn when_the_agent_profile_is_rendered_then_it_never_grants_broad_exec() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let agent = home_path.join("agent");
@@ -1591,7 +1592,7 @@ mod tests {
     /// `allow_broad_exec`, adds `(allow process-exec*)`; without it, the agent keeps its enumerated
     /// literal. Broad exec is additive — the enumerated literal is present in both.
     #[test]
-    fn a_leaf_carries_broad_exec_and_the_main_box_does_not() {
+    fn when_leaf_and_main_box_profiles_are_rendered_then_only_the_leaf_grants_broad_exec() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -1634,7 +1635,7 @@ mod tests {
     /// `file-map-executable` deny still renders; the leaf overlay adds an allow AFTER it, so a build
     /// loads what it compiles. The agent carries the deny and no allow (write-xor-execute).
     #[test]
-    fn broad_exec_adds_a_map_exec_allow_overriding_the_write_cell_deny() {
+    fn when_broad_exec_is_granted_then_map_exec_overrides_the_write_cell_deny() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -1678,7 +1679,7 @@ mod tests {
     /// **Broad exec maps executable only over writable grants.** One allow per write grant, a
     /// `subpath` for a root and a `literal` for a file, and none over a read root or the program.
     #[test]
-    fn broad_exec_map_exec_allow_names_only_write_grants() {
+    fn when_broad_exec_adds_map_exec_then_the_allow_names_only_write_grants() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -1731,7 +1732,7 @@ mod tests {
     /// **A refused tree inside a leaf's write root stays unexecutable.** The refusal's exec and
     /// map-exec denies render after the broad-exec overlay, so the overlay cannot re-open them.
     #[test]
-    fn broad_exec_refused_tree_inside_a_write_root_stays_unexecutable() {
+    fn when_a_refused_tree_is_inside_a_broad_exec_write_root_then_it_stays_unexecutable() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -1781,7 +1782,7 @@ mod tests {
     /// **A write root inside a read root renders the read subpath on the outer root and the write
     /// leaves on the inner one.**
     #[test]
-    fn a_write_root_inside_a_read_root_renders_both_roots() {
+    fn when_a_write_root_is_inside_a_read_root_then_both_roots_are_rendered() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let agent = home_path.join("agent");
@@ -1818,7 +1819,8 @@ mod tests {
     }
 
     #[test]
-    fn a_discovery_root_opens_home_existence_and_metadata_but_a_credential_store_stays_refused() {
+    fn when_discovery_covers_the_home_then_existence_and_metadata_open_but_credential_stores_stay_refused()
+     {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -1893,7 +1895,8 @@ mod tests {
     /// denied), but a path a grant already names beneath it — the CA trust bundle, the box home —
     /// keeps existence AND metadata, while an ungranted sibling-box path stays refused.
     #[test]
-    fn discovery_excludes_the_box_state_tree_but_a_granted_path_beneath_it_survives() {
+    fn when_discovery_covers_box_state_then_the_state_tree_is_excluded_but_explicit_descendants_survive()
+     {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let boxes = home_path.join(".strands-box/b");
@@ -1996,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_discovery_root_the_home_existence_deny_survives() {
+    fn when_no_discovery_root_is_granted_then_the_home_existence_deny_survives() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -2028,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn a_child_discovery_root_does_not_open_the_whole_home() {
+    fn when_discovery_covers_a_child_directory_then_it_does_not_open_the_whole_home() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -2070,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_opens_the_data_volume_spelling_of_the_home() {
+    fn when_discovery_covers_the_home_then_its_data_volume_spelling_is_opened() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -2100,7 +2103,7 @@ mod tests {
 
     /// **Discovery keeps a credential store's metadata denied on the data-volume spelling too.**
     #[test]
-    fn discovery_denies_credential_store_metadata_on_the_data_volume_twin() {
+    fn when_discovery_covers_a_credential_store_twin_then_its_metadata_is_denied() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -2134,7 +2137,7 @@ mod tests {
     /// **A refused tree stays opaque under discovery.** Its existence and metadata denies render
     /// after the discovery allows over the home, so discovery cannot re-open them.
     #[test]
-    fn a_refused_tree_stays_opaque_under_discovery() {
+    fn when_discovery_covers_a_refused_tree_then_the_tree_stays_opaque() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let program = home_path.join("agent");
@@ -2166,7 +2169,8 @@ mod tests {
     }
 
     #[test]
-    fn a_write_protection_subtracts_write_and_hard_link_after_the_write_root() {
+    fn when_a_write_protection_is_rendered_then_write_and_hard_link_are_subtracted_after_the_write_root()
+     {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2274,7 +2278,7 @@ mod tests {
 
     /// **A refusal renders its data-volume spelling beside its own, after every allow.**
     #[test]
-    fn a_refusal_renders_its_data_volume_spelling_after_every_allow() {
+    fn when_a_refusal_has_a_data_volume_spelling_then_it_is_rendered_after_every_allow() {
         let (_temp, _root, config) = refusal_fixture();
         let profile = render_profile(&config).expect("profile");
         let last_allow = profile.rfind("(allow ").expect("an allow renders");
@@ -2302,7 +2306,7 @@ mod tests {
     /// same literal pair the root carries on itself, after the root's last leaf allow, and touches
     /// neither the root, nor anything above it, nor the refused path, nor a sibling directory.
     #[test]
-    fn a_refusal_inside_a_write_root_fixes_its_ancestors() {
+    fn when_a_refusal_is_inside_a_write_root_then_its_ancestors_are_fixed() {
         let (_temp, root, config) = refusal_fixture();
         let profile = render_profile(&config).expect("profile");
 
@@ -2387,7 +2391,7 @@ mod tests {
     /// **A refusal directly under a write root adds no rule**, because its parent is the root, and
     /// **a refusal outside every write root adds none**, because no write cell reaches its parent.
     #[test]
-    fn a_refusal_at_the_root_or_outside_every_write_root_fixes_nothing() {
+    fn when_a_refusal_is_at_the_root_or_outside_write_roots_then_no_ancestors_are_fixed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2437,7 +2441,7 @@ mod tests {
     /// **Shared ancestors render one pair**, whether two refusals share them, a refusal and a write
     /// protection share them, or a second write root sits beside the first.
     #[test]
-    fn shared_ancestors_of_refusals_and_protections_render_one_pair() {
+    fn when_refusals_and_protections_share_ancestors_then_one_rule_pair_is_rendered() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2512,7 +2516,7 @@ mod tests {
     /// ancestor for the outer root, renders its identity pair again after the outer root's leaf
     /// allows, so its identity holds whatever order the grants were stated in.
     #[test]
-    fn nested_write_roots_are_refused_by_the_floor_and_bounded_by_the_renderer() {
+    fn when_write_roots_are_nested_then_the_floor_refuses_them_and_the_renderer_bounds_them() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2578,7 +2582,7 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_requirement_remains_inspectable_after_profile_apply() {
+    fn when_the_profile_is_applied_then_identity_requirements_remain_inspectable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2612,7 +2616,7 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_lookup_remains_narrow_after_a_directory_refusal() {
+    fn when_a_directory_is_refused_then_identity_lookup_remains_narrow() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = temp.path().canonicalize().expect("canonical");
         let program = base.join("agent");
@@ -2691,7 +2695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_move_during_profile_apply_is_refused_before_exec() {
+    fn when_a_path_moves_during_profile_apply_then_it_is_refused_before_exec() {
         for write_protected in [false, true] {
             let temp = tempfile::tempdir().expect("tempdir");
             let base = temp.path().canonicalize().expect("canonical");
@@ -2735,7 +2739,7 @@ mod tests {
     /// there.
     #[cfg(target_os = "macos")]
     #[test]
-    fn support_info_names_seatbelt() {
+    fn when_support_info_is_requested_then_it_names_seatbelt() {
         let info = SeatbeltBackend::new().support_info();
         assert_eq!(info.platform, Platform::MacOS);
         assert_eq!(info.mechanism, MECHANISM);

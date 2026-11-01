@@ -719,7 +719,7 @@ mod tests {
     /// Every entry states its rule and nothing else, so this is the only place the semantics are
     /// pinned. The last two cases are the pair that no single rule can express.
     #[test]
-    fn the_match_rules_are_what_they_say() {
+    fn when_floor_match_rules_are_evaluated_then_each_matches_its_declared_scope() {
         let exact = Forbidden::exact("/a", ForbiddenClass::SystemTree);
         let overlap = Forbidden::overlap("/a", ForbiddenClass::CredentialStore);
         let a = Path::new("/a");
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_credential_exception_clears_only_its_operation() {
+    fn when_a_credential_exception_is_exact_then_it_clears_only_its_operation() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_descendant_inherits_a_root_exception_but_an_alias_does_not() {
+    fn when_an_exact_descendant_uses_a_root_exception_then_it_inherits_it_but_an_alias_does_not() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn the_same_store_kind_under_two_homes_is_not_the_same_store() {
+    fn when_one_store_kind_exists_under_two_homes_then_the_stores_remain_distinct() {
         let declared = tempfile::tempdir().expect("a declared home");
         let declared = declared.path().canonicalize().expect("the home resolves");
         let passwd = super::operator_home().expect("the passwd home");
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_exception_cannot_cover_a_symlink_from_another_store() {
+    fn when_a_symlink_comes_from_another_store_then_a_direct_exception_does_not_cover_it() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let aws = home_path.join(".aws");
@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn a_system_tree_cannot_receive_a_credential_exception() {
+    fn when_a_path_is_a_system_tree_then_it_cannot_receive_a_credential_exception() {
         let error = crate::config::ContainmentConfig::new()
             .allow_credential_store("/etc", Operation::Read, Scope::Root)
             .expect_err("a system tree is not a credential store");
@@ -876,7 +876,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn direct_credential_write_requires_the_same_read_grant_on_linux() {
+    fn when_linux_receives_a_direct_credential_write_then_the_same_read_grant_is_required() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let cache = home_path.join(".aws/sso/cache");
@@ -903,7 +903,7 @@ mod tests {
     /// caller is told rather than stopped. Every other floor is unchanged, and the pair is counted
     /// once however many spellings reach it.
     #[test]
-    fn execute_and_write_on_one_path_warn_and_clear_every_floor() {
+    fn when_execute_and_write_share_one_path_then_they_warn_and_clear_every_floor() {
         use super::ContainmentWarning::WritableAndExecutable;
 
         let directory = tempfile::tempdir().expect("a directory");
@@ -995,7 +995,7 @@ mod tests {
     /// **A write root inside a read root clears every floor.** The inner grant states the one
     /// writable corner of a read-only tree.
     #[test]
-    fn a_write_root_inside_a_read_root_clears_every_floor() {
+    fn when_a_write_root_is_inside_a_read_root_then_every_floor_is_cleared() {
         let directory = tempfile::tempdir().expect("a directory");
         let project = directory
             .path()
@@ -1015,7 +1015,7 @@ mod tests {
     /// **One grant clears the floors on its own**, and the caller learns whether it named a
     /// credential store exactly.
     #[test]
-    fn one_grant_clears_the_floors_and_reports_a_credential_store() {
+    fn when_one_grant_clears_the_floors_then_its_credential_store_is_reported() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let project = home_path.join("project");
@@ -1060,7 +1060,7 @@ mod tests {
 
     /// **A grant on a path that does not exist yet still reports a credential store.**
     #[test]
-    fn an_absent_grant_path_reports_its_store_without_a_live_identity() {
+    fn when_a_grant_path_is_absent_then_its_store_is_reported_without_live_identity() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
 
@@ -1090,7 +1090,7 @@ mod tests {
     /// scope**: the privilege configuration beneath it is never reachable through a root grant, so
     /// a root permit on the row would promise reach that does not exist.
     #[test]
-    fn a_metadata_grant_on_etc_clears_one_row_at_a_time() {
+    fn when_etc_metadata_is_granted_then_floor_rows_are_cleared_individually() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
 
@@ -1122,7 +1122,7 @@ mod tests {
     /// **An exec tree holding a program that changes identity is refused**, and the refusal names
     /// the file. The control is the same tree before the bit is set.
     #[test]
-    fn an_execute_tree_holding_an_identity_changing_program_is_refused() {
+    fn when_an_exec_tree_contains_an_identity_changing_program_then_it_is_refused() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let directory = tempfile::tempdir().expect("a directory");
@@ -1158,7 +1158,7 @@ mod tests {
     ///
     /// The control runs first on the same path, and each case asserts the bit survived the `chmod`.
     #[test]
-    fn an_execute_grant_that_changes_identity_is_refused() {
+    fn when_an_exec_grant_can_change_identity_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let directory = tempfile::tempdir().expect("a directory");
@@ -1201,7 +1201,7 @@ mod tests {
 
     /// **What the list does to a path.** One table, so the entries are read together.
     #[test]
-    fn the_list_refuses_what_it_claims_and_renders_what_it_must() {
+    fn when_forbidden_paths_are_evaluated_then_declared_refusals_and_rendered_rules_match() {
         let must_refuse = [
             ("/usr", Scope::Root),
             ("/usr", Scope::Dir),
@@ -1268,7 +1268,7 @@ mod tests {
 
     /// An anchor's spelling matches its kind, so no entry means the wrong path.
     #[test]
-    fn every_anchor_is_spelled_for_its_kind() {
+    fn when_anchors_are_rendered_then_each_uses_the_spelling_for_its_kind() {
         for entry in forbidden_paths() {
             let anchor = entry.anchor.as_str();
             assert!(!anchor.contains(".."), "{anchor} traverses upward");
@@ -1288,7 +1288,7 @@ mod tests {
     /// The box held this list, so a path present there and absent here is a floor lost in the
     /// merge. It is checked through the authoring-time predicate the box now calls.
     #[test]
-    fn the_floor_covers_every_credential_path_the_pack_loader_held() {
+    fn when_pack_loader_credential_paths_are_checked_then_the_floor_covers_every_path() {
         for relative in [
             ".aws",
             ".ssh",
@@ -1328,7 +1328,7 @@ mod tests {
     /// lacked. The three groups below are what each list carried, and dropping any entry is a
     /// silent widening on at least one platform.
     #[test]
-    fn the_shared_floor_covers_what_each_backend_refused_separately() {
+    fn when_backend_refusals_are_compared_then_the_shared_floor_covers_them() {
         let shared = absolute_entries();
 
         let both = [
@@ -1415,7 +1415,7 @@ mod tests {
 
     /// A file inside a system tree stays grantable, because that entry names one path.
     #[test]
-    fn the_floor_names_roots_and_not_prefixes() {
+    fn when_a_path_shares_a_forbidden_prefix_then_only_actual_roots_are_matched() {
         for root in absolute_entries() {
             assert!(
                 !root.ends_with('/') || root == "/",
@@ -1432,7 +1432,7 @@ mod tests {
     /// resolves to `/private/var`, so only the resolved spelling matches a row.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_grant_on_the_var_system_root_is_refused_beyond_the_cell_it_permits() {
+    fn when_var_is_granted_beyond_its_permitted_cell_then_it_is_refused() {
         let homes = [PathBuf::from("/Users/fixture")];
         for spelling in ["/var", "/private/var"] {
             for (operation, scope) in [
@@ -1460,7 +1460,7 @@ mod tests {
     /// **A loader directory reads as a tree, and nothing wider.** Every process maps code from it,
     /// so the runtime minimum grants it; a write, an exec, or an entry-only read there stays refused.
     #[test]
-    fn a_loader_directory_reads_as_a_tree_and_nothing_wider() {
+    fn when_a_loader_directory_is_granted_then_it_reads_as_a_tree_and_nothing_wider() {
         let homes = [PathBuf::from(HOME)];
         for spelling in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
             // A grant carries its canonical identity, and so does each row's anchor.
@@ -1499,7 +1499,7 @@ mod tests {
 
     /// The second anchor name refuses no cell the box's floor or an `[agent] read` entry grants.
     #[test]
-    fn the_second_anchor_name_refuses_no_cell_a_pack_grants() {
+    fn when_an_anchor_has_a_second_name_then_pack_grants_are_not_newly_refused() {
         for (path, operation, scope) in [
             ("/", Operation::Read, Scope::Dir),
             ("/etc", Operation::Metadata, Scope::Dir),
@@ -1537,7 +1537,7 @@ mod tests {
     /// Judged lexically against a fixture home, so it runs on every host: the data volume's names
     /// exist only on macOS, and `PathGrant::new` refuses a path that is not there.
     #[test]
-    fn a_forbidden_path_named_through_the_data_volume_is_refused() {
+    fn when_a_forbidden_path_uses_a_data_volume_spelling_then_it_is_refused() {
         let homes = [PathBuf::from("/fixture-home")];
         let through_the_data_volume = |path: &str| -> PathBuf {
             Path::new(DATA_VOLUME_ROOT).join(path.strip_prefix('/').expect("absolute"))
@@ -1569,7 +1569,7 @@ mod tests {
     /// and these names exist on no other platform.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_real_grant_named_through_the_data_volume_is_refused() {
+    fn when_a_real_grant_uses_a_forbidden_data_volume_spelling_then_it_is_refused() {
         let spellings = super::operator_home_spellings(None).expect("home spellings");
         let canonical = spellings.first().expect("a canonical spelling");
         // Both present on every macOS install, so these pin the rule rather than the host.
@@ -1599,7 +1599,7 @@ mod tests {
     /// every node, so a node this floor never judged would disclose a credential file's existence
     /// and mode. The grant's own two ends are outside every row; only a middle node is inside one.
     #[test]
-    fn a_chain_node_inside_a_credential_store_is_refused() {
+    fn when_an_interpreter_chain_node_is_inside_a_credential_store_then_it_is_refused() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical tempdir");
         let home = root.join("home");
@@ -1638,10 +1638,10 @@ mod tests {
 
     /// **The exemption clears the operator's own store and no other row, judged where a grant meets
     /// it.** `require_bounded_grant` reads `is_exemptible`, so a row retyped to `CredentialStore`
-    /// becomes exemptible; `only_a_credential_store_row_is_exemptible` reads the table and this reads
+    /// becomes exemptible; `when_a_floor_row_is_exempted_then_it_must_be_a_credential_store_row` reads the table and this reads
     /// the refusal, because a green table says nothing about what the gate does with the flag set.
     #[test]
-    fn the_exemption_clears_no_row_the_operator_does_not_own() {
+    fn when_the_operator_does_not_own_a_floor_row_then_an_exemption_cannot_clear_it() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
 
@@ -1706,7 +1706,7 @@ mod tests {
     /// This is the divergence the declared home closes: the box resolves `~/.aws` against `$HOME`,
     /// and under `sudo -E` that is the invoking user's home while `passwd(getuid())` is root's.
     #[test]
-    fn every_anchor_protects_its_own_home() {
+    fn when_multiple_home_anchors_exist_then_each_protects_its_own_home() {
         const OTHER: &str = "/Users/elsewhere";
         let homes = [PathBuf::from(HOME), PathBuf::from(OTHER)];
         for home in [HOME, OTHER] {
@@ -1736,7 +1736,7 @@ mod tests {
     /// grantable. These hold a password hash, and DAC is the only thing refusing an authored grant
     /// on one — which is nothing at `euid` 0.
     #[test]
-    fn the_system_password_database_is_never_grantable() {
+    fn when_the_system_password_database_is_granted_then_it_is_refused() {
         let homes = [PathBuf::from("/fixture-home")];
         // A real grant reaches the floor canonicalized, so judge the identity rather than the
         // spelling an operator typed. An absent path keeps its own name, which is the Linux rows.
@@ -1783,7 +1783,7 @@ mod tests {
     /// `AnyOverlap` so the descendants go with them, and this test is what tells the two rules apart —
     /// switching any row here to `ExactPath` leaves every assertion below failing.
     #[test]
-    fn a_machine_credential_store_refuses_a_grant_inside_it() {
+    fn when_a_grant_is_inside_a_machine_credential_store_then_it_is_refused() {
         let homes = [PathBuf::from("/fixture-home")];
         // Each row's anchor is resolved before the comparison, so a descendant is spelled the way a
         // canonicalized grant arrives: under `/private` where the ancestor is a symlink, and as
@@ -1827,7 +1827,7 @@ mod tests {
 
     /// No `AnyOverlap` row lets a cell through, and the existence deny depends on it.
     #[test]
-    fn no_credential_row_lets_a_cell_through() {
+    fn when_a_credential_floor_row_is_checked_then_no_cell_is_permitted() {
         for entry in forbidden_paths()
             .iter()
             .filter(|entry| entry.rule == Match::AnyOverlap)
@@ -1843,7 +1843,7 @@ mod tests {
 
     /// A credential anchor reached through a symbolic link renders both spellings.
     #[test]
-    fn a_linked_credential_anchor_renders_both_spellings() {
+    fn when_a_credential_anchor_is_linked_then_both_spellings_are_rendered() {
         let fixtures = tempfile::tempdir().expect("fixtures");
         let home = fixtures.path().canonicalize().expect("canonical fixtures");
         let elsewhere = home.join("vault-aws");
@@ -1863,7 +1863,7 @@ mod tests {
 
     /// The set is exactly the credential rows, named here rather than derived from the list.
     #[test]
-    fn the_existence_deny_covers_exactly_these_credential_stores() {
+    fn when_credential_existence_denials_are_rendered_then_the_exact_expected_stores_are_covered() {
         let home = std::path::Path::new("/fixture-home");
         let mut rendered: Vec<String> = credential_store_paths_under(home)
             .iter()
@@ -1916,10 +1916,10 @@ mod tests {
     ///
     /// **This is the test that makes the design safe rather than merely working.** Anchoring is
     /// monotone, so a caller naming a wrong or hostile home only widens the refusal set. Swap the
-    /// union for an override and [`every_anchor_protects_its_own_home`] still passes while a caller
+    /// union for an override and [`when_multiple_home_anchors_exist_then_each_protects_its_own_home`] still passes while a caller
     /// gains the power to switch the floor off — so that test cannot carry this property.
     #[test]
-    fn a_declared_home_never_replaces_the_passwd_anchor() {
+    fn when_a_home_is_declared_then_it_adds_an_anchor_without_replacing_the_passwd_anchor() {
         let passwd = super::operator_home().expect("this platform reports a passwd home");
 
         let declared = PathBuf::from("/Users/elsewhere");

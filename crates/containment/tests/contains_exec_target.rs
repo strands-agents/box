@@ -694,7 +694,7 @@ fn no_credential_store_answers_an_existence_test() {
         containment::test_support::credential_store_paths().expect("the floor's credential stores");
     // At least one per row per home spelling. A row whose anchor is a symlink renders two paths, so
     // the exact name set is pinned against a fixture home in
-    // `floors.rs::the_existence_deny_covers_exactly_these_credential_stores`.
+    // `floors.rs::when_credential_existence_denials_are_rendered_then_the_exact_expected_stores_are_covered`.
     let homes = containment::test_support::operator_home_spellings().expect("home spellings");
     assert!(
         protected.len() >= 12 * homes.len(),

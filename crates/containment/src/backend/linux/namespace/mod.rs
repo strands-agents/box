@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn support_info_names_the_namespace_mechanism() {
+    fn when_support_information_is_reported_then_the_namespace_mechanism_is_named() {
         let info = NamespaceBackend::new().support_info();
         assert_eq!(info.mechanism, "namespace");
         assert_eq!(info.platform, Platform::Linux);
@@ -553,7 +553,7 @@ mod tests {
     /// A host that forbids user namespaces must report unsupported, so
     /// `checked_backend` refuses before `apply` can be reached.
     #[test]
-    fn a_host_that_forbids_user_namespaces_reports_unsupported() {
+    fn when_the_host_forbids_user_namespaces_then_support_is_reported_as_unavailable() {
         let backend = NamespaceBackend::with_probe_result(false);
         let info = backend.support_info();
 
@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_permits_user_namespaces_reports_supported() {
+    fn when_the_host_permits_user_namespaces_then_support_is_reported_as_available() {
         let info = NamespaceBackend::with_probe_result(true).support_info();
         assert!(info.is_supported);
     }
@@ -574,7 +574,7 @@ mod tests {
     /// The default config is exactly what the box builds, minus its grants, so
     /// this is the shape that must validate.
     #[test]
-    fn the_default_isolated_request_validates() {
+    fn when_the_default_isolated_request_is_validated_then_it_is_accepted() {
         let backend = NamespaceBackend::with_probe_result(true);
         backend
             .validate_config(&acceptable())
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_decoded_writes_require_full_read_coverage() {
+    fn when_direct_or_decoded_writes_are_validated_then_full_read_coverage_is_required() {
         let backend = NamespaceBackend::with_probe_result(true);
         let directory = tempfile::tempdir().expect("a project");
         let project = directory
@@ -626,7 +626,7 @@ mod tests {
 
     /// Each unrestricted reach mode is refused rather than over-enforced.
     #[test]
-    fn every_unrestricted_reach_mode_is_refused() {
+    fn when_unrestricted_reach_is_requested_then_every_mode_is_refused() {
         let backend = NamespaceBackend::with_probe_result(true);
 
         for (label, config) in [
@@ -650,7 +650,7 @@ mod tests {
     /// network namespace (no `CLONE_NEWNET`) instead of a private routeless one, so the host's routes
     /// are already present. It validates rather than being refused.
     #[test]
-    fn host_network_grant_validates() {
+    fn when_host_network_access_is_granted_then_validation_succeeds() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::AllowAll)
@@ -663,7 +663,7 @@ mod tests {
 
     /// `Localhost` is the network the box actually uses, and it must validate.
     #[test]
-    fn proxy_only_validates() {
+    fn when_proxy_only_networking_is_requested_then_validation_succeeds() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::localhost().connect(33085))
@@ -677,7 +677,7 @@ mod tests {
     /// An inbound bind has no lowering, so asking for one is refused rather than silently dropped
     /// -- a dropped bind port would look like a working listener that no one can reach.
     #[test]
-    fn a_requested_bind_port_is_refused_rather_than_dropped() {
+    fn when_a_bind_port_is_requested_then_it_is_refused_instead_of_dropped() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::localhost().connect(33085).listen(8080))
@@ -696,7 +696,7 @@ mod tests {
     /// A wrong-mechanism override names a backend whose semantics this one does
     /// not implement.
     #[test]
-    fn a_wrong_mechanism_override_is_refused() {
+    fn when_the_mechanism_override_is_wrong_then_it_is_refused() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable().with_backend_override(BackendOverride::Seatbelt {
             extensions_enabled: false,
@@ -716,7 +716,7 @@ mod tests {
     /// dependency is a readable refusal rather than a failed `execve` inside an already-pivoted
     /// namespace.
     #[test]
-    fn a_grant_whose_view_cannot_be_planned_is_refused_during_validation() {
+    fn when_a_grant_view_cannot_be_planned_then_validation_refuses_it() {
         let backend = NamespaceBackend::with_probe_result(true);
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("target");
@@ -741,7 +741,7 @@ mod tests {
 
     /// A directory grant on a system root is refused before anything irreversible.
     #[test]
-    fn a_directory_grant_on_a_system_root_is_refused() {
+    fn when_a_directory_grant_targets_a_system_root_then_it_is_refused() {
         let backend = NamespaceBackend::with_probe_result(true);
 
         for root in ["/", "/etc", "/usr", "/home", "/var"] {
@@ -765,7 +765,7 @@ mod tests {
     /// A *file* inside a system root is still grantable — the floor bounds subtrees, not individual
     /// files.
     #[test]
-    fn a_file_inside_a_system_root_is_still_grantable() {
+    fn when_a_file_is_inside_a_system_root_then_it_can_still_be_granted() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .allow("/bin/sh", Operation::Read, Scope::File)
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_character_device_grants_are_accepted() {
+    fn when_a_fixed_character_device_is_granted_then_it_is_accepted() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .allow("/dev/null", Operation::Read, Scope::File)
@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_device_exception_does_not_extend_to_a_symlink_alias() {
+    fn when_a_symlink_alias_names_a_fixed_device_then_the_exception_does_not_extend_to_it() {
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("null-alias");
         std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
@@ -811,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn other_configured_character_device_grants_are_refused() {
+    fn when_another_character_device_is_configured_then_it_is_refused() {
         let device = std::path::Path::new("/dev/full");
         if !device.exists() {
             println!("skipping: {} is absent on this host", device.display());
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_utility_devices_remain_in_the_scaffold() {
+    fn when_the_scaffold_is_built_then_fixed_utility_devices_remain_present() {
         let view = view::MountView::plan(&acceptable()).expect("the view plans");
         for device in ["/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"] {
             assert!(view.entries().iter().any(|entry| {
@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn character_and_block_device_modes_are_classified_as_devices() {
+    fn when_device_modes_are_classified_then_character_and_block_devices_are_recognized() {
         assert!(is_device_mode(libc::S_IFCHR));
         assert!(is_device_mode(libc::S_IFBLK));
         assert!(!is_device_mode(libc::S_IFREG));
@@ -853,7 +853,7 @@ mod tests {
     /// vocabulary refuses `Dir`, so this backend's own check never sees one; `Root` plans one
     /// executable read-only bind.
     #[test]
-    fn an_execute_grant_at_dir_scope_is_refused_and_an_exec_tree_validates() {
+    fn when_execute_scope_is_dir_then_it_is_refused_but_an_exec_tree_validates() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tree = directory.path().join("tools");
         std::fs::create_dir(&tree).expect("an exec tree");
@@ -886,7 +886,7 @@ mod tests {
     /// **`List` and a future-file refusal are refused by name at validation**, before anything
     /// irreversible runs, because this backend has no lowering for either.
     #[test]
-    fn the_cells_without_a_lowering_are_refused_by_name_at_validation() {
+    fn when_a_cell_has_no_linux_lowering_then_validation_refuses_it_by_name() {
         let backend = NamespaceBackend::with_probe_result(true);
         let directory = tempfile::tempdir().expect("tempdir");
 
@@ -936,7 +936,7 @@ mod tests {
 
     /// **A read tree confers no exec and an exec tree does**, at the kernel.
     #[test]
-    fn a_read_tree_confers_no_exec_and_an_exec_tree_does() {
+    fn when_read_and_exec_trees_are_applied_then_only_the_exec_tree_grants_execution() {
         super::failure_tests::in_fresh_process(|| {
             use std::os::unix::fs::PermissionsExt as _;
 
@@ -1008,7 +1008,7 @@ mod tests {
     /// change then adds nothing. This test measures the bits, not the call's answer, because that is
     /// the only way the refusal shows.
     #[test]
-    fn a_workload_marks_its_own_output_executable_and_only_an_exec_grant_runs_it() {
+    fn when_a_workload_marks_its_output_executable_then_only_an_exec_grant_allows_it_to_run() {
         use std::os::unix::fs::PermissionsExt as _;
 
         if !the_host_can_build_a_view() {
@@ -1132,7 +1132,8 @@ mod tests {
     /// stays writable and runnable; an exec tree inside a write root is writable and runnable while
     /// the rest of the write root stays no-exec.
     #[test]
-    fn the_warned_pair_is_writable_and_runnable_at_the_kernel_in_both_nestings() {
+    fn when_write_and_exec_grants_overlap_in_either_nesting_then_the_warned_pair_is_writable_and_runnable()
+     {
         use std::os::unix::fs::PermissionsExt as _;
 
         if !the_host_can_build_a_view() {
@@ -1215,7 +1216,7 @@ mod tests {
 
     /// **A refused file reads empty and refuses a write**, while its sibling keeps the tree's reach.
     #[test]
-    fn a_refused_file_reads_empty_and_refuses_a_write() {
+    fn when_a_file_is_refused_then_it_reads_empty_and_cannot_be_written() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
@@ -1307,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_input_injection_is_refused_before_descriptor_lookup() {
+    fn when_terminal_input_injection_is_attempted_then_it_is_refused_before_descriptor_lookup() {
         // An invalid descriptor cannot inject input, even if the filter regresses.
         // The unfiltered control proves that the kernel would return EBADF.
         let request = u64::from(libc::TIOCSTI as u32);
@@ -1349,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queries_still_work_under_the_filters() {
+    fn when_terminal_queries_run_under_the_filters_then_they_still_work() {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
         let mut master = -1;
@@ -1415,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn the_event_loop_timer_call_is_permitted_under_the_filters() {
+    fn when_an_event_loop_timer_call_runs_under_the_filters_then_it_is_permitted() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1442,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn permit_and_restriction_filters_refuse_unapproved_calls() {
+    fn when_a_call_is_unapproved_then_permit_and_restriction_filters_refuse_it() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1500,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_workload_permits_accept_only_approved_arguments() {
+    fn when_a_workload_permit_is_argument_scoped_then_only_approved_arguments_pass() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1535,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn vectored_stdio_write_is_permitted_without_permitting_vectored_read() {
+    fn when_vectored_stdio_is_used_then_writes_are_permitted_and_vectored_reads_are_not() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1589,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_usage_of_self_and_children_passes_both_filters() {
+    fn when_self_or_child_resource_usage_is_queried_then_both_filters_permit_it() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1614,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicating_a_standard_stream_passes_both_filters() {
+    fn when_a_standard_stream_is_duplicated_then_both_filters_permit_it() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1636,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn setting_the_file_mode_mask_passes_both_filters() {
+    fn when_the_file_mode_mask_is_set_then_both_filters_permit_it() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1658,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn setpgid_permits_only_self_group_creation() {
+    fn when_setpgid_is_called_then_only_self_group_creation_is_permitted() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1719,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn every_network_mode_refuses_other_socket_families() {
+    fn when_a_socket_family_is_unapproved_then_every_network_mode_refuses_it() {
         for network in [
             Network::Blocked,
             Network::Localhost {
@@ -1818,7 +1819,7 @@ mod tests {
     /// check, because the filter's *effect* is the claim — a rule that compiles but matches the
     /// wrong argument would leave this open while the table still listed the entry.
     #[test]
-    fn route_three_write_then_execute_is_refused() {
+    fn when_route_three_writes_then_executes_then_execution_is_refused() {
         if !probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -1869,7 +1870,7 @@ mod tests {
 
     /// **A read-execute mapping with no write is still permitted.** The bound on the rule above.
     #[test]
-    fn a_read_execute_mapping_is_still_permitted() {
+    fn when_a_mapping_requests_read_and_execute_then_it_is_permitted() {
         if !probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -1902,7 +1903,7 @@ mod tests {
 
     /// `Blocked` — the DEFAULT network mode — actually blocks, at the kernel.
     #[test]
-    fn blocked_mode_leaves_no_route_at_all() {
+    fn when_network_mode_is_blocked_then_no_route_remains() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
@@ -1968,7 +1969,7 @@ mod tests {
 
     /// `AllowAll` joins the host network namespace and keeps the PID, mount, IPC, UTS, and user namespaces.
     #[test]
-    fn allow_all_joins_the_host_network_and_keeps_the_other_namespaces() {
+    fn when_network_mode_is_allow_all_then_host_network_is_joined_and_other_namespaces_are_kept() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
@@ -2083,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn one_object_cannot_execute_after_a_separate_write_mapping() {
+    fn when_an_object_has_a_separate_write_mapping_then_it_cannot_execute() {
         use std::os::fd::AsRawFd as _;
 
         if !the_host_can_build_a_view() {
@@ -2163,7 +2164,7 @@ mod tests {
 
     /// The whole sequence, at the kernel, in one test.
     #[test]
-    fn apply_delivers_every_property_it_claims() {
+    fn when_containment_is_applied_then_every_reported_property_is_delivered() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
@@ -2291,7 +2292,7 @@ mod tests {
 
     /// Refused files and trees leave their metadata-only ancestor empty and read-only.
     #[test]
-    fn a_refusal_beneath_a_metadata_only_directory_establishes() {
+    fn when_a_refusal_is_beneath_a_metadata_only_directory_then_the_view_establishes() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
@@ -2454,7 +2455,7 @@ mod tests {
 
     /// The macOS discovery and runtime-service fields leave Linux mounts and filters unchanged.
     #[test]
-    fn linux_validate_states_its_handling_of_macos_only_leaf_fields() {
+    fn when_linux_validates_macos_only_leaf_fields_then_its_handling_is_reported() {
         let home = tempfile::tempdir().expect("home");
         let workspace = home.path().join("workspace");
         let state = workspace.join(".strands-box");
@@ -2497,7 +2498,7 @@ mod tests {
 
     /// The reaper writes the exec-confirm byte before the workload runs, and the apply-failure byte when the view fails.
     #[test]
-    fn the_reaper_writes_the_exec_confirm_byte_and_a_failure_byte() {
+    fn when_reaper_setup_succeeds_or_fails_then_it_writes_the_corresponding_confirmation_byte() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;

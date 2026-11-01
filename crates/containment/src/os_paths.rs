@@ -290,7 +290,7 @@ mod tests {
     /// **Every cell each set states, in order.** The two files replaced one Rust table in the box,
     /// and this is the whole record of what that table held for this platform.
     #[test]
-    fn each_set_states_exactly_these_cells() {
+    fn when_runtime_path_sets_are_built_then_each_contains_the_exact_expected_cells() {
         #[cfg(target_os = "macos")]
         let (agent, leaf) = (
             vec![
@@ -374,7 +374,7 @@ mod tests {
 
     /// **The two sets are disjoint**, so the union is each stated once and no path is in both sets.
     #[test]
-    fn no_path_is_in_both_sets() {
+    fn when_runtime_path_sets_are_compared_then_no_path_appears_in_both() {
         for (path, operation, scope) in os_paths().agent.cells() {
             assert!(
                 !os_paths()
@@ -393,7 +393,7 @@ mod tests {
     /// **No set can state an exec grant, a denial, or a write root: the schema has no list for one.**
     /// Each list names one cell, so the vocabulary a set may reach is the six lists and nothing else.
     #[test]
-    fn a_set_has_no_list_for_an_exec_grant_a_denial_or_a_write_tree() {
+    fn when_a_path_set_is_built_then_it_contains_no_list_exec_deny_or_write_tree_grant() {
         for absent in [
             "exec",
             "exec_root",
@@ -425,7 +425,7 @@ mod tests {
 
     /// Only the null device is written, which is the one claim the schema cannot carry by itself.
     #[test]
-    fn only_the_null_device_is_written() {
+    fn when_runtime_write_cells_are_built_then_only_the_null_device_is_writable() {
         for (name, set) in [("agent", &os_paths().agent), ("leaf", &os_paths().leaf)] {
             assert!(
                 set.write_file.iter().all(|path| path == "/dev/null"),
@@ -437,7 +437,7 @@ mod tests {
 
     /// Every cell the host reports exists, in the kind its scope names, and once per identity.
     #[test]
-    fn every_reported_cell_exists_in_the_kind_its_scope_names() {
+    fn when_runtime_cells_are_reported_then_every_path_exists_with_the_kind_named_by_its_scope() {
         let reported = os_minimum_cells();
         assert!(
             reported
@@ -461,7 +461,7 @@ mod tests {
     /// Neither runtime set reaches the active developer directory.
     #[cfg(target_os = "macos")]
     #[test]
-    fn no_containment_reaches_the_developer_directory() {
+    fn when_containment_reach_is_built_then_the_developer_directory_is_unreachable() {
         let Some(developer) = std::process::Command::new("/usr/bin/xcode-select")
             .arg("-p")
             .output()
@@ -505,7 +505,7 @@ mod tests {
     /// each row — a row moved from `machine_credential` to `credential_store` becomes exemptible by
     /// `allow_credential_store`, and every other test stays green — and the order.
     #[test]
-    fn the_forbidden_rows_are_exactly_these() {
+    fn when_forbidden_rows_are_built_then_they_match_the_expected_inventory() {
         use ForbiddenClass::{
             CredentialStore, HomeNamespace, LoaderDirectory, MachineCredential, PasswordDatabase,
             PrivilegeConfiguration, SystemTree, WholeFilesystem,
@@ -641,7 +641,7 @@ mod tests {
 
     /// **Only the operator's own store is exemptible**, which is the gate a message string carried.
     #[test]
-    fn only_a_credential_store_row_is_exemptible() {
+    fn when_a_floor_row_is_exempted_then_it_must_be_a_credential_store_row() {
         for row in forbidden_paths() {
             assert_eq!(
                 row.class.is_exemptible(),
@@ -660,7 +660,7 @@ mod tests {
 
     /// Every class states a distinct reason, so a refusal names which row refused.
     #[test]
-    fn every_class_states_its_own_reason() {
+    fn when_floor_classes_are_reported_then_each_has_its_own_reason() {
         let classes = [
             ForbiddenClass::WholeFilesystem,
             ForbiddenClass::HomeNamespace,

@@ -7,7 +7,7 @@ use strands_det_harness::{Platform, det_case};
 // (`record/config/filesystem.rs::denial` gives an existing file `Scope::File`): the refused object
 // cannot be moved to a permitted name, and no permitted file can be moved over it. On Linux the
 // namespace view binds an empty read-only file over the leaf
-// (`view.rs::MountKind::EmptyFile`, pinned by `mod.rs::a_refused_file_reads_empty_and_refuses_a_write`),
+// (`view.rs::MountKind::EmptyFile`, pinned by `mod.rs::when_a_file_is_refused_then_it_reads_empty_and_cannot_be_written`),
 // so the leaf is a mountpoint and `rename(2)` of it, or onto it, answers EBUSY — the errno
 // `box_shell.rs::a_contained_host_binary_cannot_move_an_authority_sources_parent` asserts for a
 // rename that reaches a protected mountpoint, and the one rename(2) documents for a mount point.
@@ -31,7 +31,7 @@ include!("../probes/probe_lines.rs");
 /// | operation on the denied leaf | Linux (`view.rs` empty-file bind, `remount_protected` read-only) | macOS (`seatbelt.rs` leaf denies on the literal) |
 /// |---|---|---|
 /// | `rename(2)` of it, or onto it | EBUSY: it is a mount point (rename(2); `a_contained_host_binary_cannot_move_an_authority_sources_parent` pins EBUSY on a protected mountpoint) | EPERM |
-/// | `read(2)` of it | not a refusal: reads EMPTY (`a_refused_file_reads_empty_and_refuses_a_write`, code 22 makes an absent file a failure) | EPERM |
+/// | `read(2)` of it | not a refusal: reads EMPTY (`when_a_file_is_refused_then_it_reads_empty_and_cannot_be_written`, code 22 makes an absent file a failure) | EPERM |
 /// | `open(2)` for append on it | EROFS: the bind is remounted read-only (open(2)) | EPERM |
 /// | `read(2)` of the permitted name it was to take | ENOENT: nothing was ever created there | ENOENT: nothing there, and the workspace's read root answers existence for its entries |
 fn rename_denials() -> &'static [i32] {

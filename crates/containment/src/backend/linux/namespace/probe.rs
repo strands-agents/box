@@ -40,7 +40,7 @@ mod tests {
 
     /// The probe answers without restricting this process.
     #[test]
-    fn the_probe_leaves_the_calling_process_unrestricted() {
+    fn when_the_namespace_probe_runs_then_the_calling_process_remains_unrestricted() {
         let first = user_namespace_is_permitted();
         let second = user_namespace_is_permitted();
 
@@ -54,7 +54,7 @@ mod tests {
     /// On a host that permits user namespaces the probe says so, and the measurement is the same
     /// fact the launcher depends on.
     #[test]
-    fn the_probe_reports_this_hosts_policy() {
+    fn when_the_namespace_probe_runs_then_it_reports_the_host_policy() {
         let permitted = user_namespace_is_permitted();
         // Not an assertion about the host: an assertion that the answer is usable.
         println!("user namespaces permitted here: {permitted}");

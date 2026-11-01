@@ -165,7 +165,7 @@ fn refusal_names(error: ContainmentError, expected: &str) {
 }
 
 #[test]
-fn unreadable_descriptor_directory_refuses_launch() {
+fn when_descriptor_enumeration_fails_then_inherited_descriptor_cleanup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_openat, None);
         refusal_names(
@@ -176,7 +176,7 @@ fn unreadable_descriptor_directory_refuses_launch() {
 }
 
 #[test]
-fn failed_bounding_capability_drop_refuses_launch() {
+fn when_a_bounding_capability_cannot_be_dropped_then_capability_cleanup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_CAPBSET_DROP as u64)));
         refusal_names(
@@ -187,7 +187,7 @@ fn failed_bounding_capability_drop_refuses_launch() {
 }
 
 #[test]
-fn failed_capability_clear_refuses_launch() {
+fn when_capability_sets_cannot_be_cleared_then_capability_cleanup_reports_an_error() {
     in_fresh_process_with_user_namespace(true, || {
         refuse_syscall(libc::SYS_capset, None);
         refusal_names(
@@ -198,7 +198,7 @@ fn failed_capability_clear_refuses_launch() {
 }
 
 #[test]
-fn failed_no_new_privileges_refuses_launch() {
+fn when_new_privileges_cannot_be_disabled_then_authority_setup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_NO_NEW_PRIVS as u64)));
         refusal_names(
@@ -209,7 +209,7 @@ fn failed_no_new_privileges_refuses_launch() {
 }
 
 #[test]
-fn failed_loopback_control_socket_refuses_network_setup() {
+fn when_the_loopback_control_socket_cannot_open_then_network_setup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_socket, None);
         refusal_names(
@@ -220,7 +220,7 @@ fn failed_loopback_control_socket_refuses_network_setup() {
 }
 
 #[test]
-fn failed_loopback_flag_read_refuses_network_setup() {
+fn when_loopback_flags_cannot_be_read_then_network_setup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_ioctl, Some((1, libc::SIOCGIFFLAGS)));
         refusal_names(
@@ -231,7 +231,7 @@ fn failed_loopback_flag_read_refuses_network_setup() {
 }
 
 #[test]
-fn failed_loopback_flag_write_refuses_network_setup() {
+fn when_loopback_flags_cannot_be_written_then_network_setup_reports_an_error() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_ioctl, Some((1, libc::SIOCSIFFLAGS)));
         refusal_names(
@@ -242,7 +242,7 @@ fn failed_loopback_flag_write_refuses_network_setup() {
 }
 
 #[test]
-fn a_bound_loopback_port_cannot_be_silently_shared() {
+fn when_a_loopback_port_is_already_bound_then_a_second_listener_is_refused() {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     refusal_names(
@@ -252,7 +252,7 @@ fn a_bound_loopback_port_cannot_be_silently_shared() {
 }
 
 #[test]
-fn failed_descriptor_transfer_refuses_network_setup() {
+fn when_listener_descriptor_transfer_fails_then_network_setup_reports_an_error() {
     in_fresh_process(|| {
         let (sender, _receiver) = std::os::unix::net::UnixStream::pair().unwrap();
         let descriptor = netns::listen_on_loopback(0).unwrap();
@@ -265,7 +265,7 @@ fn failed_descriptor_transfer_refuses_network_setup() {
 }
 
 #[test]
-fn denied_namespace_creation_changes_the_support_probe_result() {
+fn when_namespace_creation_is_denied_then_the_probe_reports_no_support_and_setup_fails() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_unshare, None);
         assert!(!probe::user_namespace_is_permitted());
@@ -277,7 +277,7 @@ fn denied_namespace_creation_changes_the_support_probe_result() {
 }
 
 #[test]
-fn namespace_setup_stops_at_each_failed_operation_in_both_network_modes() {
+fn when_a_namespace_setup_operation_fails_then_both_network_modes_stop_at_that_operation() {
     for join_host_network in [false, true] {
         let remaining = libc::CLONE_NEWNS
             | libc::CLONE_NEWIPC
@@ -335,7 +335,7 @@ fn namespace_setup_stops_at_each_failed_operation_in_both_network_modes() {
 }
 
 #[test]
-fn failed_reaper_channel_refuses_setup_before_forking() {
+fn when_the_reaper_channel_cannot_be_created_then_namespace_setup_reports_an_error() {
     in_fresh_process(|| {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_socketpair, None);
@@ -347,7 +347,7 @@ fn failed_reaper_channel_refuses_setup_before_forking() {
 }
 
 #[test]
-fn failed_pid_namespace_refuses_setup_before_forking() {
+fn when_the_pid_namespace_cannot_be_created_then_namespace_setup_reports_an_error() {
     in_fresh_process(|| {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_unshare, Some((0, libc::CLONE_NEWPID as u64)));
@@ -359,7 +359,7 @@ fn failed_pid_namespace_refuses_setup_before_forking() {
 }
 
 #[test]
-fn failed_filter_installation_refuses_launch() {
+fn when_the_permit_filter_cannot_be_installed_then_filter_setup_reports_an_error() {
     in_fresh_process(|| {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
@@ -373,7 +373,7 @@ fn failed_filter_installation_refuses_launch() {
 }
 
 #[test]
-fn a_failed_wait_is_not_reported_as_workload_success() {
+fn when_waiting_for_a_child_fails_then_the_reaper_reports_setup_failure() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_wait4, None);
         assert_eq!(reaper::supervise(12345), 125);
@@ -381,12 +381,12 @@ fn a_failed_wait_is_not_reported_as_workload_success() {
 }
 
 #[test]
-fn a_reaper_with_no_children_exits_successfully() {
+fn when_the_reaper_has_no_children_then_it_exits_successfully() {
     in_fresh_process(|| assert_eq!(reaper::supervise(12345), 0));
 }
 
 #[test]
-fn a_failed_parent_death_arm_refuses_the_handshake() {
+fn when_parent_death_protection_cannot_be_armed_then_the_handshake_is_refused() {
     in_fresh_process(|| {
         let (_parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
         refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_PDEATHSIG as u64)));
@@ -395,7 +395,7 @@ fn a_failed_parent_death_arm_refuses_the_handshake() {
 }
 
 #[test]
-fn an_unavailable_child_status_makes_the_namespace_probe_refuse_support() {
+fn when_the_probe_child_status_is_unavailable_then_namespace_support_is_not_reported() {
     in_fresh_process(|| {
         // The kernel reaps the child automatically, so waitpid cannot collect its status.
         assert_ne!(
@@ -407,7 +407,7 @@ fn an_unavailable_child_status_makes_the_namespace_probe_refuse_support() {
 }
 
 #[test]
-fn a_signalled_probe_child_does_not_establish_namespace_support() {
+fn when_a_signal_kills_the_probe_child_then_namespace_support_is_not_reported() {
     in_fresh_process(|| {
         let core_limit = libc::rlimit {
             rlim_cur: 0,
@@ -431,7 +431,7 @@ fn a_signalled_probe_child_does_not_establish_namespace_support() {
 }
 
 #[test]
-fn a_failed_fork_does_not_establish_namespace_support() {
+fn when_the_probe_child_cannot_be_created_then_namespace_support_is_not_reported() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_clone, None);
         refuse_syscall(libc::SYS_clone3, None);
@@ -442,7 +442,7 @@ fn a_failed_fork_does_not_establish_namespace_support() {
 }
 
 #[test]
-fn interrupted_lifetime_handshakes_retry_and_complete() {
+fn when_a_lifetime_handshake_is_interrupted_then_it_retries_and_completes() {
     in_fresh_process(|| {
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
@@ -472,7 +472,7 @@ fn interrupted_lifetime_handshakes_retry_and_complete() {
 }
 
 #[test]
-fn interrupted_confirmation_writes_retry_and_deliver_once() {
+fn when_a_confirmation_write_is_interrupted_then_it_retries_and_delivers_once() {
     in_fresh_process(|| {
         signals::interrupted_write(
             |descriptor| write_confirm_byte(Some(descriptor), APPLY_FAILURE_BYTE),
@@ -482,7 +482,7 @@ fn interrupted_confirmation_writes_retry_and_deliver_once() {
 }
 
 #[test]
-fn an_unwritable_confirmation_descriptor_does_not_retry_forever() {
+fn when_the_confirmation_descriptor_is_unwritable_then_the_write_returns() {
     in_fresh_process(|| {
         use std::io::{Read, Write};
         use std::os::fd::{AsRawFd, FromRawFd};
@@ -516,12 +516,12 @@ fn assert_reaper_wait_sequence(results: &[Result<libc::c_int, libc::c_int>], exp
 }
 
 #[test]
-fn interrupted_reaper_waits_resume_until_a_normal_exit() {
+fn when_reaper_waits_are_interrupted_then_they_resume_and_return_the_child_exit_code() {
     assert_reaper_wait_sequence(&[Err(libc::EINTR), Err(libc::EINTR), Ok(37 << 8)], 37);
 }
 
 #[test]
-fn failed_reaper_waits_and_abnormal_exits_return_setup_failure() {
+fn when_reaper_waits_fail_or_children_exit_abnormally_then_setup_failure_is_reported() {
     for error in [libc::ECHILD, libc::EIO, libc::ESRCH] {
         assert_reaper_wait_sequence(&[Err(error)], 125);
     }
@@ -532,7 +532,7 @@ fn failed_reaper_waits_and_abnormal_exits_return_setup_failure() {
 }
 
 #[test]
-fn a_failed_second_filter_installation_reports_the_restriction_stage() {
+fn when_the_restriction_filter_cannot_be_installed_then_the_error_names_that_stage() {
     in_fresh_process(|| {
         let mut filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
@@ -546,7 +546,7 @@ fn a_failed_second_filter_installation_reports_the_restriction_stage() {
 }
 
 #[test]
-fn failed_reaper_creation_refuses_launch_before_any_child_starts() {
+fn when_the_namespace_reaper_cannot_be_created_then_namespace_setup_reports_an_error() {
     in_fresh_process_with_user_namespace(true, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_clone, None);
@@ -561,7 +561,7 @@ fn failed_reaper_creation_refuses_launch_before_any_child_starts() {
 }
 
 #[test]
-fn failed_reaper_handshake_terminates_the_launcher_before_materialization() {
+fn when_the_reaper_handshake_fails_then_the_launcher_exits_with_handshake_failure() {
     in_fresh_process_expecting_exit(true, Some(127), None, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_sendto, Some((2, 1)));
@@ -571,7 +571,7 @@ fn failed_reaper_handshake_terminates_the_launcher_before_materialization() {
 }
 
 #[test]
-fn failed_native_reaper_wait_reports_setup_failure() {
+fn when_the_launcher_cannot_wait_for_the_reaper_then_it_exits_with_setup_failure() {
     in_fresh_process_expecting_exit(true, Some(125), None, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_sendto, Some((2, 1)));
@@ -582,7 +582,7 @@ fn failed_native_reaper_wait_reports_setup_failure() {
 }
 
 #[test]
-fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
+fn when_descriptor_cleanup_leaves_an_open_descriptor_then_the_namespace_reaper_terminates() {
     use std::os::fd::AsRawFd as _;
     in_fresh_process_expecting_exit(
         true,
@@ -599,7 +599,7 @@ fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
 }
 
 #[test]
-fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
+fn when_the_reaper_cannot_clear_capabilities_then_it_terminates_the_namespace() {
     in_fresh_process_expecting_exit(
         true,
         Some(127),
@@ -614,7 +614,7 @@ fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
 }
 
 #[test]
-fn a_reaper_that_cannot_lock_privileges_terminates_its_namespace() {
+fn when_the_reaper_cannot_disable_new_privileges_then_it_terminates_the_namespace() {
     in_fresh_process_expecting_exit(
         true,
         Some(127),
@@ -629,7 +629,7 @@ fn a_reaper_that_cannot_lock_privileges_terminates_its_namespace() {
 }
 
 #[test]
-fn a_failed_workload_fork_terminates_the_namespace_reaper() {
+fn when_the_workload_cannot_be_created_then_the_namespace_reaper_terminates() {
     in_fresh_process_expecting_exit(true, Some(126), None, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         let threads = std::fs::read_dir("/proc/self/task").unwrap().count();
@@ -650,7 +650,7 @@ fn a_failed_workload_fork_terminates_the_namespace_reaper() {
 }
 
 #[test]
-fn a_configured_path_that_disappears_refuses_the_device_check() {
+fn when_a_configured_path_disappears_then_the_device_check_reports_an_error() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("granted");
     std::fs::write(&path, b"fixture").unwrap();
@@ -665,7 +665,7 @@ fn a_configured_path_that_disappears_refuses_the_device_check() {
 }
 
 #[test]
-fn a_traced_child_stop_is_not_reported_as_a_successful_exit() {
+fn when_a_traced_child_stops_then_the_reaper_reports_setup_failure() {
     in_fresh_process(|| {
         let child = unsafe { libc::fork() };
         assert!(child >= 0);

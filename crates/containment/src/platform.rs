@@ -73,7 +73,7 @@ mod tests {
     use super::{Platform, linux_platform_info};
 
     #[test]
-    fn linux_details_name_the_architecture() {
+    fn when_linux_platform_details_are_reported_then_the_architecture_is_named() {
         let info = linux_platform_info();
         assert_eq!(info.platform, Platform::Linux);
         assert!(info.details.contains(std::env::consts::ARCH), "{info:?}");

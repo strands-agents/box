@@ -191,7 +191,7 @@ mod tests {
     /// An ARM64 kernel gets the namespace launcher.
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_arm64_kernel_selects_the_namespace_launcher() {
+    fn when_linux_uses_an_arm64_kernel_then_the_namespace_launcher_is_selected() {
         use super::{LinuxMechanism, linux_mechanism};
 
         assert_eq!(
@@ -203,7 +203,7 @@ mod tests {
     /// A non-Linux platform reaching the Linux arm is refused rather than defaulted.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_non_linux_platform_in_the_linux_arm_is_refused() {
+    fn when_the_linux_launcher_receives_another_platform_then_it_is_refused() {
         use super::{LinuxMechanism, linux_mechanism};
 
         assert!(matches!(
@@ -214,7 +214,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_non_arm64_linux_architecture_is_refused() {
+    fn when_linux_architecture_is_not_arm64_then_it_is_refused() {
         use super::{LinuxMechanism, linux_mechanism};
 
         let decision = linux_mechanism(Platform::Linux, "x86_64");
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_backend_for_a_different_platform() {
+    fn when_a_backend_belongs_to_another_platform_then_it_is_rejected() {
         let backend = MockBackend::new(SupportInfo {
             is_supported: true,
             platform: Platform::Linux,
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_backend_that_reports_unsupported() {
+    fn when_a_backend_reports_no_support_then_it_is_rejected() {
         let backend = MockBackend::new(SupportInfo {
             is_supported: false,
             platform: Platform::MacOS,
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_grant_is_refused_before_backend_selection() {
+    fn when_a_credential_grant_is_forbidden_then_it_is_refused_before_backend_selection() {
         let home = tempfile::tempdir().expect("operator home");
         let credentials = home.path().join(".aws");
         std::fs::create_dir(&credentials).expect("credential store");
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_config_still_refuses_an_unavailable_backend() {
+    fn when_configuration_is_valid_but_the_backend_is_unavailable_then_apply_is_refused() {
         let selected = std::cell::Cell::new(false);
         let error = apply_backend(
             || -> Result<Box<dyn ContainmentBackend>, ContainmentError> {
@@ -329,7 +329,7 @@ mod tests {
         );
     }
     #[test]
-    fn an_unavailable_native_handoff_refuses_before_backend_selection() {
+    fn when_native_handoff_is_unavailable_then_it_is_refused_before_backend_selection() {
         let (handoff, _) = std::os::unix::net::UnixStream::pair().unwrap();
         let selected = std::cell::Cell::new(false);
         let result = apply_backend(

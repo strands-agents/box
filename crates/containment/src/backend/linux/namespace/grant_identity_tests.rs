@@ -217,7 +217,7 @@ fn in_child(action: impl FnOnce() -> i32) -> (i32, String) {
 }
 
 #[test]
-fn a_child_panic_is_an_error() {
+fn when_a_grant_identity_child_panics_then_the_result_is_an_error() {
     super::failure_tests::in_fresh_process(|| {
         let result = in_child(|| panic!("synthetic child failure"));
         assert_eq!(result.0, OTHER, "{result:?}");
@@ -225,7 +225,7 @@ fn a_child_panic_is_an_error() {
 }
 
 #[test]
-fn a_child_setup_failure_is_an_error() {
+fn when_a_grant_identity_child_fails_setup_then_the_result_is_an_error() {
     super::failure_tests::in_fresh_process(|| {
         use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
 
@@ -291,7 +291,7 @@ fn materialize_after(
 }
 
 #[test]
-fn unchanged_files_directories_and_sockets_start() {
+fn when_granted_files_directories_and_sockets_are_unchanged_then_startup_succeeds() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -307,7 +307,7 @@ fn unchanged_files_directories_and_sockets_start() {
 }
 
 #[test]
-fn swapped_files_directories_and_sockets_refuse_before_startup() {
+fn when_granted_files_directories_and_sockets_are_swapped_then_startup_is_refused() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -325,7 +325,7 @@ fn swapped_files_directories_and_sockets_refuse_before_startup() {
 }
 
 #[test]
-fn same_path_object_replacements_refuse_before_startup() {
+fn when_an_object_is_replaced_at_the_same_path_then_startup_is_refused() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -346,7 +346,7 @@ fn same_path_object_replacements_refuse_before_startup() {
 }
 
 #[test]
-fn a_replacement_between_grant_creation_and_planning_is_refused() {
+fn when_an_object_is_replaced_between_grant_creation_and_planning_then_it_is_refused() {
     for kind in [Kind::Directory, Kind::File, Kind::Socket] {
         let fixture = Fixture::new(kind);
         let config = fixture.config(false);
@@ -361,7 +361,7 @@ fn a_replacement_between_grant_creation_and_planning_is_refused() {
 }
 
 #[test]
-fn an_unlinked_grant_keeps_its_inode_reserved_until_the_config_drops() {
+fn when_a_granted_path_is_unlinked_then_its_inode_stays_reserved_until_configuration_is_dropped() {
     let fixture = Fixture::new(Kind::File);
     let config = fixture.config(false);
     let identity = crate::model::ObjectIdentity::from_metadata(&fixture.grant.metadata().unwrap());
@@ -379,7 +379,7 @@ fn an_unlinked_grant_keeps_its_inode_reserved_until_the_config_drops() {
 }
 
 #[test]
-fn a_prepared_object_stays_pinned_until_its_grant_is_applied() {
+fn when_an_object_is_prepared_then_it_stays_pinned_until_its_grant_is_applied() {
     let fixture = Fixture::new(Kind::File);
     let prepared = ContainmentConfig::prepare_filesystem_path(&fixture.grant).unwrap();
     let identity = crate::model::ObjectIdentity::from_metadata(&fixture.grant.metadata().unwrap());
@@ -400,7 +400,7 @@ fn a_prepared_object_stays_pinned_until_its_grant_is_applied() {
 }
 
 #[test]
-fn read_only_and_writable_grants_keep_their_access_modes() {
+fn when_read_only_and_writable_grants_are_applied_then_their_access_modes_are_preserved() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -456,7 +456,7 @@ fn read_only_and_writable_grants_keep_their_access_modes() {
 }
 
 #[test]
-fn unchanged_symlinks_and_hardlinks_preserve_permitted_reads() {
+fn when_symlinks_and_hard_links_are_unchanged_then_permitted_reads_still_work() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -493,7 +493,7 @@ fn unchanged_symlinks_and_hardlinks_preserve_permitted_reads() {
 }
 
 #[test]
-fn enclosing_bind_does_not_expose_the_symlink_target() {
+fn when_a_bind_encloses_a_symlink_then_it_does_not_expose_the_target() {
     super::failure_tests::in_fresh_process(|| {
         if !supported() {
             return;
@@ -521,7 +521,7 @@ fn apply(fixture: &Fixture, config: &ContainmentConfig) -> (i32, String) {
 }
 
 #[test]
-fn concurrent_source_swaps_never_expose_replacement_bytes() {
+fn when_grant_sources_are_swapped_concurrently_then_replacement_bytes_are_never_exposed() {
     const CHILD: &str = "SBOX58_RACE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let thread = std::thread::current();

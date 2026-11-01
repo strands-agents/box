@@ -94,7 +94,7 @@ fn refuse_syscall(number: libc::c_long, argument: Option<(u8, u64)>) {
 }
 
 #[test]
-fn the_entry_point_reports_usage_errors_with_exit_code_two() {
+fn when_the_entry_point_receives_usage_errors_then_it_reports_exit_code_two() {
     in_child("unknown flag \"--exact\"", || {
         // The child harness supplies --exact, which is not a launcher argument.
         assert_eq!(main(), ExitCode::from(2));
@@ -102,7 +102,7 @@ fn the_entry_point_reports_usage_errors_with_exit_code_two() {
 }
 
 #[test]
-fn descriptor_sweep_closes_unpreserved_handles_when_proc_is_unavailable() {
+fn when_proc_is_unavailable_then_the_descriptor_sweep_closes_unpreserved_handles() {
     in_child("", || {
         let victim = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
         let kept = std::fs::File::open("/dev/null").unwrap();
@@ -129,7 +129,7 @@ fn descriptor_sweep_closes_unpreserved_handles_when_proc_is_unavailable() {
 }
 
 #[test]
-fn a_close_error_refuses_setup_before_configuration_loading() {
+fn when_closing_a_descriptor_fails_then_setup_is_refused_before_configuration_loading() {
     in_child("cannot close inherited descriptors", || {
         let victim = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
         refuse_syscall(libc::SYS_close, Some((0, victim as u64)));
@@ -142,7 +142,7 @@ fn a_close_error_refuses_setup_before_configuration_loading() {
 }
 
 #[test]
-fn failure_to_set_close_on_exec_refuses_the_status_channel() {
+fn when_setting_close_on_exec_fails_then_the_status_channel_is_refused() {
     in_child("cannot arm setup status channel", || {
         let file = std::fs::File::open("/dev/null").unwrap();
         refuse_syscall(libc::SYS_fcntl, Some((1, libc::F_SETFD as u64)));
@@ -160,7 +160,7 @@ fn failure_to_set_close_on_exec_refuses_the_status_channel() {
 }
 
 #[test]
-fn launch_gate_refuses_a_closed_peer_and_a_failed_write_timeout() {
+fn when_a_launch_gate_peer_closes_or_write_timeout_setup_fails_then_the_gate_is_refused() {
     in_child("", || {
         let (parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
         drop(parent);
@@ -180,7 +180,7 @@ fn launch_gate_refuses_a_closed_peer_and_a_failed_write_timeout() {
 }
 
 #[test]
-fn execution_enters_the_explicit_working_directory_before_attempting_exec() {
+fn when_an_explicit_working_directory_is_given_then_execution_enters_it_before_exec() {
     in_child("exec ", || {
         let directory = tempfile::tempdir().unwrap();
         let mut args = request();
@@ -194,7 +194,7 @@ fn execution_enters_the_explicit_working_directory_before_attempting_exec() {
 }
 
 #[test]
-fn launch_acknowledgment_precedes_configuration_loading() {
+fn when_launch_is_acknowledged_then_configuration_loading_follows() {
     in_child("cannot read config file", || {
         use std::io::{Read, Write};
         let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -211,7 +211,7 @@ fn launch_acknowledgment_precedes_configuration_loading() {
 }
 
 #[test]
-fn a_refused_launch_acknowledgment_prevents_configuration_loading() {
+fn when_launch_acknowledgment_is_refused_then_configuration_is_not_loaded() {
     in_child("parent refused launch", || {
         use std::io::{Read, Write};
         let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -227,7 +227,7 @@ fn a_refused_launch_acknowledgment_prevents_configuration_loading() {
 }
 
 #[test]
-fn interrupted_setup_reports_retry_and_deliver_the_stage_once() {
+fn when_setup_reports_are_interrupted_then_they_retry_and_deliver_the_stage_once() {
     in_child("", || {
         signals::interrupted_write(
             |descriptor| {

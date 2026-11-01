@@ -1765,7 +1765,7 @@ mod tests {
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
     /// `/proc/self/mounts` escapes exactly four characters, all below 128.
     #[test]
-    fn the_kernel_octal_escapes_decode() {
+    fn when_mount_paths_contain_kernel_octal_escapes_then_the_escapes_are_decoded() {
         assert_eq!(unescape_mount_field(r"/mnt/two\040words"), "/mnt/two words");
         assert_eq!(unescape_mount_field(r"/mnt/a\011tab"), "/mnt/a\ttab");
         assert_eq!(unescape_mount_field(r"/mnt/a\012line"), "/mnt/a\nline");
@@ -1777,7 +1777,8 @@ mod tests {
     /// The old implementation walked bytes and finished with `push(byte as char)`, a Latin-1
     /// widening: `café` came back as `cafÃ©`.
     #[test]
-    fn a_non_ascii_path_is_not_mangled_and_still_prefixes_its_target() {
+    fn when_a_mount_path_contains_non_ascii_bytes_then_it_is_preserved_and_still_prefixes_its_target()
+     {
         for path in [
             "/mnt/café",
             "/mnt/日本語/src",
@@ -1810,7 +1811,8 @@ mod tests {
     }
 
     #[test]
-    fn broad_exec_keeps_scaffolds_refusals_and_protected_files_non_executable() {
+    fn when_broad_exec_is_enabled_then_scaffolds_refusals_and_protected_files_stay_non_executable()
+    {
         let root = tempfile::tempdir().expect("fixture");
         let work = root.path().join("work");
         let denied = work.join("denied");
@@ -1887,7 +1889,7 @@ mod tests {
     /// the Linux counterpart of `profile_conformance.rs::the_rendered_profile_grants_exactly_these_
     /// operations_and_no_others`.
     #[test]
-    fn the_view_leaves_exactly_the_intended_paths_executable() {
+    fn when_the_view_is_planned_then_only_the_intended_paths_are_marked_executable() {
         // `/bin/sh` and `/bin/cat`: two real dynamically linked binaries, so the census sees an
         // interpreter and libraries rather than a synthetic fixture.
         let config = ContainmentConfig::new()
@@ -1971,7 +1973,7 @@ mod tests {
 
     /// A read-only directory grant may enclose an exec literal's own file bind.
     #[test]
-    fn a_read_only_directory_grant_may_enclose_an_exec_literals_file_bind() {
+    fn when_a_read_only_directory_encloses_an_exec_file_bind_then_the_grants_are_accepted() {
         // Runs in a forked child, and that is required rather than tidy: `unshare(CLONE_NEWUSER)`
         // returns `EINVAL` in a multi-threaded process, and the test harness is multi-threaded.
         let child = unsafe { libc::fork() };
@@ -2073,7 +2075,7 @@ mod tests {
     /// A read grant is present and not writable. If this ever plans a writable
     /// bind, a `Read` grant would silently authorize modification.
     #[test]
-    fn a_read_grant_plans_a_read_only_bind() {
+    fn when_a_read_grant_is_planned_then_it_uses_a_read_only_bind() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Root)
@@ -2096,7 +2098,7 @@ mod tests {
 
     /// **An exec tree plans one read-only, executable bind**, and a read tree beside it does not.
     #[test]
-    fn an_exec_tree_plans_an_executable_read_only_bind_and_a_read_tree_a_no_exec_one() {
+    fn when_exec_and_read_trees_are_planned_then_both_are_read_only_and_only_exec_is_executable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tools = directory.path().join("tools");
         let data = directory.path().join("data");
@@ -2130,7 +2132,7 @@ mod tests {
     /// **A grant nested inside another is planned after the tree that encloses it, whatever order
     /// the two were stated in**, so the nested bind is the upper mount and its flags hold at runtime.
     #[test]
-    fn a_nested_grant_is_planned_after_the_tree_that_encloses_it_whatever_the_grant_order() {
+    fn when_grants_are_nested_then_the_parent_tree_is_planned_first_regardless_of_input_order() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tree = directory.path().join("tools");
         let corner = tree.join("cache");
@@ -2172,7 +2174,7 @@ mod tests {
     /// **A write root inside a read root plans the outer bind read-only and no-exec, and the inner
     /// bind writable after it.**
     #[test]
-    fn a_write_root_inside_a_read_root_plans_the_writable_bind_on_top() {
+    fn when_a_write_root_is_inside_a_read_root_then_the_writable_bind_is_planned_on_top() {
         let directory = tempfile::tempdir().expect("tempdir");
         let project = directory.path().join("project");
         let output = project.join("build");
@@ -2210,7 +2212,7 @@ mod tests {
     /// **An exec file inside a read tree is planned after the tree**, so its executable bind sits
     /// on top of the no-exec one that encloses it, whatever order the grants arrived in.
     #[test]
-    fn an_exec_file_inside_a_read_tree_is_planned_after_the_tree() {
+    fn when_an_exec_file_is_inside_a_read_tree_then_it_is_planned_after_the_tree() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tree = directory.path().join("runtime");
         std::fs::create_dir_all(tree.join("bin")).expect("a read tree");
@@ -2242,7 +2244,7 @@ mod tests {
     /// **An exec grant inside a write root plans a writable, executable island**, which is the pair
     /// the floor warns about lowered as stated; and a write root inside an exec tree runs.
     #[test]
-    fn the_warned_write_plus_exec_pair_plans_a_writable_executable_bind() {
+    fn when_write_and_exec_grants_overlap_then_the_warned_pair_plans_a_writable_executable_bind() {
         let directory = tempfile::tempdir().expect("tempdir");
         let project = directory.path().join("project");
         let output = project.join("target");
@@ -2290,7 +2292,7 @@ mod tests {
     /// **`List` is refused by name**, because a bind exposes bytes and an empty filesystem exposes
     /// no entry, so neither is enumeration without content.
     #[test]
-    fn a_list_grant_is_refused_by_name() {
+    fn when_a_list_grant_is_planned_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::List, Scope::Root)
@@ -2311,7 +2313,7 @@ mod tests {
     /// **A refused file that exists plans an empty-file overmount after the grant that binds it**,
     /// so the workload finds an empty, unwritable file where the refused one is.
     #[test]
-    fn a_refused_file_that_exists_plans_an_empty_file_overmount_after_its_grant() {
+    fn when_a_refused_file_exists_then_an_empty_file_overmount_is_planned_after_its_grant() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tree = directory.path().join("project");
         std::fs::create_dir(&tree).expect("a project");
@@ -2358,7 +2360,7 @@ mod tests {
     /// **A refusal under a refused tree plans nothing of its own**: the tree's empty filesystem
     /// already holds it, and a mountpoint cannot be created inside one.
     #[test]
-    fn a_refusal_under_a_refused_tree_plans_nothing_of_its_own() {
+    fn when_a_refusal_is_under_a_refused_tree_then_it_plans_no_separate_mount() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tree = directory.path().join("hidden");
         std::fs::create_dir(&tree).expect("a tree to refuse");
@@ -2393,7 +2395,7 @@ mod tests {
     /// **A refused file that does not exist yet is refused by name**: an overmount needs an
     /// existing target, and creating one through a writable bind would create it on the host.
     #[test]
-    fn a_refused_file_that_does_not_exist_is_refused_by_name() {
+    fn when_a_refused_file_is_missing_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let future = directory.path().join("not-yet-written.env");
         let config = ContainmentConfig::new()
@@ -2423,7 +2425,7 @@ mod tests {
 
     /// A directory-scope grant plans a **fresh, read-only** filesystem, not a bind.
     #[test]
-    fn a_directory_scope_grant_plans_a_fresh_read_only_filesystem() {
+    fn when_a_directory_scope_grant_is_planned_then_it_uses_a_fresh_read_only_filesystem() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Dir)
@@ -2450,7 +2452,7 @@ mod tests {
 
     /// A metadata-only ancestor must not hide an explicitly granted descendant.
     #[test]
-    fn an_explicit_descendant_replaces_its_metadata_only_ancestor() {
+    fn when_a_descendant_is_explicitly_granted_then_it_replaces_its_metadata_only_ancestor() {
         let ancestor = tempfile::tempdir().expect("ancestor");
         let descendant = ancestor.path().join("box");
         std::fs::create_dir(&descendant).expect("descendant");
@@ -2475,7 +2477,7 @@ mod tests {
 
     /// A refusal leaves its metadata-only ancestor empty and read-only.
     #[test]
-    fn a_refusal_keeps_its_metadata_only_ancestor_read_only() {
+    fn when_a_refusal_has_a_metadata_only_ancestor_then_the_ancestor_stays_read_only() {
         let ancestor = tempfile::tempdir().expect("ancestor");
         let refused = ancestor.path().join("box/private");
         std::fs::create_dir_all(&refused).expect("the refused tree");
@@ -2500,7 +2502,7 @@ mod tests {
 
     /// A read-write grant is writable — the box's home depends on this.
     #[test]
-    fn a_read_write_grant_plans_a_writable_bind() {
+    fn when_a_read_write_grant_is_planned_then_it_uses_a_writable_bind() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Root)
@@ -2513,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_protection_overlays_its_writable_ancestor() {
+    fn when_a_write_protection_is_planned_then_it_overlays_its_writable_ancestor() {
         use std::os::unix::fs::MetadataExt as _;
 
         let directory = tempfile::tempdir().expect("tempdir");
@@ -2557,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_socket_grants_plan_one_writable_non_executable_socket() {
+    fn when_socket_grants_are_duplicated_then_one_writable_non_executable_socket_is_planned() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("broker.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -2586,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_directory_grants_plan_one_empty_read_only_filesystem() {
+    fn when_directory_grants_are_duplicated_then_one_empty_read_only_filesystem_is_planned() {
         let directory = tempfile::tempdir().unwrap();
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Dir)
@@ -2613,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_subtrees_remain_omitted_from_the_linux_view() {
+    fn when_metadata_subtrees_are_requested_then_the_linux_view_omits_them() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("private"), b"content").unwrap();
         let config = ContainmentConfig::new()
@@ -2629,7 +2631,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_file_mounts_refuse_writes_and_parent_replacement() {
+    fn when_protected_files_are_mounted_then_writes_and_parent_replacement_are_refused() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
@@ -2677,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_replaced_protected_parent_refuses_the_view() {
+    fn when_a_protected_parent_is_missing_or_replaced_then_the_view_is_refused() {
         let (_source, staging, view, target) = planned_parent_fixture();
         let error = view.protect_parents(staging.path()).unwrap_err();
         assert!(
@@ -2693,7 +2695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_protected_parent_bind_refuses_the_view() {
+    fn when_binding_a_protected_parent_fails_then_the_view_is_refused() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let (_source, staging, view, target) = planned_parent_fixture();
             std::fs::create_dir_all(&target).unwrap();
@@ -2709,7 +2711,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_directory_mount_is_read_only() {
+    fn when_an_empty_directory_is_mounted_then_it_is_read_only() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
@@ -2728,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_file_outside_a_tree_bind_is_empty_and_read_only() {
+    fn when_a_refused_file_is_outside_a_tree_bind_then_it_is_empty_and_read_only() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("private");
@@ -2747,7 +2749,7 @@ mod tests {
     /// The grant's own resolved path is the path inside the view, so one policy
     /// file names the same thing on both platforms.
     #[test]
-    fn a_grant_is_planned_at_its_own_resolved_path() {
+    fn when_a_grant_is_planned_then_it_uses_its_own_resolved_path() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Root)
@@ -2766,7 +2768,7 @@ mod tests {
     /// A refusal is planned after every grant, and an override is re-appended rather than left at
     /// the index the grant gave it.
     #[test]
-    fn a_refusal_is_planned_last_and_shadows_the_grant_that_bound_its_parent() {
+    fn when_a_refusal_is_planned_then_it_is_last_and_shadows_its_parent_grant() {
         let project = tempfile::tempdir().expect("tempdir");
         let refused = project.path().join("inner");
         std::fs::create_dir(&refused).expect("inner directory");
@@ -2818,7 +2820,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_replaces_parent_protection_below_its_mountpoint() {
+    fn when_a_refusal_covers_parent_protection_then_it_replaces_protection_below_its_mountpoint() {
         let root = tempfile::tempdir().expect("workspace");
         let refused = root.path().join("authority");
         let nested = refused.join("nested");
@@ -2850,7 +2852,7 @@ mod tests {
     /// Every view has a root, a fresh `/proc`, a private `/tmp`, and the four device nodes — and
     /// the root comes first, since nothing can be bound into a filesystem that does not exist yet.
     #[test]
-    fn the_scaffold_is_always_planned_and_the_root_is_first() {
+    fn when_a_view_is_planned_then_the_scaffold_is_always_present_and_the_root_is_first() {
         let config = ContainmentConfig::new();
         let entries = planned(&config);
 
@@ -2875,7 +2877,7 @@ mod tests {
     /// No grant means no host path at all beyond the scaffold. This is the
     /// property that makes an ungranted path `ENOENT` rather than readable.
     #[test]
-    fn a_view_with_no_grants_contains_no_host_paths_beyond_the_scaffold() {
+    fn when_a_view_has_no_grants_then_it_contains_only_scaffold_host_paths() {
         let entries = planned(&ContainmentConfig::new());
 
         assert!(
@@ -2890,7 +2892,8 @@ mod tests {
     /// An execute grant on a real dynamically linked binary plans its interpreter
     /// and its libraries, and does *not* plan the directory holding them.
     #[test]
-    fn an_execute_grant_plans_its_interpreter_and_libraries_but_not_their_directory() {
+    fn when_execute_is_granted_then_its_interpreter_and_libraries_are_planned_without_their_directory()
+     {
         // `/bin/sh` is dynamically linked on every supported host, so this needs
         // no fixture and exercises the real parser against a real image.
         let config = ContainmentConfig::new()
@@ -2936,7 +2939,7 @@ mod tests {
 
     /// A submount under a read-only grant is read-only too.
     #[test]
-    fn a_submount_under_a_read_only_grant_is_also_read_only() {
+    fn when_a_read_only_grant_has_a_submount_then_the_submount_is_also_read_only() {
         if !crate::backend::linux::namespace::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -3027,7 +3030,7 @@ mod tests {
 
     /// A grant through a symlink is reachable under BOTH names.
     #[test]
-    fn a_grant_through_a_symlink_is_reachable_under_both_names() {
+    fn when_a_grant_uses_a_symlink_then_both_planned_names_use_the_same_source() {
         let directory = tempfile::tempdir().expect("tempdir");
         let real = directory.path().join("real.txt");
         std::fs::write(&real, b"contents").expect("write target");
@@ -3059,7 +3062,7 @@ mod tests {
     /// Two grants for one path plan one mount whose access is their union, so
     /// mount order cannot decide whether the path is writable.
     #[test]
-    fn two_grants_for_one_path_plan_one_mount_with_the_union_of_their_access() {
+    fn when_two_grants_share_a_path_then_one_mount_combines_their_access() {
         let directory = tempfile::tempdir().expect("tempdir");
         let config = ContainmentConfig::new()
             .allow(directory.path(), Operation::Read, Scope::Root)
@@ -3086,7 +3089,7 @@ mod tests {
 
     /// Two executables sharing libc plan one bind for it.
     #[test]
-    fn a_library_shared_by_two_executables_is_planned_once() {
+    fn when_two_executables_share_a_library_then_the_library_is_planned_once() {
         let config = ContainmentConfig::new()
             .allow("/bin/sh", Operation::Exec, Scope::File)
             .expect("sh grant")
@@ -3108,7 +3111,7 @@ mod tests {
 
     /// A static binary plans no interpreter and no libraries, rather than failing.
     #[test]
-    fn a_non_elf_executable_plans_no_dependencies() {
+    fn when_an_executable_is_not_elf_then_it_plans_no_dependencies() {
         let directory = tempfile::tempdir().expect("tempdir");
         let script = directory.path().join("script.sh");
         std::fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
@@ -3123,7 +3126,7 @@ mod tests {
 
     /// A truncated or hostile file must not panic the planner.
     #[test]
-    fn a_malformed_elf_plans_no_dependencies_rather_than_panicking() {
+    fn when_an_elf_image_is_malformed_then_it_plans_no_dependencies_without_panicking() {
         let directory = tempfile::tempdir().expect("tempdir");
 
         for (name, bytes) in [
@@ -3151,7 +3154,7 @@ mod tests {
     /// A file grant whose path is a directory is refused, not widened. The check
     /// exists because binding the directory would authorize every file in it.
     #[test]
-    fn a_file_grant_whose_path_became_a_directory_is_refused() {
+    fn when_a_granted_file_becomes_a_directory_then_it_is_refused() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("target");
         std::fs::write(&path, b"file for now").expect("write file");
@@ -3252,7 +3255,7 @@ mod tests {
     /// **A program under a tree its own `read` list grants establishes**: the file an earlier bind
     /// brought in is its own mountpoint.
     #[test]
-    fn an_exec_file_under_a_read_root_establishes() {
+    fn when_an_exec_file_is_under_a_read_root_then_the_view_establishes() {
         if !crate::backend::linux::namespace::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -3278,7 +3281,7 @@ mod tests {
     /// **A program reached through a symbolic link inside the granted tree establishes**: the link
     /// is left to the enclosing bind and its resolved spelling carries its own.
     #[test]
-    fn a_symlinked_exec_file_under_a_read_root_establishes() {
+    fn when_a_symlinked_exec_file_is_under_a_read_root_then_the_view_establishes() {
         if !crate::backend::linux::namespace::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -3303,7 +3306,7 @@ mod tests {
 
     /// **An absent mountpoint inside a writable bind is refused, never created on the host.**
     #[test]
-    fn an_absent_mountpoint_is_not_created_on_the_host() {
+    fn when_a_mountpoint_is_absent_then_it_is_not_created_on_the_host() {
         if !crate::backend::linux::namespace::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -3340,7 +3343,7 @@ mod tests {
     /// **A symbolic link at a mountpoint no bind encloses is refused**: only a link an enclosing
     /// bind brought in is left to that bind.
     #[test]
-    fn a_symlink_at_a_mountpoint_outside_any_bind_is_refused() {
+    fn when_a_mountpoint_outside_every_bind_is_a_symlink_then_it_is_refused() {
         if !crate::backend::linux::namespace::probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -3482,7 +3485,8 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_elf_headers_and_invalid_program_tables_plan_no_dependencies() {
+    fn when_elf_headers_or_program_tables_are_unsupported_or_invalid_then_no_dependencies_are_planned()
+     {
         let base = synthetic_elf(None, &["libfixture.so"], None);
         let mut cases = Vec::new();
         for (label, offset, value) in [("magic", 0, 0), ("32-bit", 4, 1), ("big-endian", 5, 2)] {
@@ -3513,7 +3517,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_arguments_with_nul_are_refused_before_the_syscall() {
+    fn when_mount_arguments_contain_nul_then_they_are_refused_before_the_syscall() {
         let invalid = Path::new("/tmp/before\0after");
         for (source, target, fstype, data) in [
             (Some(invalid), Path::new("/"), None, None),
@@ -3532,7 +3536,7 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_internal_mount_entries_are_refused_before_mounting() {
+    fn when_internal_mount_entries_are_unsafe_then_they_are_refused_before_mounting() {
         let root = tempfile::tempdir().unwrap();
         let view = MountView {
             entries: Vec::new(),
@@ -3558,7 +3562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_protected_mountpoint_must_exist_as_a_regular_file() {
+    fn when_a_protected_mountpoint_is_checked_then_it_must_exist_as_a_regular_file() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         std::fs::write(&source, b"protected").unwrap();
@@ -3592,7 +3596,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_file_never_creates_a_mountpoint_through_a_host_bind() {
+    fn when_a_refused_file_needs_a_mountpoint_through_a_host_bind_then_creation_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let parent = MountEntry {
             source: Some(root.path().join("host")),
@@ -3630,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn mounted_protection_checks_device_inode_and_link_count() {
+    fn when_mounted_protection_is_checked_then_device_inode_and_link_count_must_match() {
         use std::os::unix::fs::MetadataExt as _;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("protected");
@@ -3654,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_mount_that_does_not_install_the_checked_object_is_refused() {
+    fn when_a_grant_mount_installs_a_different_object_then_it_is_refused() {
         super::super::failure_tests::in_fresh_process(|| {
             use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
 
@@ -3703,7 +3707,7 @@ mod tests {
     }
 
     #[test]
-    fn an_opened_grant_source_keeps_its_object_after_path_replacement() {
+    fn when_a_grant_source_path_is_replaced_then_the_opened_source_keeps_its_object() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let directory = tempfile::tempdir().unwrap();
             for is_directory in [false, true] {
@@ -3760,7 +3764,8 @@ mod tests {
     }
 
     #[test]
-    fn dependency_lookup_handles_explicit_paths_and_refuses_unmodeled_tokens() {
+    fn when_dependencies_use_explicit_paths_or_unmodeled_tokens_then_paths_resolve_and_tokens_are_refused()
+     {
         let directory = tempfile::tempdir().unwrap();
         let library = directory.path().join("libfixture-coverage.so");
         std::fs::write(&library, b"library").unwrap();
@@ -3791,7 +3796,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_mount_escapes_remain_literal() {
+    fn when_mount_escapes_are_malformed_then_they_remain_literal() {
         for spelling in [r"tail\", r"\12", r"\888", r"\08x"] {
             assert_eq!(unescape_mount_field(spelling), spelling);
         }
@@ -3810,22 +3815,22 @@ mod tests {
     }
 
     #[test]
-    fn failed_mount_propagation_change_refuses_the_view() {
+    fn when_mount_propagation_change_fails_then_the_view_is_refused() {
         materialize_refuses(libc::SYS_mount, None, "making the mount tree private");
     }
 
     #[test]
-    fn unavailable_random_device_refuses_the_staging_root() {
+    fn when_the_random_device_is_unavailable_then_the_staging_root_is_refused() {
         materialize_refuses(libc::SYS_openat, None, "opening /dev/urandom");
     }
 
     #[test]
-    fn unreadable_random_device_refuses_the_staging_root() {
+    fn when_the_random_device_is_unreadable_then_the_staging_root_is_refused() {
         materialize_refuses(libc::SYS_read, None, "reading /dev/urandom");
     }
 
     #[test]
-    fn failed_staging_directory_creation_refuses_the_view() {
+    fn when_staging_directory_creation_fails_then_the_view_is_refused() {
         #[cfg(target_arch = "x86_64")]
         let call = libc::SYS_mkdir;
         #[cfg(not(target_arch = "x86_64"))]
@@ -3834,7 +3839,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_fresh_filesystem_mount_refuses_the_view() {
+    fn when_mounting_a_fresh_filesystem_fails_then_the_view_is_refused() {
         materialize_refuses(
             libc::SYS_mount,
             Some((3, libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC)),
@@ -3843,7 +3848,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_root_read_only_remount_refuses_the_view() {
+    fn when_remounting_the_root_read_only_fails_then_the_view_is_refused() {
         materialize_refuses(
             libc::SYS_mount,
             Some((
@@ -3860,22 +3865,22 @@ mod tests {
     }
 
     #[test]
-    fn failed_root_pivot_refuses_the_view() {
+    fn when_pivoting_the_root_fails_then_the_view_is_refused() {
         materialize_refuses(libc::SYS_pivot_root, None, "pivot_root into the view");
     }
 
     #[test]
-    fn failed_directory_change_after_pivot_refuses_the_view() {
+    fn when_changing_directory_after_pivot_fails_then_the_view_is_refused() {
         materialize_refuses(libc::SYS_chdir, None, "entering the pivoted root");
     }
 
     #[test]
-    fn failed_old_root_detachment_refuses_the_view() {
+    fn when_detaching_the_old_root_fails_then_the_view_is_refused() {
         materialize_refuses(libc::SYS_umount2, None, "detaching the old root");
     }
 
     #[test]
-    fn an_unreadable_detached_root_refuses_the_view() {
+    fn when_the_detached_root_is_unreadable_then_the_view_is_refused() {
         materialize_refuses(
             libc::SYS_openat,
             Some((
@@ -3887,7 +3892,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nonempty_old_root_mountpoint_refuses_the_pivoted_view() {
+    fn when_the_old_root_mountpoint_is_nonempty_then_the_pivoted_view_is_refused() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             mount_syscall(
                 None,
@@ -3926,7 +3931,7 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_mount_tables_refuse_remounting_and_shadow_classification() {
+    fn when_mount_tables_are_unreadable_then_remounting_and_shadow_classification_are_refused() {
         super::super::failure_tests::in_fresh_process(|| {
             super::super::failure_tests::refuse_syscall(libc::SYS_openat, None);
             let target = Path::new("/fixture");
@@ -3944,7 +3949,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unshadowed_remount_error_refuses_the_view() {
+    fn when_an_unshadowed_remount_fails_then_the_view_is_refused() {
         super::super::failure_tests::in_fresh_process(|| {
             let directory = tempfile::tempdir().unwrap();
             super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
@@ -4002,7 +4007,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_empty_refusal_source_creation_refuses_the_view() {
+    fn when_creating_an_empty_refusal_source_fails_then_the_view_is_refused() {
         establish_refuses(
             MountKind::EmptyFile,
             false,
@@ -4013,7 +4018,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_empty_refusal_target_opening_refuses_the_view() {
+    fn when_opening_an_empty_refusal_target_fails_then_the_view_is_refused() {
         establish_refuses(
             MountKind::EmptyFile,
             true,
@@ -4024,7 +4029,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_empty_refusal_parent_creation_refuses_the_view() {
+    fn when_creating_an_empty_refusal_parent_fails_then_the_view_is_refused() {
         let call = libc::SYS_mkdirat;
         establish_refuses(
             MountKind::EmptyFile,
@@ -4036,7 +4041,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_empty_file_binding_refuses_the_view() {
+    fn when_binding_an_empty_file_fails_then_the_view_is_refused() {
         establish_refuses(
             MountKind::EmptyFile,
             true,
@@ -4047,12 +4052,12 @@ mod tests {
     }
 
     #[test]
-    fn failed_source_binding_refuses_the_view() {
+    fn when_binding_a_source_fails_then_the_view_is_refused() {
         establish_refuses(MountKind::Bind, false, "/entry", libc::SYS_mount, "binding");
     }
 
     #[test]
-    fn failed_file_bind_mountpoint_creation_refuses_the_view() {
+    fn when_creating_a_file_bind_mountpoint_fails_then_the_view_is_refused() {
         establish_refuses(
             MountKind::Bind,
             false,
@@ -4063,7 +4068,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_fresh_mount_directory_creation_refuses_the_view() {
+    fn when_creating_a_fresh_mount_directory_fails_then_the_view_is_refused() {
         let call = libc::SYS_mkdirat;
         establish_refuses(
             MountKind::Fresh { fstype: "tmpfs" },
@@ -4075,7 +4080,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_bind_cannot_replace_a_directory_mountpoint() {
+    fn when_a_file_bind_targets_a_directory_mountpoint_then_replacement_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         std::fs::write(&source, b"source").unwrap();
@@ -4113,7 +4118,8 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_mounts_and_ancestors_outside_the_grant_do_not_count_as_shadowing() {
+    fn when_mounts_are_unrelated_or_ancestors_are_outside_the_grant_then_they_do_not_count_as_shadowing()
+     {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
             let root = tempfile::tempdir().unwrap();
             let grant = root.path().join("grant");
@@ -4140,7 +4146,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_executable_names_the_failed_dependency_lookup() {
+    fn when_an_executable_is_missing_then_the_failed_dependency_lookup_is_named() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("absent");
         let error = image_needs(&missing)
@@ -4151,7 +4157,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_interpreter_segments_do_not_create_an_interpreter_grant() {
+    fn when_interpreter_segments_are_malformed_then_no_interpreter_grant_is_created() {
         let base = synthetic_elf(Some("/ld-fixture"), &[], None);
         let mut cases = Vec::new();
         for (label, byte) in [("empty interpreter", 0), ("invalid UTF-8", 0xff)] {
@@ -4173,7 +4179,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_malformed_dynamic_metadata_plans_no_libraries() {
+    fn when_dynamic_metadata_is_absent_or_malformed_then_no_libraries_are_planned() {
         let base = synthetic_elf(None, &["libfixture.so"], None);
         let dynamic = u64::from_le_bytes(base[128..136].try_into().unwrap()) as usize;
         let mut cases = Vec::new();
@@ -4213,7 +4219,7 @@ mod tests {
     }
 
     #[test]
-    fn an_overflowing_string_table_file_offset_does_not_panic() {
+    fn when_a_string_table_file_offset_overflows_then_planning_does_not_panic() {
         let mut image = synthetic_elf(None, &["libfixture.so"], None);
         image[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
         let directory = tempfile::tempdir().unwrap();
@@ -4222,7 +4228,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_rpath_is_used_when_runpath_is_absent() {
+    fn when_runpath_is_absent_then_legacy_rpath_is_used() {
         let mut image = synthetic_elf(None, &["libfixture.so"], Some("/one:/two"));
         let dynamic = u64::from_le_bytes(image[128..136].try_into().unwrap()) as usize;
         image[dynamic + 16..dynamic + 24].copy_from_slice(&15u64.to_le_bytes());
@@ -4235,7 +4241,8 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cycles_and_repeated_interpreters_terminate_without_duplicate_images() {
+    fn when_dependencies_cycle_or_repeat_interpreters_then_the_walk_terminates_without_duplicate_images()
+     {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let interpreter = planted_image(root, "loader", b"loader");
@@ -4280,7 +4287,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_walk_refuses_more_than_its_image_limit() {
+    fn when_the_dependency_walk_exceeds_its_image_limit_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         for index in 0..=MAXIMUM_IMAGES + 2 {
             let next = format!("image-{}.so", index + 1);
@@ -4308,7 +4315,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unseekable_string_table_offset_plans_no_libraries() {
+    fn when_a_string_table_offset_is_unseekable_then_no_libraries_are_planned() {
         let mut image = synthetic_elf(None, &["fixture.so"], None);
         image.extend_from_slice(b"\0fixture.so\0");
         // The table address is 176. This translation fits u64 but cannot be a file offset.
@@ -4319,7 +4326,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_string_table_plans_no_libraries() {
+    fn when_a_string_table_is_unreadable_then_no_libraries_are_planned() {
         super::super::failure_tests::in_fresh_process(|| {
             let directory = tempfile::tempdir().unwrap();
             let mut image = synthetic_elf(None, &["fixture.so"], None);
@@ -4333,7 +4340,7 @@ mod tests {
     }
 
     #[test]
-    fn a_library_with_unverifiable_path_identity_refuses_dependency_planning() {
+    fn when_a_library_path_identity_cannot_be_verified_then_dependency_planning_is_refused() {
         super::super::failure_tests::in_fresh_process(|| {
             let directory = tempfile::tempdir().unwrap();
             let program = planted_image(
@@ -4361,7 +4368,7 @@ mod tests {
     }
 
     #[test]
-    fn string_tables_outside_load_segment_ranges_plan_no_libraries() {
+    fn when_string_tables_are_outside_load_segment_ranges_then_no_libraries_are_planned() {
         let directory = tempfile::tempdir().unwrap();
         for (virtual_address, size) in [(1024u64, 4096u64), (0, 1)] {
             let mut image = synthetic_elf(None, &["fixture.so"], None);
@@ -4375,7 +4382,7 @@ mod tests {
     /// **An exec file brings the libraries its `DT_RUNPATH` names, and theirs in turn**, each as
     /// a read-only executable file bind.
     #[test]
-    fn an_exec_file_pulls_its_runpath_libraries_transitively() {
+    fn when_an_exec_file_uses_runpath_then_its_libraries_are_pulled_transitively() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4411,7 +4418,7 @@ mod tests {
 
     #[cfg(target_env = "gnu")]
     #[test]
-    fn an_executable_runpath_does_not_shadow_a_system_librarys_child() {
+    fn when_an_executable_has_runpath_then_it_does_not_shadow_a_system_librarys_child() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4439,7 +4446,7 @@ mod tests {
 
     #[cfg(target_env = "gnu")]
     #[test]
-    fn library_search_inheritance_matches_the_native_loader() {
+    fn when_library_search_paths_are_inherited_then_they_match_the_native_loader() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         std::fs::create_dir(root.join("deps")).expect("library directory");
@@ -4537,7 +4544,7 @@ mod tests {
 
     #[cfg(target_env = "gnu")]
     #[test]
-    fn an_exec_file_pulls_system_libraries_transitively() {
+    fn when_an_exec_file_uses_system_libraries_then_they_are_pulled_transitively() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(&root, "app", &synthetic_elf(None, &["libm.so.6"], None));
@@ -4577,7 +4584,8 @@ mod tests {
     /// **A read root on a loader directory is bound executable and read-only**, and a read root
     /// anywhere else stays no-exec.
     #[test]
-    fn a_read_root_on_a_loader_directory_is_bound_executable_and_read_only() {
+    fn when_a_read_root_covers_a_loader_directory_then_its_planned_bind_is_executable_and_read_only()
+     {
         let loader = LIBRARY_DIRECTORIES
             .iter()
             .map(Path::new)
@@ -4610,7 +4618,7 @@ mod tests {
 
     /// **A dependency a loader directory already covers is not planned twice.**
     #[test]
-    fn a_dependency_a_loader_directory_covers_is_not_planned_twice() {
+    fn when_a_loader_directory_covers_a_dependency_then_the_dependency_is_not_planned_twice() {
         let libc_directory = LIBRARY_DIRECTORIES
             .iter()
             .map(Path::new)
@@ -4642,7 +4650,7 @@ mod tests {
     }
 
     #[test]
-    fn an_executable_rpath_keeps_its_origin_in_indirect_dependencies() {
+    fn when_an_executable_uses_rpath_then_its_origin_is_preserved_in_indirect_dependencies() {
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4670,7 +4678,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_runpath_suppresses_local_and_inherited_rpath() {
+    fn when_runpath_is_empty_then_local_and_inherited_rpath_are_suppressed() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4693,7 +4701,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ancestor_rpath_survives_a_descendants_runpath() {
+    fn when_a_descendant_has_runpath_then_an_ancestor_rpath_survives() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4721,7 +4729,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_loader_supplies_a_shared_librarys_inherited_rpath() {
+    fn when_a_library_is_shared_then_its_first_loader_supplies_inherited_rpath() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path().canonicalize().expect("canonical");
         let shared = planted_image(
@@ -4776,7 +4784,7 @@ mod tests {
     /// **An interpreter the floor refuses is refused by name**, because the workload authors the
     /// program header that names it.
     #[test]
-    fn an_interpreter_inside_a_credential_store_is_refused_by_name() {
+    fn when_an_interpreter_is_inside_a_credential_store_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
         let loader = planted_image(&home, ".aws/ld.so", &synthetic_elf(None, &[], None));
@@ -4803,7 +4811,7 @@ mod tests {
     /// **A needed library no search directory holds is refused by name**, so the closure refuses
     /// the plan rather than leaving the view short of an image `exec` needs.
     #[test]
-    fn a_needed_library_no_search_directory_holds_is_refused_by_name() {
+    fn when_no_search_directory_holds_a_needed_library_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
         let app = planted_image(
@@ -4828,7 +4836,7 @@ mod tests {
     /// **A library the floor refuses is refused by name**, so a rewritten binary cannot reach a
     /// credential store through its `DT_RUNPATH`.
     #[test]
-    fn a_runpath_library_inside_a_credential_store_is_refused_by_name() {
+    fn when_a_runpath_library_is_inside_a_credential_store_then_it_is_refused_by_name() {
         let directory = tempfile::tempdir().expect("tempdir");
         let home = directory.path().canonicalize().expect("canonical");
         planted_image(&home, ".aws/libapp.so", &synthetic_elf(None, &[], None));

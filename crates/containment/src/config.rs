@@ -757,7 +757,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepared_path_preserves_the_authorized_identity_and_original_spelling() {
+    fn when_a_path_is_prepared_then_authorized_identity_and_original_spelling_are_preserved() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -781,7 +781,7 @@ mod tests {
     /// The scope a caller asks for is the scope validation applies, so a directory scope cannot be
     /// satisfied by a file and vice versa.
     #[test]
-    fn a_grant_is_validated_against_the_scope_it_asks_for() {
+    fn when_a_grant_is_created_then_it_is_validated_against_its_requested_scope() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().canonicalize().unwrap();
         let file = directory.join("agent.sock");
@@ -817,7 +817,7 @@ mod tests {
     /// `profile_conformance.rs::a_refusal_at_dir_scope_is_refused_and_file_scope_names_one_file`
     /// pins it through the verb that does state one.
     #[test]
-    fn the_illegal_cells_are_refused_before_a_backend_sees_them() {
+    fn when_a_cell_is_illegal_then_it_is_refused_before_backend_selection() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().canonicalize().unwrap();
         let file = directory.join("program");
@@ -870,7 +870,7 @@ mod tests {
 
     /// Read and write on one path is two grants, so neither mode hides inside the other.
     #[test]
-    fn read_and_write_on_one_path_are_two_grants() {
+    fn when_read_and_write_share_one_path_then_they_remain_two_grants() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().canonicalize().unwrap();
 
@@ -886,7 +886,8 @@ mod tests {
     }
 
     #[test]
-    fn credential_store_exceptions_round_trip_and_old_json_defaults_to_none() {
+    fn when_credential_exceptions_round_trip_then_they_are_preserved_and_old_json_defaults_to_none()
+    {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -912,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn a_serialized_exception_must_have_its_matching_credential_grant() {
+    fn when_an_exception_is_deserialized_then_its_matching_credential_grant_is_required() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -937,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn a_serialized_exception_refuses_a_non_exact_original_alias() {
+    fn when_a_serialized_exception_has_a_non_exact_original_alias_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -971,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_exact_credential_path_can_receive_an_exception() {
+    fn when_a_credential_path_is_not_exact_then_it_cannot_receive_an_exception() {
         let home = tempfile::tempdir().expect("an operator home");
         let ordinary = home.path().join("ordinary");
         std::fs::create_dir(&ordinary).expect("an ordinary directory");
@@ -987,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_symlink_cannot_exempt_an_ordinary_target() {
+    fn when_a_credential_symlink_targets_an_ordinary_path_then_it_cannot_exempt_that_path() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let store = home_path.join(".aws");
@@ -1008,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_symlink_cannot_switch_stores() {
+    fn when_a_credential_symlink_switches_stores_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let aws = home_path.join(".aws");
@@ -1031,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_symlink_chain_cannot_leave_and_reenter_its_store() {
+    fn when_a_credential_symlink_chain_leaves_and_reenters_its_store_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let aws = home_path.join(".aws");
@@ -1057,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn a_serialized_exception_cannot_switch_stores() {
+    fn when_a_serialized_exception_switches_stores_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let aws = home_path.join(".aws");
@@ -1091,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn a_serialized_exception_cannot_leave_and_reenter_its_store() {
+    fn when_a_serialized_exception_leaves_and_reenters_its_store_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let aws = home_path.join(".aws");
@@ -1129,7 +1130,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn serialized_credential_write_requires_the_same_read_grant_on_linux() {
+    fn when_linux_deserializes_a_credential_write_then_the_same_read_grant_is_required() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let cache = home_path.join(".aws/sso/cache");
@@ -1151,7 +1152,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn credential_write_coverage_requires_contents_not_directory_entries() {
+    fn when_credential_write_coverage_is_checked_then_content_reads_are_required_instead_of_directory_entries()
+     {
         let home = tempfile::tempdir().expect("an operator home");
         let cache = home.path().join(".aws/sso/cache");
         std::fs::create_dir_all(&cache).expect("a credential cache");
@@ -1174,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn the_network_refuses_every_zero_port() {
+    fn when_a_network_port_is_zero_then_it_is_refused() {
         fn assert_invalid_port(network: Network, expected_field: &'static str) {
             let refusal = ContainmentConfig::new()
                 .set_network(network)
@@ -1192,7 +1194,7 @@ mod tests {
 
     /// Two localhost services cannot share one port, so a config claiming they do is refused.
     #[test]
-    fn two_of_the_connect_ports_may_not_be_the_same() {
+    fn when_connect_ports_repeat_then_the_duplicate_is_refused() {
         let refusal = ContainmentConfig::new()
             .set_network(Network::localhost().connect(8080).connect(8080))
             .expect_err("one port cannot be two services");
@@ -1207,7 +1209,7 @@ mod tests {
     /// The refusal is `ConflictingGrants` rather than `InvalidPort`, because there is no port 0 to
     /// report — the earlier shape told an operator to fix a port that was never named.
     #[test]
-    fn an_empty_connect_list_is_refused() {
+    fn when_a_connect_list_is_empty_then_it_is_refused() {
         let refusal = ContainmentConfig::new()
             .set_network(Network::localhost())
             .expect_err("Localhost with no port reaches nothing");
@@ -1223,7 +1225,7 @@ mod tests {
 
     /// The builder is additive, and grant order is the wire contract on Linux.
     #[test]
-    fn from_json_refuses_a_discovery_root_outside_the_operator_home() {
+    fn when_json_discovery_root_is_outside_the_operator_home_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         // A crafted config whose discovery root is the filesystem root, not the operator home:
@@ -1242,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn from_json_refuses_a_relative_discovery_path() {
+    fn when_json_discovery_path_is_relative_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let sub = home_path.join("sub");
@@ -1267,7 +1269,7 @@ mod tests {
     /// A discovery root that resolves outside the home, or that has no stated home, is refused on load.
     #[cfg(unix)]
     #[test]
-    fn from_json_refuses_a_discovery_root_outside_the_home() {
+    fn when_json_discovery_root_is_outside_the_declared_home_then_it_is_refused() {
         let home = tempfile::tempdir().expect("an operator home");
         let home_path = home.path().canonicalize().expect("the home resolves");
         let sub = home_path.join("sub");
@@ -1308,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn the_connect_ports_keep_their_grant_order() {
+    fn when_connect_ports_are_configured_then_their_grant_order_is_preserved() {
         let config = ContainmentConfig::new()
             .set_network(
                 Network::localhost()
