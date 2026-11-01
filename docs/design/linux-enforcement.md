@@ -132,7 +132,10 @@ The gateway supports outbound HTTP and HTTPS requests.
 The gateway applies policy, as described in [egress enforcement](egress.md).
 
 The sandbox cannot connect directly to the surrounding OS's loopback (`localhost`) listeners or [abstract Unix sockets](#terms).
-A client that uses the gateway can reach a local HTTP service when policy permits.
+A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
+Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback address.
+See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
 
 `contain_egress = false` selects the surrounding OS network namespace.
 Direct connections can reach IPv4 destinations, including loopback listeners, and abstract Unix sockets.
