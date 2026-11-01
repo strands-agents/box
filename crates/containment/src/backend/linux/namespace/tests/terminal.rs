@@ -1,7 +1,7 @@
 //! Disposable-terminal checks for both installed workload filters.
 
-use super::{Network, SyscallPolicy};
-use crate::backend::linux::namespace::install_syscall_filters;
+use super::super::{Network, install_syscall_filters, syscall::SyscallPolicy};
+use super::in_child;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 fn terminal() -> (OwnedFd, OwnedFd) {
@@ -27,25 +27,15 @@ fn child(filtered: bool, probe: impl FnOnce() -> i32) -> i32 {
     let filters = SyscallPolicy::for_config(&Network::Blocked)
         .compile()
         .unwrap();
-    // SAFETY: the child uses bounded syscall probes and exits without unwinding.
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0);
-    if pid == 0 {
+    in_child(|| {
         // SAFETY: terminate a stuck disposable probe instead of hanging the test runner.
         unsafe { libc::alarm(5) };
-        let result = if filtered && install_syscall_filters(&filters).is_err() {
+        if filtered && install_syscall_filters(&filters).is_err() {
             90
         } else {
             probe()
-        };
-        // SAFETY: do not return into the test runner.
-        unsafe { libc::_exit(result) };
-    }
-    let mut status = 0;
-    // SAFETY: pid is this test's child.
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-    assert!(libc::WIFEXITED(status), "probe was signalled: {status}");
-    libc::WEXITSTATUS(status)
+        }
+    })
 }
 
 fn discipline(fd: i32) -> i32 {
@@ -227,8 +217,8 @@ fn terminal_modes_size_input_output_and_restoration_remain_available() {
             let size = libc::winsize {
                 ws_row: 39,
                 ws_col: 107,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
+                ws_xpixel: 808,
+                ws_ypixel: 592,
             };
             let mut observed = libc::winsize {
                 ws_row: 0,
@@ -243,8 +233,19 @@ fn terminal_modes_size_input_output_and_restoration_remain_available() {
             if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut observed) } != 0 {
                 return 3;
             }
-            if observed.ws_row != 39 || observed.ws_col != 107 {
+            if (
+                observed.ws_row,
+                observed.ws_col,
+                observed.ws_xpixel,
+                observed.ws_ypixel,
+            ) != (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
+            {
                 return 4;
+            }
+            let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: settings has enough output storage for the open terminal.
+            if unsafe { libc::tcgetattr(fd, settings.as_mut_ptr()) } != 0 {
+                return 8;
             }
             let mut raw = original;
             // SAFETY: raw is initialized, and both termios calls target the private slave.

@@ -126,6 +126,8 @@ The filter compares the low 32 bits of each request, as the kernel does.
 Nonzero upper bits do not bypass the restriction.
 
 Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
+Virtual-console keyboard modes, display modes, and switching remain permitted.
+A workload that inherits a Linux text console can still disable its keyboard input or text display.
 This restriction does not isolate every terminal operation or restore arbitrary terminal settings after workload exit.
 
 ## Network access

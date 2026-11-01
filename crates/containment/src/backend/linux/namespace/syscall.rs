@@ -816,7 +816,7 @@ impl SyscallPolicy {
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
         if entry.number == libc::SYS_ioctl {
-            return terminal_input_injection_rules();
+            return terminal_control_rules();
         }
         if entry.number == libc::SYS_socket {
             return self.socket_rules();
@@ -870,7 +870,7 @@ impl SyscallPolicy {
     }
 }
 
-fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+fn terminal_control_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     [libc::TIOCSTI, libc::TIOCLINUX, libc::TIOCSETD]
         .into_iter()
         .map(|request| {
@@ -1538,6 +1538,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod terminal_tests;

@@ -935,19 +935,18 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     process; neither stops a runtime reading a file and interpreting it. The AGENTS.md W^X section says
     the same thing in its own words: an exec view is safe only when no reachable program is
     universal over authored data, and the harness always is.
-- **`ioctl` is permitted wholesale on Linux, and nothing filters `TIOCSTI`. Unmeasured, and Linux is
-  the more exposed platform.** `ioctl` sits in `WORKLOAD_PERMITTED` with no `MEDIATED` entry, so no
-  request number is scoped. The workload's descriptor 0 is the operator's real controlling terminal on
-  both platforms: `terminal.rs` hands the terminal to the child's process group and the box calls no
-  `setsid`. On macOS Apple's kernel refuses `TIOCSTI` — measured, and by the platform rather than by
-  the profile. Linux's historic check permits it with **no capability** when the descriptor is the
-  caller's own controlling terminal, and the `dev.tty.legacy_tiocsti` sysctl that closes it arrived in
-  6.2. So the target kernel decides, and nobody has run the probe.
-  - **Measure before designing.** Drive `ioctl(0, TIOCSTI, &byte)` from a contained workload on a real
-    terminal, with an uncontained control, exactly as `tests/inherited_handles_macos.rs` does.
-  - **Unlike Seatbelt, seccomp can express the narrow denial.** The request number is `arg1`, a
-    scalar, so an `ArgumentScoped` entry is the same shape `mmap`, `mprotect`, and `execveat` already
-    use. That is a cheap floor whichever way the measurement goes.
+- **Linux terminal restrictions do not isolate the inherited terminal.** The filter refuses
+  `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` by their low 32 request bits. Normal terminal settings and
+  queries remain permitted. Keep the denial and successful-operation controls in `tests::terminal`.
+  - The workload can inherit the operator's controlling terminal. In upstream Linux 6.12,
+    `KDSKBMODE`, `KDSETMODE`, `VT_SETMODE`, and `VT_ACTIVATE` accept that relationship without an
+    extra capability. `KDSKBMETA` has no equivalent permission check in its dispatch branch.
+    These requests remain permitted and can change the operator's console keyboard or display state.
+  - Disposable pseudoterminals prove request refusal and unchanged line discipline and input.
+    They cannot reproduce virtual-console selection, paste, keyboard modes, or display modes.
+    Test those effects only on a disposable console with separate recovery access.
+  - Keep request numbers sourced from `libc`. Additional console restrictions need upstream names
+    and successful-operation controls; do not substitute handwritten request numbers.
 - **The reach modes have one legal value each.** Both backends refuse every non-default `SignalMode`,
   `ProcessInfoMode`, and `IpcMode`, so those four exported enums describe a widening the product does
   not offer. Kept deliberately for a future backend that honours them.
