@@ -3,7 +3,7 @@
 
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 
@@ -201,6 +201,10 @@ fn run_probe(directory: &Path, contained: bool, owner_group: Option<u32>) -> Vec
             }
         }
     }
+    run_permission_probe(directory, contained, "file_permission_probe")
+}
+
+fn run_permission_probe(directory: &Path, contained: bool, probe: &str) -> Vec<Outcome> {
     let executable = std::env::current_exe().unwrap();
     let config_file = tempfile::NamedTempFile::new().unwrap();
     let mut command;
@@ -236,12 +240,7 @@ fn run_probe(directory: &Path, contained: bool, owner_group: Option<u32>) -> Vec
     }
     let output = command
         .current_dir(directory)
-        .args([
-            "--exact",
-            "file_permission_probe",
-            "--nocapture",
-            "--test-threads=1",
-        ])
+        .args(["--exact", probe, "--nocapture", "--test-threads=1"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -388,4 +387,124 @@ fn direct_file_permissions_preserve_writes_and_refuse_special_modes() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const EXISTING_MODES: [(&str, u32, u32); 7] = [
+    ("inherited-add-write", 0o2755, 0o2775),
+    ("inherited-no-change", 0o2755, 0o2755),
+    ("inherited-clear-bit", 0o2755, 0o775),
+    ("setuid-keep-bit", 0o4755, 0o4755),
+    ("setuid-clear-bit", 0o4755, 0o755),
+    ("setgid-keep-bit", 0o2755, 0o2775),
+    ("setgid-clear-bit", 0o2755, 0o775),
+];
+
+#[test]
+fn existing_permission_probe() {
+    let Some(directory) = std::env::var_os("BOX_PERMISSION_PROBE") else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut outcomes = Vec::new();
+    for (name, _, requested) in EXISTING_MODES {
+        let path = directory.join(name);
+        let before = std::fs::metadata(&path).unwrap();
+        let name_c = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: the live C string names an owned fixture prepared by the parent test.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_fchmodat,
+                libc::AT_FDCWD,
+                name_c.as_ptr(),
+                requested,
+            )
+        };
+        let errno = if result < 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap()
+        } else {
+            0
+        };
+        let after = std::fs::metadata(&path).unwrap();
+        outcomes.push(Outcome {
+            operation: name.to_owned(),
+            requested: u64::from(requested),
+            result,
+            errno,
+            mode: Some(after.mode() & 0o7777),
+            uid: Some(after.uid()),
+            gid: Some(after.gid()),
+            before_mode: Some(before.mode() & 0o7777),
+            before_uid: Some(before.uid()),
+            before_gid: Some(before.gid()),
+        });
+    }
+    println!("{MARKER}{}", serde_json::to_string(&outcomes).unwrap());
+}
+
+fn prepare_existing_modes(directory: &Path) {
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o2770)).unwrap();
+    for (name, mode, _) in EXISTING_MODES {
+        let path = directory.join(name);
+        if name.starts_with("inherited-") {
+            std::fs::DirBuilder::new().create(&path).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            assert_ne!(
+                metadata.mode() & 0o2000,
+                0,
+                "directory must inherit its group bit"
+            );
+            assert_eq!(metadata.gid(), std::fs::metadata(directory).unwrap().gid());
+            // Ordinary bits depend on umask; preserve the inherited bit while fixing the fixture mode.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        } else {
+            std::fs::write(&path, b"inert permission fixture\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, mode);
+    }
+}
+
+#[test]
+fn permission_changes_refuse_existing_special_bits_unless_cleared() {
+    let host = tempfile::tempdir().unwrap();
+    let boxed = tempfile::tempdir().unwrap();
+    prepare_existing_modes(host.path());
+    prepare_existing_modes(boxed.path());
+    let controls = run_permission_probe(host.path(), false, "existing_permission_probe");
+    let outcomes = run_permission_probe(boxed.path(), true, "existing_permission_probe");
+    assert_eq!(controls.len(), EXISTING_MODES.len());
+    assert_eq!(outcomes.len(), EXISTING_MODES.len());
+    for ((control, outcome), (name, initial, requested)) in
+        controls.iter().zip(&outcomes).zip(EXISTING_MODES)
+    {
+        assert_eq!(control.operation, name);
+        assert_eq!(outcome.operation, name);
+        assert_eq!(control.before_mode, Some(initial));
+        assert_eq!(outcome.before_mode, Some(initial));
+        assert_eq!(control.result, 0, "host control: {control:?}");
+        assert_eq!(
+            control.mode,
+            Some(requested),
+            "host must retain requested bits"
+        );
+        let denied = requested & 0o6000 != 0;
+        assert_eq!(outcome.result, if denied { -1 } else { 0 }, "{outcome:?}");
+        assert_eq!(
+            outcome.errno,
+            if denied { libc::EPERM } else { 0 },
+            "{outcome:?}"
+        );
+        assert_eq!(
+            outcome.mode,
+            Some(if denied { initial } else { requested }),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.uid, outcome.before_uid);
+        assert_eq!(outcome.gid, outcome.before_gid);
+        let metadata = std::fs::metadata(boxed.path().join(name)).unwrap();
+        assert_eq!(Some(metadata.mode() & 0o7777), outcome.mode);
+        let owner = std::fs::metadata(boxed.path()).unwrap();
+        assert_eq!(metadata.uid(), owner.uid());
+        assert_eq!(metadata.gid(), owner.gid());
+    }
 }

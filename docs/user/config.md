@@ -201,11 +201,15 @@ their place.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
-On Linux, write access permits ordinary file writes and executable-bit changes. It does not
-permit changing a file's owner or group, or requesting set-user-ID or set-group-ID bits during
-permission changes or creation. These requests fail with `EPERM` (operation not permitted).
+On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
+changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
+owner or group, or requesting either special bit during creation, remains forbidden. These requests fail with `EPERM` (operation not permitted).
 Opening an existing file without creation flags does not use its supplied creation mode.
 Existing shared-group directories retain Linux's normal group inheritance for new subdirectories.
+A permission change also fails if its requested mode keeps a set-user-ID or set-group-ID bit
+that the file or directory already has. The request must clear both bits to succeed.
+This includes directories that inherited their group bit: GNU `chmod g+w` and even
+`chmod 755` preserve that bit and fail. A refused request leaves the existing permissions unchanged.
 
 ### Direct access by operating system
 

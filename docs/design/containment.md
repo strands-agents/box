@@ -185,11 +185,17 @@ It also rejects either bit in `mkdirat` and in the creation mode of `openat` whe
 `O_TMPFILE` is present. It checks the low 32 bits that the kernel uses. An `openat` call without
 creation flags ignores the mode argument, so that unused argument does not cause a refusal.
 The permit filter continues to exclude ownership-changing calls, `openat2`, and `mknodat`.
-Ordinary writes, executable-bit changes, and permitted compiler output remain available.
+Ordinary writes and permitted compiler output remain available. Executable-bit changes require
+a requested mode without either special bit.
 
 These checks govern requested modes. A pre-existing set-group-ID directory can still pass its
 group and directory inheritance bit to new subdirectories. The filter does not remove existing
-bits or change the host's directory inheritance rules.
+bits or change the host's directory inheritance rules. It cannot distinguish keeping an existing
+bit from adding one: both requests fail if the requested mode contains either bit. A request
+that clears both bits can succeed. GNU `chmod` can preserve a directory's inherited group bit
+when changing ordinary permissions, so those commands can fail even when they add no special bit.
+`permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
+existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
 
 ### How you check a box's reach
 
