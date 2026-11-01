@@ -145,7 +145,7 @@ fn call_reach(b: &BoxFixture, native_egress: bool, url: &str) -> (String, RunRes
 }
 
 det_case! {
-    name: when_tool_server_disables_egress_containment_then_direct_host_network_works,
+    name: cn_native_egress,
     id:   "CN-NE-01",
     platforms: [Linux, Macos],
     desc: "Native egress: a contain_egress=false MCP leaf joins the host network namespace and reaches an un-proxied host endpoint, while the gateway default (routeless namespace) cannot",

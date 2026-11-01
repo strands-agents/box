@@ -4,7 +4,7 @@ use std::process::Command;
 use strands_det_harness::{BoxFixture, Platform, det_case, native_python};
 
 det_case! {
-    name: when_agent_sends_signals_then_macos_refuses_child_signals_and_linux_hides_host_targets,
+    name: cn_i_03,
     id:   "CN-I-03",
     platforms: [Macos, Linux],
     desc: "Process signals: macOS refuses signals to an owned child; Linux permits self-signaling and cannot signal a live host marker",

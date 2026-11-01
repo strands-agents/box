@@ -2,7 +2,7 @@ use strands_det_harness::det_case;
 
 // A rename under an `fs:move` permit moves the file within the workspace.
 det_case! {
-    name: when_monty_has_move_permit_then_rename_moves_file_and_is_journaled,
+    name: mo_mv,
     id:   "MO-MV",
     desc: "Rename: Path.rename under an fs:move permit moves the file, and the move is judged",
     run: |b| {

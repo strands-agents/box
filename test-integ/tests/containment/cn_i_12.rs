@@ -4,7 +4,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: when_agent_attaches_host_shared_memory_then_host_contents_remain_unreadable,
+    name: cn_i_12,
     id: "CN-I-12",
     platforms: [Linux],
     desc: "A native shared-memory attach cannot read the host's test-owned System V segment",

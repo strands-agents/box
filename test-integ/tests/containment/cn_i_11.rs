@@ -4,7 +4,7 @@ use crate::phase3 as support;
 use strands_det_harness::det_case;
 
 det_case! {
-    name: when_linux_agent_injects_terminal_input_then_reported_result_matches_observed_input,
+    name: cn_i_11,
     id: "CN-I-11",
     platforms: [Linux],
     desc: "Characterization: Linux TIOCSTI results agree with independently observed test PTY input",
