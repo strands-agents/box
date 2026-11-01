@@ -1290,6 +1290,9 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     #[tokio::test]
     async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
         use crate::run::contain::supervise::LeafBox;
         for streaming in [false, true] {
             for (environment, expected) in [(true, "target environment"), (false, "target exec")] {
@@ -1332,6 +1335,9 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     #[tokio::test]
     async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
         use crate::run::contain::supervise::LeafBox;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for code in [0, 3, 4, 5, 42] {
@@ -1380,6 +1386,54 @@ mod tests {
         .unwrap();
         assert_eq!(parts.child.wait().await.unwrap().code(), Some(5));
         assert_eq!(output, b"STREAM_OK");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    fn the_host_can_build_a_view() -> bool {
+        // SAFETY: the child uses syscalls only and calls `_exit`.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return true;
+        }
+        if child == 0 {
+            // SAFETY: syscall-only child.
+            unsafe {
+                let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+                if libc::unshare(namespaces) != 0 {
+                    libc::_exit(10);
+                }
+                let inner = libc::fork();
+                if inner < 0 {
+                    libc::_exit(12);
+                }
+                if inner == 0 {
+                    if libc::mount(
+                        c"proc".as_ptr(),
+                        c"/proc".as_ptr(),
+                        c"proc".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    ) != 0
+                    {
+                        libc::_exit(11);
+                    }
+                    libc::_exit(0);
+                }
+                let mut inner_status = 0;
+                libc::waitpid(inner, &mut inner_status, 0);
+                let mounted = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+                libc::_exit(if mounted { 0 } else { 11 });
+            }
+        }
+
+        let mut status = 0;
+        // SAFETY: wait for this process's child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        let usable = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        if !usable {
+            eprintln!("skipping: this host cannot build a namespace mount view");
+        }
+        usable
     }
 
     /// One operator home holding a box root, a project, and the trees the specs below name.

@@ -118,8 +118,8 @@ impl Trampoline {
     }
 
     /// The stage containment failed at, or `None` when it never failed.
-    pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, BoxError> {
-        Ok(self.setup_status.read_failure()?)
+    pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
+        self.setup_status.read_failure()
     }
 }
 
@@ -814,11 +814,7 @@ impl SetupStatusPipe {
             };
             match (read, byte[0]) {
                 (0, _) if complete && reaper_ready => return Ok(None),
-                (0, _) => {
-                    return Err(TrampolineError::StatusProtocol {
-                        reason: "channel closed before setup completion".into(),
-                    });
-                }
+                (0, _) => return Err(TrampolineError::SetupIncomplete),
                 (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
                 #[cfg(target_os = "linux")]
                 (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
@@ -1194,8 +1190,61 @@ mod tests {
 
     // ── The setup-status pipe ──────────────────────────────────────────────────
 
+    #[tokio::test]
+    async fn cancelling_before_the_launch_gate_preserves_the_signal_exit() {
+        use crate::run::contain::supervise::{ProcessGroup, contained_exit_code};
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::time::Duration;
+
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGKILL] {
+            let (mut parent, gate) = UnixStream::pair().unwrap();
+            parent
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut command = Command::new(locate().unwrap());
+            command.args([
+                "--config",
+                "/dev/null",
+                "--config-sha256",
+                &"0".repeat(64),
+                "--target-env-json",
+                "{}",
+            ]);
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            attach_descriptor(&mut command, &gate, "--launch-gate-fd").unwrap();
+            command.args(["--", "/bin/sh", "-c", "printf WORKLOAD_RAN"]);
+            let mut stdout_file = tempfile::tempfile().unwrap();
+            command.stdout(stdout_file.try_clone().unwrap());
+            let mut group = ProcessGroup::spawn(command).await.unwrap();
+            drop(gate);
+            pipe.writer.take();
+            let mut ready = [0];
+            parent.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            group.signal(signal).unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(5), group.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            group.release().await.unwrap();
+            assert_eq!(status.signal(), Some(signal));
+            let setup = pipe.read_failure();
+            assert!(matches!(setup, Err(TrampolineError::SetupIncomplete)));
+            let code = contained_exit_code(status, setup).unwrap();
+            assert_eq!(
+                format!("{code:?}"),
+                format!("{:?}", std::process::ExitCode::from((128 + signal) as u8))
+            );
+            let mut stdout = String::new();
+            stdout_file.rewind().unwrap();
+            stdout_file.read_to_string(&mut stdout).unwrap();
+            assert!(stdout.is_empty());
+        }
+    }
+
     #[test]
-    fn closure_without_setup_completion_is_a_protocol_failure() {
+    fn closure_without_setup_completion_is_incomplete() {
         let mut command = Command::new("/bin/true");
         let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
@@ -1203,7 +1252,7 @@ mod tests {
 
         assert!(matches!(
             pipe.read_failure(),
-            Err(TrampolineError::StatusProtocol { .. })
+            Err(TrampolineError::SetupIncomplete)
         ));
     }
 
@@ -1254,10 +1303,15 @@ mod tests {
             let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
             pipe.writer.as_mut().unwrap().write_all(bytes).unwrap();
             pipe.writer.take();
-            assert!(matches!(
-                pipe.read_failure(),
-                Err(TrampolineError::StatusProtocol { .. })
-            ));
+            let failure = pipe.read_failure();
+            if bytes.len() == 1 {
+                assert!(matches!(failure, Err(TrampolineError::SetupIncomplete)));
+            } else {
+                assert!(matches!(
+                    failure,
+                    Err(TrampolineError::StatusProtocol { .. })
+                ));
+            }
         }
         for bytes in [[128, 6], [6, 128]] {
             let mut command = Command::new("/bin/true");

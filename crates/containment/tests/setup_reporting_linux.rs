@@ -184,6 +184,7 @@ fn finish(run: &mut Run) -> (std::process::ExitStatus, String, String) {
 }
 
 fn check_failure(fault: Fault, expected: u8) {
+    check_success();
     let mut run = start(fault, "printf WORKLOAD_RAN", None);
     let mut bytes = Vec::new();
     run.status.read_to_end(&mut bytes).unwrap();
@@ -203,31 +204,52 @@ fn check_failure(fault: Fault, expected: u8) {
 
 #[test]
 fn bounding_failure_reports_apply() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Bounding, 3);
 }
 #[test]
 fn capability_failure_reports_apply() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Capabilities, 3);
 }
 #[test]
 fn privilege_failure_reports_apply() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Privileges, 3);
 }
 #[test]
 fn filter_failure_reports_apply() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Filter, 3);
 }
 #[test]
 fn environment_failure_reports_decode() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Environment, 4);
 }
 #[test]
 fn executable_failure_reports_exec() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     check_failure(Fault::Exec, 5);
 }
 
 #[test]
 fn streaming_setup_finishes_before_workload_exit() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     let mut run = start(
         Fault::None,
         "read value; printf '%s' \"$value\"; exit 5",
@@ -254,6 +276,9 @@ fn streaming_setup_finishes_before_workload_exit() {
 
 #[test]
 fn buffered_success_keeps_ordinary_workload_exit_codes() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     for code in [0, 3, 4, 5, 42] {
         let mut run = start(Fault::None, &format!("printf BUFFER_OK; exit {code}"), None);
         let (exit, stdout, stderr) = finish(&mut run);
@@ -268,6 +293,9 @@ fn buffered_success_keeps_ordinary_workload_exit_codes() {
 
 #[test]
 fn abrupt_launcher_death_has_no_setup_completion() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     let (mut parent, gate) = UnixStream::pair().unwrap();
     parent
         .set_read_timeout(Some(Duration::from_secs(8)))
@@ -288,6 +316,9 @@ fn abrupt_launcher_death_has_no_setup_completion() {
 
 #[test]
 fn abrupt_death_during_filter_installation_has_no_setup_completion() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
     let mut run = start(Fault::KillFilter, "printf WORKLOAD_RAN", None);
     let mut bytes = Vec::new();
     run.status.read_to_end(&mut bytes).unwrap();
@@ -300,6 +331,10 @@ fn abrupt_death_during_filter_installation_has_no_setup_completion() {
 
 #[test]
 fn an_unclosed_supervisor_writer_reports_failure_without_waiting_for_workload_exit() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
+    check_success();
     let mut run = start(Fault::StatusClose, "read value", None);
     let mut bytes = Vec::new();
     run.status.read_to_end(&mut bytes).unwrap();
@@ -307,4 +342,62 @@ fn an_unclosed_supervisor_writer_reports_failure_without_waiting_for_workload_ex
     let (exit, stdout, _) = finish(&mut run);
     assert!(!exit.success());
     assert!(stdout.is_empty());
+}
+
+fn check_success() {
+    let mut run = start(Fault::None, "printf CONTROL_OK", None);
+    let mut bytes = Vec::new();
+    run.status.read_to_end(&mut bytes).unwrap();
+    bytes.sort_unstable();
+    let (exit, stdout, stderr) = finish(&mut run);
+    assert_eq!(bytes, [6, 128], "positive control: {stderr}");
+    assert!(exit.success(), "positive control: {stderr}");
+    assert_eq!(stdout, "CONTROL_OK");
+}
+
+fn the_host_can_build_a_view() -> bool {
+    // SAFETY: the child uses syscalls only and calls `_exit`.
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return true;
+    }
+    if child == 0 {
+        // SAFETY: syscall-only child.
+        unsafe {
+            let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+            if libc::unshare(namespaces) != 0 {
+                libc::_exit(10);
+            }
+            let inner = libc::fork();
+            if inner < 0 {
+                libc::_exit(12);
+            }
+            if inner == 0 {
+                if libc::mount(
+                    c"proc".as_ptr(),
+                    c"/proc".as_ptr(),
+                    c"proc".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    libc::_exit(11);
+                }
+                libc::_exit(0);
+            }
+            let mut inner_status = 0;
+            libc::waitpid(inner, &mut inner_status, 0);
+            let mounted = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+            libc::_exit(if mounted { 0 } else { 11 });
+        }
+    }
+
+    let mut status = 0;
+    // SAFETY: wait for this process's child.
+    unsafe { libc::waitpid(child, &mut status, 0) };
+    let usable = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+    if !usable {
+        eprintln!("skipping: this host cannot build a namespace mount view");
+    }
+    usable
 }

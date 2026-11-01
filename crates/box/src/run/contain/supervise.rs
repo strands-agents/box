@@ -594,16 +594,7 @@ impl Contained {
         termination_result?;
         native_result?;
         terminal_result?;
-        // A setup failure outranks the status: `exit 3` from a refused apply is
-        // the trampoline's, not the workload's.
-        if let Some(stage) = setup_result? {
-            return Err(TrampolineError::SetupFailed {
-                stage,
-                detail: None,
-            }
-            .into());
-        }
-        Ok(exit_code(status))
+        contained_exit_code(status, setup_result)
     }
 }
 
@@ -920,6 +911,27 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
     Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
 }
 
+pub(super) fn contained_exit_code(
+    status: ExitStatus,
+    setup: Result<Option<crate::error::SetupStage>, TrampolineError>,
+) -> Result<ExitCode, BoxError> {
+    match setup {
+        #[cfg(unix)]
+        Err(TrampolineError::SetupIncomplete)
+            if std::os::unix::process::ExitStatusExt::signal(&status).is_some() => {}
+        result => {
+            if let Some(stage) = result? {
+                return Err(TrampolineError::SetupFailed {
+                    stage,
+                    detail: None,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(exit_code(status))
+}
+
 /// A process's exit code, or `128 + signal` when it died from one.
 fn captured_status(status: ExitStatus) -> i32 {
     status.code().unwrap_or_else(|| {
@@ -1143,6 +1155,42 @@ mod tests {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(libc::SIGINT))),
             format!("{:?}", ExitCode::from(128 + libc::SIGINT as u8))
+        );
+    }
+
+    #[test]
+    fn incomplete_agent_setup_preserves_signal_exit_codes() {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGKILL] {
+            let status = ExitStatus::from_raw(signal);
+            let result = contained_exit_code(status, Err(TrampolineError::SetupIncomplete));
+            assert_eq!(
+                format!("{:?}", result.unwrap()),
+                format!("{:?}", exit_code(status))
+            );
+        }
+        for code in [0, 1, 127] {
+            assert!(
+                contained_exit_code(
+                    ExitStatus::from_raw(code << 8),
+                    Err(TrampolineError::SetupIncomplete),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_signal_does_not_hide_reported_or_malformed_setup() {
+        let status = ExitStatus::from_raw(libc::SIGTERM);
+        assert!(contained_exit_code(status, Ok(Some(SetupStage::Apply))).is_err());
+        assert!(
+            contained_exit_code(
+                status,
+                Err(TrampolineError::StatusProtocol {
+                    reason: "unknown marker".into(),
+                })
+            )
+            .is_err()
         );
     }
 

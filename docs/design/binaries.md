@@ -58,7 +58,9 @@ On Linux, the namespace reaper sends a separate completion marker after its own 
 Box requires both markers. The launcher and reaper close their copies before they wait for workload exit.
 A long-lived workload therefore cannot keep the setup reader blocked through those copies.
 
-Channel closure before all required preparation markers is a protocol failure. Closure after that marker
+Channel closure before all required preparation markers is incomplete setup. Buffered and streaming
+execution report it as an error. If the agent launcher dies from a signal, Box preserves its signal exit
+status. A reported setup failure or malformed marker still takes priority over that status. Closure after that marker
 means preparation completed without a reported launch failure. It does not prove application readiness
 or successful executable launch: abrupt death between the marker and the launch closes the channel too.
 The same status reader serves buffered and streaming execution. It rejects the obsolete completion marker immediately, so an old helper cannot retain a streaming setup wait.
