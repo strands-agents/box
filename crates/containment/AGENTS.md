@@ -794,8 +794,12 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `AF_RDS` through.
 - **Deny `io_uring_setup` beside `socket(AF_INET)`**, because `IORING_OP_SOCKET` needs no `socket(2)`
   since 5.19 and seccomp cannot read a ring's SQEs.
-- **Take every number from `libc`**, never a hand-written `#ifdef` table. Fix a missing name upstream;
-  never `#[cfg]` it away.
+- **Take syscall numbers and available request constants from `libc`**, never a hand-written `#ifdef` table.
+  The twenty legacy console requests in `terminal_control_rules` are an explicit exception when
+  `libc` lacks their names. Define those private `u32` constants from the pinned Linux UAPI `kd.h`
+  and `vt.h` headers. Verify production and independent test values against those headers when
+  changing the list. Upstream work is optional for this exception; no merge or release is required.
+  Fix other missing names upstream; never omit a restriction with `#[cfg]` because a name is missing.
 
 ### W^X
 
