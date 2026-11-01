@@ -119,21 +119,34 @@ Tool execution from writable files does not remove these memory restrictions.
 
 ## Network access
 
-With gateway networking enabled, the Linux sandbox has a private network namespace without external routes.
-Box creates a loopback endpoint inside that namespace.
-A relay carries its connections to the egress gateway in the trusted process.
-The relay transfers bytes.
-The gateway applies policy.
-See [egress enforcement](egress.md).
-
-For a tool, `[tool.<name>.network] contain_egress = false` selects the surrounding OS network namespace.
+On Linux, `contain_egress` selects the network mode for a tool or local MCP server.
+A tool sets it under `[tool.<name>.network]`.
 A local MCP server has the corresponding [MCP setting](../user/mcp.md).
-Traffic then bypasses the gateway and its policy checks.
-Filesystem and process restrictions still apply.
-The agent refuses a network table.
+The agent uses gateway networking and refuses a network table.
 
-This exception does not enable every socket family.
-The Linux filter permits UNIX and IPv4 sockets and refuses all other families, including IPv6.
+`contain_egress = true` is the default.
+The sandbox has a private network namespace without external routes.
+Box creates a loopback endpoint inside that namespace.
+A relay carries its connections to the local egress gateway in the box's trusted process.
+The gateway supports outbound HTTP and HTTPS requests.
+The gateway applies policy, as described in [egress enforcement](egress.md).
+
+The sandbox cannot connect directly to the surrounding OS's loopback (`localhost`) listeners or [abstract Unix sockets](#terms).
+A client that uses the gateway can reach a local HTTP service when policy permits.
+
+`contain_egress = false` selects the surrounding OS network namespace.
+Direct connections can reach IPv4 destinations, including loopback listeners, and abstract Unix sockets.
+Direct connections bypass the gateway's policy checks, credential injection, and traffic records.
+Box still sets proxy environment variables, so clients that use them can continue through the gateway.
+
+In both modes, the Linux filter permits Unix and IPv4 sockets and refuses other socket families, including IPv6.
+[Pathname Unix sockets](#terms) remain subject to filesystem visibility and operating system permissions.
+A directory grant can expose sockets inside that directory.
+
+The process retains the invoking operator's identity in the surrounding OS.
+A reachable service that trusts that identity may treat the process as the operator.
+The process keeps its filesystem and process restrictions.
+Those restrictions do not constrain a surrounding-OS service that acts on the process's behalf.
 
 <a id="startup-failures-and-qualification"></a>
 
@@ -159,6 +172,8 @@ Minimum versions, minimum privileges, package installation, and testing the asse
 | Term | Definition | Notes |
 |---|---|---|
 | Namespace | A kernel mechanism that gives processes a separate view of selected resources. | Box uses several namespace types. |
+| Abstract Unix socket | A local communication endpoint with a name instead of a filesystem path. | Its visibility follows the network namespace. |
+| Pathname Unix socket | A local communication endpoint addressed through a filesystem path. | A directory grant can expose its path. |
 | Bind mount | An existing file or directory exposed at another mount point. | Its access flags affect direct file operations. |
 | Seccomp | A Linux mechanism that filters system calls. | Box uses static filters before workload execution. |
 | Shared library | Code that a program loads from a separate file. | The loader needs readable, executable access. |
