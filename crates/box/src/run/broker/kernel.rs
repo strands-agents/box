@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn with_no_gateway_every_request_is_refused() {
+    fn when_no_gateway_exists_then_every_request_is_refused() {
         let (status, _stdout, stderr) = run(None, "curl -sS https://a.example/");
 
         assert_eq!(status, 1, "{stderr}");
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn a_marked_refusal_fails_curl() {
+    fn when_a_response_marks_a_refusal_then_curl_reports_failure() {
         let (routing, _connections) = gateway(
             "HTTP/1.1 403 Forbidden\r\nx-strands-box-egress: refused\r\nContent-Length: 13\r\n\
              Connection: close\r\n\r\npolicy denied",
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn a_private_address_is_refused_before_transport() {
+    fn when_a_request_targets_a_private_address_then_it_is_refused_before_transport() {
         let (routing, connections) =
             gateway("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nLEAKED");
 
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_hop_meets_the_floor_in_the_wrapper() {
+    fn when_a_redirect_is_followed_then_the_wrapper_applies_the_floor_to_the_next_hop() {
         let (routing, connections) = gateway(
             "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/\r\nContent-Length: 0\r\n\
              Connection: close\r\n\r\n",
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn insecure_does_not_widen_trust() {
+    fn when_insecure_mode_is_requested_then_trust_is_not_widened() {
         let leaf = certificate();
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(leaf.signing_key.serialize_der().into());
         let config = Arc::new(

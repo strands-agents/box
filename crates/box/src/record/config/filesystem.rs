@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_lists_state_no_grant() {
+    fn when_filesystem_lists_are_absent_then_no_grants_are_declared() {
         let fixture = Fixture::new();
         let reach = direct_grants(&Filesystem::default(), &fixture.context()).expect("empty");
         assert!(reach.grants.is_empty());
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_write_access_requires_explicit_read_coverage() {
+    fn when_linux_write_access_is_declared_then_explicit_read_coverage_is_required() {
         let fixture = Fixture::new();
         let context = fixture.context();
         for (body, accepted) in [
@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn disclosures_distinguish_complete_and_partial_access() {
+    fn when_access_disclosures_are_emitted_then_complete_and_partial_access_are_distinct() {
         let fixture = Fixture::new();
         for (body, modes) in [
             ("read = ['~/notes']", vec!["read-only"]),
@@ -844,7 +844,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_preserves_write_only_and_partial_read_grants() {
+    fn when_macos_grants_are_translated_then_write_only_and_partial_read_access_are_preserved() {
         let fixture = Fixture::new();
         let reach = fixture.reach(&fixture.context(), "write_file = ['~/notes/api.md']");
         assert_eq!(reach.grants[0].access, "write-only");
@@ -861,7 +861,7 @@ mod tests {
 
     /// **Each list maps to its cell**, on a directory and on a file where both are legal.
     #[test]
-    fn every_list_translates_to_its_cell() {
+    fn when_a_filesystem_list_is_translated_then_it_produces_its_corresponding_cell() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let body = format!(
@@ -913,7 +913,7 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn list_and_a_future_deny_translate_where_the_backend_lowers_them() {
+    fn when_the_backend_supports_list_and_future_deny_then_both_grants_are_translated() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let body = format!(
@@ -945,7 +945,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn list_and_a_future_deny_are_refused_by_name_on_linux() {
+    fn when_linux_receives_list_or_future_deny_then_the_unsupported_grant_is_refused_by_name() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let context = fixture.context();
@@ -969,7 +969,7 @@ mod tests {
 
     /// **One case per refusal class, each asserting the message names the table and the entry.**
     #[test]
-    fn every_refusal_class_fires_and_names_the_entry() {
+    fn when_a_filesystem_entry_violates_a_refusal_rule_then_the_error_names_the_entry() {
         let fixture = Fixture::new();
         let home = fixture.home.clone();
         let context = fixture.context();
@@ -1098,7 +1098,7 @@ mod tests {
     /// **`write` no longer implies `read`**, so naming one path in both is how read-write is stated,
     /// and a write root inside a read root is a narrowing rather than a conflict.
     #[test]
-    fn read_and_write_compose_rather_than_conflict() {
+    fn when_read_and_write_grants_overlap_then_they_compose_without_conflict() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let reach = fixture.reach(
@@ -1131,7 +1131,7 @@ mod tests {
     /// **A credential store named exactly is a disclosed punch-through; one beneath a grant is
     /// refused.**
     #[test]
-    fn a_credential_store_is_granted_only_when_named_exactly() {
+    fn when_a_credential_store_is_named_exactly_then_it_can_be_granted() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         std::fs::create_dir_all(home.join(".aws")).expect("a credential store");
@@ -1153,7 +1153,7 @@ mod tests {
     /// by path: a sibling box's directory beneath the same grant is not, and the disclosure names
     /// the grant that reaches it.
     #[test]
-    fn a_project_entry_subtracts_the_directory_holding_this_boxs_authority() {
+    fn when_a_project_is_granted_then_the_box_authority_directory_is_subtracted() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let own = home.join("project/.strands-box");
@@ -1195,7 +1195,7 @@ mod tests {
     /// **A configuration loaded from outside the workspace is protected the same way**: the
     /// directory `--config` named is subtracted from a wider grant by path, whatever it is called.
     #[test]
-    fn an_authority_directory_outside_the_workspace_is_subtracted_by_path() {
+    fn when_authority_is_outside_the_workspace_then_its_directory_is_subtracted_by_path() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let authority = home.join("elsewhere/authority");
@@ -1256,7 +1256,7 @@ mod tests {
 
     /// **A writable grant enclosing a policy that nothing subtracts is refused.**
     #[test]
-    fn a_writable_grant_over_an_unsubtracted_policy_is_refused() {
+    fn when_a_write_grant_exposes_unsubtracted_policy_then_it_is_refused() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         std::fs::write(home.join("scratch/policy.dw"), "").expect("a policy outside a box");
@@ -1279,7 +1279,7 @@ mod tests {
 
     /// **A write entry enclosing a directory on the MCP program search path is refused.**
     #[test]
-    fn a_writable_search_directory_is_refused() {
+    fn when_a_search_directory_is_writable_then_it_is_refused() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let context = FilesystemContext {

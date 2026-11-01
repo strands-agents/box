@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_reads_each_target_after_hardening() {
+    fn when_mount_targets_are_inspected_then_each_read_occurs_after_hardening() {
         let directory = tempfile::tempdir().expect("directory");
         let files = [
             File::open(directory.path()).expect("directory descriptor"),
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_serializes_concurrent_targets() {
+    fn when_mount_inspections_overlap_then_target_reads_are_serialized() {
         let directory = tempfile::tempdir().expect("directory");
         let files = [
             File::open(directory.path()).expect("directory descriptor"),
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_replaces_a_forked_locked_parent_reader() {
+    fn when_a_child_inherits_a_locked_mount_reader_then_it_replaces_the_parent_reader() {
         let directory = tempfile::tempdir().expect("directory");
         let parent_target = File::open(directory.path()).expect("parent descriptor");
         let child_target = File::open("/proc").expect("child descriptor");
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_does_not_return_a_previous_identity_after_an_io_error() {
+    fn when_mount_inspection_has_an_io_error_then_no_previous_identity_is_returned() {
         let file = File::open("/proc").expect("proc descriptor");
         for (syscall, error) in [
             (libc::SYS_dup3, libc::EBADF),
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_descriptors_are_closed_on_exec() {
+    fn when_mount_inspector_descriptors_are_opened_then_they_close_on_exec() {
         let file = File::open("/proc").expect("proc descriptor");
         let mut reader = MountReader::open().expect("reader");
         for _ in 0..2 {
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_inspector_refuses_missing_ambiguous_or_malformed_identity() {
+    fn when_mount_identity_is_missing_ambiguous_or_malformed_then_inspection_is_refused() {
         for information in [
             "",
             "ino:\t42\n",

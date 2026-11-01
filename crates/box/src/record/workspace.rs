@@ -85,7 +85,7 @@ mod tests {
 
     /// `same_directory` answers by identity, so two routes to one directory agree.
     #[test]
-    fn one_directory_reached_two_ways_is_the_same_directory() {
+    fn when_one_directory_has_two_spellings_then_both_resolve_to_the_same_directory() {
         let root = std::env::temp_dir().join(format!("sb-ident-{}", std::process::id()));
         let real = root.join("real");
         let other = root.join("other");

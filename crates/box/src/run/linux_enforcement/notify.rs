@@ -296,7 +296,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refused_handoff_closes_received_descriptors() {
+    fn when_handoff_is_refused_then_received_descriptors_are_closed() {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let mut pipe = [-1; 2];
         // SAFETY: pipe contains space for both returned descriptors.
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_handoff_preserves_close_on_exec() {
+    fn when_handoff_is_accepted_then_close_on_exec_is_preserved() {
         let (sender, receiver) = UnixStream::pair().unwrap();
         transfer(&sender, &[sender.as_raw_fd()]).unwrap();
         let handles = receive_handles(&receiver, 1).unwrap();
@@ -416,13 +416,13 @@ mod tests {
         unsafe { OwnedFd::from_raw_fd(descriptor) }
     }
     #[test]
-    fn registration_accepts_a_kernel_listener_and_path_only_directory() {
+    fn when_registration_has_a_kernel_listener_and_path_only_directory_then_it_is_accepted() {
         let listener = listener();
         let handles = [listener.descriptor.try_clone().unwrap(), root_directory()];
         validate_registration(b"BOXFS\0\x01\0", &handles, 1).unwrap();
     }
     #[test]
-    fn registration_refuses_a_wrong_protocol_or_retained_listener() {
+    fn when_registration_has_a_wrong_protocol_or_retained_listener_then_it_is_refused() {
         let listener = listener();
         let handles = [listener.descriptor.try_clone().unwrap(), root_directory()];
         assert!(validate_registration(b"BOXFS\0\x02\0", &handles, 1).is_err());
@@ -430,7 +430,7 @@ mod tests {
         assert!(validate_registration(b"BOXFS\0\x01\0", &handles[..1], 1).is_err());
     }
     #[test]
-    fn registration_refuses_swapped_duplicate_and_wrong_descriptor_kinds() {
+    fn when_registration_descriptors_are_swapped_duplicated_or_wrong_kinds_then_it_is_refused() {
         let listener = listener();
         let root = root_directory();
         let header = b"BOXFS\0\x01\0";

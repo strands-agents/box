@@ -435,7 +435,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// A `fetch(url)` routes through the gateway (absolute-form request) and its response maps to
     /// a guest dict `{status, body}`.
     #[tokio::test]
-    async fn fetch_routes_through_the_gateway_and_maps_the_response() {
+    async fn when_fetch_is_called_then_it_uses_the_gateway_and_maps_the_response() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "HELLO");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -475,7 +475,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     }
 
     #[tokio::test]
-    async fn monty_fetch_carries_call_context_and_preserves_explicit_headers() {
+    async fn when_monty_fetch_has_call_context_and_explicit_headers_then_both_are_preserved() {
         const FIRST: &str = "00-11111111111111111111111111111111-aaaaaaaaaaaaaaaa-03";
         const SECOND: &str = "00-22222222222222222222222222222222-bbbbbbbbbbbbbbbb-01";
         async fn request(parent: Option<&str>, state: Option<&str>, headers: &str) -> String {
@@ -543,7 +543,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// A non-200 status is an ordinary value the script reads, not a host error.
     #[tokio::test]
-    async fn a_non_200_status_flows_to_the_script_as_a_value() {
+    async fn when_fetch_returns_a_non_200_status_then_the_script_receives_it_as_a_value() {
         let (proxy_url, _rx) = proxy_returning(404, "Not Found", "missing");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -566,7 +566,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// `fetch()` with no url argument is a catchable `TypeError`, and no client is built.
     #[tokio::test]
-    async fn fetch_with_no_url_argument_is_a_type_error() {
+    async fn when_fetch_has_no_url_argument_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(&routing, &[], &[]).await;
@@ -582,7 +582,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// With no egress, `fetch` is not the curated route: its own arm fails it closed at the
     /// broker-failure status — the network is off by absence.
     #[tokio::test]
-    async fn a_fetch_with_no_egress_is_not_serviced() {
+    async fn when_fetch_has_no_egress_route_then_it_is_not_serviced() {
         let (_root, reach) = fixture();
         let policy = permissive();
 
@@ -606,7 +606,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// Only `fetch` is serviced: a call to any other name is an unresolved callable, so it raises a
     /// catchable `NameError` at status `1` and the proxy is never contacted.
     #[tokio::test]
-    async fn a_non_fetch_call_raises_a_name_error_even_with_egress() {
+    async fn when_an_unknown_call_has_egress_then_a_name_error_is_raised() {
         let (_root, reach) = fixture();
         let policy = permissive();
         let (proxy_url, _rx) = proxy_returning(200, "OK", "HELLO");
@@ -638,7 +638,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// A `fetch` with a method, headers, and a body routes all three through the gateway at parity
     /// with the Shell — the proxy sees the method, the custom header, and the body length.
     #[tokio::test]
-    async fn a_post_with_headers_and_body_routes_through_the_gateway() {
+    async fn when_fetch_posts_headers_and_a_body_then_the_request_uses_the_gateway() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -691,7 +691,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// A non-string `method` is a catchable `TypeError`, and no client is built.
     #[tokio::test]
-    async fn a_non_string_method_is_a_type_error() {
+    async fn when_the_method_is_not_a_string_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(
@@ -714,7 +714,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// A `headers` value that is not a `{str: str}` dict is a catchable `TypeError`.
     #[tokio::test]
-    async fn non_string_header_values_are_a_type_error() {
+    async fn when_header_values_are_not_strings_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(
@@ -741,7 +741,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// A fetch to a floored literal IP (IMDS/link-local) is refused before any transport, reusing
     /// the Shell's `check_url_safe` (parity with the Shell) — the proxy is never contacted.
     #[tokio::test]
-    async fn a_fetch_to_a_floored_ip_is_refused_before_transport() {
+    async fn when_fetch_targets_a_floored_ip_then_it_is_refused_before_transport() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -769,7 +769,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// A response body over `MAX_RESPONSE_BYTES` is a catchable error, not a truncated value — the
     /// streaming cap bounds the trusted process's memory.
     #[tokio::test]
-    async fn a_response_over_the_cap_is_an_error() {
+    async fn when_a_fetch_response_exceeds_the_limit_then_an_error_is_returned() {
         let proxy_url = proxy_returning_body_of(MAX_RESPONSE_BYTES + 1);
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -791,7 +791,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// An unresolved callable with no egress is a language error too, not the network-off `125`:
     /// the `fetch`-name guard, not the presence of egress, is what gates the fail-closed status.
     #[tokio::test]
-    async fn a_non_fetch_call_with_no_egress_raises_a_name_error() {
+    async fn when_an_unknown_call_has_no_egress_then_a_name_error_is_raised() {
         let (_root, reach) = fixture();
         let policy = permissive();
 
@@ -820,7 +820,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// A `bytes` body is sent as-is (not just a `str`), at parity with the gateway's `BodyRef`.
     #[tokio::test]
-    async fn a_bytes_body_is_sent_as_is() {
+    async fn when_fetch_has_a_bytes_body_then_the_bytes_are_sent_unchanged() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -854,7 +854,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// `url` may be supplied as a keyword argument, not only positionally.
     #[tokio::test]
-    async fn a_url_keyword_argument_is_accepted() {
+    async fn when_url_is_a_keyword_argument_then_fetch_accepts_it() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -877,7 +877,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// `method`, `headers`, and `body` may be supplied positionally, not only as keywords.
     #[tokio::test]
-    async fn method_and_body_may_be_positional() {
+    async fn when_method_and_body_are_positional_then_fetch_accepts_them() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
@@ -909,7 +909,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// (RFC 7230), but `Set-Cookie` joins with a newline (it is comma-exempt — cookie values contain
     /// commas), so the guest can split it back.
     #[tokio::test]
-    async fn duplicate_response_headers_are_coalesced() {
+    async fn when_response_headers_repeat_then_their_values_are_coalesced() {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
 
@@ -959,7 +959,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// An unknown keyword argument (a typo like `header=` for `headers=`) is a catchable TypeError,
     /// not a silently dropped value — no transport, no client built.
     #[tokio::test]
-    async fn an_unknown_keyword_argument_is_a_type_error() {
+    async fn when_fetch_has_an_unknown_keyword_argument_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(
@@ -985,7 +985,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
 
     /// Extra positional arguments are a catchable TypeError, matching Python's call semantics.
     #[tokio::test]
-    async fn too_many_positional_arguments_is_a_type_error() {
+    async fn when_fetch_has_too_many_positional_arguments_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(
@@ -1012,7 +1012,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
     /// One argument given both positionally and by keyword is a catchable TypeError, not a silently
     /// dropped keyword value — matching Python's "got multiple values for argument".
     #[tokio::test]
-    async fn both_positional_and_keyword_for_one_arg_is_a_type_error() {
+    async fn when_one_argument_is_both_positional_and_named_then_a_type_error_is_raised() {
         let (_dir, routing) = routing_with_proxy("http://127.0.0.1:1".to_string());
 
         let result = fetch_through_gateway(

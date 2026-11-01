@@ -19,7 +19,7 @@
 //!   impossible because the shim's workspace is read-only, so the marker never
 //!   appears. An attempt at this test passed against the *unfixed* worker and took
 //!   five minutes, which is worse than no test.
-//!   `an_abandoned_command_does_not_stop_the_boundary` drives the worker directly.
+//!   `when_a_command_is_abandoned_then_the_boundary_keeps_serving` drives the worker directly.
 //! - **Protocol-level malformed input.** Oversized frames, truncated prefixes, and
 //!   unknown fields are covered in `shell_protocol`'s tests, which speak the wire
 //!   format without needing a client that can.

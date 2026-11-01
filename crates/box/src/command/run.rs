@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_announces_each_credential_store_and_operation() {
+    fn when_startup_disclosures_are_emitted_then_each_credential_store_and_operation_is_named() {
         let record = record_with(
             Some(spec("claude", &["~/.gitconfig"], &[])),
             BTreeMap::from([(
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_escapes_control_characters_in_a_stored_path() {
+    fn when_a_stored_path_contains_control_characters_then_startup_escapes_them() {
         let record = record_with(
             None,
             BTreeMap::from([(

@@ -789,7 +789,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn empty_attribution_keeps_policy_denial_classes_distinct() {
+    fn when_attribution_is_empty_then_policy_denial_classes_remain_distinct() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(Vec::new(), &history.path().join("dogwood.redb"))
             .expect("policy opens");
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transformed_policy_verdict_keeps_only_the_effective_result() {
+    fn when_a_policy_verdict_is_transformed_then_only_the_effective_result_is_kept() {
         let pending = EffectiveDecision::enforcement_deny(
             r#"Box::Action::"mcp:call""#,
             "server/tools/list",
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn the_egress_adapter_maps_connection_and_request_decisions() {
+    fn when_egress_decisions_are_adapted_then_connection_and_request_decisions_are_mapped() {
         let recorder = DecisionRecorder::discarding();
         let adapter = EgressDecisionRecorder::over(Arc::clone(&recorder));
 
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_tool_permit_no_match_and_forbid_record_the_final_decisions() {
+    fn when_remote_tool_refinement_permits_misses_or_forbids_then_the_final_decision_is_recorded() {
         const TOOLS: &str = r#"{"result":{"tools":[
           {"name":"add","inputSchema":{"type":"object",
             "properties":{"a":{"type":"integer"}},"required":["a"]}}
@@ -1031,7 +1031,7 @@ mod tests {
     /// response leg takes no decision, so a capture there would hold a verdict from the request it
     /// followed.
     #[test]
-    fn raw_verdict_capture_is_scoped_to_decided_egress_attempts() {
+    fn when_egress_attempts_are_decided_then_raw_verdict_capture_is_scoped_to_those_attempts() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let interceptor = EgressDecisionInterceptor::over(Arc::new(CaptureProbe {
             observed: Arc::clone(&observed),
@@ -1086,7 +1086,7 @@ mod tests {
     /// **Ordinary egress keeps the policy that admitted it**, on the `net:connect` and
     /// `http:request` gates.
     #[test]
-    fn ordinary_egress_records_the_policy_that_decided_it() {
+    fn when_ordinary_egress_is_recorded_then_the_deciding_policy_is_named() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(
             vec![Policy {
@@ -1191,7 +1191,7 @@ mod tests {
     /// held in one slot, so an emitted decision naming a different exchange must fall back to the
     /// gateway's own label rather than take what is waiting there.
     #[test]
-    fn a_held_verdict_reaches_no_other_exchange() {
+    fn when_a_verdict_is_held_then_it_cannot_reach_another_exchange() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(
             vec![Policy {
@@ -1284,7 +1284,7 @@ mod tests {
     /// A gate whose own result disagrees with the policy verdict beneath it keeps the gate's label:
     /// a floor may refuse what policy permitted, and it is not that permit that decided.
     #[test]
-    fn a_gate_that_overrides_the_policy_verdict_keeps_its_own_label() {
+    fn when_a_gate_overrides_policy_then_its_own_label_is_kept() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(
             vec![Policy {
@@ -1347,7 +1347,7 @@ mod tests {
     /// An operator reads their own name for a rule; a policy that authored none still has to be
     /// identifiable, and an empty `@id` identifies nothing.
     #[test]
-    fn an_authored_id_is_preferred_and_the_rule_id_is_the_fallback() {
+    fn when_attribution_has_an_authored_id_then_it_is_preferred_and_rule_id_is_the_fallback() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(
             vec![Policy {

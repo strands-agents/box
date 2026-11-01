@@ -1083,7 +1083,7 @@ mod tests {
     /// **A leaf setup failure carries the trampoline's message**, which names the binary and the
     /// library the view could not resolve, rather than the stage alone.
     #[test]
-    fn a_leaf_setup_failure_carries_the_trampolines_message() {
+    fn when_leaf_setup_fails_then_the_trampoline_message_is_preserved() {
         let stderr = b"strands-box: [tool.cargo] runs /usr/bin/app\n\
             strands-box-contain-trampoline: containment apply failed: '/usr/bin/app' needs the \
             shared library 'libnope.so.1', which is not in its DT_RUNPATH\n";
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn a_startup_failure_preserves_grouped_reads_and_additive_guidance() {
+    fn when_startup_fails_then_grouped_reads_and_additive_guidance_are_preserved() {
         let stderr = b"earlier log\nstrands-box-contain-trampoline: containment apply failed: 2 dependencies lack read access\nDependency: /vendor/codec\nDependency: /vendor/storage\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.\n";
         let detail = trampoline_message(stderr).unwrap();
         for required in [
@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn a_maximum_missing_read_reason_keeps_its_final_guidance() {
+    fn when_a_missing_read_reason_reaches_its_limit_then_its_final_guidance_is_preserved() {
         // This fixture reaches MissingReads::require_complete's 6000-byte reason limit.
         let mut reason = "2 dependencies lack read access\nDependency: /vendor/界\nDependency: /vendor/storage\nRequested by: /project/".to_owned();
         let guidance = "\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.";
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn a_normal_exit_reports_its_own_code() {
+    fn when_a_workload_exits_normally_then_its_exit_code_is_reported() {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(7 << 8))),
             format!("{:?}", ExitCode::from(7))
@@ -1150,7 +1150,7 @@ mod tests {
     /// A signalled workload reports `128 + signal`, the shell convention, so a
     /// caller can tell a crash from a nonzero exit.
     #[test]
-    fn a_signalled_exit_reports_128_plus_the_signal() {
+    fn when_a_workload_exits_from_a_signal_then_128_plus_the_signal_is_reported() {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(libc::SIGINT))),
             format!("{:?}", ExitCode::from(128 + libc::SIGINT as u8))
@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn a_signalled_leaf_reports_128_plus_the_signal() {
+    fn when_a_leaf_exits_from_a_signal_then_128_plus_the_signal_is_reported() {
         assert_eq!(captured_status(ExitStatus::from_raw(7 << 8)), 7);
         assert_eq!(
             captured_status(ExitStatus::from_raw(libc::SIGKILL)),
@@ -1169,7 +1169,7 @@ mod tests {
     /// Signalling a group that has already gone is not an error: the workload
     /// exiting before the box signals it is the normal case, not a fault.
     #[tokio::test]
-    async fn signalling_a_departed_group_succeeds() {
+    async fn when_a_process_group_has_departed_then_signaling_it_succeeds() {
         let group = departed_group().await;
 
         assert!(
@@ -1180,7 +1180,7 @@ mod tests {
 
     /// A pid that cannot be a process group is refused rather than signalled.
     #[tokio::test]
-    async fn an_out_of_range_process_id_is_refused() {
+    async fn when_a_process_id_is_out_of_range_then_it_is_refused() {
         let mut group = departed_group().await;
         group.leader = u32::MAX;
 
@@ -1193,7 +1193,7 @@ mod tests {
     /// Terminating twice is idempotent, so `Drop` after an explicit terminate
     /// cannot report a spurious failure.
     #[tokio::test]
-    async fn terminating_twice_is_idempotent() {
+    async fn when_termination_is_requested_twice_then_the_second_request_is_harmless() {
         let mut group = departed_group().await;
 
         assert!(group.terminate().is_ok());
@@ -1230,7 +1230,7 @@ mod tests {
     /// **An inherited ignored `SIGHUP` stays ignored.** A box started under `nohup` must not stop
     /// its workload on the hangup its parent told it to ignore, so no listener is installed.
     #[tokio::test]
-    async fn an_inherited_ignored_hangup_installs_no_listener() {
+    async fn when_hangup_is_inherited_as_ignored_then_no_listener_is_installed() {
         let _signals = SIGNALS.lock().await;
         // SAFETY: a zeroed `sigaction` is a valid value; the previous disposition is saved and
         // restored before the lock drops.
@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_supplied_terminal_becomes_the_workloads_controlling_terminal() {
+    async fn when_a_terminal_is_supplied_then_it_becomes_the_workload_controlling_terminal() {
         use std::os::fd::{AsRawFd, FromRawFd};
 
         let (mut master, mut slave) = (-1, -1);
@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_shutdown_preserves_the_hosts_signal_handlers() {
+    async fn when_terminal_shutdown_completes_then_host_signal_handlers_are_preserved() {
         let _signals = SIGNALS.lock().await;
         let _listening = Signals::listen().unwrap();
         for signal in [libc::SIGTERM, libc::SIGHUP] {
@@ -1345,7 +1345,7 @@ mod tests {
     /// `stop` ends a group that ignores `SIGTERM`: the bounded wait runs out and `SIGKILL` follows,
     /// so the leader and its descendant are both gone when it returns.
     #[tokio::test]
-    async fn stopping_a_group_that_ignores_sigterm_kills_every_member() {
+    async fn when_a_group_ignores_sigterm_then_stopping_it_kills_every_member() {
         let directory = tempfile::tempdir().expect("a directory");
         let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
 
@@ -1369,7 +1369,7 @@ mod tests {
 
     /// Dropping the group, which is what a `?` return after spawn does, ends every member.
     #[tokio::test]
-    async fn dropping_a_group_ends_every_member() {
+    async fn when_a_process_group_is_dropped_then_every_member_ends() {
         let directory = tempfile::tempdir().expect("a directory");
         let (group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
 
@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_exit_stops_descendants_that_hold_the_output_open() {
+    async fn when_descendants_hold_captured_output_open_then_leader_exit_stops_them() {
         let directory = tempfile::tempdir().expect("a directory");
         let path = directory.path().join("pids");
         let mut command = Command::new("/bin/sh");
@@ -1409,7 +1409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_a_captured_wait_ends_every_member() {
+    async fn when_a_captured_wait_is_canceled_then_every_group_member_ends() {
         let directory = tempfile::tempdir().expect("a directory");
         let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
         let (started, waiting) = tokio::sync::oneshot::channel();
@@ -1424,7 +1424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_captured_wait_timeout_ends_every_member() {
+    async fn when_a_captured_wait_times_out_then_every_group_member_ends() {
         let directory = tempfile::tempdir().expect("a directory");
         let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
         let result = tokio::time::timeout(Duration::from_millis(20), async move {

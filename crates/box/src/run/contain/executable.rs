@@ -312,7 +312,7 @@ mod tests {
 
     /// A relative path with a separator has no root to resolve against, so it is refused by name.
     #[test]
-    fn a_relative_path_with_a_separator_is_refused() {
+    fn when_a_relative_program_path_contains_a_separator_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
         executable_at(&home.join("agent"));
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_path_is_used_as_authored() {
+    fn when_a_program_path_is_absolute_then_its_authored_spelling_is_preserved() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().canonicalize().unwrap();
         let executable = home.join("agent");
@@ -341,7 +341,7 @@ mod tests {
 
     /// A linked program is exec'd through the link and granted on what the link names.
     #[test]
-    fn a_linked_program_is_started_through_the_link_and_granted_on_its_target() {
+    fn when_a_program_is_a_symlink_then_launch_uses_the_link_and_the_grant_uses_its_target() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let target = root.join("real-agent");
@@ -365,7 +365,7 @@ mod tests {
 
     /// The route's directory is canonical even when the program's own name is a link.
     #[test]
-    fn the_route_carries_a_canonical_directory() {
+    fn when_a_program_route_is_resolved_then_its_directory_is_canonical() {
         let directory = tempfile::tempdir().unwrap();
         let real = directory.path().canonicalize().unwrap().join("real");
         std::fs::create_dir(&real).unwrap();
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn a_non_executable_file_is_refused() {
+    fn when_a_file_is_not_executable_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().canonicalize().unwrap().join("data");
         std::fs::write(&file, "not a program").unwrap();
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_name_absent_from_the_search_path_is_refused() {
+    fn when_a_bare_program_name_is_absent_from_the_search_path_then_it_is_refused() {
         let error = Resolver {
             search_path: OsStr::new("/nonexistent-a:/nonexistent-b"),
         }
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_name_resolves_on_the_declared_search_path() {
+    fn when_a_bare_program_name_is_present_then_the_declared_search_path_resolves_it() {
         let directory = tempfile::tempdir().unwrap();
         let bin = directory.path().canonicalize().unwrap().join("hostbin");
         std::fs::create_dir(&bin).unwrap();
@@ -427,7 +427,7 @@ mod tests {
     /// A non-absolute search entry means "the current directory", which a process does not have,
     /// so it is skipped rather than rebased.
     #[test]
-    fn a_non_absolute_search_entry_is_skipped() {
+    fn when_a_search_entry_is_not_absolute_then_it_is_skipped() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let bin = root.join("bin");
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn read_shebang_parses_the_interpreter_and_its_tokens() {
+    fn when_a_shebang_is_read_then_its_interpreter_and_tokens_are_parsed() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("tool");
         std::fs::write(&script, "#!/usr/bin/env python3\nprint('x')\n").unwrap();
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn read_shebang_is_none_without_a_hashbang() {
+    fn when_a_file_has_no_hashbang_then_no_shebang_is_returned() {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("bin");
         std::fs::write(&binary, b"\x7fELFnot-a-script").unwrap();
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_resolves_the_real_interpreter_on_the_search_path() {
+    fn when_a_shebang_uses_env_then_the_real_interpreter_is_resolved_on_the_search_path() {
         let dir = tempfile::tempdir().unwrap();
         let interpreter = dir.path().join("myinterp");
         executable_at(&interpreter);
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_skips_leading_name_value_assignments() {
+    fn when_an_env_shebang_has_leading_assignments_then_they_are_skipped() {
         // `#!/usr/bin/env FOO=bar myinterp` — the assignment must not be taken as the interpreter.
         let dir = tempfile::tempdir().unwrap();
         let interpreter = dir.path().join("myinterp");
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_resolves_a_split_string_interpreter() {
+    fn when_an_env_shebang_uses_a_split_string_then_the_interpreter_is_resolved() {
         // `#!/usr/bin/env --split-string=myinterp` — the interpreter is attached to the flag.
         let dir = tempfile::tempdir().unwrap();
         let interpreter = dir.path().join("myinterp");
@@ -516,12 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_is_none_for_a_direct_path_interpreter() {
+    fn when_a_shebang_names_a_direct_interpreter_then_no_env_interpreter_is_returned() {
         assert!(env_shebang_target(Path::new("/bin/sh"), &[], None).is_none());
     }
 
     #[test]
-    fn a_direct_path_shebang_chain_names_its_interpreter() {
+    fn when_a_shebang_chain_uses_direct_paths_then_its_interpreter_is_named() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("tool");
         std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
@@ -545,7 +545,7 @@ mod tests {
     /// `env` first and `env` then execs the interpreter.
     #[cfg(unix)]
     #[test]
-    fn an_env_shebang_chain_names_env_and_the_interpreter() {
+    fn when_a_shebang_chain_uses_env_then_env_and_the_interpreter_are_named() {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("a directory");
         let script = directory.path().join("tool.sh");
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn an_env_shebang_includes_envs_own_interpreter() {
+    fn when_env_has_its_own_interpreter_then_the_shebang_chain_includes_it() {
         let directory = tempfile::tempdir().expect("a directory");
         let root = directory
             .path()
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_interpreter_branch_survives_a_shared_long_branch() {
+    fn when_interpreter_branches_share_a_long_branch_then_a_short_branch_is_preserved() {
         let directory = tempfile::tempdir().expect("a directory");
         let root = directory
             .path()
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn an_env_interpreter_cycle_keeps_the_selected_interpreter() {
+    fn when_env_interpreters_form_a_cycle_then_the_selected_interpreter_is_kept() {
         let directory = tempfile::tempdir().expect("a directory");
         let root = directory
             .path()
@@ -688,7 +688,7 @@ mod tests {
     /// execs `/var/select/sh`'s target rather than interpreting the script itself.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_sh_shebang_chain_names_the_selected_variant_on_macos() {
+    fn when_a_macos_shebang_uses_sh_then_the_selected_variant_is_named() {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = tempfile::tempdir().expect("a directory");
         let script = directory.path().join("tool.sh");
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_link_target_joins_the_links_directory() {
+    fn when_a_symlink_target_is_relative_then_it_joins_the_link_directory() {
         assert_eq!(
             link_target(Path::new("/var/select/sh"), PathBuf::from("../../bin/bash")),
             PathBuf::from("/var/select/../../bin/bash")
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn a_native_binary_has_no_shebang_chain() {
+    fn when_a_program_is_a_native_binary_then_its_shebang_chain_is_empty() {
         // `/bin/sh` is a Mach-O binary, not a `#!`-script.
         assert!(
             shebang_interpreter_chain(Path::new("/bin/sh"), OsStr::new("/usr/bin:/bin")).is_empty()

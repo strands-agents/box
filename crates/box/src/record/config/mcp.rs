@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn a_local_server_declares_a_name_a_program_and_its_argv() {
+    fn when_a_local_server_is_declared_then_its_name_program_and_arguments_are_preserved() {
         let file = parse(
             r#"
             [[server]]
@@ -310,7 +310,7 @@ mod tests {
 
     /// The lookup key is `program`, and the server's `name` selects nothing.
     #[test]
-    fn a_server_is_reached_by_its_program_and_not_by_its_name() {
+    fn when_a_server_is_resolved_then_its_program_selects_it_instead_of_its_name() {
         let file = parse(
             r#"
             [[server]]
@@ -332,7 +332,7 @@ mod tests {
 
     /// Two entries sharing one `program` want one alias path, so the file is refused.
     #[test]
-    fn two_servers_sharing_one_program_are_refused() {
+    fn when_two_servers_share_one_program_then_they_are_refused() {
         let refusal = parse(
             r#"
             [[server]]
@@ -354,7 +354,7 @@ mod tests {
 
     /// An absent `[[mcp]]` array is a box with no MCP servers, not an error.
     #[test]
-    fn an_absent_array_is_no_servers() {
+    fn when_the_server_array_is_absent_then_no_servers_are_declared() {
         let file = parse("").expect("a box.toml with no [[mcp]] entries");
         assert!(
             file.is_empty(),
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_name_is_refused() {
+    fn when_server_names_repeat_then_the_duplicate_is_refused() {
         let error = parse(
             r#"
             [[server]]
@@ -382,7 +382,7 @@ mod tests {
     /// A name that cannot be an attribute is refused rather than sanitized, because `a/b` and `a_b`
     /// becoming one name means a rule written for either reaches both.
     #[test]
-    fn a_name_outside_the_character_set_is_refused() {
+    fn when_a_server_name_contains_unsupported_characters_then_it_is_refused() {
         for name in ["has space", "a/b", "tab\t", "sémantic"] {
             let error =
                 parse(&format!("[[server]]\nname = {name:?}\ncommand = [\"x\"]")).unwrap_err();
@@ -395,7 +395,7 @@ mod tests {
 
     /// A program the alias image would route to an interpreter is refused.
     #[test]
-    fn a_program_that_collides_with_an_interpreter_alias_is_refused() {
+    fn when_a_server_program_collides_with_an_interpreter_alias_then_it_is_refused() {
         assert_eq!(
             crate::INTERPRETER_ALIASES,
             ["zsh", "bash", "sh", "python3", "python"]
@@ -425,7 +425,7 @@ mod tests {
 
     /// `.` and `..` pass the character set and name a directory rather than a program.
     #[test]
-    fn a_relative_directory_program_is_refused() {
+    fn when_a_server_program_uses_a_relative_directory_then_it_is_refused() {
         for program in [".", ".."] {
             let error = parse(&format!(
                 "[[server]]\nname = \"x\"\ncommand = [{program:?}]"
@@ -440,14 +440,14 @@ mod tests {
 
     /// An entry naming no program would start nothing.
     #[test]
-    fn an_empty_program_is_refused() {
+    fn when_a_server_program_is_empty_then_it_is_refused() {
         let error = parse("[[server]]\nname = \"x\"\ncommand = [\"\"]").unwrap_err();
         assert!(error.to_string().contains("`program` is empty"), "{error}");
     }
 
     /// An unknown key is a hard error, like every other config this box reads.
     #[test]
-    fn an_unknown_key_is_refused() {
+    fn when_a_server_declares_an_unknown_key_then_it_is_refused() {
         assert!(
             parse("[[server]]\nname = \"x\"\ncommand = [\"y\"]\ndestination = \"z\"").is_err(),
             "a remote server's `destination` is not a key this build reads"
@@ -469,7 +469,7 @@ mod tests {
 
     /// A `type = "stdio"` entry carries a command.
     #[test]
-    fn a_stdio_entry_carries_a_command() {
+    fn when_a_stdio_entry_is_loaded_then_its_command_is_preserved() {
         let parsed = entry("[mcp.builder]\ntype = \"stdio\"\ncommand = [\"issues-mcp\"]")
             .expect("a stdio entry parses");
         assert_eq!(
@@ -487,7 +487,7 @@ mod tests {
 
     /// A `type = "http"` entry carries destinations and an optional secret.
     #[test]
-    fn an_http_entry_carries_destinations_and_a_secret() {
+    fn when_an_http_entry_is_loaded_then_its_destinations_and_secret_are_preserved() {
         let parsed = entry(
             "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
              secret.ref = \"env://GITHUB_MCP_TOKEN\"",
@@ -507,7 +507,7 @@ mod tests {
 
     /// The transport tag is mandatory: an entry with no `type` cannot be resolved to either variant.
     #[test]
-    fn a_missing_type_is_refused() {
+    fn when_a_server_type_is_missing_then_the_entry_is_refused() {
         assert!(
             entry("[mcp.builder]\ncommand = [\"issues-mcp\"]").is_err(),
             "`type` selects the transport and has no default, so it must be required"
@@ -517,7 +517,7 @@ mod tests {
     /// A field belonging to the other transport is refused, so a stdio entry cannot smuggle
     /// destinations and an http entry cannot smuggle a command.
     #[test]
-    fn a_field_for_the_wrong_transport_is_refused() {
+    fn when_a_field_belongs_to_another_transport_then_the_entry_is_refused() {
         assert!(
             entry("[mcp.a]\ntype = \"stdio\"\ndestinations = [\"api.test\"]").is_err(),
             "a stdio entry has no `destinations`"
@@ -542,7 +542,7 @@ mod tests {
     /// A stdio entry's grants live directly under `[mcp.<name>]`, and its synthesized `ProcessSpec`
     /// carries the entry's command plus those grants.
     #[test]
-    fn a_stdio_entry_synthesizes_a_process_spec_from_its_command_and_grants() {
+    fn when_a_stdio_entry_is_translated_then_its_command_and_grants_form_a_process_spec() {
         let map = entries(
             "[mcp.builder]\ntype = \"stdio\"\ncommand = [\"issues-mcp\", \"--stdio\"]\n\
              [mcp.builder.filesystem]\nread = [\"~/.local/share/issues-mcp\"]\n\
@@ -574,7 +574,7 @@ mod tests {
     /// `[mcp.<name>.network] contain_egress = false` marks the server native-egress
     /// (Network::AllowAll); omitting the table, or `true`, keeps it gateway-routed.
     #[test]
-    fn contain_egress_false_marks_native_egress() {
+    fn when_contain_egress_is_false_then_native_egress_is_selected() {
         let native = entries(
             "[mcp.builder]\ntype = \"stdio\"\ncommand = [\"issues-mcp\"]\n\
              [mcp.builder.network]\ncontain_egress = false",
@@ -602,7 +602,7 @@ mod tests {
     /// Containment is not optional: a stdio entry that declares no grants is still contained. It
     /// produces a spec carrying only its command, and runs on the leaf baseline alone.
     #[test]
-    fn a_grantless_stdio_entry_is_still_contained() {
+    fn when_a_stdio_entry_has_no_grants_then_it_still_uses_containment() {
         let map = entries("[mcp.fetch]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]");
         let specs = contained_specs(&map);
         let entry = specs
@@ -622,7 +622,7 @@ mod tests {
 
     /// Only remote (http) servers produce no contained spec; every stdio server does.
     #[test]
-    fn an_http_entry_produces_no_contained_spec() {
+    fn when_an_http_entry_is_translated_then_no_contained_spec_is_created() {
         let map =
             entries("[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]");
         assert!(
@@ -633,7 +633,7 @@ mod tests {
 
     /// A stdio entry carrying a key no build reads is a load error, like every other config.
     #[test]
-    fn an_unknown_stdio_field_is_refused() {
+    fn when_a_stdio_field_is_unknown_then_the_entry_is_refused() {
         #[derive(serde::Deserialize)]
         struct Fixture {
             #[allow(dead_code)]
@@ -664,7 +664,7 @@ mod tests {
 
     /// An `[mcp.<name>.filesystem]` refuses `metadata` and `exec`, as a tool table does.
     #[test]
-    fn mcp_filesystem_refuses_metadata_and_exec_like_a_tool() {
+    fn when_mcp_filesystem_declares_metadata_or_exec_then_it_is_refused_like_a_tool() {
         let path = std::path::Path::new("box.toml");
         let head = "name = \"codex\"\nbox_dir = \"/var/lib/boxes/codex\"\n";
         for (table, list) in [

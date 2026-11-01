@@ -123,7 +123,7 @@ impl Btf {
 mod tests {
     use super::*;
     #[test]
-    fn truncated_kernel_type_data_is_refused() {
+    fn when_kernel_type_data_is_truncated_then_it_is_refused() {
         for bytes in [&[][..], &[0x9f, 0xeb, 1, 0][..], &[0; 24][..]] {
             assert!(Btf::parse(bytes).is_err());
         }

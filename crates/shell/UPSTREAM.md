@@ -923,7 +923,7 @@ history half in
 which fails against the prior walk, and guards the refusal in
 `tests/policy_shell_fs_e2e.rs::forbidding_the_selected_candidates_exec_probe_keeps_it_from_running`.
 The box pins the floor in
-`run/broker/shell.rs::a_locate_inside_trusted_box_state_is_beneath_the_floor_and_records_no_decision`.
+`run/broker/shell.rs::when_locate_targets_trusted_box_state_then_the_floor_refuses_without_a_policy_decision`.
 
 **Not upstream-worthy in this shape.** Upstream has no admission on the walk, so the defect does not
 exist there. If the effect seam is offered upstream, `Locate` goes with it.
@@ -1412,7 +1412,7 @@ I/O timeout, so no pending drain is dropped at box exit.
   the file before one write, the peak grows by 27 MiB and the test fails.
 - `::a_host_write_that_fails_midway_fails_the_command_and_keeps_the_partial_file` sets
   `RLIMIT_FSIZE` to 1 MiB and writes 4 MiB, and pins status 1, the message, and a partial file.
-- The box's `run::broker::host::tests::a_calls_write_is_on_the_host_when_its_status_returns` pins
+- The box's `run::broker::host::tests::when_a_call_returns_its_status_then_its_write_is_visible_on_the_host` pins
   the same contract through the broker socket, over `CallKernel`.
 
 With `execute_item` returning before `settle_writes`, the first five fail with the host file at

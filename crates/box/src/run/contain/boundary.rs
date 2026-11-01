@@ -1594,7 +1594,7 @@ mod tests {
     /// authority source is subtracted when a table is judged; a spawn walks no granted tree and
     /// re-judges nothing.
     #[test]
-    fn a_spawn_acts_on_the_reach_judged_when_the_run_started() {
+    fn when_a_process_spawns_then_it_uses_the_reach_judged_at_run_start() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.filesystem = Filesystem {
@@ -1654,7 +1654,7 @@ mod tests {
     /// itself replaced by a link, and an ancestor replaced by a link.
     #[cfg(unix)]
     #[test]
-    fn a_spawn_refuses_a_grant_whose_identity_changed_after_judgement() {
+    fn when_an_approved_grant_changes_identity_then_spawn_refuses_it() {
         let fixture = Fixture::new();
         let inner = fixture.path("scratch/inner");
         std::fs::create_dir(&inner).expect("a granted directory");
@@ -1743,7 +1743,7 @@ mod tests {
     /// **A spawn refuses a reach whose subtracted authority directory moved**: the directory the
     /// sources were read from is renamed, so it is no longer where the judgement subtracted it.
     #[test]
-    fn a_spawn_refuses_a_reach_whose_subtracted_authority_moved() {
+    fn when_subtracted_authority_moves_then_spawn_refuses_the_reach() {
         let fixture = Fixture::new();
         let authority = fixture.path("scratch/inner/authority");
         let source = plant_authority(&authority);
@@ -1812,7 +1812,7 @@ mod tests {
     /// **A spawn refuses a reach whose `deny` path was replaced** after the judgement; on macOS a
     /// `deny` path not there when the run judged it is replayed by name.
     #[test]
-    fn a_spawn_refuses_a_reach_whose_denied_path_was_replaced() {
+    fn when_a_denied_path_is_replaced_then_spawn_refuses_the_reach() {
         let fixture = Fixture::new();
         let secret = fixture.path("scratch/secret");
         std::fs::create_dir(&secret).expect("a denied directory");
@@ -1874,7 +1874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_log_directory_gets_metadata_only_when_the_process_lists_it() {
+    fn when_a_process_lists_its_log_directory_then_metadata_access_is_granted() {
         let fixture = Fixture::new();
         let logs = fixture.path("logs");
         std::fs::create_dir(&logs).expect("a log directory");
@@ -1921,7 +1921,8 @@ mod tests {
 
     /// A spec selects native egress only through `contain_egress = false`.
     #[test]
-    fn a_spec_selects_native_egress_only_through_contain_egress_false() {
+    fn when_contain_egress_is_false_then_native_egress_is_selected_and_other_settings_do_not_select_it()
+     {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         assert_eq!(EgressMode::for_spec(&spec), EgressMode::Gateway);
@@ -1937,7 +1938,7 @@ mod tests {
 
     /// The startup disclosure names a leaf's native egress, and says nothing of it for a gateway leaf.
     #[test]
-    fn the_disclosure_names_native_egress_only_when_it_is_selected() {
+    fn when_native_egress_is_selected_then_the_disclosure_names_it() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let native = fixture.translate_full(
@@ -1973,10 +1974,10 @@ mod tests {
     /// is the box-level half of the escape; the seatbelt render itself is covered in
     /// `profile_conformance`. macOS-only because it asserts the seatbelt text; the Linux side of the
     /// same `Network::AllowAll` (joining the host network namespace) is covered by
-    /// `native_egress_translates_on_linux` here and the namespace backend's own tests.
+    /// `when_native_egress_is_translated_on_linux_then_translation_succeeds` here and the namespace backend's own tests.
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_egress_translates_to_allow_all() {
+    fn when_native_egress_is_translated_then_network_access_is_allow_all() {
         const IP_OUTBOUND: &str = "(remote ip \"*:*\")";
         let pathless = |profile: &str| {
             profile
@@ -2016,7 +2017,7 @@ mod tests {
     /// `Boundary` is not `Debug`.
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_egress_translates_on_linux() {
+    fn when_native_egress_is_translated_on_linux_then_translation_succeeds() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
 
@@ -2049,7 +2050,8 @@ mod tests {
     /// opted-in leaf launches both render the opendirectoryd identity lookup needed for `getpwuid`.
     /// Keys on all three markers so the account grant cannot pull in the leaf network bundle.
     #[test]
-    fn an_agent_gets_account_lookup_without_leaf_network_runtime_services() {
+    fn when_agent_runtime_cells_are_composed_then_account_lookup_is_present_without_leaf_network_services()
+     {
         let fixture = Fixture::new();
         let spec = fixture.spec();
 
@@ -2091,7 +2093,7 @@ mod tests {
     /// program, the arguments, and the working directory are equal; only the table name in the
     /// disclosure differs.
     #[test]
-    fn one_spec_translates_the_same_as_agent_and_as_tool() {
+    fn when_one_spec_is_translated_as_agent_or_tool_then_its_declared_grants_match() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
 
@@ -2119,7 +2121,8 @@ mod tests {
     /// byte-identical to before discovery.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_leaf_discovers_the_operator_home_and_the_main_box_does_not() {
+    fn when_leaf_and_agent_home_reach_are_compared_then_only_the_leaf_discovers_the_operator_home()
+    {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let home = fixture
@@ -2193,7 +2196,7 @@ mod tests {
     /// there.** The cell is metadata on the directory's own entry, so it reads no alias and lists
     /// none.
     #[test]
-    fn the_agent_tests_existence_in_its_alias_directory_and_a_leaf_does_not() {
+    fn when_alias_directory_existence_is_checked_then_the_agent_can_check_it_and_a_leaf_cannot() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let bin = fixture.root.bin_directory();
@@ -2217,7 +2220,7 @@ mod tests {
     /// box directory.**
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_alias_directory_existence_allow_is_the_only_box_state_it_opens() {
+    fn when_alias_directory_existence_is_allowed_then_no_other_box_state_is_opened() {
         let fixture = Fixture::new();
         let boundary =
             fixture.translate_with_reach(&fixture.spec(), "[agent]", RuntimeReach::Agent);
@@ -2267,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_leaf_enables_and_discloses_execution_from_writable_grants() {
+    fn when_execution_from_writable_grants_is_selected_then_only_a_leaf_enables_and_discloses_it() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         for (reach, expected) in [(RuntimeReach::Leaf, true), (RuntimeReach::Agent, false)] {
@@ -2284,7 +2287,7 @@ mod tests {
     /// keys on `RuntimeReach` and the agent box keeps enumerated exec.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_leaf_gets_broad_exec_and_the_main_box_does_not() {
+    fn when_leaf_and_agent_exec_access_are_compared_then_only_the_leaf_has_broad_exec() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let profile = |reach| {
@@ -2311,7 +2314,7 @@ mod tests {
     /// **Every profile refuses the box's private tree in both spellings, after every allow that
     /// reaches it**: the agent box, a tool leaf, and an MCP leaf alike.
     #[test]
-    fn every_profile_refuses_the_private_tree_after_every_allow_that_reaches_it() {
+    fn when_profile_allows_reach_private_storage_then_a_later_refusal_still_protects_it() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let private = fixture
@@ -2366,7 +2369,8 @@ mod tests {
     /// **The caller's spelling becomes `argv[0]` and the executable stays the identity**, so a venv
     /// link runs the canonical interpreter while the interpreter reads the link as its own path.
     #[test]
-    fn the_launch_spelling_becomes_argument_zero_and_the_executable_stays_canonical() {
+    fn when_a_program_launches_then_argument_zero_uses_its_spelling_and_the_executable_stays_canonical()
+     {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let spelled = fixture.path("project/.venv/bin/python");
@@ -2405,7 +2409,7 @@ mod tests {
 
     /// **A trailing argv appends to `command`**, so a fixed leading argument keeps its place.
     #[test]
-    fn a_trailing_argv_appends_to_the_commands_fixed_arguments() {
+    fn when_trailing_arguments_are_supplied_then_they_follow_fixed_command_arguments() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
 
@@ -2427,7 +2431,7 @@ mod tests {
     /// **A `${NAME}` in `command` resolves to this run's value**, and the text around it is
     /// unchanged.
     #[test]
-    fn a_core_owned_token_expands_to_this_runs_value() {
+    fn when_a_core_owned_token_is_expanded_then_it_uses_this_run_value() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command.push(
@@ -2462,7 +2466,7 @@ mod tests {
     /// **An unknown name inside `${...}`, and an unterminated `${`, are each refused**, naming the
     /// argument.
     #[test]
-    fn an_unexpandable_token_refuses_the_run() {
+    fn when_a_token_cannot_be_expanded_then_the_run_is_refused() {
         let fixture = Fixture::new();
         for (argument, needle) in [
             (
@@ -2492,7 +2496,7 @@ mod tests {
     /// **A credential phantom is refused rather than expanded, and the expandable set holds exactly
     /// three telemetry names.**
     #[test]
-    fn a_credential_phantom_is_refused_rather_than_expanded() {
+    fn when_a_token_names_a_credential_phantom_then_it_is_refused_without_expansion() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command
@@ -2546,7 +2550,7 @@ mod tests {
 
     /// **A `${...}` in element 0 of `command` is refused.**
     #[test]
-    fn a_token_in_the_program_is_refused() {
+    fn when_the_program_contains_a_token_then_it_is_refused() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command[0] = "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}".to_string();
@@ -2563,7 +2567,7 @@ mod tests {
 
     /// **Expansion applies to `command` and not to the trailing argv**, which runs unchanged.
     #[test]
-    fn a_trailing_argument_is_never_expanded() {
+    fn when_a_trailing_argument_contains_a_token_then_it_is_not_expanded() {
         let fixture = Fixture::new();
         let boundary = fixture.translate(
             &fixture.spec(),
@@ -2583,7 +2587,7 @@ mod tests {
     /// **Every list translates to its cell**, beside the command's own exec grant and the
     /// workspace's enter-only grant.
     #[test]
-    fn the_eight_lists_translate_to_their_cells() {
+    fn when_the_eight_filesystem_lists_are_translated_then_each_produces_its_corresponding_cells() {
         let fixture = Fixture::new();
         let boundary =
             fixture.translate_with_reach(&fixture.spec(), "[agent]", RuntimeReach::Agent);
@@ -2675,7 +2679,7 @@ mod tests {
     /// **A tool gets every phantom and no MCP alias**: the box is the credential boundary, and only
     /// the agent starts an MCP server.
     #[test]
-    fn a_tool_gets_every_phantom_and_no_mcp_alias() {
+    fn when_a_tool_boundary_is_built_then_it_receives_every_phantom_and_no_mcp_alias() {
         let fixture = Fixture::new();
         let boundary = fixture.translate(&fixture.spec(), "[tool.sh]", &[]);
         let translated = cells(&boundary);
@@ -2699,7 +2703,7 @@ mod tests {
     /// roots of the minimum, and no cell reaches a program directory or grants exec beyond the
     /// command, the stated `exec` entries, and the aliases.
     #[test]
-    fn a_program_outside_every_exec_grant_is_still_refused() {
+    fn when_a_program_is_outside_every_exec_grant_then_execution_is_refused() {
         let fixture = Fixture::new();
         let boundary = fixture.translate(&fixture.spec(), "[agent]", &[]);
         let translated = cells(&boundary);
@@ -2749,7 +2753,7 @@ mod tests {
     /// is the operator's when undeclared, `PATH` starts with the alias directory, and nothing is
     /// inherited from the host.
     #[test]
-    fn the_environment_is_composed_and_inherits_nothing() {
+    fn when_the_environment_is_composed_then_no_host_environment_is_inherited() {
         let fixture = Fixture::new();
         let boundary =
             fixture.translate_with_reach(&fixture.spec(), "[agent]", RuntimeReach::Agent);
@@ -2812,7 +2816,7 @@ mod tests {
     /// **A leaf holds no variable from the operator's environment**: only its spec's `env`, every
     /// phantom, and Core's names, in both egress modes.
     #[test]
-    fn a_leaf_holds_no_operator_variable_only_its_spec_phantom_and_core_names() {
+    fn when_a_leaf_environment_is_composed_then_only_spec_phantom_and_core_names_are_present() {
         let fixture = Fixture::new();
         for egress in [EgressMode::Gateway, EgressMode::Native] {
             let leaf =
@@ -2860,7 +2864,7 @@ mod tests {
 
     /// **A declared `HOME` and `PATH` are honoured**, and Core's names still win a collision.
     #[test]
-    fn a_declared_home_and_path_win_beneath_cores_names() {
+    fn when_home_and_path_are_declared_then_they_override_defaults_beneath_core_owned_names() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         let home = fixture.path("scratch");
@@ -2892,7 +2896,7 @@ mod tests {
 
     /// **The disclosure names every grant, Core's minimum, and the effective `HOME` and `PATH`.**
     #[test]
-    fn the_disclosure_states_what_the_process_reaches() {
+    fn when_boundary_disclosures_are_emitted_then_they_state_the_process_reach() {
         let fixture = Fixture::new();
         let boundary =
             fixture.translate_with_reach(&fixture.spec(), "[agent]", RuntimeReach::Agent);
@@ -2932,7 +2936,7 @@ mod tests {
 
     /// **A command inside its own writable grant is disclosed as a warning**, and still runs.
     #[test]
-    fn a_writable_command_is_disclosed_as_a_warning() {
+    fn when_a_command_is_writable_then_its_disclosure_is_a_warning() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command = vec![fixture.path("tools/run").display().to_string()];
@@ -2954,7 +2958,7 @@ mod tests {
 
     /// **An interpreter hop inside a writable grant is disclosed as a warning**, like the command.
     #[test]
-    fn a_writable_interpreter_is_disclosed_as_a_warning() {
+    fn when_an_interpreter_is_writable_then_its_disclosure_is_a_warning() {
         let fixture = Fixture::new();
         let interpreter = fixture.path("scratch/interp");
         std::fs::copy("/bin/sh", &interpreter).expect("an interpreter copy");
@@ -2980,7 +2984,7 @@ mod tests {
     /// **A writable interpreter a stated `exec` entry covers is still disclosed**, because the
     /// exposure is the same whichever list granted the hop.
     #[test]
-    fn a_writable_interpreter_under_a_stated_exec_grant_is_still_disclosed() {
+    fn when_a_writable_interpreter_has_an_exec_grant_then_it_is_still_disclosed() {
         let fixture = Fixture::new();
         let interpreter = fixture.path("scratch/interp");
         std::fs::copy("/bin/sh", &interpreter).expect("an interpreter copy");
@@ -3005,7 +3009,7 @@ mod tests {
 
     /// **The command's exec rule is disclosed as implicit unless an `exec` entry names it.**
     #[test]
-    fn the_commands_exec_rule_is_disclosed_as_implicit_unless_listed() {
+    fn when_command_execution_is_not_listed_then_its_exec_rule_is_disclosed_as_implicit() {
         let fixture = Fixture::new();
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
         let needle = format!("exec        {}  (command, implicit)", sh.display());
@@ -3031,7 +3035,7 @@ mod tests {
     /// carries the spelling the box execs.
     #[cfg(unix)]
     #[test]
-    fn a_linked_command_keeps_its_route_when_an_exec_entry_names_its_target() {
+    fn when_an_exec_entry_names_a_linked_command_target_then_the_command_keeps_its_route() {
         let fixture = Fixture::new();
         let link = fixture.path("bin/link");
         std::os::unix::fs::symlink(fixture.path("bin/run"), &link).expect("a link to the command");
@@ -3066,7 +3070,7 @@ mod tests {
     /// caller-boundary launch refuses the shebang hop by name, and an entry covering it lets it run.
     #[cfg(unix)]
     #[test]
-    fn a_fallback_program_may_not_bring_an_unlisted_interpreter() {
+    fn when_a_fallback_program_needs_an_unlisted_interpreter_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
         let fixture = Fixture::new();
         let built = fixture.path("scratch/built.sh");
@@ -3124,7 +3128,7 @@ mod tests {
     /// **A command named in its own `exec` list is granted once**, and the disclosure then shows the
     /// operator's entry rather than the implicit rule.
     #[test]
-    fn a_command_named_in_its_own_exec_list_is_granted_once() {
+    fn when_a_command_is_in_its_own_exec_list_then_it_is_granted_once() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.command = vec![fixture.path("bin/run").display().to_string()];
@@ -3155,7 +3159,7 @@ mod tests {
     /// **An interpreter a stated `exec` entry names is granted once**, whichever spelling the shebang
     /// uses for it.
     #[test]
-    fn an_interpreter_an_exec_entry_covers_is_not_granted_twice() {
+    fn when_an_exec_entry_covers_an_interpreter_then_it_is_not_granted_twice() {
         let fixture = Fixture::new();
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
         let mut spec = fixture.spec();
@@ -3262,7 +3266,7 @@ mod tests {
         /// spelled as the identity the host resolves it to, and the two entries the host refuses by
         /// name removed: `list` on Linux, and `metadata` on `/etc`, which the floor refuses
         /// everywhere because the privilege configuration under it is never reachable through a
-        /// root grant (`the_contract_examples_etc_metadata_entry_is_refused_by_the_floor`).
+        /// root grant (`when_etc_metadata_is_declared_as_in_the_contract_example_then_the_floor_refuses_it`).
         fn spec(&self, table: &str) -> ProcessSpec {
             let sh = Path::new("/bin/sh")
                 .canonicalize()
@@ -3292,7 +3296,7 @@ mod tests {
     /// reaches the floor; an operator's own `/etc` spelling meets the symbolic-link refusal on an
     /// `[agent.filesystem]` entry first, and `/private/etc` is the spelling the floor judges.
     #[test]
-    fn the_contract_examples_etc_metadata_entry_is_refused_by_the_floor() {
+    fn when_etc_metadata_is_declared_as_in_the_contract_example_then_the_floor_refuses_it() {
         let example = ContractExample::new();
         let mut spec = example.spec(CONTRACT_AGENT);
         let etc = Path::new("/etc").canonicalize().expect("etc exists");
@@ -3335,7 +3339,7 @@ mod tests {
     /// **A working directory the launch role supplies is judged like a declared one**: the box's
     /// own directory and the operator's home are refused whichever branch names them.
     #[test]
-    fn a_fallback_working_directory_is_judged_like_a_declared_one() {
+    fn when_a_working_directory_is_a_fallback_then_it_is_judged_like_a_declared_directory() {
         let fixture = Fixture::new();
         let mut spec = fixture.spec();
         spec.workspace = None;
@@ -3379,7 +3383,7 @@ mod tests {
     /// **The translator refuses a declared home in trusted Box state**, for the agent and for a
     /// tool, so a spec reaching it by any route meets the same refusal the configuration does.
     #[test]
-    fn a_declared_home_in_trusted_box_state_is_refused_by_the_translator() {
+    fn when_declared_home_is_inside_trusted_box_state_then_translation_refuses_it() {
         let fixture = Fixture::new();
         let fallback = fixture.path("project");
         for (table, home) in [
@@ -3425,7 +3429,7 @@ mod tests {
     /// **A metadata cell on an ancestor of private state grants none of its contents**, while a
     /// read cell there is refused: the exemption the guards carry for `Metadata` is exact.
     #[test]
-    fn a_metadata_only_ancestor_does_not_grant_private_contents() {
+    fn when_an_ancestor_has_metadata_only_access_then_private_contents_remain_ungranted() {
         let box_directory = Path::new("/boxes/codex");
         let private = box_directory.join("private");
         for scope in [Scope::Dir, Scope::Root] {
@@ -3456,7 +3460,7 @@ mod tests {
     /// spelling does.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_data_volume_spelling_of_the_box_directory_is_still_guarded() {
+    fn when_box_state_uses_a_data_volume_spelling_then_it_remains_protected() {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let lab = scratch.path().canonicalize().expect("the scratch resolves");
         assert!(lab.starts_with("/private"), "{}", lab.display());
@@ -3482,7 +3486,7 @@ mod tests {
     /// **A write grant over a policy loaded in the macOS data-volume spelling still protects it.**
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_write_grant_over_a_data_volume_authority_still_protects_it() {
+    fn when_a_write_grant_encloses_data_volume_authority_then_the_authority_remains_protected() {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let project = scratch.path().canonicalize().expect("the scratch resolves");
         std::fs::write(project.join("policy.dw"), "permit(...)").expect("a policy");
@@ -3520,7 +3524,7 @@ mod tests {
     /// **A policy path spelled through a parent component still resolves to the file it names**,
     /// so the write guard judges the same identity the box loads.
     #[test]
-    fn a_policy_spelled_through_a_parent_component_is_still_resolved() {
+    fn when_a_policy_path_contains_a_parent_component_then_it_is_still_resolved() {
         let fixture = Fixture::new();
         let policy = fixture.path("project/.strands-box/policy.dw");
         std::fs::create_dir_all(policy.parent().unwrap()).expect("the authority directory");
@@ -3591,7 +3595,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
     /// **The contract's full Claude Code example translates, table by table, to the cells the
     /// contract states**, every process gets every phantom, and only the agent gets MCP aliases.
     #[test]
-    fn the_contracts_claude_code_example_translates_to_its_cells() {
+    fn when_the_claude_code_contract_example_is_translated_then_its_expected_cells_are_created() {
         let example = ContractExample::new();
         let fixture = &example.fixture;
         let at = |path: &str| PathBuf::from(example.at(path));
@@ -3810,7 +3814,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
     /// **A leaf resolves its shebang hops past the alias directory.** A leaf whose declared `PATH`
     /// names the alias directory runs a `#!/usr/bin/env bash` script on the surrounding OS's `bash`.
     #[test]
-    fn a_leafs_shebang_resolves_past_the_alias_directory() {
+    fn when_a_leaf_shebang_is_resolved_then_interpreter_search_passes_the_alias_directory() {
         use std::os::unix::fs::PermissionsExt as _;
         let fixture = Fixture::new();
         let bin = fixture.root.bin_directory();
@@ -3847,7 +3851,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
     /// `PATH`, no exec on any alias, and no connect on the broker socket, so it cannot reach the
     /// Strands Shell again. The agent keeps all three.
     #[test]
-    fn a_leaf_holds_no_route_back_to_the_broker() {
+    fn when_a_leaf_boundary_is_built_then_it_has_no_route_back_to_the_broker() {
         let fixture = Fixture::new();
         let socket = fixture.root.broker_socket();
         let bin = fixture.root.bin_directory();
@@ -3932,7 +3936,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
     /// **The agent's one connect grant is its own broker, and a leaf holds none.**
     #[test]
-    fn no_box_holds_a_connect_grant_beyond_its_own_broker() {
+    fn when_a_box_boundary_is_built_then_connect_grants_do_not_extend_beyond_its_own_broker() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let connects = |boundary: &Boundary| {
@@ -3966,7 +3970,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
     /// loader's library directories. Both reaches keep what any process needs to run at all, which
     /// is what makes this a narrowing rather than a break.
     #[test]
-    fn agent_containment_withholds_leaf_cells() {
+    fn when_agent_containment_is_built_then_leaf_only_cells_are_withheld() {
         let fixture = Fixture::new();
         let spec = fixture.spec();
         let narrow = cells(&fixture.translate_with_reach(&spec, "[agent]", RuntimeReach::Agent));
@@ -4039,7 +4043,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
     /// `Launch { … }` literal as a block and pairs its `table` with its `runtime_reach`, so swapping
     /// the two reaches fails it — a test that only counted the two spellings did not.
     #[test]
-    fn the_agent_launch_selects_agent_containment() {
+    fn when_the_agent_launch_is_prepared_then_agent_containment_is_selected() {
         /// Every `(table, reach)` pair a source file's production half states.
         fn pairs(source: &str) -> Vec<(String, String)> {
             // The production half only: a `#[cfg(test)]` module builds fixtures with either reach.
@@ -4096,7 +4100,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
     /// A tool's credential-store grant reaches its own boundary, and no other table's.
     #[test]
-    fn a_credential_store_grant_reaches_only_its_own_table() {
+    fn when_a_table_grants_a_credential_store_then_only_that_table_receives_the_grant() {
         let mut fixture = Fixture::new();
         let store = fixture.path(".aws");
         std::fs::create_dir_all(&store).expect("a credential store");
@@ -4156,7 +4160,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
     /// The agent's boundary ignores tool and MCP grants, and adds one alias per added MCP server.
     #[test]
-    fn the_agent_boundary_is_identical_with_and_without_tool_and_mcp_grants() {
+    fn when_tool_and_mcp_grants_change_then_the_agent_boundary_stays_identical() {
         let mut fixture = Fixture::new();
         let spec = fixture.spec();
         let before = fixture

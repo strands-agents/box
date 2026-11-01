@@ -232,7 +232,7 @@ mod tests {
 
     /// A declared server resolves to the argv the file fixed.
     #[test]
-    fn a_declared_server_resolves_to_the_files_own_argv() {
+    fn when_a_declared_server_is_resolved_then_its_program_file_determines_its_arguments() {
         // Through `uvx`, because that is the alias the harness executes for this server.
         let admitted = admit("uvx").expect("uvx is declared");
         assert_eq!(admitted.program(), "uvx");
@@ -251,7 +251,7 @@ mod tests {
     ///
     /// The box places one alias per declared server, so an undeclared program names nothing the box
     #[test]
-    fn an_undeclared_program_is_refused() {
+    fn when_a_program_is_undeclared_then_it_is_refused() {
         for undeclared in ["not-in-the-file", "aws-mcp"] {
             let refusal = admit(undeclared)
                 .expect_err("a program the file does not declare must be refused")
@@ -287,7 +287,7 @@ mod tests {
 
     /// A coarse permit admits a tool when the per-tool refinement has no matching rule.
     #[test]
-    fn a_permitted_tool_call_is_admitted() {
+    fn when_policy_permits_a_tool_call_then_it_is_admitted() {
         let policy = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };"#,
@@ -303,7 +303,7 @@ mod tests {
     /// loop `forward_server_frame` runs, decide (`admit_tool_call`) plus `record(Outcome::Mcp)`, so
     /// removing the record leaves the count at 0 and this test fails.
     #[test]
-    fn a_temporal_response_cap_on_mcp_call_fires() {
+    fn when_mcp_calls_exceed_the_temporal_response_limit_then_further_calls_are_refused() {
         let engine = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_no_match_refinement_records_the_coarse_permit_as_the_final_decision() {
+    fn when_refinement_matches_no_rule_then_the_coarse_permit_is_recorded_as_final() {
         use crate::run::telemetry::{EffectiveRule, EffectiveVerdict};
 
         let policy = policy(
@@ -407,7 +407,7 @@ mod tests {
 
     /// **A forbid on one tool refuses that tool and leaves the rest working.**
     #[test]
-    fn one_tool_is_refused_while_the_rest_still_work() {
+    fn when_one_tool_is_forbidden_then_other_tools_remain_usable() {
         let policy = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };
@@ -427,14 +427,14 @@ mod tests {
 
     /// A tool call with nothing permitting it is refused, not forwarded.
     #[test]
-    fn an_unpermitted_tool_call_is_refused() {
+    fn when_a_tool_call_has_no_permit_then_it_is_refused() {
         let policy = tool_policy("");
         let refusal = call(&policy, SEARCH).expect_err("the coarse gate has no permit");
         assert!(refusal.to_string().contains("[default-deny]"));
     }
 
     #[test]
-    fn a_policy_denial_bounds_the_reported_tool_name() {
+    fn when_a_denied_tool_name_is_reported_then_its_length_is_bounded() {
         let policy = policy("forbid (principal, action, resource);");
         let frame = json!({
             "jsonrpc": "2.0",
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_denial_escapes_request_context_in_the_response() {
+    fn when_a_denial_response_contains_request_context_then_that_context_is_escaped() {
         let policy = policy("forbid (principal, action, resource);");
         let unsafe_text = "name\n\u{1b}[31m\u{202e}\\suffix";
         for (method, tool) in [("tools/call", unsafe_text), (unsafe_text, "tool")] {
@@ -493,7 +493,7 @@ mod tests {
     /// the typed server-namespaced gate as a refinement, so a `forbid` on an argument value
     /// refuses one call while the coarse permit still covers the tool for other arguments.
     #[test]
-    fn a_per_tool_argument_forbid_refines_the_coarse_allow() {
+    fn when_tool_arguments_match_a_forbid_then_the_coarse_allow_is_refined_to_denial() {
         let policy = tool_policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn a_per_tool_permit_keeps_its_attribution() {
+    fn when_a_tool_specific_rule_permits_then_its_attribution_is_preserved() {
         let policy = tool_policy(
             r#"@id("coarse")
                permit(principal, action == Box::Action::"mcp:call", resource);
@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn a_per_tool_forbid_records_the_refined_denial_as_the_final_decision() {
+    fn when_a_tool_specific_rule_forbids_then_the_refined_denial_is_recorded_as_final() {
         use crate::run::telemetry::{EffectiveRule, EffectiveVerdict};
 
         let policy = tool_policy(
@@ -588,7 +588,7 @@ mod tests {
 
     /// A denied request receives a JSON-RPC error with its original request id.
     #[test]
-    fn a_policy_denial_has_a_json_rpc_response() {
+    fn when_policy_denies_a_request_then_a_json_rpc_response_is_created() {
         let message =
             r#"policy denied this operation [policy: private-search]: Use "PublicSearch"."#;
         for (frame, id) in [
@@ -615,7 +615,7 @@ mod tests {
 
     /// Notifications and malformed frames have no request id the broker can answer.
     #[test]
-    fn a_policy_denial_response_requires_an_id_bearing_json_rpc_request() {
+    fn when_a_denial_response_is_created_then_an_id_bearing_json_rpc_request_is_required() {
         for frame in [
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
             r#"{"jsonrpc":"2.0","id":null,"method":"tools/call"}"#,
@@ -632,7 +632,7 @@ mod tests {
 
     /// A tool input that does not match the generated type is refused.
     #[test]
-    fn a_mistyped_tool_input_is_refused() {
+    fn when_tool_input_has_the_wrong_type_then_it_is_refused() {
         let policy = tool_policy(
             r#"permit (
                 principal,
@@ -651,7 +651,7 @@ mod tests {
 
     /// The handshake frames ask the server for nothing, so they raise no decision.
     #[test]
-    fn a_frame_that_calls_no_tool_raises_no_decision() {
+    fn when_a_frame_calls_no_tool_then_it_raises_no_tool_decision() {
         let deny_everything = open_policy(Vec::new());
         for frame in [
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
@@ -672,7 +672,7 @@ mod tests {
     /// **The `*/list` discovery methods are decided, so a rule can gate discovery.** They were
     /// undecided; promoting them matches the remote door and lets a policy hide a server's catalog.
     #[test]
-    fn the_list_methods_are_decided() {
+    fn when_a_list_method_is_called_then_policy_decides_it() {
         let deny_everything = open_policy(Vec::new());
         for method in ["tools/list", "prompts/list", "resources/list"] {
             let frame = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}"}}"#);
@@ -690,7 +690,7 @@ mod tests {
     ///
     /// The client MUST NOT write responses under the 2026-07-28 stdio binding, so a frame carrying
     #[test]
-    fn a_client_sent_response_is_refused() {
+    fn when_a_client_sends_a_response_as_a_request_then_it_is_refused() {
         let permit_everything = open_policy(vec![policy::Policy {
             origin: std::path::PathBuf::from("permissive.dw"),
             text: "permit (principal, action, resource);".to_string(),
@@ -713,7 +713,7 @@ mod tests {
     ///
     /// `resources/read` reads a file the server can reach, and `prompts/get` expands a template;
     #[test]
-    fn a_method_other_than_tools_call_still_raises_a_decision() {
+    fn when_a_method_is_not_tools_call_then_it_still_raises_a_decision() {
         let deny_everything = open_policy(Vec::new());
         // A method with no per-item identity (`*/list`, subscribe, a later method): decided by the
         // method alone, so the denial names it.
@@ -750,7 +750,7 @@ mod tests {
 
     /// A decided method reports itself as the target, so a rule can permit exactly one.
     #[test]
-    fn a_rule_may_permit_one_method_without_permitting_the_rest() {
+    fn when_a_rule_permits_one_method_then_other_methods_remain_unpermitted() {
         let reads_only = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.method == "resources/read" };"#,
@@ -777,7 +777,7 @@ mod tests {
     /// admitted again (the exact regression). The permitted case also proves the reported target is
     /// canonical, so a denial/telemetry record names the resolved identity.
     #[test]
-    fn a_respelled_resource_uri_cannot_dodge_a_uri_forbid() {
+    fn when_a_forbidden_resource_uri_is_respelled_then_the_forbid_still_applies() {
         let guards_etc = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };
@@ -818,7 +818,7 @@ mod tests {
     ///
     /// The prefix is admitted undecided because a notification gets no reply, so the client learns
     #[test]
-    fn a_notification_carrying_an_id_is_decided() {
+    fn when_a_notification_carries_an_id_then_it_is_decided() {
         let deny_everything = open_policy(Vec::new());
 
         // A real notification: no `id`, so no decision and no reply.
@@ -847,7 +847,7 @@ mod tests {
 
     /// **A JSON-RPC batch is refused.** It carried every method past the check.
     #[test]
-    fn a_batch_frame_cannot_smuggle_a_call_past_the_decision() {
+    fn when_a_batch_contains_a_tool_call_then_it_cannot_bypass_the_decision() {
         let permissive = policy(r#"permit (principal, action, resource);"#);
         let batch = format!("[{SEARCH}]");
         let refusal = call(&permissive, &batch)
@@ -863,7 +863,7 @@ mod tests {
     ///
     /// This is what lets the declaration stay coarse. Without it, one malformed frame would leave
     #[test]
-    fn an_unparseable_frame_is_refused_rather_than_forwarded() {
+    fn when_a_frame_cannot_be_parsed_then_it_is_refused_without_forwarding() {
         let permissive = policy(r#"permit (principal, action, resource);"#);
         for frame in [
             "not json at all",

@@ -233,7 +233,8 @@ mod tests {
 
     /// **Every alias name links to this box's own image, and none to the installed one.**
     #[test]
-    fn every_alias_shares_the_boxs_own_image_inode_and_not_the_installed_one() {
+    fn when_aliases_are_materialized_then_they_share_the_private_image_inode_instead_of_the_installed_inode()
+     {
         let (layout, owner, installed, _home) = fixture(b"image one");
         let servers = [declared("issues-mcp")];
 
@@ -275,7 +276,7 @@ mod tests {
 
     /// **A second `materialize` on the same box reuses the clone and touches no alias name.**
     #[test]
-    fn a_second_materialize_reuses_the_clone_and_unlinks_no_alias() {
+    fn when_aliases_are_materialized_again_then_the_clone_is_reused_without_unlinking_aliases() {
         let (layout, owner, installed, _home) = fixture(b"image one");
         materialize_from(&layout, &[], &installed, &owner).expect("the first materialize");
         let image = layout.alias_image();
@@ -310,7 +311,7 @@ mod tests {
 
     /// **An installed image with other bytes replaces the clone, and every alias follows it.**
     #[test]
-    fn a_changed_installed_image_replaces_the_clone() {
+    fn when_the_installed_image_changes_then_materialization_replaces_the_clone() {
         let (layout, owner, installed, _home) = fixture(b"image one");
         materialize_from(&layout, &[], &installed, &owner).expect("the first materialize");
         let image = layout.alias_image();
@@ -347,7 +348,7 @@ mod tests {
 
     /// **A box materialized from the current image is not stale; a missing or foreign alias is.**
     #[test]
-    fn a_box_materialized_from_the_current_image_is_not_stale() {
+    fn when_a_box_uses_the_current_image_then_it_is_not_stale() {
         let (layout, owner, installed, _home) = fixture(b"image one");
 
         assert!(
@@ -396,7 +397,7 @@ mod tests {
 
     /// **A dropped MCP server's alias is removed at the next `materialize`, under the run lock.**
     #[test]
-    fn a_dropped_servers_alias_is_removed_at_the_next_materialize() {
+    fn when_a_server_is_removed_then_its_alias_is_removed_at_the_next_materialization() {
         let (layout, owner, installed, _home) = fixture(b"image one");
         let servers = [declared("issues-mcp")];
         materialize_from(&layout, &servers, &installed, &owner).expect("with the server");
@@ -416,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn every_alias_is_materialized_and_executable() {
+    fn when_aliases_are_materialized_then_every_alias_exists_and_is_executable() {
         let (layout, owner, installed, _home) = fixture(b"image one");
         let servers = [declared("issues-mcp")];
         materialize_from(&layout, &servers, &installed, &owner).expect("the aliases materialize");
@@ -445,7 +446,7 @@ mod tests {
 
     /// The installed image beside a built binary, when there is one, materializes as well.
     #[test]
-    fn the_installed_image_materializes_when_present() {
+    fn when_the_installed_image_exists_then_it_can_be_materialized() {
         let operator_home = tempfile::tempdir().expect("an operator home");
         let layout = crate::record::layout::testing::box_root(operator_home.path(), "codex");
         if installed_image().is_err() {

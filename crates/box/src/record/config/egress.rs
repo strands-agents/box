@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_placement_is_a_bearer_authorization_header() {
+    fn when_credential_placement_is_omitted_then_it_defaults_to_a_bearer_authorization_header() {
         let entries = load(
             r#"
             [egress.a]
@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_defaults_to_phantom_and_always_threads_through() {
+    fn when_inject_is_omitted_then_phantom_injection_is_selected_and_preserved() {
         let variable = present_variable();
         let strict = load(&format!(
             r#"
@@ -913,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_inject_is_refused() {
+    fn when_inject_is_unknown_then_the_route_is_refused() {
         let error = load(
             r#"
             [egress.a]
@@ -933,7 +933,7 @@ mod tests {
     /// A signed route mints no placeholder, so it refuses `secret.inject` — for an `aws://`
     /// profile and for a `credsd://` source alike, since a credsd route always signs.
     #[test]
-    fn inject_is_refused_beside_a_signed_route() {
+    fn when_a_signed_route_declares_inject_then_the_route_is_refused() {
         for reference in ["aws://default", "credsd://prod"] {
             let error = load(&format!(
                 "[egress.a]\ndestinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = {reference:?}\nsecret.inject = \"always\"\n"
@@ -947,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn phantom_prefix_is_accepted_and_threads_through() {
+    fn when_a_phantom_prefix_is_declared_then_it_is_accepted_and_preserved() {
         let variable = present_variable();
         let entries = load(&format!(
             r#"
@@ -966,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_phantom_prefix_leaves_the_route_default() {
+    fn when_a_phantom_prefix_is_absent_then_the_route_default_is_preserved() {
         let variable = present_variable();
         let entries = load(&format!(
             r#"
@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unsafe_phantom_prefix_is_refused() {
+    fn when_a_phantom_prefix_is_unsafe_then_the_route_is_refused() {
         for prefix in ["", "sk ant", "sk/ant"] {
             let error = load(&format!(
                 r#"
@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn phantom_prefix_is_refused_beside_a_signed_route() {
+    fn when_a_signed_route_declares_a_phantom_prefix_then_the_route_is_refused() {
         let error = load(
             r#"
             [egress.a]
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn a_named_header_defaults_to_a_raw_value() {
+    fn when_a_header_is_named_without_a_prefix_then_its_value_is_raw() {
         // `x-api-key: <secret>` carries no `Bearer ` convention, so the prefix defaults
         // to empty.
         let entries = load(
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_prefix_overrides_the_convention() {
+    fn when_a_prefix_is_explicit_then_it_overrides_the_header_convention() {
         let entries = load(
             r#"
             [egress.a]
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn a_port_is_honored_and_zero_is_refused() {
+    fn when_a_port_is_declared_then_valid_ports_are_honored_and_zero_is_refused() {
         let entries = load(
             r#"
             [egress.a]
@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn a_target_the_mechanism_cannot_honor_is_refused() {
+    fn when_the_mechanism_cannot_honor_a_target_then_the_route_is_refused() {
         // A host pattern is not refused any more: a target attaches a credential to
         // requests the policy already permitted, so a wildcard or path narrows what carries
         for (text, why) in [
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_may_be_a_pattern() {
+    fn when_a_host_pattern_is_declared_then_it_is_accepted() {
         for host in [
             "*.anthropic.com",
             "api.example.com/v1/",
@@ -1135,7 +1135,7 @@ mod tests {
 
     /// An all-hosts host is refused however it is spelled.
     #[test]
-    fn an_all_hosts_host_is_refused_however_it_is_spelled() {
+    fn when_a_host_matches_all_hosts_then_every_spelling_is_refused() {
         for host in [
             "*", "*/", "*/v1/", // The family the text comparison missed.
             "*:443", "*:80", "*:8443", "*:443/v1",
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_hosts_are_refused() {
+    fn when_hosts_overlap_then_the_routes_are_refused() {
         for (a, b, why) in [
             ("api.stripe.com", "api.stripe.com", "identical"),
             (
@@ -1189,7 +1189,7 @@ mod tests {
 
     /// An overlap is refused within one entry as well as across two.
     #[test]
-    fn an_overlap_inside_one_entry_is_refused() {
+    fn when_hosts_overlap_within_one_entry_then_the_entry_is_refused() {
         let error = load(
             r#"
             [egress.a]
@@ -1218,7 +1218,7 @@ mod tests {
     /// traffic with the first's `context.input.server`. The overlap check above misses this, because
     /// two distinct explicit ports do not overlap.
     #[test]
-    fn two_mcp_servers_on_one_host_are_refused() {
+    fn when_two_mcp_servers_share_a_host_then_they_are_refused() {
         let error = load(
             r#"
             [egress.prod]
@@ -1282,7 +1282,7 @@ mod tests {
     /// classifier and fail closed. Two plain-HTTP entries on one host stay a matter for the overlap
     /// check, not this one.
     #[test]
-    fn an_mcp_server_may_not_share_a_host_with_a_plain_http_entry() {
+    fn when_an_mcp_server_and_plain_http_entry_share_a_host_then_they_are_refused() {
         let error = load(
             r#"
             [egress.http_svc]
@@ -1318,7 +1318,7 @@ mod tests {
     /// A remote MCP server name is `context.input.server` and is rendered into the starter policy,
     /// so a control character in it is refused rather than written into a policy comment.
     #[test]
-    fn a_remote_mcp_server_name_must_be_nameable() {
+    fn when_a_remote_mcp_server_name_cannot_be_named_then_it_is_refused() {
         let error = load(
             "[egress.\"ev\\nil\"]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com\"]\n",
         )
@@ -1331,7 +1331,7 @@ mod tests {
 
     /// `host_of` keeps a bare IPv6 whole rather than truncating it at the last colon.
     #[test]
-    fn host_of_keeps_a_bare_ipv6_whole() {
+    fn when_host_of_parses_bare_ipv6_then_the_address_stays_whole() {
         assert_eq!(host_of("2001:db8::1"), "2001:db8::1");
         assert_eq!(host_of("[2001:db8::1]:8931"), "2001:db8::1");
         assert_eq!(host_of("https://[2001:db8::1]/mcp"), "2001:db8::1");
@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_hosts_are_allowed() {
+    fn when_hosts_are_disjoint_then_the_routes_are_allowed() {
         let entries = load(
             r#"
             [egress.a]
@@ -1361,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn a_locator_must_be_a_uri() {
+    fn when_a_locator_is_not_a_uri_then_it_is_refused() {
         assert!(
             load("[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"STRIPE_KEY\"").is_err(),
             "a bare variable name is not a locator"
@@ -1369,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn an_aws_locator_takes_no_header_or_prefix() {
+    fn when_an_aws_locator_declares_a_header_or_prefix_then_it_is_refused() {
         let ok = load(
             r#"
             [egress.a]
@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn two_entries_on_one_destination_are_refused() {
+    fn when_two_entries_share_a_destination_then_they_are_refused() {
         let text = r#"
             [egress.a]
             destinations = ["api.stripe.com"]
@@ -1429,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_destinations_are_allowed() {
+    fn when_destinations_are_distinct_then_the_entries_are_allowed() {
         let entries = load(
             r#"
             [egress.a]
@@ -1451,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn a_header_or_prefix_cannot_forge_a_wire_boundary() {
+    fn when_a_header_or_prefix_contains_a_wire_boundary_then_it_is_refused() {
         for extra in [
             "secret.header = \"X-Bad: injected\"",
             "secret.header = \"X-Bad\\r\\nInjected\"",
@@ -1469,7 +1469,7 @@ mod tests {
 
     /// `aws://` alone provisions nothing, and that is correct (it signs in-boundary).
     #[test]
-    fn only_a_signed_locator_provisions_nothing() {
+    fn when_a_locator_is_signed_then_it_provisions_no_environment_variable() {
         let entries =
             load("[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"aws://prod\"")
                 .expect("valid");
@@ -1483,7 +1483,7 @@ mod tests {
 
     /// A credential scheme the box cannot deliver is refused at `configure`.
     #[test]
-    fn an_undeliverable_credential_scheme_is_refused() {
+    fn when_a_credential_scheme_cannot_be_delivered_then_it_is_refused() {
         for locator in [
             "file:///etc/tokens/gh",
             "op://Private/GitHub/token",
@@ -1506,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_prefix_carrying_a_brace_is_refused_at_configure() {
+    fn when_a_credential_prefix_contains_a_brace_then_configuration_is_refused() {
         let variable = present_variable();
         for prefix in ["Bearer {}", "{}-", "Token {}=", "a{b", "a}b"] {
             let error = load(&format!(
@@ -1522,7 +1522,7 @@ mod tests {
 
     /// `credential_pattern` is not a key this record accepts.
     #[test]
-    fn a_credential_pattern_key_is_not_accepted() {
+    fn when_a_credential_declares_a_pattern_key_then_it_is_refused() {
         let variable = present_variable();
         let parsed: Result<Fixture, _> = toml::from_str(&format!(
             "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\ncredential_pattern = \"/v1/{{}}/models\""
@@ -1535,7 +1535,7 @@ mod tests {
 
     /// The placement key accepts the three available values and defaults to `header`.
     #[test]
-    fn a_credential_placement_selects_where_the_credential_lands() {
+    fn when_credential_placement_is_selected_then_the_credential_uses_that_location() {
         let variable = present_variable();
         for (placement, extra) in [
             (None, ""),
@@ -1560,7 +1560,7 @@ mod tests {
 
     /// `url_path` is refused by name, so its absence reads as withheld not misspelled.
     #[test]
-    fn the_url_path_placement_is_refused_as_unavailable() {
+    fn when_url_path_placement_is_selected_then_it_is_refused_as_unavailable() {
         let variable = present_variable();
         let error = load(&format!(
             "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\nsecret.placement = \"url_path\"\n"
@@ -1580,7 +1580,7 @@ mod tests {
 
     /// The invalid placement/argument combinations are refused.
     #[test]
-    fn an_invalid_placement_combination_is_refused() {
+    fn when_placement_options_conflict_then_the_route_is_refused() {
         let variable = present_variable();
         for (extra, why) in [
             ("secret.placement = \"cookie\"\n", "an unknown placement"),
@@ -1621,7 +1621,7 @@ mod tests {
 
     /// The two deliverable schemes still load.
     #[test]
-    fn a_deliverable_credential_scheme_is_accepted() {
+    fn when_a_credential_scheme_can_be_delivered_then_it_is_accepted() {
         let variable = present_variable();
         for locator in [format!("env://{variable}"), "aws://prod".to_string()] {
             load(&format!(
@@ -1635,7 +1635,7 @@ mod tests {
     /// file parses: the TOML is well-formed, but the box sets `PATH` itself and an unset
     /// variable would mint a phantom standing in for nothing.
     #[test]
-    fn a_credential_may_not_claim_a_reserved_or_unset_variable() {
+    fn when_a_credential_names_a_reserved_or_unset_variable_then_it_is_refused() {
         for (name, expected) in [
             ("PATH", "reserved"),
             ("HTTPS_PROXY", "reserved"),
@@ -1663,7 +1663,7 @@ mod tests {
 
     /// A variable holding only whitespace is refused too, not just an unset one.
     #[test]
-    fn a_credential_variable_holding_only_whitespace_is_refused() {
+    fn when_a_credential_variable_contains_only_whitespace_then_it_is_refused() {
         let name = "STRANDS_BOX_WHITESPACE_ONLY_CREDENTIAL";
         for spelling in [" ", "   ", "\n", "\t "] {
             // SAFETY (test): the name is scoped to this test, so nothing else reads or writes it.
@@ -1692,7 +1692,7 @@ mod tests {
 
     /// A credsd signed route provisions nothing in the workload environment.
     #[test]
-    fn a_credsd_route_provisions_nothing() {
+    fn when_a_route_uses_credsd_then_no_environment_variable_is_provisioned() {
         let entries = load(
             r#"
             [egress.a]
@@ -1711,7 +1711,7 @@ mod tests {
     /// A `credsd://` source is accepted and opens a signed route with no declared type.
     /// The daemon's `material.type` picks the signer per request, so the box needs no type key.
     #[test]
-    fn a_credsd_source_is_inferred_and_signs() {
+    fn when_a_credsd_source_is_inferred_then_the_route_uses_signing() {
         let entries = load(
             r#"
             [egress.a]
@@ -1733,7 +1733,7 @@ mod tests {
     /// `secret.type` is not a key the box carries, so `deny_unknown_fields` refuses it as an
     /// unknown field on every scheme — the type comes from the daemon, never from config.
     #[test]
-    fn a_secret_type_key_is_rejected_on_every_scheme() {
+    fn when_secret_type_is_declared_then_every_scheme_rejects_it() {
         for reference in ["credsd://prod", "env://TOKEN", "aws://prod"] {
             let text = format!(
                 "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {reference:?}\nsecret.type = \"aws\"\n"
@@ -1751,7 +1751,7 @@ mod tests {
 
     /// A `credsd://` reference with an empty environment is refused.
     #[test]
-    fn a_credsd_source_with_an_empty_environment_is_refused() {
+    fn when_a_credsd_environment_is_empty_then_the_source_is_refused() {
         let error = load(
             r#"
             [egress.a]
@@ -1765,7 +1765,7 @@ mod tests {
 
     /// An `env://` entry with no other keys defaults to a bearer `Authorization` header.
     #[test]
-    fn an_env_entry_defaults_to_a_bearer_header() {
+    fn when_an_env_entry_omits_placement_then_it_uses_a_bearer_header() {
         let entries = load(
             r#"
             [egress.a]
@@ -1787,7 +1787,7 @@ mod tests {
     /// The preflight's environment set is every distinct `credsd://` environment, in order — and it
     /// ignores `env://` and `aws://` sources, which name no credsd environment.
     #[test]
-    fn credsd_environments_are_the_distinct_credsd_sources() {
+    fn when_credsd_sources_repeat_then_environment_discovery_returns_distinct_sources() {
         let entries = load(
             r#"
             [egress.bedrock]
@@ -1821,7 +1821,7 @@ mod tests {
     /// covered — keying the preflight to egress alone (an earlier bug) deferred a down daemon to the
     /// first `mcp:call` instead of failing at box start.
     #[test]
-    fn credsd_environments_covers_the_remote_mcp_map() {
+    fn when_remote_mcp_uses_credsd_then_environment_discovery_includes_its_sources() {
         let egress = load(
             r#"
             [egress.stripe]
@@ -1853,7 +1853,7 @@ mod tests {
 
     /// A box with no credsd source names no environment, so the preflight contacts no daemon.
     #[test]
-    fn a_box_with_no_credsd_source_names_no_environment() {
+    fn when_no_credsd_source_exists_then_no_environment_is_named() {
         let entries = load(
             r#"
             [egress.stripe]
@@ -1867,7 +1867,7 @@ mod tests {
 
     /// A credsd credential signs in-boundary, so it refuses header/prefix/placement/param.
     #[test]
-    fn a_credsd_source_refuses_placement_keys() {
+    fn when_a_credsd_source_declares_placement_keys_then_it_is_refused() {
         for extra in [
             "secret.header = \"x-api-key\"",
             "secret.prefix = \"Bearer \"",

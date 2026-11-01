@@ -442,7 +442,7 @@ mod tests {
     /// **The home is named by its own host path, and it is the only entry.** The second half of
     /// this asserted a bind at `/workspace`.
     #[test]
-    fn the_home_keeps_its_host_path_and_is_the_only_bind() {
+    fn when_home_reach_is_constructed_then_the_host_path_is_preserved_as_the_only_bind() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
 
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_outside_the_reachable_set_is_refused_in_the_callers_spelling() {
+    fn when_a_path_is_outside_reach_then_the_refusal_uses_the_caller_spelling() {
         let (_root, reach) = fixture();
 
         let refused = reach
@@ -477,7 +477,7 @@ mod tests {
 
     /// The refusal must name what the caller wrote, not a path derived from it.
     #[test]
-    fn a_refusal_names_the_spelling_the_caller_used() {
+    fn when_a_path_is_refused_then_the_error_names_the_caller_spelling() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
 
@@ -500,7 +500,7 @@ mod tests {
     /// touch.
     #[cfg(unix)]
     #[test]
-    fn a_symlink_whose_spelling_is_not_its_identity_is_refused() {
+    fn when_a_symlink_spelling_differs_from_its_identity_then_it_is_refused() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("home/secret"), "s").expect("a secret in the home");
@@ -522,7 +522,7 @@ mod tests {
     /// A relative spelling means the same file it means in the Shell, because both
     /// resolve it against the working directory.
     #[test]
-    fn a_relative_spelling_resolves_against_the_working_directory() {
+    fn when_a_path_spelling_is_relative_then_it_resolves_against_the_working_directory() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("home/notes.txt"), "n").expect("a file in the home");
@@ -546,7 +546,7 @@ mod tests {
 
     /// A new leaf is approved, because a create names a path that does not exist yet.
     #[test]
-    fn a_new_leaf_inside_the_home_is_approved() {
+    fn when_a_new_leaf_is_inside_the_home_then_it_is_approved() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         let requested = resolved.join("home/new.txt");
@@ -560,7 +560,7 @@ mod tests {
     /// An ancestor symlink may spell the visible home, while effects use its canonical identity.
     #[cfg(unix)]
     #[test]
-    fn an_ancestor_symlink_spelling_binds_to_the_canonical_home_identity() {
+    fn when_an_ancestor_has_a_symlink_spelling_then_it_binds_to_the_canonical_home_identity() {
         let root = tempfile::tempdir().expect("a fixture root");
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::create_dir(resolved.join("real")).expect("real parent");
@@ -595,7 +595,7 @@ mod tests {
     /// ways.
     #[cfg(unix)]
     #[test]
-    fn a_non_canonical_workspace_spelling_of_the_home_is_refused() {
+    fn when_workspace_uses_a_noncanonical_home_spelling_then_it_is_refused() {
         let root = tempfile::tempdir().expect("a fixture root");
         let resolved = root.path().canonicalize().expect("the root resolves");
         let home = resolved.join("home");
@@ -643,7 +643,7 @@ mod tests {
     ///
     /// This is the sharpest hazard of interpreter reach: the interpreters see the whole
     #[test]
-    fn a_path_inside_the_box_directory_is_beneath_the_floor() {
+    fn when_a_path_is_inside_the_box_directory_then_the_floor_protects_it() {
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("resolves");
         let target = resolved.join("boxes/codex/private/policy.dw");
@@ -663,7 +663,7 @@ mod tests {
     /// The box directory itself is refused, not merely its contents, whether the caller reads it
     /// or changes it.
     #[test]
-    fn the_box_directory_itself_is_beneath_the_floor_for_every_operation() {
+    fn when_an_operation_targets_the_box_directory_then_the_floor_protects_it() {
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("resolves");
         let target = resolved.join("boxes/codex");
@@ -684,7 +684,7 @@ mod tests {
     /// **The floor makes no exception for a home**: a home declared inside the box directory
     /// reaches nothing there.
     #[test]
-    fn a_home_inside_trusted_box_state_reaches_nothing_there() {
+    fn when_home_is_inside_trusted_box_state_then_it_grants_no_reach_there() {
         let operator = tempfile::tempdir().expect("an operator home");
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let box_root = resolved.join("boxes/codex");
@@ -711,7 +711,7 @@ mod tests {
     /// that names its private state in the ordinary spelling.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_data_volume_box_directory_is_still_beneath_the_floor() {
+    fn when_the_box_directory_uses_a_data_volume_spelling_then_the_floor_still_protects_it() {
         let operator = tempfile::tempdir().expect("an operator home");
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let box_directory = resolved.join("boxes/codex");
@@ -738,7 +738,7 @@ mod tests {
     ///
     /// Measured 2026-08-18 by deleting the floor: this test still passed, because
     #[test]
-    fn a_symlink_into_the_box_directory_is_refused() {
+    fn when_a_symlink_points_into_the_box_directory_then_it_is_refused() {
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("resolves");
         let link = resolved.join("workspace/service/shortcut");
@@ -758,7 +758,7 @@ mod tests {
     /// only this run's own sources and trusted Box state sit beneath it, whatever a directory is
     /// called.
     #[test]
-    fn a_sibling_boxs_authority_passes_the_floor_and_policy_decides() {
+    fn when_authority_belongs_to_a_sibling_box_then_it_passes_the_floor_and_policy_decides() {
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let sibling = resolved.join("workspace/service/.strands-box");
@@ -779,7 +779,7 @@ mod tests {
     /// **A loaded authority source is beneath the floor wherever it sits**, so a policy read from
     /// beside the project is no more readable than one under it.
     #[test]
-    fn a_loaded_authority_source_is_beneath_the_floor_wherever_it_sits() {
+    fn when_an_authority_source_is_loaded_then_the_floor_protects_it_at_every_location() {
         let operator = tempfile::tempdir().expect("an operator home");
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let policy = resolved.join("workspace/policy.dw");
@@ -825,7 +825,7 @@ mod tests {
     /// change named in the ordinary spelling.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_data_volume_authority_source_still_guards_its_directory() {
+    fn when_an_authority_source_uses_a_data_volume_spelling_then_its_directory_remains_protected() {
         let operator = tempfile::tempdir().expect("an operator home");
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let enclosing = resolved.join("workspace");
@@ -857,7 +857,7 @@ mod tests {
     /// **A configuration `--config` named outside the workspace is protected identically**: the
     /// source is refused for every operation, and the directory holding it may not be changed.
     #[test]
-    fn a_config_loaded_from_outside_the_workspace_is_beneath_the_floor() {
+    fn when_configuration_is_loaded_outside_the_workspace_then_the_floor_protects_it() {
         let operator = tempfile::tempdir().expect("an operator home");
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let authority = resolved.join("elsewhere/authority");
@@ -901,7 +901,7 @@ mod tests {
 
     /// An ordinary workspace path is still reachable, so the floor is a floor and not a wall.
     #[test]
-    fn an_ordinary_project_path_is_still_reachable() {
+    fn when_a_path_is_an_ordinary_project_path_then_it_remains_reachable() {
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("resolves");
         let target = resolved.join("workspace/service");
@@ -948,13 +948,13 @@ mod private_tree_mutation_tests {
     }
 
     #[test]
-    fn parent_mutation_is_refused() {
+    fn when_a_mutation_targets_a_protected_parent_then_it_is_refused() {
         let (_temporary, reach, box_root) = fixture();
         refused_by_floor(&reach, box_root.parent().unwrap(), ENCLOSES_BOX_STATE);
     }
 
     #[test]
-    fn grandparent_mutation_is_refused() {
+    fn when_a_mutation_targets_a_protected_grandparent_then_it_is_refused() {
         let (_temporary, reach, box_root) = fixture();
         refused_by_floor(
             &reach,
@@ -965,7 +965,7 @@ mod private_tree_mutation_tests {
 
     #[cfg(unix)]
     #[test]
-    fn ancestor_mutation_through_a_second_spelling_is_refused() {
+    fn when_a_mutation_targets_an_ancestor_through_an_alias_then_it_is_refused() {
         let (temporary, reach, box_root) = fixture();
         let home = temporary.path().canonicalize().unwrap();
         for (name, ancestor) in [
@@ -988,19 +988,19 @@ mod private_tree_mutation_tests {
     }
 
     #[test]
-    fn protected_root_mutation_is_refused() {
+    fn when_a_mutation_targets_a_protected_root_then_it_is_refused() {
         let (_temporary, reach, box_root) = fixture();
         refused_by_floor(&reach, &box_root, BENEATH_THE_FLOOR);
     }
 
     #[test]
-    fn protected_descendant_mutation_is_refused() {
+    fn when_a_mutation_targets_a_protected_descendant_then_it_is_refused() {
         let (_temporary, reach, box_root) = fixture();
         refused_by_floor(&reach, &box_root.join("private/child"), BENEATH_THE_FLOOR);
     }
 
     #[test]
-    fn ancestor_non_mutating_access_is_accepted() {
+    fn when_ancestor_access_does_not_mutate_then_it_is_accepted() {
         let (_temporary, reach, box_root) = fixture();
         for ancestor in [
             box_root.parent().unwrap(),
@@ -1012,7 +1012,7 @@ mod private_tree_mutation_tests {
     }
 
     #[test]
-    fn unaffected_sibling_mutation_is_accepted() {
+    fn when_a_mutation_targets_an_unaffected_sibling_then_it_is_accepted() {
         let (temporary, reach, _box_root) = fixture();
         let sibling = temporary.path().canonicalize().unwrap().join("sibling");
         assert!(reach.refuse_forbidden(&sibling, "dummy", true).is_ok());

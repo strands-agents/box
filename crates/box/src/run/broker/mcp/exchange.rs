@@ -1263,7 +1263,7 @@ done"#
     }
 
     #[test]
-    fn the_final_list_reply_waits_for_its_schema_to_stage() {
+    fn when_the_final_list_reply_arrives_then_it_waits_for_schema_staging() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1331,7 +1331,7 @@ done"#
     }
 
     #[test]
-    fn a_catalog_that_cannot_stage_replaces_the_held_reply_with_the_discovery_error() {
+    fn when_a_catalog_cannot_be_staged_then_the_held_reply_becomes_a_discovery_error() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1366,7 +1366,7 @@ done"#
     }
 
     #[test]
-    fn a_list_the_server_never_answers_fails_discovery_at_its_deadline() {
+    fn when_the_server_never_answers_a_list_then_discovery_fails_at_its_deadline() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1397,7 +1397,7 @@ done"#
     }
 
     #[test]
-    fn a_list_that_starts_mid_chain_is_relayed_but_not_captured() {
+    fn when_listing_starts_mid_chain_then_replies_are_relayed_without_capture() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1459,7 +1459,7 @@ done"#
     }
 
     #[test]
-    fn a_server_request_reaches_the_client_and_a_permitted_reply_reaches_the_server() {
+    fn when_the_server_sends_a_request_then_the_client_receives_it_and_a_permitted_reply_returns() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1487,7 +1487,7 @@ done"#
     }
 
     #[test]
-    fn a_forbidden_reply_to_a_server_request_returns_an_error_to_the_server() {
+    fn when_a_client_reply_to_a_server_request_is_forbidden_then_the_server_receives_an_error() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(&format!(
@@ -1522,7 +1522,7 @@ done"#
     }
 
     #[test]
-    fn a_reply_to_a_server_ping_crosses_undecided() {
+    fn when_the_client_replies_to_a_server_ping_then_no_policy_decision_is_made() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(&format!(
@@ -1546,7 +1546,7 @@ done"#
     }
 
     #[test]
-    fn an_unsolicited_or_repeated_client_reply_is_refused() {
+    fn when_a_client_reply_is_unsolicited_or_repeated_then_it_is_refused() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             for (name, replies) in [
@@ -1600,7 +1600,7 @@ done"#
     }
 
     #[test]
-    fn two_connections_listing_at_once_accept_one_catalog() {
+    fn when_two_connections_list_concurrently_then_one_catalog_is_accepted() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1639,7 +1639,7 @@ done"#
     }
 
     #[test]
-    fn an_unsupported_protocol_version_refuses_the_exchange() {
+    fn when_the_protocol_version_is_unsupported_then_the_exchange_is_refused() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1687,7 +1687,7 @@ done"#
     }
 
     #[test]
-    fn discovery_completes_only_after_the_held_reply_reaches_the_client() {
+    fn when_a_discovery_reply_is_held_then_discovery_completes_only_after_delivery_to_the_client() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1728,7 +1728,7 @@ done"#
     }
 
     #[test]
-    fn server_frames_keep_flowing_while_a_schema_stages() {
+    fn when_schema_staging_is_pending_then_server_frames_keep_flowing() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1785,7 +1785,7 @@ done"#
     }
 
     #[test]
-    fn a_ping_reply_carries_no_payload_to_the_server() {
+    fn when_the_client_replies_to_a_ping_then_no_payload_reaches_the_server() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1809,7 +1809,7 @@ done"#
     }
 
     #[test]
-    fn an_oversized_server_request_is_refused_and_not_forwarded() {
+    fn when_a_server_request_is_oversized_then_it_is_refused_without_forwarding() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1837,7 +1837,7 @@ done"#
     }
 
     #[test]
-    fn a_list_that_is_not_captured_cannot_fail_discovery() {
+    fn when_a_list_is_not_captured_then_it_cannot_fail_discovery() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(PERMIT_ALL_MCP);
@@ -1861,7 +1861,7 @@ done"#
     }
 
     #[test]
-    fn a_registry_with_no_stdio_server_reports_done_once() {
+    fn when_the_registry_has_no_stdio_server_then_done_is_reported_once() {
         let fixture_policy = Arc::new(crate::test_support::open_policy(Vec::new()));
         let registry = DiscoveryRegistry::testing_with_policy(&[], fixture_policy);
         registry.request_completion_check();
@@ -2003,7 +2003,7 @@ done"#
     }
 
     #[test]
-    fn a_root_list_before_initialize_leaves_discovery_undiscovered() {
+    fn when_a_root_list_precedes_initialize_then_discovery_remains_undiscovered() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2040,7 +2040,7 @@ done"#
     }
 
     #[test]
-    fn invalid_server_frames_stop_and_refuse_the_exchange() {
+    fn when_server_frames_are_invalid_then_the_exchange_stops_and_refuses_them() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2104,7 +2104,7 @@ done"#
     }
 
     #[test]
-    fn an_existing_terminal_failure_stops_and_reaps_a_new_exchange() {
+    fn when_a_terminal_failure_already_exists_then_a_new_exchange_is_stopped_and_reaped() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2156,7 +2156,8 @@ done"#
     }
 
     #[test]
-    fn a_resource_read_whose_uri_is_not_rfc_3986_is_refused_and_the_exchange_remains_usable() {
+    fn when_a_resource_uri_violates_rfc_3986_then_the_read_is_refused_and_the_exchange_remains_usable()
+     {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2285,7 +2286,8 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn a_stdio_frame_with_a_duplicate_key_is_refused_recorded_and_the_exchange_remains_usable() {
+    fn when_a_stdio_frame_has_a_duplicate_key_then_refusal_is_recorded_and_the_exchange_remains_usable()
+     {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(DUPLICATE_KEY_POLICY);
@@ -2350,7 +2352,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn a_duplicate_key_is_refused_on_frames_the_classifier_never_sees() {
+    fn when_an_unclassified_frame_has_a_duplicate_key_then_it_is_refused() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(DUPLICATE_KEY_POLICY);
@@ -2414,7 +2416,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn a_stdio_frame_without_a_duplicate_key_forwards_byte_identical() {
+    fn when_a_stdio_frame_has_no_duplicate_key_then_it_is_forwarded_byte_identical() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
             let fixture = fixture(DUPLICATE_KEY_POLICY);
@@ -2454,7 +2456,8 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn a_tool_call_before_list_returns_an_error_and_the_exchange_remains_usable() {
+    fn when_a_tool_call_precedes_listing_then_it_returns_an_error_and_the_exchange_remains_usable()
+    {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2504,7 +2507,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn saturated_input_cannot_hide_stop_or_prevent_reap() {
+    fn when_input_is_saturated_then_stop_and_reap_still_complete() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2570,7 +2573,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     #[test]
-    fn dropping_a_program_cancels_its_exchange_and_reaps_its_child() {
+    fn when_a_program_is_dropped_then_its_exchange_is_canceled_and_its_child_is_reaped() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

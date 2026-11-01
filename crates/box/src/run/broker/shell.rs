@@ -524,7 +524,7 @@ mod tests {
     /// no listed verb reaches `fs:other`, and `Locate` is no decision on either side.** The policy
     /// crate's `tests/shell_fs_vocabulary.rs` pins the same lists against the vendored source.
     #[tokio::test]
-    async fn every_kernel_verb_labels_the_action_the_policy_adapter_decides() {
+    async fn when_a_kernel_verb_is_decided_then_its_label_matches_the_policy_adapter_action() {
         const FS_OTHER: &str = r#"Box::Action::"fs:other""#;
         const FS_READ: &str = r#"Box::Action::"fs:read""#;
         let policy = Arc::new(
@@ -706,7 +706,7 @@ mod tests {
     /// **A Shell record names the authored policy that decided the effect.** The gate's own label
     /// said only that the Shell asked; an audit reader needs the rule that answered.
     #[tokio::test]
-    async fn a_shell_record_names_the_policy_that_decided_the_effect() {
+    async fn when_a_shell_effect_is_recorded_then_the_deciding_policy_is_named() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("home/ok.txt"), "kept").expect("a fixture file");
@@ -772,7 +772,7 @@ mod tests {
     /// observation capture around it hold: the capture is a thread-local, so a suspension there
     /// would let a concurrent Program's verdict land in this one's attribution.
     #[test]
-    fn the_policy_interception_beneath_the_floor_never_suspends() {
+    fn when_policy_interception_runs_beneath_the_floor_then_it_never_suspends() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("home/ok.txt"), "kept").expect("a fixture file");
@@ -810,7 +810,7 @@ mod tests {
     /// The Shell had no canonicity check, and now has the same one Monty has.
     #[cfg(unix)]
     #[test]
-    fn the_floor_refuses_a_symlink_leading_out_of_the_reachable_set() {
+    fn when_a_symlink_leads_outside_reach_then_the_floor_refuses_it() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         let secret = resolved.join("outside.pem");
@@ -843,7 +843,7 @@ mod tests {
     /// The Shell's own virtual inodes are not host-backed, so the floor has nothing to
     /// confine there and must not refuse them.
     #[test]
-    fn the_floor_passes_a_name_the_host_does_not_back() {
+    fn when_a_name_has_no_host_entry_then_the_floor_passes_it() {
         let (_root, reach) = fixture();
         let floor = floor(reach);
 
@@ -860,7 +860,7 @@ mod tests {
     /// A resolved command carries no path of its own, so the floor admits it and judges its
     /// effects.
     #[test]
-    fn the_floor_admits_a_resolved_command() {
+    fn when_a_command_is_resolved_then_the_floor_admits_it() {
         let (_root, reach) = fixture();
         let floor = floor(reach);
         floor
@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_reach_floor_replaces_a_policy_permit_with_one_final_denial() {
+    async fn when_the_reach_floor_overrides_a_permit_then_one_final_denial_is_recorded() {
         let root = tempfile::tempdir().expect("a fixture root");
         let shared = root.path().canonicalize().expect("the root resolves");
         // The operator's own home, which is what an agent reads unless `[agent] env.HOME` names
@@ -946,7 +946,7 @@ mod tests {
     /// **A metadata read the reach floor refuses meets no `::response` precondition**, and an
     /// answered one does.
     #[tokio::test]
-    async fn a_metadata_read_the_floor_refuses_meets_no_response_precondition() {
+    async fn when_the_floor_refuses_metadata_then_no_response_precondition_is_checked() {
         let root = tempfile::tempdir().expect("a fixture root");
         let shared = root.path().canonicalize().expect("the root resolves");
         let box_root = shared.join("boxes/codex");
@@ -1029,7 +1029,8 @@ mod tests {
     /// A `PATH` candidate inside trusted Box state is refused by the floor with no decision
     /// recorded, and one beside it passes.
     #[tokio::test]
-    async fn a_locate_inside_trusted_box_state_is_beneath_the_floor_and_records_no_decision() {
+    async fn when_locate_targets_trusted_box_state_then_the_floor_refuses_without_a_policy_decision()
+     {
         let root = tempfile::tempdir().expect("a fixture root");
         let shared = root.path().canonicalize().expect("the root resolves");
         let workspace = shared.join("project");
@@ -1081,7 +1082,7 @@ mod tests {
     /// Shell offers**: a read, a metadata probe, and a write of either source, and a removal of
     /// the directory holding them, all end in the floor's refusal with no permit attributed.
     #[tokio::test]
-    async fn the_loaded_authority_is_beneath_the_floor_under_a_workspace_permit() {
+    async fn when_workspace_policy_permits_loaded_authority_then_the_floor_still_protects_it() {
         let root = tempfile::tempdir().expect("a fixture root");
         let shared = root.path().canonicalize().expect("the root resolves");
         let workspace = shared.join("project");
@@ -1188,7 +1189,7 @@ mod tests {
 
     /// The mode half of the same guard, also proven by introducing the defect.
     #[test]
-    fn a_snapshotted_bind_refuses_to_serve() {
+    fn when_a_bind_was_snapshotted_then_serving_it_is_refused() {
         let (_root, reach) = fixture();
         let binds = reach.shell_binds();
         let (source, destination) = binds[0];

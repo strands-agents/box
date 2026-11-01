@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // The subtraction in docs/design/decisions.md#direct-filesystem-reach-is-declared-and-disclosed is
 // by path: the directory holding the sources THIS run loaded is refused
 // beneath the grant that encloses it (`record/config/filesystem.rs::direct_grants`, pinned by
-// `a_project_entry_subtracts_the_directory_holding_this_boxs_authority`). No directory name is
+// `when_a_project_is_granted_then_the_box_authority_directory_is_subtracted`). No directory name is
 // special. A sibling box's `.strands-box` under the granted project is therefore an ordinary
 // directory: the workload reads and rewrites the sibling's policy with its own syscalls, the host
 // finds the write, and the startup disclosure names the write grant that reaches it. The same run

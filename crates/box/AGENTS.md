@@ -205,7 +205,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **A tool's workspace and reach come from its own `[tool.<name>]` table.** One translator reads
   both specs, so a tool holds what it declares and nothing the agent declared.
-  `run::contain::boundary::one_spec_translates_the_same_as_agent_and_as_tool` pins that the two
+  `run::contain::boundary::when_one_spec_is_translated_as_agent_or_tool_then_its_declared_grants_match` pins that the two
   translate alike, and
   `box_shell.rs::the_shells_home_matches_the_workloads_and_its_cwd_is_the_project` pins that the
   hosted Shell stands where the workload stands.
@@ -226,7 +226,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **`name` and `[agent]` are keys in the file, and the file is the only source of truth.** There is
   no `--name` flag: `box_dir` selects the box and the file names it, so a second selector could
-  disagree with the first. `run_config.rs::run_selects_a_box_by_its_configuration_alone` pins that
+  disagree with the first. `run_config.rs::when_run_selects_a_box_then_only_its_configuration_determines_the_selection` pins that
   `--name` is refused. A bare `run` executes the stored `[agent] command`, and a trailing argv
   **appends** to it, so the key states the invocation prefix and the line the operator typed states
   the rest. `run_config.rs::a_trailing_argv_appends_to_the_stored_command` is the pin. **The key is
@@ -282,7 +282,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   two crates was the defect: the box once screened only its own built-in paths, so a record's
   `[agent]` entries reached the translator with no credential check at all. The one punch-through is
   a store the operator names exactly, which `validate_grant` reports and
-  `record::config::filesystem::a_credential_store_is_granted_only_when_named_exactly` pins. A prefix
+  `record::config::filesystem::when_a_credential_store_is_named_exactly_then_it_can_be_granted` pins. A prefix
   of a store, or a parent of one, stays refused.
 - **The authored policy is the only authorizer, at all three enforcement points.** Box builds
   three adapters over the one `Arc<PolicyEngine>`: `EgressPolicyInterceptor` for the proxy (`net:*`),
@@ -337,8 +337,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     the product directory, "below the owned root" covered every sibling box, so one `permit fs:read`
     read another box's `policy.dw`. `refuse_home_in_box_state` is called at config time in
     `RunContract::read` and again in `boundary::translate`, the two places `refuse_operator_home` is
-    called; `reach.rs`'s `a_home_inside_trusted_box_state_reaches_nothing_there` pins the floor half,
-    and `layout.rs`'s `a_declared_home_enclosing_the_box_directory_is_refused` pins the enclosing one.
+    called; `reach.rs`'s `when_home_is_inside_trusted_box_state_then_it_grants_no_reach_there` pins the floor half,
+    and `layout.rs`'s `when_the_declared_home_encloses_the_box_directory_then_it_is_refused` pins the enclosing one.
 
     **A SIBLING box's state is no longer covered, and that is an accepted residual** — see "A sibling
     box's stored state is reachable" under Open findings. Do not read this bullet as covering it.
@@ -461,23 +461,23 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **A relative path with a separator is refused, because no directory is its root.** An absolute
   path is used as authored, and a bare name is searched on the spec's `PATH`.
-  `a_relative_path_with_a_separator_is_refused` and
-  `a_bare_name_resolves_on_the_declared_search_path` are the pins. A search entry that is not
+  `when_a_relative_program_path_contains_a_separator_then_it_is_refused` and
+  `when_a_bare_program_name_is_present_then_the_declared_search_path_resolves_it` are the pins. A search entry that is not
   absolute is skipped rather than rebased, because one entry the box cannot honour is no reason to
   reject a `PATH` that also names usable directories.
 
   **The grant is prepared from the route, so the spelling the profile renders and the spelling the
   box execs are one string**. The route keeps a canonical directory and its own
   final component. A symlinked program therefore starts through the link and is authorized on its
-  target, which `the_route_carries_a_canonical_directory` and
-  `a_linked_program_is_started_through_the_link_and_granted_on_its_target` pin. Do not canonicalize
+  target, which `when_a_program_route_is_resolved_then_its_directory_is_canonical` and
+  `when_a_program_is_a_symlink_then_launch_uses_the_link_and_the_grant_uses_its_target` pin. Do not canonicalize
   the final component, and do not render a second spelling.
 
   **A script launches an interpreter, so the whole chain is granted.** `shebang_interpreter_chain`
   reads each `#!` line, resolves a `#!/usr/bin/env <name>` line to the real interpreter on the search
   path, and bounds the chain so a cycle cannot loop. Without those grants a script refuses at exec
-  and no `fs:*` decision explains it. `a_direct_path_shebang_chain_names_its_interpreter` and
-  `env_shebang_resolves_the_real_interpreter_on_the_search_path` are the pins.
+  and no `fs:*` decision explains it. `when_a_shebang_chain_uses_direct_paths_then_its_interpreter_is_named` and
+  `when_a_shebang_uses_env_then_the_real_interpreter_is_resolved_on_the_search_path` are the pins.
 
   **The resolver reads no file to pick a different program.** An absolute path is used as authored and
   a bare name is searched on the declared `PATH`, and nothing else can replace the candidate.
@@ -487,7 +487,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   **A command inside a directory the same spec makes writable is a startup warning, not a refusal.**
   A process that can write the command's directory can choose the program it runs, so the overlap is
   a real exposure. The operator authored both lists, so the box states the overlap on stderr and
-  proceeds rather than dropping either. `boundary.rs::a_writable_command_is_disclosed_as_a_warning`
+  proceeds rather than dropping either. `boundary.rs::when_a_command_is_writable_then_its_disclosure_is_a_warning`
   and `containment`'s `an_exec_grant_inside_a_write_root_warns_and_applies_beneath_every_backend`
   pin the two levels.
 - **`strands-box-contain-trampoline` is located beside the box executable and nowhere else.** It is
@@ -639,8 +639,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   shell accepts the flags split. What keeps this from becoming a third argument slot: the
   3-argument form is accepted **only** when both leading arguments are recognized flags (`-c`/`-l`)
   *and* one of them is `-c`. So `-c CMD /tmp/attacker.sock` is refused, and so is `-l -l CMD`.
-  `the_alias_accepts_no_socket_argument` and
-  `a_three_argument_form_that_is_not_two_flags_is_refused` pin the pair; deleting either leaves the
+  `when_a_socket_argument_is_given_then_the_alias_refuses_it` and
+  `when_three_arguments_do_not_contain_two_flags_then_the_alias_refuses_them` pin the pair; deleting either leaves the
   other passing while the guard is gone. Every accepted spelling derives its socket through one
   `shell_mode`, because a second copy of that derivation is where an argument-supplied socket path
   would get in.
@@ -697,7 +697,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   this shape:
   - **`Input` and `StdinEof` were blocked as well as `Signal`**, so a request/reply session
     *deadlocked*: the `Input` carrying request 2 was not read until the Call ended, and the Call
-    would not end until it saw request 2. `a_program_serves_a_request_reply_session` is the test.
+    would not end until it saw request 2. `when_a_program_receives_requests_then_it_serves_replies_across_the_conversation` is the test.
   - **A running Program stays reachable through `running`, keyed by id.** `Input`, `StdinEof`, and
     `Signal` find it there while its slot is inside a task, which is why `control_for` consults both
     maps. Dropping that lookup reinstates the deadlock for `Input` only — the hardest version to
@@ -713,13 +713,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     underneath it. `RunningCall::sequence` closes it. **Do not "simplify" the completion arm back to
     `running.remove(&done.id).is_some()`.** It reproduced only on **aarch64**, with the right text
     and the wrong status, so a status-only or output-only assertion misses half of it, and
-    `a_reused_program_id_never_reports_a_closed_calls_status` runs twelve cycles because a single
+    `when_a_program_id_is_reused_then_no_closed_call_status_is_reported` runs twelve cycles because a single
     cycle passes on most runs.
 - **What `hardening` buys, and the gaps that are easy to misread.** The trusted process holds the CA
   private key, every resolved plaintext secret, and the box's one `Policy` with its temporal
   history. `hardening` makes that memory unreadable with two syscalls per platform. **Every
   mechanism applies unconditionally, and no environment variable declines one.**
-  `no_environment_variable_declines_the_hardening` is the guard and must not be deleted; it reads
+  `when_environment_variables_are_present_then_none_can_disable_hardening` is the guard and must not be deleted; it reads
   the module's own source rather than probing behaviour, because the defect it closed was a
   *branch* and a behavioural test proves only that this build ignores this spelling. A debugger now
   needs a source change and a rebuild.
@@ -769,13 +769,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the security boundary** — together they are the only thing between attacker-supplied Python and the
   operator's filesystem. Two escapes were found in its first version, both pinned by a test that
   must not be deleted:
-  - a **dangling symlink written through** (`a_dangling_symlink_cannot_be_written_through`). "It
+  - a **dangling symlink written through** (`when_a_write_targets_a_dangling_symlink_then_it_is_refused`). "It
     cannot be a symlink because it does not exist" is false: `canonicalize` fails with `ENOENT` on a
     dangling link, so the path took the create branch, got its name re-attached, passed
     `starts_with`, and `fs::write` followed it out of the box with the trusted process's authority.
     Hence `symlink_metadata` on the re-attached leaf.
   - an **intra-home link laundering a path-scoped rule**
-    (`an_intra_home_symlink_cannot_launder_a_scoped_read`). `ScriptPolicyInterceptor` resolves
+    (`when_an_intra_home_symlink_changes_a_scoped_read_then_the_read_is_refused`). `ScriptPolicyInterceptor` resolves
     lexically, so `home/public/alias -> home/private/secret` was judged as `/public/alias` and read
     from `/private/secret`. Both are inside the home, so no mount floor catches it; refusing a
     non-canonical spelling is what closes it.
@@ -877,7 +877,7 @@ Do not treat any of these as settled by the code existing.
   does inside its leaf. The network half **is** pinned end to end, by
   `native_egress_mcp.rs::a_gateway_mcp_server_cannot_reach_an_unproxied_host_endpoint` and its
   native-egress control. What no end-to-end test covers is a **filesystem** refusal from inside a
-  stdio server's leaf: `a_grantless_stdio_entry_is_still_contained` pins that translation, not the
+  stdio server's leaf: `when_a_stdio_entry_has_no_grants_then_it_still_uses_containment` pins that translation, not the
   kernel.
 - **The Shell floor does not keep the path it approved.** `ReachFloor::approve_one` ends
   `.map(|_approved| ())`. The vendored kernel judges a path on its host identity, refuses an effect
@@ -928,7 +928,7 @@ Do not treat any of these as settled by the code existing.
   (`box_filesystem.rs::the_workspace_is_enterable_and_unreadable_until_listed`), and an `fs:*`
   permit on a path outside the reachable set is refused **regardless of the rule**
   (`reach.rs::Reach::approve`, pinned by
-  `a_path_outside_the_reachable_set_is_refused_in_the_callers_spelling`). What is still wanted is an
+  `when_a_path_is_outside_reach_then_the_refusal_uses_the_caller_spelling`). What is still wanted is an
   **end-to-end** test, a permitting rule refused through the whole box, which is blocked by the
   `operator_home` box-e2e drift — a containment-config schema mismatch that fails box creation for
   the whole `box_filesystem`/`box_shell` suite. The mechanism is already unit-covered, so this is

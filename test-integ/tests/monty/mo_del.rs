@@ -1,6 +1,6 @@
 use strands_det_harness::det_case;
 
-// The box's own `unlink_and_rmdir_delete_within_the_home` pins that a delete PERFORMS under an
+// The box's own `when_unlink_or_rmdir_targets_the_home_then_the_entry_is_deleted` pins that a delete PERFORMS under an
 // `fs:delete` grant, but at the adapter (`OsFunctionCall::Unlink`) level. Through a real Monty
 // script the delete surface is pathlib `Path.unlink()` (os.unlink is not exposed — os has no
 // `unlink`). This is the bound: the baseline forbids `fs:delete`, so the delete on a file the

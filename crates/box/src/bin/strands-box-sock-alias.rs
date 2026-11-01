@@ -473,7 +473,8 @@ mod tests {
     /// `TRACESTATE` are the only two names this image knows, because every harness spells those the
     /// same way.
     #[test]
-    fn the_alias_reads_the_standard_trace_headers_and_names_no_harness() {
+    fn when_alias_trace_handling_is_inspected_then_standard_headers_are_used_without_harness_names()
+    {
         let source = include_str!("strands-box-sock-alias.rs");
         let body = source
             .split_once("#[cfg(test)]")
@@ -500,7 +501,7 @@ mod tests {
     /// The alias derives its socket from its own path, under both login and
     /// non-login spellings. `public/bin/zsh` → `public/run/box.sock`.
     #[test]
-    fn the_alias_derives_its_socket_from_its_own_path() {
+    fn when_the_alias_socket_is_resolved_then_it_is_derived_from_the_alias_path() {
         for flag in ["-c", "-lc"] {
             let mode = parse_mode(
                 PathBuf::from("/private/scaffold/public/bin/zsh"),
@@ -522,7 +523,7 @@ mod tests {
 
     /// A positional script becomes the command text, not a path the shim would open.
     #[test]
-    fn a_positional_script_is_forwarded_as_its_contents() {
+    fn when_a_positional_script_is_given_then_its_contents_are_forwarded() {
         let script = std::env::temp_dir().join(format!("shim-script-{}.sh", std::process::id()));
         std::fs::write(&script, "printf ok\n").unwrap();
 
@@ -551,7 +552,7 @@ mod tests {
 
     /// An absent script is refused here, with the script named.
     #[test]
-    fn an_unreadable_script_is_refused_before_any_request_is_sent() {
+    fn when_a_script_cannot_be_read_then_it_is_refused_before_sending_a_request() {
         let error = parse_mode(
             PathBuf::from("/private/scaffold/public/bin/zsh"),
             vec![OsString::from("/nonexistent/attacker.sh")],
@@ -567,7 +568,7 @@ mod tests {
 
     /// A script larger than the frame budget is refused by size, not by frame error.
     #[test]
-    fn an_oversized_script_is_refused_by_size() {
+    fn when_a_script_exceeds_the_size_limit_then_it_is_refused_by_size() {
         let script = std::env::temp_dir().join(format!("shim-big-{}.sh", std::process::id()));
         std::fs::write(&script, "x".repeat(MAX_SCRIPT_BYTES + 1)).unwrap();
 
@@ -588,7 +589,7 @@ mod tests {
     /// `-c` and `-l` split across two arguments is the same submission as `-lc`. This is the
     /// spelling Claude Code uses. Either order, because a shell accepts either.
     #[test]
-    fn the_alias_accepts_c_and_l_as_separate_flags() {
+    fn when_c_and_l_are_separate_flags_then_the_alias_accepts_them() {
         for flags in [["-c", "-l"], ["-l", "-c"]] {
             let mode = parse_mode(
                 PathBuf::from("/private/scaffold/public/bin/zsh"),
@@ -613,7 +614,7 @@ mod tests {
     /// never becomes a third argument slot. Without the `any(-c)` condition, `-l -l COMMAND` would
     /// run a command no `-c` asked for.
     #[test]
-    fn a_three_argument_form_that_is_not_two_flags_is_refused() {
+    fn when_three_arguments_do_not_contain_two_flags_then_the_alias_refuses_them() {
         for arguments in [
             vec!["-c", "printf ok", "/tmp/attacker.sock"],
             vec!["-l", "printf ok", "/tmp/attacker.sock"],
@@ -636,7 +637,7 @@ mod tests {
 
     /// A flag-shaped lone argument is refused rather than read as a filename.
     #[test]
-    fn a_lone_flag_is_not_treated_as_a_script() {
+    fn when_a_lone_flag_is_given_then_it_is_not_treated_as_a_script() {
         for flag in ["-i", "-s", "--login", "-"] {
             let error = parse_mode(
                 PathBuf::from("/private/scaffold/public/bin/zsh"),
@@ -653,7 +654,7 @@ mod tests {
 
     /// The alias cannot be talked into serve mode.
     #[test]
-    fn the_alias_cannot_become_a_shim() {
+    fn when_shim_mode_is_requested_then_the_alias_cannot_enter_it() {
         let error = parse_mode(
             PathBuf::from("/private/scaffold/public/bin/zsh"),
             vec![
@@ -669,7 +670,7 @@ mod tests {
     /// The alias accepts no socket argument at any position, so the workload
     /// cannot aim its requests at a serving shim it controls.
     #[test]
-    fn the_alias_accepts_no_socket_argument() {
+    fn when_a_socket_argument_is_given_then_the_alias_refuses_it() {
         for arguments in [
             vec!["-c", "printf ok", "/tmp/attacker.sock"],
             vec!["--socket", "/tmp/attacker.sock", "-c", "printf ok"],
@@ -687,7 +688,7 @@ mod tests {
 
     /// A shell name routes to the Shell, and a name outside all three lists is an MCP server.
     #[test]
-    fn a_shell_name_routes_to_the_shell_and_any_other_name_is_an_mcp_server() {
+    fn when_the_alias_name_is_a_shell_then_it_routes_to_shell_and_other_names_route_to_mcp() {
         for name in ["bash", "zsh", "sh"] {
             let mode = parse_mode(
                 PathBuf::from(format!("/private/run/public/bin/{name}")),
@@ -732,7 +733,7 @@ mod tests {
 
     /// This image cannot be made to serve, by name or by flag.
     #[test]
-    fn the_shim_name_is_refused_rather_than_served() {
+    fn when_the_alias_name_is_shim_then_it_is_refused() {
         let error = parse_mode(
             PathBuf::from("/opt/strands/strands-box-sock-alias"),
             ["--serve", "/run/box.sock", "/workspace"]
@@ -752,7 +753,7 @@ mod tests {
 
     /// `--serve` and `--policy` are not arguments this image understands.
     #[test]
-    fn serving_flags_are_treated_as_a_script_not_a_role() {
+    fn when_serving_flags_are_given_then_they_are_treated_as_a_script() {
         let mode = parse_mode(
             PathBuf::from("/private/scaffold/public/bin/zsh"),
             ["--serve", "/private/scaffold/public/run/box.sock"]
@@ -795,7 +796,7 @@ mod tests {
     /// A status outside `u8` fails closed rather than wrapping, so a truncated value is never
     /// reported as success.
     #[test]
-    fn an_out_of_range_shell_status_fails_closed() {
+    fn when_a_shell_status_is_out_of_range_then_the_alias_reports_failure() {
         assert_eq!(shell_status(-1), SHELL_FAILURE_EXIT);
         assert_eq!(shell_status(256), SHELL_FAILURE_EXIT);
         // 0 must survive: a real success has to stay distinguishable.

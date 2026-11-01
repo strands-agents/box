@@ -5,7 +5,7 @@ use strands_det_harness::det_case;
 // A binary the workload builds under one of the agent's own `exec` entries runs through the hosted
 // Shell with no per-binary `[tool.*]` table, under a `shell:spawn` permit, in the agent's own
 // boundary. The box's own suite pins the selection step
-// (`hosted.rs::a_program_under_the_callers_exec_grant_runs_in_the_callers_boundary`); this is the
+// (`hosted.rs::when_a_program_is_under_the_caller_exec_grant_then_it_runs_in_the_caller_boundary`); this is the
 // end-to-end check.
 //
 // Needs the box at c7d0f41d or later. On 864df453 no table names the program, the spawn is refused

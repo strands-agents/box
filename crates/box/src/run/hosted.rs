@@ -869,7 +869,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_uninspectable_trust_directory_is_refused() {
+    fn when_the_trust_directory_cannot_be_inspected_then_open_is_refused() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "trust-inspection");
         let trust = root.trust_directory();
@@ -978,7 +978,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     /// **Opening the box judges every process table's reach once**, so a tool spawn acts on what
     /// this run approved and a grant that cannot be judged refuses the box before the agent starts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn opening_the_box_judges_every_process_tables_reach_once() {
+    async fn when_a_box_is_opened_then_every_process_table_has_its_reach_judged_once() {
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
         let home = operator.path().canonicalize().expect("a canonical home");
@@ -1176,7 +1176,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     }
 
     #[tokio::test]
-    async fn authority_uses_the_box_private_dogwood_database() {
+    async fn when_authority_is_opened_then_it_uses_the_box_private_history_database() {
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
 
@@ -1190,7 +1190,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
 
     /// A raw policy verdict is not the box's canonical decision record.
     #[tokio::test]
-    async fn a_raw_policy_refusal_reaches_no_box_telemetry_file() {
+    async fn when_raw_policy_is_refused_then_no_box_telemetry_file_is_written() {
         use policy::{ApprovedPath, FsOperation, GovernedBox, PathResolver, Request};
 
         let operator = tempfile::tempdir().expect("operator home");
@@ -1234,7 +1234,8 @@ permit (principal, action == alpha::Action::"read", resource);"#
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn teardown_wakes_waiters_reaps_processes_and_joins_finalization_before_withdrawal() {
+    async fn when_teardown_runs_then_waiters_wake_and_processes_and_finalization_finish_before_withdrawal()
+     {
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
         let pids_path = operator.path().join("mcp-pids");
@@ -1394,7 +1395,8 @@ wait"#;
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fatal_durable_staging_stops_the_supervised_workload_and_withdraws_live_state() {
+    async fn when_durable_staging_fails_fatally_then_the_workload_stops_and_live_state_is_withdrawn()
+     {
         let _supervising = SIGNALS.lock().await;
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
@@ -1567,7 +1569,7 @@ while :; do :; done"#
     /// group: the leader and its descendant are both gone once the box has returned.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_setup_failure_after_spawn_ends_the_whole_workload_process_group() {
+    async fn when_setup_fails_after_spawn_then_the_entire_workload_process_group_ends() {
         let workload = supervised_workload(HELD_GROUP, 2).await;
         let pids = workload.pids.clone();
 
@@ -1584,7 +1586,7 @@ while :; do :; done"#
     /// child is gone when it returns.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_normal_exit_ends_the_descendants_the_leader_left_behind() {
+    async fn when_the_leader_exits_normally_then_its_remaining_descendants_are_terminated() {
         let workload = supervised_workload(
             r#"trap '' TERM; sleep 3600 & printf '%s %s' "$$" "$!" > "$1"; exit 0"#,
             2,
@@ -1643,7 +1645,7 @@ while :; do :; done"#
     /// armed only by `wait` would never see this delivery.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_terminate_signal_to_the_box_ends_the_workload_before_the_box_exits() {
+    async fn when_the_box_receives_terminate_then_the_workload_ends_before_the_box_exits() {
         let (outcome, pids) = box_signalled_after_spawn(
             libc::SIGTERM,
             tokio::signal::unix::SignalKind::terminate(),
@@ -1665,7 +1667,7 @@ while :; do :; done"#
     /// death, which `stop` causes with `SIGTERM` and then `SIGKILL`, not the signal the box received.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_hangup_signal_to_the_box_ends_the_workload_before_the_box_exits() {
+    async fn when_the_box_receives_hangup_then_the_workload_ends_before_the_box_exits() {
         let (outcome, pids) = box_signalled_after_spawn(
             libc::SIGHUP,
             tokio::signal::unix::SignalKind::hangup(),
@@ -1694,7 +1696,7 @@ while :; do :; done"#
     /// after the leader's exit is what ends it.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_interrupt_to_the_box_reaches_the_workloads_group() {
+    async fn when_the_box_receives_interrupt_then_the_signal_reaches_the_workload_group() {
         let (outcome, pids) = box_signalled_after_spawn(
             libc::SIGINT,
             tokio::signal::unix::SignalKind::interrupt(),
@@ -1717,7 +1719,7 @@ while :; do :; done"#
     /// Every arm of a schema install states its outcome, including the arm that stops the box.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_fatal_schema_install_records_the_server_it_refused() {
+    async fn when_schema_installation_fails_fatally_then_the_refused_server_is_recorded() {
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
         let record = record(&root);
@@ -1804,7 +1806,7 @@ while :; do :; done"#
 
     #[cfg(unix)]
     #[test]
-    fn a_local_server_refuses_a_grant_replaced_after_startup_approval() {
+    fn when_an_approved_local_server_grant_is_replaced_then_launch_is_refused() {
         let home = tempfile::tempdir().expect("operator home");
         let operator = home.path().canonicalize().expect("canonical operator home");
         let operator = operator.as_path();
@@ -1882,7 +1884,7 @@ while :; do :; done"#
     /// **The longest `command` prefix the invocation matches selects the tool**, and the arguments
     /// after that prefix are the tool's trailing ones.
     #[test]
-    fn the_longest_matching_command_prefix_selects_the_tool() {
+    fn when_multiple_command_prefixes_match_then_the_longest_selects_the_tool() {
         let record = selection_record(&[("sh", &["/bin/sh"]), ("sh-c", &["/bin/sh", "-c"])]);
 
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
@@ -1932,7 +1934,7 @@ while :; do :; done"#
     /// `rustc` runs under `[tool.rustc]` and not under the `[tool.cargo]` that shares its file.
     #[cfg(unix)]
     #[test]
-    fn the_called_name_selects_among_tools_that_resolve_to_one_file() {
+    fn when_tools_resolve_to_one_file_then_the_called_name_selects_among_them() {
         let (_root, bin, record) = rustup_links();
         let program = bin.join("rustup");
 
@@ -1954,7 +1956,7 @@ while :; do :; done"#
     /// longest matching prefix, in name order, still wins.
     #[cfg(unix)]
     #[test]
-    fn a_called_name_no_tool_has_leaves_selection_unchanged() {
+    fn when_no_tool_has_the_called_name_then_selection_is_unchanged() {
         let (_root, bin, record) = rustup_links();
         let program = bin.join("rustup");
 
@@ -1968,7 +1970,7 @@ while :; do :; done"#
     /// prefixes of one length and nothing more.
     #[cfg(unix)]
     #[test]
-    fn a_longer_prefix_still_wins_over_the_called_name() {
+    fn when_a_longer_command_prefix_matches_then_it_takes_precedence_over_the_called_name() {
         let (_root, bin, mut record) = rustup_links();
         let mut longer = record.tool["cargo"].clone();
         longer.command.push("-c".to_string());
@@ -1992,7 +1994,7 @@ while :; do :; done"#
     /// intends selects the tool. The translator expands the same argument, so a literal comparison
     /// here would make such a tool unselectable by any real argv.
     #[test]
-    fn a_tool_whose_command_holds_a_token_is_selected_by_the_expanded_argument() {
+    fn when_a_tool_command_contains_a_token_then_the_expanded_argument_selects_it() {
         let record = selection_record(&[(
             "probe",
             &[
@@ -2033,7 +2035,7 @@ while :; do :; done"#
 
     /// **A token no build expands refuses by name**, and a malformed table hides no sibling.
     #[test]
-    fn a_tool_command_with_an_unexpandable_token_is_refused_by_name() {
+    fn when_a_tool_command_token_cannot_be_expanded_then_the_tool_is_refused_by_name() {
         let record = selection_record(&[("probe", &["/bin/sh", "--endpoint=${NOT_A_CORE_NAME}"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
@@ -2063,7 +2065,7 @@ while :; do :; done"#
     /// **Every declared tool is selectable by the agent**: the file declaring a `[tool.<name>]` is
     /// what puts it in the agent's reach, with nothing else to name it.
     #[test]
-    fn every_declared_tool_is_selectable_by_the_agent() {
+    fn when_tools_are_declared_then_the_agent_can_select_every_tool() {
         let record = selection_record(&[("sh", &["/bin/sh"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
@@ -2077,7 +2079,7 @@ while :; do :; done"#
     /// no table names it: the caller's spec with the program as its command, the arguments trailing.
     #[cfg(unix)]
     #[test]
-    fn a_program_under_the_callers_exec_grant_runs_in_the_callers_boundary() {
+    fn when_a_program_is_under_the_caller_exec_grant_then_it_runs_in_the_caller_boundary() {
         let root = tempfile::tempdir().expect("a directory");
         let target = root.path().join("target/debug");
         std::fs::create_dir_all(&target).expect("a target tree");
@@ -2114,7 +2116,7 @@ while :; do :; done"#
     /// holds, because the fallback takes no `network` from it.
     #[cfg(unix)]
     #[test]
-    fn a_program_under_an_exec_grant_never_takes_native_egress() {
+    fn when_a_program_uses_an_exec_grant_then_it_never_selects_native_egress() {
         let root = tempfile::tempdir().expect("a directory");
         let target = root.path().join("target/debug");
         std::fs::create_dir_all(&target).expect("a target tree");
@@ -2143,7 +2145,7 @@ while :; do :; done"#
     /// **A native tool's `egress:native` record precedes its run**, so a call the agent cancels or
     /// outlasts still leaves the record.
     #[test]
-    fn a_native_tool_records_egress_native_before_it_runs() {
+    fn when_a_native_tool_starts_then_native_egress_is_recorded_before_execution() {
         let src = include_str!("hosted.rs");
         let spawner = src
             .split_once("fn tool_spawner(")
@@ -2168,7 +2170,7 @@ while :; do :; done"#
     /// table matches is refused, even under a caller `exec` entry.
     #[cfg(unix)]
     #[test]
-    fn a_program_a_table_names_never_falls_back_to_the_caller() {
+    fn when_a_table_names_a_program_then_execution_never_falls_back_to_the_caller() {
         let root = tempfile::tempdir().expect("a directory");
         let tools = root.path().join("tools");
         std::fs::create_dir_all(&tools).expect("a tools tree");
@@ -2200,7 +2202,7 @@ while :; do :; done"#
     /// **A program under a caller `deny` entry is refused** even inside a caller `exec` entry.
     #[cfg(unix)]
     #[test]
-    fn a_denied_program_under_an_exec_entry_is_refused() {
+    fn when_a_program_under_an_exec_entry_is_denied_then_execution_is_refused() {
         let root = tempfile::tempdir().expect("a directory");
         let target = root.path().join("target/debug");
         std::fs::create_dir_all(&target).expect("a target tree");
@@ -2222,7 +2224,7 @@ while :; do :; done"#
     /// file covers nothing.
     #[cfg(unix)]
     #[test]
-    fn an_unresolvable_deny_entry_refuses_and_an_absent_one_does_not() {
+    fn when_a_deny_entry_cannot_be_resolved_then_it_is_refused_but_an_absent_entry_is_not() {
         let root = tempfile::tempdir().expect("a directory");
         let target = root.path().join("target/debug");
         std::fs::create_dir_all(&target).expect("a target tree");
@@ -2258,7 +2260,7 @@ while :; do :; done"#
     /// **A program outside every caller `exec` entry is still refused** when no table names it.
     #[cfg(unix)]
     #[test]
-    fn a_program_outside_every_exec_grant_is_still_refused() {
+    fn when_a_program_is_outside_every_exec_grant_then_execution_is_refused() {
         let root = tempfile::tempdir().expect("a directory");
         std::fs::create_dir_all(root.path().join("target")).expect("a target tree");
         let elsewhere = root.path().join("elsewhere");
@@ -2290,7 +2292,7 @@ while :; do :; done"#
     /// spelling or a bare name to.
     #[cfg(unix)]
     #[test]
-    fn tool_credential_paths_are_keyed_by_the_programs_canonical_identity() {
+    fn when_tool_credential_paths_are_derived_then_the_canonical_program_identity_keys_them() {
         let elsewhere = tempfile::tempdir().expect("a directory");
         let link = elsewhere.path().join("aws-link");
         let target = Path::new("/bin/sh").canonicalize().expect("sh exists");
@@ -2322,7 +2324,8 @@ while :; do :; done"#
     /// **A tool starts in the caller's directory only inside its own reach**: the agent's workspace
     /// or a tree its lists name; anywhere else falls back to the agent's workspace.
     #[test]
-    fn a_callers_directory_is_accepted_only_inside_the_tools_reach() {
+    fn when_a_caller_directory_is_inside_tool_reach_then_it_is_accepted_and_other_directories_are_refused()
+     {
         let root = tempfile::tempdir().expect("a directory");
         let root_path = root.path().canonicalize().expect("canonical");
         for relative in ["workspace/src", "vendor/sdk", "elsewhere"] {
@@ -2366,7 +2369,7 @@ while :; do :; done"#
     /// names are all refused.
     #[cfg(unix)]
     #[test]
-    fn selection_is_by_resolved_path_and_a_stranger_is_refused() {
+    fn when_a_tool_is_selected_then_resolved_path_determines_identity_and_strangers_are_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let record = selection_record(&[("sh", &["/bin/sh"])]);

@@ -410,7 +410,7 @@ mod tests {
     /// An undefined name (a `NameLookup`) is a language error, not a broker failure: it raises a
     /// catchable `NameError` and the script exits `1`, the same as CPython.
     #[tokio::test]
-    async fn an_undefined_name_raises_a_name_error() {
+    async fn when_a_name_is_undefined_then_a_name_error_is_raised() {
         let (_root, reach) = fixture();
         let policy = permissive();
 
@@ -440,7 +440,7 @@ mod tests {
     /// The raised `NameError` is a real Python exception the script can catch: a `try`/`except`
     /// around an undefined name resumes and the run completes at status `0`.
     #[tokio::test]
-    async fn a_caught_name_error_lets_the_script_continue() {
+    async fn when_a_name_error_is_caught_then_the_script_continues() {
         let (_root, reach) = fixture();
         let policy = permissive();
 
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_script_stops_at_its_suspension_limit() {
+    async fn when_a_script_reaches_its_suspension_limit_then_it_stops() {
         let outcome = run_script(
             &format!(
                 "import os\ntry:\n    for _ in range({}):\n        os.urandom(1)\nexcept Exception:\n    print('caught')",
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_sleeps_block_and_concurrent_sleeps_take_the_sum() {
+    async fn when_two_sleeps_run_concurrently_then_both_block_and_the_total_is_their_sum() {
         for source in [
             "import time\nstarted = time.monotonic()\ntime.sleep(0.2)\nprint(time.monotonic() - started >= 0.2)",
             "import asyncio, time\nasync def main():\n    started = time.monotonic()\n    await asyncio.sleep(0.2)\n    return time.monotonic() - started >= 0.2\nprint(asyncio.run(main()))",
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bare_name_resolves_under_the_working_directory() {
+    async fn when_a_bare_name_is_resolved_then_it_uses_the_working_directory() {
         let (_root, reach) = fixture();
         std::fs::write(
             Path::new(reach.working_directory()).join("notes.txt"),
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_oversized_allocation_stops_the_script_and_not_the_box() {
+    async fn when_an_allocation_is_oversized_then_the_script_stops_and_the_box_survives() {
         let policy = permissive();
         let outcome = run_script(
             &format!(
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sleep_longer_than_the_total_raises_at_once() {
+    async fn when_a_sleep_exceeds_the_total_budget_then_it_raises_immediately() {
         let started = std::time::Instant::now();
         let outcome = run_script(
             "import time\ntime.sleep(600)\nprint('woke')",
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sleep_is_never_shortened_and_the_total_is_bounded() {
+    fn when_sleep_uses_its_budget_then_duration_is_not_shortened_and_the_total_is_bounded() {
         let mut slept = Duration::ZERO;
         assert_eq!(
             charge_sleep(&mut slept, SLEEP_TOTAL_LIMIT, SLEEP_TOTAL_LIMIT).ok(),

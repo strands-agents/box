@@ -148,7 +148,7 @@ mod tests {
 
     /// No environment variable declines a mechanism in this module.
     #[test]
-    fn no_environment_variable_declines_the_hardening() {
+    fn when_environment_variables_are_present_then_none_can_disable_hardening() {
         let needles = [
             format!("env{}var", "::"),
             format!("var{}os", "_"),
@@ -173,7 +173,7 @@ mod tests {
     /// `RLIMIT_CORE` reaches `{0, 0}`, and the resulting limit really cannot be raised again.
     #[test]
     #[cfg(unix)]
-    fn the_core_limit_is_zero_and_cannot_be_raised_again() {
+    fn when_the_core_limit_is_hardened_then_it_is_zero_and_cannot_be_raised() {
         // SAFETY: the child applies the irreversible change and `_exit`s; it never returns into
         // test-harness code.
         let child = unsafe { libc::fork() };
@@ -224,7 +224,7 @@ mod tests {
     /// `PR_SET_DUMPABLE=0` takes effect, and the read-back is what proves it.
     #[test]
     #[cfg(target_os = "linux")]
-    fn the_process_becomes_non_dumpable() {
+    fn when_process_hardening_runs_then_the_process_becomes_non_dumpable() {
         // SAFETY: the child applies the irreversible change and `_exit`s.
         let child = unsafe { libc::fork() };
         assert_ne!(child, -1, "fork failed");
@@ -254,10 +254,10 @@ mod tests {
         );
     }
 
-    /// A non-dumpable process refuses `process_vm_readv` from a sibling at the same UID.
+    /// A non-dumpable child refuses `process_vm_readv` from its parent at the same UID.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_sibling_cannot_read_a_non_dumpable_process() {
+    fn when_a_child_is_non_dumpable_then_its_parent_cannot_read_its_memory() {
         assert!(
             reads_own_child(false),
             "the control arm must succeed: a dumpable child's memory is readable at the same UID, \

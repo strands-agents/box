@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_network_table_selects_native_egress() {
+    fn when_a_tool_network_table_is_loaded_then_it_selects_native_egress() {
         let native = spec("command = [\"sso-cli\"]\n[network]\ncontain_egress = false\n");
         assert!(
             native.native_egress(),
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_refuses_a_network_table_whatever_it_holds() {
+    fn when_an_agent_declares_a_network_table_then_it_is_refused_regardless_of_content() {
         for table in [
             "[network]\ncontain_egress = false\n",
             "[network]\ncontain_egress = true\n",
@@ -427,14 +427,14 @@ mod tests {
     }
 
     #[test]
-    fn a_network_table_refuses_an_unknown_key() {
+    fn when_a_network_table_contains_an_unknown_key_then_it_is_refused() {
         let parsed: Result<ProcessSpec, _> =
             toml::from_str("command = [\"sso-cli\"]\n[network]\nproxy = false\n");
         assert!(parsed.is_err(), "only contain_egress is a network key");
     }
 
     #[test]
-    fn a_spec_carries_the_four_fields_and_the_eight_lists() {
+    fn when_a_process_spec_is_loaded_then_its_four_fields_and_eight_lists_are_preserved() {
         let parsed = spec(
             r#"
             command = ["claude", "--version"]
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn every_removed_or_unknown_key_is_a_load_error() {
+    fn when_a_process_key_is_removed_or_unknown_then_loading_fails() {
         for unknown in [
             "command = [\"x\"]\ndefault_command = [\"x\"]",
             "command = [\"x\"]\nread = [\"/a\"]",
@@ -480,7 +480,7 @@ mod tests {
 
     /// **One case per refusal class, each asserting the message names the table and the cause.**
     #[test]
-    fn every_shape_refusal_fires_and_names_its_cause() {
+    fn when_a_process_shape_is_invalid_then_the_refusal_names_its_cause() {
         let cases: [(&str, &str); 8] = [
             ("command = []", "first entry"),
             ("command = [\"\"]", "element 0 is empty"),
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn un_reserved_names_are_accepted_in_env() {
+    fn when_an_environment_name_is_not_reserved_then_it_is_accepted() {
         let parsed = spec(
             "command = [\"x\"]\nenv = { HOME = \"/h\", PATH = \"/usr/bin\", TMPDIR = \"/t\", \
              TERM = \"xterm\", LANG = \"C\" }",
@@ -544,7 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn credential_store_entries_are_classified_by_spelling() {
+    fn when_credential_store_entries_are_loaded_then_their_spelling_determines_their_classification()
+     {
         let parsed = spec(
             "command = [\"aws\"]\n[filesystem]\nread = [\"~/.aws\", \"/Users/me/.ssh\", \
              \"~/.gitconfig\"]\nwrite = [\"~/.aws/sso/cache\"]\ndeny = [\"~/.aws/credentials\"]",

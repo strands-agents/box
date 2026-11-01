@@ -413,7 +413,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn round_trips_one_frame_then_reports_end_of_stream() {
+    async fn when_one_frame_is_written_then_it_round_trips_and_end_of_stream_is_reported() {
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         write_frame(
             &mut writer,
@@ -445,7 +445,7 @@ mod tests {
     /// An oversized length is refused before the body is allocated, so a workload cannot
     /// make the broker reserve memory on its behalf.
     #[tokio::test]
-    async fn rejects_an_oversized_frame_without_allocating_it() {
+    async fn when_a_frame_is_oversized_then_it_is_rejected_without_allocation() {
         let (mut writer, mut reader) = tokio::io::duplex(16);
         tokio::spawn(async move {
             let _ = writer
@@ -461,7 +461,7 @@ mod tests {
     /// An unknown field is a parse error, not a silently ignored hint — so a workload
     /// cannot smuggle a field a later protocol version might honor.
     #[tokio::test]
-    async fn rejects_unknown_request_fields() {
+    async fn when_a_request_contains_unknown_fields_then_it_is_rejected() {
         let payload =
             br#"{"version":1,"command":"printf routed","untrusted_scope":"another-workload"}"#;
         let mut frame = Vec::from((payload.len() as u32).to_be_bytes());
@@ -474,7 +474,7 @@ mod tests {
 
     /// A partial length prefix is a protocol error, distinct from a clean close.
     #[tokio::test]
-    async fn rejects_a_truncated_length_prefix() {
+    async fn when_a_length_prefix_is_truncated_then_it_is_rejected() {
         let mut reader = [0_u8, 0].as_slice();
 
         let error = read_frame::<Frame, _>(&mut reader).await.unwrap_err();
@@ -483,7 +483,7 @@ mod tests {
 
     /// A fully-escaped `Denied` reason must still fit one frame.
     #[test]
-    fn a_worst_case_refusal_reason_fits_one_frame() {
+    fn when_a_refusal_reason_has_worst_case_expansion_then_it_fits_one_frame() {
         let frame = Frame {
             version: PROTOCOL_VERSION,
             program: 1,
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transport_frame_round_trips() {
+    async fn when_a_transport_frame_is_encoded_then_it_round_trips() {
         let (mut writer, mut reader) = tokio::io::duplex(4096);
         write_frame(
             &mut writer,
@@ -537,7 +537,7 @@ mod tests {
 
     /// Several frames on ONE connection — the property version 1 refused outright.
     #[tokio::test]
-    async fn many_frames_ride_one_connection() {
+    async fn when_many_frames_share_a_connection_then_each_is_received() {
         let (mut writer, mut reader) = tokio::io::duplex(8192);
         for body in [
             Body::Open {
@@ -562,7 +562,7 @@ mod tests {
 
     /// An unknown field is refused on the header AND inside a body variant.
     #[tokio::test]
-    async fn unknown_fields_are_refused_on_the_envelope_and_in_a_body() {
+    async fn when_unknown_fields_appear_in_the_envelope_or_body_then_the_frame_is_refused() {
         for payload in [
             // An unknown key in the header.
             br#"{"version":4,"program":1,"frame_type":"close","untrusted":"x"}"#.to_vec(),
@@ -588,7 +588,7 @@ mod tests {
     /// layout the doc specifies (`frame_type` "MOVED out of body"), so a reader that logs or routes
     /// on `frame_type` need not descend into `body`. An MCP `open` still round-trips its `mode`.
     #[test]
-    fn the_frame_type_is_in_the_header() {
+    fn when_a_frame_is_encoded_then_its_type_is_in_the_header() {
         let wire = serde_json::to_value(frame(Body::Open {
             mode: Interpreter::Shell,
         }))
@@ -625,7 +625,7 @@ mod tests {
     /// The pre-version-4-shape layout — the tag placed *inside* `body` — is refused, because the
     /// header now carries no `frame_type`. So a pre-change alias image is a refusal, not a misread.
     #[tokio::test]
-    async fn a_tag_placed_inside_the_body_is_refused() {
+    async fn when_a_type_tag_is_inside_the_body_then_the_frame_is_refused() {
         for payload in [
             // current tag, but in the old (in-body) position.
             br#"{"version":4,"program":1,"body":{"frame_type":"open","mode":"shell"}}"#.to_vec(),
@@ -648,7 +648,7 @@ mod tests {
 
     /// A body-bearing kind requires its body, and a bodyless kind must omit it.
     #[tokio::test]
-    async fn the_body_presence_matches_the_frame_type() {
+    async fn when_a_frame_is_decoded_then_body_presence_must_match_its_type() {
         for payload in [
             // `call` needs a body.
             br#"{"version":4,"program":1,"frame_type":"call"}"#.to_vec(),
@@ -673,7 +673,7 @@ mod tests {
     /// spelling fails to parse rather than being misread. `a_tag_placed_inside_the_body`
     /// covers the old in-body *placement*; this covers the old *names* in their would-be positions.
     #[tokio::test]
-    async fn the_superseded_frame_names_are_refused() {
+    async fn when_superseded_frame_names_are_received_then_they_are_refused() {
         for payload in [
             // `frame` was the header tag; it is now `frame_type`, so `frame` is an unknown field
             // and `frame_type` is missing.
@@ -703,7 +703,7 @@ mod tests {
 
     /// Every `DeniedKind` serializes to its exact snake_case wire name and round-trips.
     #[test]
-    fn every_denied_kind_maps_to_its_wire_name() {
+    fn when_a_denied_kind_is_encoded_then_it_uses_its_wire_name() {
         fn wire_name(kind: DeniedKind) -> &'static str {
             match kind {
                 DeniedKind::VersionMismatch => "version_mismatch",
@@ -748,7 +748,7 @@ mod tests {
     /// A `denied` naming a reason-code outside the closed set is refused, so the vocabulary cannot
     /// grow silently on the wire — a new code is a variant and a version bump.
     #[tokio::test]
-    async fn a_denied_kind_outside_the_closed_set_is_refused() {
+    async fn when_a_denied_kind_is_outside_the_closed_set_then_it_is_refused() {
         let payload =
             br#"{"version":4,"program":1,"frame_type":"denied","body":{"kind":"kaput","reason":"x"}}"#
                 .to_vec();
@@ -766,7 +766,7 @@ mod tests {
 
     /// A body only the daemon may send is recognizable, so the dispatcher can refuse it.
     #[test]
-    fn daemon_only_bodies_are_identified() {
+    fn when_a_body_is_daemon_only_then_it_is_identified() {
         for body in [
             Body::Output {
                 stream: Stream::Stdout,
@@ -800,21 +800,21 @@ mod tests {
 
     /// Payloads survive bytes that are not valid UTF-8.
     #[test]
-    fn a_payload_carries_non_utf8_bytes() {
+    fn when_a_payload_contains_non_utf8_bytes_then_the_bytes_are_preserved() {
         let raw = [0x00_u8, 0xff, 0xfe, 0x80, b'h', b'i'];
         let encoded = encode_payload(&raw);
         assert_eq!(decode_payload(&encoded).unwrap(), raw);
     }
 
     #[test]
-    fn a_malformed_payload_is_refused() {
+    fn when_a_payload_is_malformed_then_it_is_refused() {
         let error = decode_payload("not base64!!").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     /// A full chunk still fits one frame after base64 expansion.
     #[test]
-    fn the_chunk_cap_fits_worst_case_base64_expansion() {
+    fn when_a_chunk_has_worst_case_base64_expansion_then_it_fits_the_frame_limit() {
         let body = Body::Output {
             stream: Stream::Stderr,
             data: encode_payload(&vec![0xff_u8; MAX_CHUNK_BYTES]),

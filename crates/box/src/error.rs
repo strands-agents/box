@@ -587,7 +587,7 @@ mod tests {
 
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     #[test]
-    fn native_outcome_failure_preserves_the_policy_error() {
+    fn when_native_outcome_recording_fails_then_the_policy_error_is_preserved() {
         use std::error::Error;
         let error = NativeFilesystemError::Outcome {
             source: policy::PolicyError::Evaluation("record failed".into()),
@@ -602,7 +602,8 @@ mod tests {
     }
 
     #[test]
-    fn setup_stage_bytes_round_trip_and_reject_the_unknown() {
+    fn when_setup_stage_bytes_are_decoded_then_known_stages_round_trip_and_unknown_stages_are_rejected()
+     {
         for (byte, stage) in [
             (1, SetupStage::ConfigRead),
             (2, SetupStage::ConfigValidation),
@@ -622,7 +623,7 @@ mod tests {
 
     /// The strings the end-to-end suites match on.
     #[test]
-    fn refusals_name_their_cause() {
+    fn when_a_refusal_is_formatted_then_its_cause_is_named() {
         let cases: [(BoxError, &str); 4] = [
             (
                 LayoutError::NotADirectory {
@@ -656,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_setup_failure_names_its_stage() {
+    fn when_a_setup_failure_is_formatted_then_its_stage_is_named() {
         let error: BoxError = TrampolineError::SetupFailed {
             stage: SetupStage::Apply,
             detail: None,

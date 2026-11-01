@@ -228,7 +228,7 @@ directory grant. Only the agent's sandbox gets the aliases, their directory on i
 judges every call as the agent. A tool's or MCP server's sandbox with a route to the broker
 would therefore act as the agent. So that sandbox has no alias and cannot connect to
 `run/box.sock`. Its `PATH` is its own search path alone, without the alias directory.
-`boundary.rs::a_leaf_holds_no_route_back_to_the_broker` pins this. The alternative was to identify
+`boundary.rs::when_a_leaf_boundary_is_built_then_it_has_no_route_back_to_the_broker` pins this. The alternative was to identify
 each caller, by peer credentials or one socket per sandbox, and judge each tool or server as its own
 principal. That
 needs a caller identity on the frozen broker protocol and in the policy principal vocabulary. The
@@ -251,8 +251,8 @@ stay: a process that escaped an earlier run's process group can still exec a nam
 replaces, and an operator who removes a box directory while its `run` is alive still kills that box's
 own execs. The cost: the host assesses one more file per box, once, at that box's first run, and it
 serializes those assessments, so boxes that start together each wait for the ones before them.
-`every_alias_shares_the_boxs_own_image_inode_and_not_the_installed_one` and
-`a_second_materialize_reuses_the_clone_and_unlinks_no_alias` pin the layout. **Updated:**
+`when_aliases_are_materialized_then_they_share_the_private_image_inode_instead_of_the_installed_inode` and
+`when_aliases_are_materialized_again_then_the_clone_is_reused_without_unlinking_aliases` pin the layout. **Updated:**
 2026-10-07.
 
 <a id="a-box-is-one-kernel-and-many-programs"></a>
@@ -391,7 +391,7 @@ disclosure on stderr naming every grant is the whole compensating control, pinne
 from any grant, by path: the box directory, and the directory holding each source this run loaded
 (the `box.toml` that `--config` named and the policy it names), wherever the operator placed them and
 whatever they are called. Without that, a host binary the agent runs could rewrite the policy that
-governs the next run. `a_project_entry_subtracts_the_directory_holding_this_boxs_authority` pins
+governs the next run. `when_a_project_is_granted_then_the_box_authority_directory_is_subtracted` pins
 it, and `a_config_outside_the_workspace_is_protected_by_path` pins a configuration loaded from
 outside the workspace.
 
@@ -400,7 +400,7 @@ granted tree for it, which protected a sibling box only when that box kept the d
 protected this box not at all when `--config` named a file elsewhere. **A sibling box's directory
 under a grant is now the operator's stated reach**, named on stderr by the grant that encloses it.
 The box defends the authority it loaded, and re-checks that by identity at every spawn, which
-`a_spawn_refuses_a_reach_whose_subtracted_authority_moved` pins.
+`when_subtracted_authority_moves_then_spawn_refuses_the_reach` pins.
 
 Three limits to plan around. Linux writable mounts also permit reads. Box therefore refuses each
 Linux write grant without explicit read coverage before any agent, tool, or local server runs.
@@ -509,7 +509,7 @@ for its cost. The server's sandbox stays filesystem-contained and Box records th
 explicitly. Both platforms honour the key, and Linux hands over more: that sandbox joins the host
 network namespace, so it
 reaches the private network, the machine's own loopback services, and the instance metadata endpoint.
-`native_egress_translates_on_linux` pins that translation. The cost is that a server needs its reach
+`when_native_egress_is_translated_on_linux_then_translation_succeeds` pins that translation. The cost is that a server needs its reach
 stated.
 
 <a id="mcp-tool-schemas-are-discovered-from-the-live-server"></a>
@@ -620,7 +620,7 @@ than beneath it. What no policy may open is refused below the engine by a deny-o
 check refuses the interpreters every operation on the `box.toml` and policy this run loaded, a read
 included, and any change to the directories that hold them, and the sandbox subtracts those
 directories from a native grant. A sibling box's directory under the reachable set is policy's to
-decide, which `a_sibling_boxs_authority_passes_the_floor_and_policy_decides` pins. So express a restriction as a `forbid` that carves a hole, never as a narrower permit: adding a
+decide, which `when_authority_belongs_to_a_sibling_box_then_it_passes_the_floor_and_policy_decides` pins. So express a restriction as a `forbid` that carves a hole, never as a narrower permit: adding a
 permit widens, and cannot take reach away.
 
 <a id="no-credential-floor-sits-beneath-the-interpreters"></a>
@@ -814,7 +814,7 @@ open. A missing outcome event also makes a counting rule undercount and fail ope
 read that got an answer records `::response` even when the answer is "no", so a `read_metadata`
 budget counts a probe of an absent path, which `a_read_metadata_budget_counts_probes_of_absent_paths`
 pins, and a read that the reach floor or the admission-window guard refuses stays `::error`, which
-`a_metadata_read_the_floor_refuses_meets_no_response_precondition` and
+`when_the_floor_refuses_metadata_then_no_response_precondition_is_checked` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin; the cost is that no event kind
 separates a "yes" from a "no". History is pruned to
 the deepest authored window and the workload itself fills that window, so treat window depth as an
@@ -1303,7 +1303,7 @@ tool or MCP server renders the inverse posture. It can test existence and read m
 operator home, and content stays gated behind that sandbox's own read grants. Two subtractions render last, so no discovery rule
 reopens them: the box state namespace is denied existence and metadata except for the exact paths a
 grant already names beneath it, and the credential floor is refused existence and metadata even under
-discovery. `a_leaf_discovers_the_operator_home_and_the_main_box_does_not` pins it. The cost is a real
+discovery. `when_leaf_and_agent_home_reach_are_compared_then_only_the_leaf_discovers_the_operator_home` pins it. The cost is a real
 disclosure: a tool or MCP server learns which paths exist across the operator home. This renders on macOS only.
 
 <a id="a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds"></a>
@@ -1471,7 +1471,7 @@ inside its own tunnel would reach the Shell as an ordinary HTTP status, and `cur
 status unless the caller passes `-f`. The gateway therefore marks each response it writes itself with a
 header, and Box's kernel wrapper turns such a response into a permission-denied error, so `curl`
 prints one reason line and exits 1. The marker is not authorization: the gateway already refused, and
-the marker only says who wrote the refusal. `kernel.rs::a_marked_refusal_fails_curl` pins it.
+the marker only says who wrote the refusal. `kernel.rs::when_a_response_marks_a_refusal_then_curl_reports_failure` pins it.
 
 **The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds its own
 client and never reads the marker, so a denied request reaches the script as an ordinary response
@@ -1508,11 +1508,11 @@ box's one policy engine, and performs it only when policy permits. Monty has no 
 whole script arrives as one call, and running a script is not itself an effect. So a rule for Monty
 always names an `fs:*` action on a path. Two deny-only floors sit beneath policy. Box sets Monty's
 working directory to the box's own, and Monty roots a relative path under it before policy sees it,
-which `a_bare_name_resolves_under_the_working_directory` pins. Then the approval step checks the
+which `when_a_bare_name_is_resolved_then_it_uses_the_working_directory` pins. Then the approval step checks the
 canonical path after policy allows, and returns the canonical path that the host must act on. The
 floors closed two real escapes, each pinned by a test that must not be deleted:
-`a_dangling_symlink_cannot_be_written_through` and
-`an_intra_home_symlink_cannot_launder_a_scoped_read`. A refusal names the absolute path, because
+`when_a_write_targets_a_dangling_symlink_then_it_is_refused` and
+`when_an_intra_home_symlink_changes_a_scoped_read_then_the_read_is_refused`. A refusal names the absolute path, because
 Monty joins a relative path to its working directory before the host receives the call, so the host
 never sees the spelling the script used.
 
@@ -1529,8 +1529,8 @@ system time in UTC, never the operator's local zone, which diverges from CPython
 `time.time()`, the monotonic clocks, and `os.urandom` are answered without a policy decision, because
 none of them names a resource that a rule can name. `time.sleep()` and `asyncio.sleep()` both block,
 because the broker has no event loop, so two concurrent sleeps take the sum of their delays.
-`the_clock_and_entropy_are_answered_without_a_policy_decision` and
-`both_sleeps_block_and_concurrent_sleeps_take_the_sum` pin both.
+`when_clock_or_entropy_is_requested_then_no_policy_decision_is_required` and
+`when_two_sleeps_run_concurrently_then_both_block_and_the_total_is_their_sum` pin both.
 
 <a id="monty-is-per-request-and-buffers-its-output"></a>
 ### Monty handles one request per VM, holds no state, buffers its output, and bounds each allocation
@@ -1544,10 +1544,10 @@ on the host does not count against that budget, so Box bounds the rest: 5 minute
 for each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
 MiB for each `os.urandom` call. Each of these bounds is less than the wall clock. A sleep is never
 shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
-`a_sleep_longer_than_the_total_raises_at_once` pins. `a_script_stops_at_its_suspension_limit` and
-`urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
+`when_a_sleep_exceeds_the_total_budget_then_it_raises_immediately` pins. `when_a_script_reaches_its_suspension_limit_then_it_stops` and
+`when_urandom_exceeds_its_limit_then_python_can_catch_the_error` pin two of them. Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which
-`an_oversized_allocation_stops_the_script_and_not_the_box` pins. A script has no limit on its total
+`when_an_allocation_is_oversized_then_the_script_stops_and_the_box_survives` pins. A script has no limit on its total
 memory, because Monty enforces one only through a global allocator that counts the whole trusted
 process and ends it on an overrun. A worker process for each script restores that limit, and it lost
 because it changes the process layout of the box. The costs: there is no interactive session, a long
@@ -1588,7 +1588,7 @@ has no route to the broker: it has no alias, and it cannot connect to
 `run/box.sock`. A tool's sandbox is ephemeral, one per `shell:spawn`. A program that a `[tool.<name>]` table names gets
 its reach from that table. A program that no table names, but that lies under one of the caller's own
 `exec` entries, runs in its own sandbox with the caller's path lists, which
-`a_program_under_the_callers_exec_grant_runs_in_the_callers_boundary` pins. So a binary with no table
+`when_a_program_is_under_the_caller_exec_grant_then_it_runs_in_the_caller_boundary` pins. So a binary with no table
 can still run. It holds the caller's path lists rather than a narrower set, and its sandbox has no route to
 the broker either.
 
@@ -1635,7 +1635,7 @@ own `env.PATH`, else the operator's real `PATH`, else the fallback. Selection co
 resolved path of each tool's program with the program the workload invoked, and compares the tool's
 fixed leading arguments with the head of the argv. The longest matching `command` wins, so
 `[tool.git-read]` and `[tool.git-push]` can differ only in their fixed arguments, which
-`the_longest_matching_command_prefix_selects_the_tool` pins. Box names a program by its canonical
+`when_multiple_command_prefixes_match_then_the_longest_selects_the_tool` pins. Box names a program by its canonical
 identity for the `shell:spawn` decision, for selection, and for credentials, and the seam runs only an
 identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one
 control on whether a program runs; a larger `PATH` changes only where Box finds a permitted program.
@@ -1801,7 +1801,7 @@ string, so a spliced secret leaves bytes in its heap that nothing wipes.
 A box egress entry may name the `env://` or `aws://` credential scheme. Every other scheme
 is refused when the config loads, and the message names the accepted set. The credentials crate can
 also resolve `file://` and `op://`, but a box egress entry may not name them, because the box has no way
-to deliver them. `an_undeliverable_credential_scheme_is_refused` pins the refusal.
+to deliver them. `when_a_credential_scheme_cannot_be_delivered_then_it_is_refused` pins the refusal.
 
 <a id="endpoint-breadth-is-refused-by-the-parsed-pattern"></a>
 ### Endpoint breadth is refused by the parsed pattern, and never by its text
@@ -1897,7 +1897,7 @@ replaces the default instead of adding to it. The file grows without bound and n
 `trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
 `metrics` name the agent's relayed log and metric records. A target names a set, with no ordering, and
 no signal contains another. A target that names no `include` receives every signal, which
-`an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word are
+`when_include_is_absent_then_every_signal_is_selected` pins. An empty list, a repeated word, and a misspelled word are
 each refused before the box exists. The box relays a harness signal and never produces one, so the
 harness's own exporter settings decide whether any such record exists.
 

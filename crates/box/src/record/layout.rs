@@ -3513,7 +3513,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_interrupted_first_record_write_leaves_the_directory_recoverable() {
+    fn when_the_first_record_write_is_interrupted_then_the_directory_remains_recoverable() {
         use std::os::unix::fs::PermissionsExt as _;
 
         for partial in [false, true] {
@@ -3578,7 +3578,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_interrupted_record_does_not_commit_its_identity() {
+    fn when_record_creation_is_interrupted_then_its_identity_is_not_committed() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3621,7 +3621,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_crash_after_mode_change_does_not_commit_the_record() {
+    fn when_a_crash_follows_the_mode_change_then_the_record_is_not_committed() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3652,7 +3652,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_crash_during_commit_staging_leaves_first_use_recoverable() {
+    fn when_commit_staging_is_interrupted_then_first_use_remains_recoverable() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3692,7 +3692,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_record_replaced_during_commit_is_refused_when_reopened() {
+    fn when_a_record_is_replaced_during_commit_then_reopening_refuses_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3769,7 +3769,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_crash_after_refresh_commit_completes_the_record_install_on_open() {
+    fn when_a_crash_follows_refresh_commit_then_open_completes_record_installation() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3837,7 +3837,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unrecognized_private_content_is_not_removed_as_interrupted_state() {
+    fn when_private_content_is_unrecognized_then_recovery_does_not_remove_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3868,7 +3868,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_hard_linked_authority_source_is_not_rewritten_as_a_partial_record() {
+    fn when_an_authority_source_has_multiple_hard_links_then_recovery_does_not_rewrite_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3897,7 +3897,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_established_record_symlink_is_refused_without_following_it() {
+    fn when_an_established_record_is_a_symlink_then_it_is_refused_without_following_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3925,7 +3925,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_established_record_hard_link_is_refused() {
+    fn when_an_established_record_has_multiple_hard_links_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3955,7 +3955,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_established_commit_marker_hard_link_is_refused() {
+    fn when_an_established_commit_marker_has_multiple_hard_links_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -3984,7 +3984,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_commit_marker_hard_link_added_during_refresh_is_refused() {
+    fn when_a_marker_gains_a_hard_link_during_refresh_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4019,7 +4019,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_configured_record_swap_after_inspection_is_refused_without_following_it() {
+    fn when_a_configured_record_is_swapped_after_inspection_then_it_is_refused_without_following_it()
+     {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4068,7 +4069,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_record_inserted_after_interrupted_state_was_opened_is_refused() {
+    fn when_a_record_is_inserted_after_interrupted_state_is_opened_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4100,7 +4101,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_partial_record_swap_before_rewrite_is_refused() {
+    fn when_a_partial_record_is_swapped_before_rewrite_then_it_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4136,7 +4137,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_root_swap_before_first_record_commit_receives_no_box_state() {
+    fn when_the_root_is_swapped_before_first_commit_then_the_replacement_receives_no_box_state() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4170,7 +4171,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_private_swap_before_first_record_commit_receives_no_box_state() {
+    fn when_private_storage_is_swapped_before_first_commit_then_the_replacement_receives_no_box_state()
+     {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4204,7 +4206,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_configured_private_swap_before_state_write_receives_no_box_state() {
+    fn when_configured_private_storage_is_swapped_before_a_write_then_the_replacement_receives_no_state()
+     {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4244,7 +4247,8 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn an_open_trampoline_cache_stays_on_the_validated_private_identity() {
+    fn when_private_storage_is_replaced_then_an_open_trampoline_cache_keeps_the_validated_identity()
+    {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -4294,7 +4298,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn different_mount_ids_are_not_one_private_state_mount() {
+    fn when_mount_ids_differ_then_private_state_mounts_are_distinct() {
         let root = tempfile::tempdir().expect("root");
         let root = std::fs::File::open(root.path()).expect("root descriptor");
         let proc = std::fs::File::open("/proc").expect("proc descriptor");
@@ -4307,7 +4311,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn mount_identity_reads_the_descriptor_without_reopening_procfs() {
+    fn when_mount_identity_is_read_then_the_open_descriptor_is_used_without_reopening_procfs() {
         let directory = tempfile::tempdir().expect("directory");
         let opened = std::fs::File::open(directory.path()).expect("directory descriptor");
         let expected = mount_id(&opened, directory.path()).expect("mount identity");
@@ -4328,7 +4332,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn mount_identity_reads_the_descriptor_when_statx_omits_the_mount_id() {
+    fn when_statx_omits_the_mount_id_then_mount_identity_still_uses_the_open_descriptor() {
         let directory = tempfile::tempdir().expect("directory");
         let opened = std::fs::File::open(directory.path()).expect("directory descriptor");
         let expected = mount_id(&opened, directory.path()).expect("mount identity");
@@ -4349,7 +4353,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn mount_identity_uses_fdinfo_when_file_handles_are_unsupported() {
+    fn when_file_handles_are_unsupported_then_mount_identity_uses_fdinfo() {
         let opened = std::fs::File::open("/proc").expect("proc descriptor");
         let expected = mount_id(&opened, Path::new("/proc")).expect("mount identity");
         mount_identity_under_syscall_refusals(
@@ -4365,7 +4369,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn mount_identity_refuses_when_every_route_is_unavailable() {
+    fn when_all_mount_identity_routes_are_unavailable_then_inspection_is_refused() {
         let directory = tempfile::tempdir().expect("directory");
         let opened = std::fs::File::open(directory.path()).expect("directory descriptor");
         for error in [libc::EOPNOTSUPP, libc::EOVERFLOW] {
@@ -4471,7 +4475,7 @@ mod tests {
 
     /// The root holds exactly one child per reachability class.
     #[test]
-    fn the_box_root_holds_exactly_one_child_per_reachability_class() {
+    fn when_a_box_root_is_created_then_each_reachability_class_has_exactly_one_child() {
         let (layout, operator_home) = layout("codex");
 
         assert_eq!(
@@ -4496,7 +4500,7 @@ mod tests {
 
     /// Nothing the box owns lives under `$TMPDIR`.
     #[test]
-    fn every_path_is_under_the_one_box_root() {
+    fn when_box_paths_are_derived_then_every_path_stays_under_the_box_root() {
         let (layout, _fixture) = layout("codex");
 
         for path in [
@@ -4520,7 +4524,7 @@ mod tests {
 
     /// **A volume that clones nothing gets a byte copy with the same bytes and the asked mode.**
     #[test]
-    fn the_byte_copy_fallback_places_an_identical_private_image() {
+    fn when_alias_copy_uses_the_byte_fallback_then_the_private_image_is_identical() {
         let (layout, _fixture) = layout("codex");
         let source_path = layout.root().join("source-image");
         std::fs::write(&source_path, b"the installed image").expect("a source image");
@@ -4563,7 +4567,7 @@ mod tests {
 
     /// The workload's `PATH` directory starts empty.
     #[test]
-    fn the_executable_directory_starts_empty() {
+    fn when_a_box_root_is_created_then_the_executable_directory_is_empty() {
         let (layout, _fixture) = layout("codex");
 
         assert_eq!(
@@ -4575,7 +4579,7 @@ mod tests {
 
     /// Every alias derives the SAME socket from its own path.
     #[test]
-    fn every_alias_derives_the_one_socket_the_shim_binds() {
+    fn when_alias_socket_paths_are_derived_then_every_alias_names_the_socket_bound_by_the_shim() {
         let (layout, _fixture) = layout("codex");
         let aliases = layout.shell_aliases();
 
@@ -4622,7 +4626,7 @@ mod tests {
     /// including one whose own leaf does not exist yet: resolution walks to the deepest existing
     /// ancestor, so a link on an interior component cannot launder the path.
     #[test]
-    fn a_declared_home_in_box_state_is_refused_in_every_spelling() {
+    fn when_the_declared_home_is_inside_box_state_then_every_spelling_is_refused() {
         let guard = tempfile::tempdir().expect("an operator home");
         let operator = guard.path().canonicalize().expect("the home resolves");
         // A caller-selected box directory, which is the only shape there is now.
@@ -4664,7 +4668,7 @@ mod tests {
     /// was accepted.
     #[cfg(unix)]
     #[test]
-    fn a_declared_home_enclosing_the_box_directory_is_refused() {
+    fn when_the_declared_home_encloses_the_box_directory_then_it_is_refused() {
         let guard = tempfile::tempdir().expect("an operator home");
         let operator = guard.path().canonicalize().expect("the home resolves");
         let box_directory = operator.join("boxes/codex");
@@ -4710,7 +4714,7 @@ mod tests {
     /// directory written in the ordinary spelling.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_data_volume_home_is_refused_inside_or_above_the_box_directory() {
+    fn when_a_data_volume_home_is_inside_or_above_the_box_directory_then_it_is_refused() {
         let guard = tempfile::tempdir().expect("an operator home");
         let operator = guard.path().canonicalize().expect("the home resolves");
         let box_directory = operator.join("boxes/codex");
@@ -4746,7 +4750,7 @@ mod tests {
     /// encloses nothing.
     #[cfg(unix)]
     #[test]
-    fn lies_within_judges_identity_through_a_second_spelling() {
+    fn when_a_directory_has_a_second_spelling_then_lies_within_compares_its_identity() {
         let guard = tempfile::tempdir().expect("a scratch directory");
         let root = guard.path().canonicalize().expect("the scratch resolves");
         let outer = root.join("state");
@@ -4784,10 +4788,10 @@ mod tests {
     ///
     /// This used to measure the longest box NAME against the operator home, which is no longer the
     /// shape: the name sites no path, and a caller supplies `box_dir`. Measuring the overhead is what
-    /// is still true, and `a_box_directory_whose_socket_exceeds_the_platform_limit_is_refused` is what
+    /// is still true, and `when_a_box_socket_path_exceeds_the_platform_limit_then_the_box_directory_is_refused` is what
     /// pins the bound itself.
     #[test]
-    fn the_broker_socket_costs_a_fixed_overhead_below_the_box_directory() {
+    fn when_a_broker_socket_path_is_derived_then_its_overhead_below_the_box_directory_is_fixed() {
         let parent = tempfile::tempdir().expect("a box parent");
         let root = parent.path().canonicalize().unwrap().join("b");
         // `create_at` reads `HOME`, and the build fleet leaves it unset, so this must hold the
@@ -4825,7 +4829,7 @@ mod tests {
     /// differs by platform.
     #[cfg(unix)]
     #[test]
-    fn a_box_directory_whose_socket_exceeds_the_platform_limit_is_refused() {
+    fn when_a_box_socket_path_exceeds_the_platform_limit_then_the_box_directory_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let parent = tempfile::tempdir().expect("a box parent");
@@ -4871,7 +4875,7 @@ mod tests {
 
     /// A box's live record is private, so the workload cannot read its own port.
     #[test]
-    fn the_live_record_is_private_to_the_box() {
+    fn when_a_live_record_path_is_derived_then_it_is_private_to_the_box() {
         let (layout, _fixture) = layout("codex");
 
         assert_eq!(
@@ -4882,7 +4886,7 @@ mod tests {
 
     /// The Dogwood database has one workload-inaccessible location.
     #[test]
-    fn dogwood_database_has_one_private_location() {
+    fn when_the_history_database_path_is_derived_then_it_has_one_private_location() {
         let (layout, _fixture) = layout("codex");
 
         assert_eq!(
@@ -4893,7 +4897,7 @@ mod tests {
 
     /// Two runs with different inputs get different containment files.
     #[test]
-    fn containment_configs_are_named_by_their_digest() {
+    fn when_containment_configs_are_stored_then_their_digests_determine_their_names() {
         let (layout, _fixture) = layout("codex");
 
         assert_ne!(
@@ -4914,7 +4918,7 @@ mod tests {
     }
 
     #[test]
-    fn a_private_file_is_written_atomically_at_its_mode() {
+    fn when_a_private_file_is_written_then_the_write_is_atomic_and_preserves_its_mode() {
         let (layout, _fixture) = layout("codex");
 
         layout
@@ -4941,7 +4945,7 @@ mod tests {
 
     /// Rewriting replaces the bytes, which is what `configure` does on a second run.
     #[test]
-    fn a_private_file_can_be_rewritten_in_place() {
+    fn when_a_private_file_already_exists_then_it_can_be_rewritten_in_place() {
         let (layout, _fixture) = layout("codex");
 
         layout
@@ -4957,7 +4961,7 @@ mod tests {
 
     /// A box directory that does not exist cannot be opened, and the failure creates nothing.
     #[test]
-    fn opening_an_uncreated_box_directory_fails_and_creates_nothing() {
+    fn when_an_uncreated_box_directory_is_opened_then_open_fails_without_creating_it() {
         let parent = tempfile::tempdir().unwrap();
         let absent = parent.path().join("never-configured");
 
@@ -4975,7 +4979,7 @@ mod tests {
     /// **Box creates no directory above the one `box_dir` names.** A caller who names a path two
     /// levels deep gets a refusal naming the missing parent, rather than a tree Box invented.
     #[test]
-    fn a_box_directory_whose_parent_is_absent_is_refused_and_creates_nothing() {
+    fn when_the_box_directory_parent_is_absent_then_creation_is_refused_without_creating_it() {
         let parent = tempfile::tempdir().unwrap();
         let absent_parent = parent.path().join("absent");
         let root = absent_parent.join("box");
@@ -4996,7 +5000,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_replaced_box_directory_is_refused_before_initialization() {
+    fn when_the_box_directory_is_replaced_then_initialization_refuses_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -5035,7 +5039,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_state_write_refuses_after_a_path_swap() {
+    fn when_a_path_is_swapped_then_state_writes_are_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -5078,7 +5082,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn validation_checks_the_directory_opened_after_a_path_swap() {
+    fn when_a_directory_path_is_swapped_then_validation_checks_the_directory_actually_opened() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -5116,7 +5120,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn directory_enumeration_uses_the_opened_identity_without_reopening_it() {
+    fn when_a_directory_is_enumerated_then_its_opened_identity_is_used_without_reopening_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         const ENTRY_COUNT: usize = 4_096;
@@ -5176,7 +5180,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn directory_enumeration_lock_serializes_the_shared_offset_region() {
+    fn when_directory_enumerations_overlap_then_the_shared_offset_region_is_serialized() {
         const READER_COUNT: usize = 8;
 
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -5215,7 +5219,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_ancestor_symlink_spelling_is_visible_and_cannot_be_retargeted() {
+    fn when_an_ancestor_has_a_symlink_spelling_then_it_is_visible_and_cannot_be_retargeted() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -5254,7 +5258,7 @@ mod tests {
 
     /// A configured box opens without being re-created.
     #[test]
-    fn opening_a_configured_box_finds_the_same_paths() {
+    fn when_a_configured_box_is_opened_then_its_paths_remain_the_same() {
         let operator_home = tempfile::tempdir().unwrap();
         let root = boxes_parent(operator_home.path()).join("codex");
 
@@ -5273,7 +5277,7 @@ mod tests {
 
     /// `configure` twice keeps the root and adds nothing to it.
     #[test]
-    fn reconfiguring_adds_no_child() {
+    fn when_a_box_is_reconfigured_then_no_child_is_added() {
         let operator_home = tempfile::tempdir().unwrap();
         let root = boxes_parent(operator_home.path()).join("codex");
 
@@ -5297,7 +5301,7 @@ mod tests {
     /// Two directories are two boxes, and the directory is what separates them now that no name
     /// sites a root.
     #[test]
-    fn distinct_directories_are_distinct_boxes() {
+    fn when_box_directories_are_distinct_then_the_boxes_are_distinct() {
         let operator_home = tempfile::tempdir().unwrap();
         let parent = boxes_parent(operator_home.path());
         let (codex, claude) = with_operator_home(operator_home.path(), || {
@@ -5312,7 +5316,7 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_alias_directory_is_refused() {
+    fn when_the_alias_directory_is_a_symlink_then_it_is_refused() {
         let operator_home = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let box_root = boxes_parent(operator_home.path()).join("codex");
@@ -5332,7 +5336,7 @@ mod tests {
 
     /// A symlinked `private/` is refused too.
     #[test]
-    fn a_symlinked_private_tree_is_refused() {
+    fn when_the_private_tree_is_a_symlink_then_it_is_refused() {
         let operator_home = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let box_root = boxes_parent(operator_home.path()).join("codex");
@@ -5352,7 +5356,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn broker_binding_uses_the_opened_directory_after_a_path_swap() {
+    fn when_the_broker_directory_path_is_swapped_then_binding_uses_the_opened_directory() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let parent = tempfile::tempdir().expect("broker parent");
@@ -5389,7 +5393,7 @@ mod tests {
     /// file as it finds it.**
     #[cfg(unix)]
     #[test]
-    fn a_committed_record_without_a_history_is_refused_and_the_file_is_left_as_found() {
+    fn when_a_committed_record_has_no_history_then_it_is_refused_without_changing_the_file() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let root = parent.path().join("box");
@@ -5466,7 +5470,7 @@ mod tests {
     /// the file as it finds it.**
     #[cfg(unix)]
     #[test]
-    fn a_history_without_a_committed_record_is_refused_and_the_file_is_left_as_found() {
+    fn when_history_has_no_committed_record_then_it_is_refused_without_changing_the_file() {
         let (layout, _operator_home) = layout("codex");
         assert!(!layout.is_configured());
         let history = layout.dogwood_database();
@@ -5546,7 +5550,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_configured_box_whose_marker_holds_its_id_and_digest_reopens() {
+    fn when_a_configured_box_marker_matches_its_id_and_digest_then_the_box_reopens() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5568,7 +5572,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_record_whose_content_changed_in_place_refuses_and_names_both_identities() {
+    fn when_record_content_changes_in_place_then_open_refuses_and_names_both_identities() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5608,7 +5612,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_marker_in_the_device_and_inode_form_refuses_with_the_identity_text() {
+    fn when_a_marker_uses_device_and_inode_identity_then_open_refuses_with_the_identity_text() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5638,7 +5642,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_record_identity_holds_no_device_or_inode() {
+    fn when_record_identity_is_constructed_then_it_contains_no_device_or_inode() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5669,7 +5673,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_copied_box_directory_with_the_same_bytes_opens_as_the_same_box() {
+    fn when_a_copied_box_has_identical_bytes_then_it_opens_as_the_same_box() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5696,7 +5700,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_committed_record_that_no_longer_parses_refuses_with_its_own_parse_error() {
+    fn when_a_committed_record_no_longer_parses_then_open_reports_its_parse_error() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5725,7 +5729,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_pending_record_that_does_not_match_the_marker_is_not_installed() {
+    fn when_a_pending_record_does_not_match_the_marker_then_it_is_not_installed() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let operator_home = tempfile::tempdir().expect("operator home");
@@ -5801,7 +5805,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_marker_beside_an_edited_record_refuses_without_sibling_directories() {
+    fn when_a_marker_has_an_edited_record_then_open_refuses_without_sibling_directories() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, _) = configured_box(operator_home.path(), parent.path());
@@ -5844,7 +5848,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_marker_beside_an_unreadable_record_refuses_without_sibling_directories() {
+    fn when_a_marker_has_an_unreadable_record_then_open_refuses_without_sibling_directories() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, box_id) = configured_box(operator_home.path(), parent.path());
@@ -5881,7 +5885,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_record_without_a_marker_still_recovers_as_an_interrupted_first_use() {
+    fn when_a_record_has_no_marker_then_it_recovers_as_an_interrupted_first_use() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
         let (root, _) = configured_box(operator_home.path(), parent.path());
@@ -5907,7 +5911,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_marker_under_the_first_use_mode_refuses_and_is_not_re_initialized() {
+    fn when_a_marker_has_the_first_use_mode_then_open_refuses_without_reinitializing_it() {
         use std::os::unix::fs::PermissionsExt as _;
 
         for edited in [true, false] {

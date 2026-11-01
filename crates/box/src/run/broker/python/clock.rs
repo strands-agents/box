@@ -104,14 +104,14 @@ mod tests {
     use crate::test_support::open_policy;
 
     #[test]
-    fn civil_from_unix_maps_known_instants() {
+    fn when_known_unix_instants_are_converted_then_the_civil_dates_match() {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil_from_unix(1_709_164_800), (2024, 2, 29, 0, 0, 0)); // a leap day
         assert_eq!(civil_from_unix(1_700_000_000), (2023, 11, 14, 22, 13, 20));
     }
 
     #[test]
-    fn datetime_from_naive_is_utc_with_no_offset() {
+    fn when_datetime_input_is_naive_then_it_uses_utc_without_an_offset() {
         let dt = datetime_from(1_700_000_000, 500_000, None);
         assert_eq!(
             (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second),
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn datetime_from_with_a_zone_shifts_and_marks_aware() {
+    fn when_datetime_input_has_a_zone_then_it_is_shifted_and_marked_aware() {
         let zone = MontyTimeZone {
             offset_seconds: 3_600,
             name: Some("UTC+1".to_string()),
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn date_today_is_a_valid_calendar_date() {
+    fn when_today_is_requested_then_a_valid_calendar_date_is_returned() {
         let today = date_today();
         assert!(
             today.year >= 2024,
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_clock_and_entropy_are_answered_without_a_policy_decision() {
+    async fn when_clock_or_entropy_is_requested_then_no_policy_decision_is_required() {
         let outcome = run_script(
             "import os, time\nprint(time.time() > 0, time.monotonic() >= 0, len(os.urandom(16)))",
             &open_policy(Vec::new()),
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn urandom_above_its_cap_is_a_catchable_python_error() {
+    async fn when_urandom_exceeds_its_limit_then_python_can_catch_the_error() {
         let outcome = run_script(
             &format!(
                 "import os\ntry:\n    os.urandom({})\nexcept ValueError:\n    print('refused')\nprint(len(os.urandom({URANDOM_LIMIT})))",

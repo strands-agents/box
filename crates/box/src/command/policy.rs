@@ -145,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writing_a_schema_replaces_its_inode() {
+    fn when_a_schema_is_written_then_its_inode_is_replaced() {
         let directory = tempfile::tempdir().expect("schema directory");
         let path = directory.path().join(ACTION_SCHEMA_FILE);
         std::fs::write(&path, "old schema").expect("old schema");

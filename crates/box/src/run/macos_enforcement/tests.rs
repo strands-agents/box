@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn child_check_reads_process_ids_instead_of_a_buffer_estimate() {
+fn when_children_are_checked_then_process_ids_are_read_instead_of_using_buffer_estimates() {
     let mut child = std::process::Command::new("/bin/sleep")
         .arg("30")
         .spawn()
@@ -27,14 +27,14 @@ fn event(kind: u32, source: &str) -> RawEvent {
 }
 
 #[test]
-fn bridge_layout_matches_rust() {
+fn when_bridge_layout_is_compared_then_it_matches_rust() {
     assert_eq!(std::mem::size_of::<RawEvent>(), unsafe {
         box_es_event_size()
     });
 }
 
 #[test]
-fn open_flags_use_kernel_access_bits_and_preserve_append() {
+fn when_open_flags_are_translated_then_kernel_access_bits_and_append_are_preserved() {
     let mut raw = event(OPEN, "/file");
     raw.flags = FREAD | FWRITE | libc::O_APPEND as u32;
     let plan = Plan::decode(&raw).unwrap();
@@ -48,7 +48,7 @@ fn open_flags_use_kernel_access_bits_and_preserve_append() {
 }
 
 #[test]
-fn permission_changes_check_the_existing_object_and_policy_operation() {
+fn when_permissions_change_then_the_existing_object_and_policy_operation_are_checked() {
     for mode in [libc::S_IFREG, libc::S_IFDIR] {
         let mut raw = event(SETMODE, "/target");
         raw.mode = mode as u32 | 0o640;
@@ -81,7 +81,7 @@ fn permission_changes_check_the_existing_object_and_policy_operation() {
 }
 
 #[test]
-fn create_and_unlink_preserve_object_types() {
+fn when_create_and_unlink_are_translated_then_object_types_are_preserved() {
     for (mode, create, remove) in [
         (
             libc::S_IFREG,
@@ -110,7 +110,7 @@ fn create_and_unlink_preserve_object_types() {
 }
 
 #[test]
-fn rename_checks_read_and_both_move_targets_and_authorizes_replacement() {
+fn when_rename_is_translated_then_read_and_both_move_targets_and_replacement_are_authorized() {
     let mut raw = event(RENAME, "/source");
     raw.destination[..12].copy_from_slice(b"/destination");
     raw.destination_identity = PARENT_IDENTITY;
@@ -136,7 +136,7 @@ fn rename_checks_read_and_both_move_targets_and_authorizes_replacement() {
 }
 
 #[test]
-fn event_only_open_checks_content_and_unknown_flags_stay_refused() {
+fn when_an_event_only_open_is_translated_then_content_is_checked_and_unknown_flags_are_refused() {
     let mut raw = event(OPEN, "/file");
     raw.flags = (libc::O_EVTONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u32;
     let plan = Plan::decode(&raw).unwrap();
@@ -153,7 +153,7 @@ fn event_only_open_checks_content_and_unknown_flags_stay_refused() {
 }
 
 #[test]
-fn execute_only_open_uses_the_existing_exec_operation() {
+fn when_an_open_is_execute_only_then_the_existing_exec_operation_is_used() {
     let mut raw = event(OPEN, "/program");
     raw.flags = (libc::O_EXEC | libc::O_CLOEXEC | libc::O_NOCTTY | libc::O_NONBLOCK) as u32;
     assert_eq!(raw.flags, 0x41020004);
@@ -165,7 +165,7 @@ fn execute_only_open_uses_the_existing_exec_operation() {
 }
 
 #[test]
-fn replacement_rechecks_the_kernel_destination_identity() {
+fn when_a_destination_is_replaced_then_its_kernel_identity_is_rechecked() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
     let destination = directory.path().join("destination");
@@ -189,7 +189,7 @@ fn replacement_rechecks_the_kernel_destination_identity() {
 }
 
 #[test]
-fn malformed_paths_and_notifications_cannot_authorize() {
+fn when_paths_or_notifications_are_malformed_then_they_cannot_authorize() {
     let mut raw = event(TRUNCATE, "/file");
     raw.phase = NOTIFY;
     assert!(Plan::decode(&raw).is_err());
@@ -205,7 +205,7 @@ fn malformed_paths_and_notifications_cannot_authorize() {
 }
 
 #[test]
-fn replaced_file_identity_is_refused() {
+fn when_file_identity_is_replaced_then_authorization_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("file");
     std::fs::write(&path, "original").unwrap();
@@ -225,7 +225,7 @@ fn replaced_file_identity_is_refused() {
 }
 
 #[test]
-fn sequence_gaps_and_duplicates_fail() {
+fn when_sequence_numbers_have_gaps_or_duplicates_then_validation_fails() {
     let mut tracker = Tracker::default();
     assert!(tracker.sequence(0));
     assert!(tracker.sequence(1));
@@ -234,7 +234,7 @@ fn sequence_gaps_and_duplicates_fail() {
 }
 
 #[test]
-fn bridge_fields_have_the_same_offsets_as_rust() {
+fn when_bridge_field_offsets_are_compared_then_they_match_rust() {
     let offsets = [
         std::mem::offset_of!(RawEvent, kind),
         std::mem::offset_of!(RawEvent, phase),
@@ -290,7 +290,7 @@ fn readable(root: &Path) -> RawEvent {
 }
 
 #[test]
-fn the_kernel_denial_replaces_a_provisional_policy_permit() {
+fn when_the_kernel_denies_after_a_policy_permit_then_the_denial_replaces_the_provisional_permit() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let context = context(&root);
@@ -310,7 +310,7 @@ fn the_kernel_denial_replaces_a_provisional_policy_permit() {
 }
 
 #[test]
-fn a_malformed_event_records_an_adapter_denial() {
+fn when_an_event_is_malformed_then_an_adapter_denial_is_recorded() {
     let directory = tempfile::tempdir().unwrap();
     let context = context(directory.path());
     let mut raw = event(OPEN, "relative");
@@ -324,7 +324,7 @@ fn a_malformed_event_records_an_adapter_denial() {
 }
 
 #[test]
-fn reply_failure_keeps_later_authorizations_denied() {
+fn when_a_reply_fails_then_later_authorizations_remain_denied() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let context = context(&root);
@@ -340,7 +340,7 @@ fn reply_failure_keeps_later_authorizations_denied() {
 }
 
 #[test]
-fn sequence_loss_keeps_later_authorizations_denied() {
+fn when_sequence_is_lost_then_later_authorizations_remain_denied() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let context = context(&root);

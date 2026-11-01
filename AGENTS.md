@@ -109,7 +109,7 @@ or `#[ignore]` its test to green a suite.
   `serve/` is gone: the broker moved to `run/broker/`, `serve/daemon/` and the `daemon` verb are
   deleted, and box has no library target. Do not reintroduce a daemon.
 - Every declared stdio MCP server runs in its own contained leaf box, and `shell:spawn` decides
-  whether it starts. `mcp.rs::a_grantless_stdio_entry_is_still_contained` and
+  whether it starts. `mcp.rs::when_a_stdio_entry_has_no_grants_then_it_still_uses_containment` and
   `runtime_mcp_start.rs::absent_start_permit_refuses_the_server_and_it_never_runs` pin the two
   halves. A leaf that sets `contain_egress = false` bypasses the gateway, and that downgrade is
   residual risk.

@@ -767,7 +767,7 @@ mod tests {
 
     /// A relative spelling means the same file it means in the Shell.
     #[test]
-    fn every_relative_path_is_rooted_at_the_box_home() {
+    fn when_a_relative_path_is_resolved_then_it_is_rooted_at_the_box_home() {
         let (root, reach) = fixture();
         let home = home(&root);
 
@@ -818,7 +818,7 @@ mod tests {
 
     /// End to end, the rooted relative path is what the effect reads.
     #[test]
-    fn a_relative_read_inside_the_home_is_performed() {
+    fn when_a_relative_read_is_inside_the_home_then_the_read_is_performed() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("notes.txt"), "hello").expect("a file in the home");
         let policy = permissive();
@@ -840,7 +840,7 @@ mod tests {
     /// The floor refuses a non-canonical spelling **after** policy allowed it.
     #[cfg(unix)]
     #[test]
-    fn a_symlink_out_of_the_home_is_refused_in_the_callers_spelling() {
+    fn when_a_symlink_leads_outside_the_home_then_the_refusal_uses_the_caller_spelling() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("outside.pem"), "s").expect("a file outside the set");
@@ -897,7 +897,7 @@ mod tests {
     /// A link between two paths *inside* the home cannot launder a path-scoped rule.
     #[cfg(unix)]
     #[test]
-    fn an_intra_home_symlink_cannot_launder_a_scoped_read() {
+    fn when_an_intra_home_symlink_changes_a_scoped_read_then_the_read_is_refused() {
         let (root, reach) = fixture();
         let home = home(&root);
         std::fs::create_dir(home.join("public")).expect("the public directory");
@@ -937,7 +937,7 @@ mod tests {
     /// `box/AGENTS.md` names this one of two escapes pinned by a test that must not be deleted.
     #[cfg(unix)]
     #[test]
-    fn a_dangling_symlink_cannot_be_written_through() {
+    fn when_a_write_targets_a_dangling_symlink_then_it_is_refused() {
         let (root, reach) = fixture();
         let home = home(&root);
         let resolved = root.path().canonicalize().expect("the root resolves");
@@ -978,7 +978,7 @@ mod tests {
 
     /// The floor is beneath policy, and a path outside every root is refused whatever policy says.
     #[test]
-    fn a_path_outside_every_reachable_root_is_refused() {
+    fn when_a_path_is_outside_every_reachable_root_then_it_is_refused() {
         let (_root, reach) = fixture();
         let policy = permissive();
         let interceptor = interceptor(&policy);
@@ -1002,7 +1002,7 @@ mod tests {
 
     /// PolicyEngine decides first, and its refusal names the caller's spelling too.
     #[test]
-    fn a_denied_effect_is_refused_by_policy_in_the_callers_spelling() {
+    fn when_policy_denies_an_effect_then_the_refusal_uses_the_caller_spelling() {
         let (root, reach) = fixture();
         let home = home(&root);
         std::fs::write(home.join("notes.txt"), "hello").expect("a file in the home");
@@ -1037,7 +1037,7 @@ mod tests {
 
     /// **A rename refusal names the endpoint policy refused**, in the caller's spelling.
     #[test]
-    fn a_rename_refusal_names_the_refused_endpoint() {
+    fn when_a_rename_endpoint_is_refused_then_the_error_names_that_endpoint() {
         for (forbidden, spelled) in [("b.txt", "sub/../b.txt"), ("a.txt", "./a.txt")] {
             let (root, reach) = fixture();
             let home = home(&root);
@@ -1075,7 +1075,7 @@ mod tests {
 
     /// **An unsupported call is refused in the caller's spelling**, whatever bytes the path holds.
     #[test]
-    fn an_unsupported_call_is_refused_in_the_callers_spelling() {
+    fn when_a_call_is_unsupported_then_the_refusal_uses_the_caller_spelling() {
         let (root, reach) = fixture();
         let home = home(&root);
         let policy = permissive();
@@ -1100,14 +1100,14 @@ mod tests {
     }
 
     #[test]
-    fn a_read_denial_preserves_paths_in_policy_annotations() {
+    fn when_a_read_is_denied_then_policy_annotation_paths_are_preserved() {
         assert_annotation_paths_preserved(OsFunctionCall::ReadText(MontyPath::new(
             "notes.txt".to_string(),
         )));
     }
 
     #[test]
-    fn a_rename_denial_preserves_paths_in_policy_annotations() {
+    fn when_a_rename_is_denied_then_policy_annotation_paths_are_preserved() {
         assert_annotation_paths_preserved(OsFunctionCall::Rename(RenameCallArgs {
             src: MontyPath::new("notes.txt".to_string()),
             dst: MontyPath::new("moved.txt".to_string()),
@@ -1182,7 +1182,7 @@ mod tests {
     /// **A Monty record names the authored policy that decided the effect.** The gate's own label
     /// said only that the interpreter asked; an audit reader needs the rule that answered.
     #[test]
-    fn a_monty_record_names_the_policy_that_decided_the_effect() {
+    fn when_a_monty_effect_is_recorded_then_the_deciding_policy_is_named() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("ok.txt"), "kept").expect("a fixture file");
         let policy = open_policy(vec![Policy {
@@ -1240,7 +1240,7 @@ mod tests {
     /// The floor's own refusal keeps the floor's label, because the policy permit it overrode is not
     /// what decided. A deny-only floor sits beneath policy and never beside it.
     #[test]
-    fn a_floor_refusal_over_a_policy_permit_keeps_the_floor_label() {
+    fn when_the_floor_overrides_a_policy_permit_then_the_floor_label_is_preserved() {
         let (root, reach) = fixture();
         let outside = root
             .path()
@@ -1273,7 +1273,7 @@ mod tests {
 
     /// `os.listdir` returns entry names for a permitted directory.
     #[test]
-    fn iterdir_lists_entry_names() {
+    fn when_iterdir_is_called_then_entry_names_are_returned() {
         let (root, reach) = fixture();
         std::fs::create_dir(home(&root).join("sub")).expect("a subdir");
         std::fs::write(home(&root).join("sub/a.txt"), "a").expect("a file");
@@ -1307,7 +1307,7 @@ mod tests {
 
     /// `open(p, "rb").read()` returns the file's bytes.
     #[test]
-    fn read_bytes_returns_file_contents() {
+    fn when_read_bytes_is_called_then_file_contents_are_returned() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("b.bin"), [1u8, 2, 3]).expect("a file");
         let policy = permissive();
@@ -1326,7 +1326,7 @@ mod tests {
 
     /// `open(p, "wb").write(...)` writes the bytes and reports the count.
     #[test]
-    fn write_bytes_writes_and_reports_the_count() {
+    fn when_write_bytes_is_called_then_bytes_are_written_and_the_count_is_returned() {
         let (root, reach) = fixture();
         let policy = permissive();
 
@@ -1349,7 +1349,7 @@ mod tests {
 
     /// `open(p, "a")` appends and does not truncate.
     #[test]
-    fn append_text_does_not_truncate() {
+    fn when_append_text_is_called_then_existing_content_is_not_truncated() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("log.txt"), "one\n").expect("seed the file");
         let policy = permissive();
@@ -1372,7 +1372,7 @@ mod tests {
 
     /// `os.path.islink` is false for a regular file.
     #[test]
-    fn is_symlink_is_false_for_a_regular_file() {
+    fn when_is_symlink_checks_a_regular_file_then_it_returns_false() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("plain.txt"), "x").expect("a file");
         let policy = permissive();
@@ -1389,7 +1389,7 @@ mod tests {
 
     /// `os.stat` normalizes `uid`/`gid`/`nlink` and keeps the real size.
     #[test]
-    fn stat_normalizes_identity_and_keeps_size() {
+    fn when_stat_is_called_then_identity_is_normalized_and_size_is_preserved() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("f.txt"), "hello").expect("a file");
         let policy = permissive();
@@ -1427,7 +1427,7 @@ mod tests {
 
     /// `os.rename` moves a file between two permitted names inside the home.
     #[test]
-    fn rename_moves_a_file_within_the_home() {
+    fn when_rename_stays_inside_the_home_then_the_file_is_moved() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("before.txt"), "data").expect("a file");
         let policy = permissive();
@@ -1456,7 +1456,7 @@ mod tests {
     /// A rename whose **destination** resolves out of the home is refused, and no move runs.
     #[cfg(unix)]
     #[test]
-    fn rename_refuses_a_destination_out_of_the_home() {
+    fn when_a_rename_destination_is_outside_the_home_then_it_is_refused() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(home(&root).join("secret.txt"), "s").expect("a file inside");
@@ -1494,7 +1494,7 @@ mod tests {
     /// A rename whose **source** resolves out of the home is refused, and no destination is made.
     #[cfg(unix)]
     #[test]
-    fn rename_refuses_a_source_out_of_the_home() {
+    fn when_a_rename_source_is_outside_the_home_then_it_is_refused() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("outside.txt"), "o").expect("a file outside");
@@ -1525,7 +1525,7 @@ mod tests {
 
     /// A rename cannot launder a denied read into a permitted new name.
     #[test]
-    fn rename_refuses_when_the_source_read_is_denied() {
+    fn when_a_rename_source_read_is_denied_then_rename_is_refused() {
         let (root, reach) = fixture();
         let home = home(&root);
         std::fs::write(home.join("secret.txt"), "classified").expect("a file");
@@ -1564,7 +1564,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
 
     /// Absent policy is default-deny for a newly-performed effect (enumerate here).
     #[test]
-    fn a_new_effect_denied_by_policy_is_refused() {
+    fn when_policy_denies_a_new_effect_then_it_is_refused() {
         let (root, reach) = fixture();
         std::fs::create_dir(home(&root).join("d")).expect("a dir");
         let policy = open_policy(Vec::<Policy>::new());
@@ -1587,7 +1587,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
 
     /// Absent policy denies a rename, and neither endpoint changes.
     #[test]
-    fn a_rename_denied_by_policy_moves_nothing() {
+    fn when_policy_denies_a_rename_then_nothing_is_moved() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("a.txt"), "a").expect("a file");
         let policy = open_policy(Vec::<Policy>::new());
@@ -1761,12 +1761,12 @@ when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.pa
     }
 
     #[test]
-    fn rename_destination_window_without_delete_permit_is_refused() {
+    fn when_a_rename_destination_appears_without_delete_permission_then_rename_is_refused() {
         rename_destination_window("");
     }
 
     #[test]
-    fn rename_destination_window_with_delete_forbid_is_refused() {
+    fn when_a_rename_destination_appears_under_a_delete_forbid_then_rename_is_refused() {
         rename_destination_window(
             r#"
 permit(principal, action == Box::Action::"fs:delete", resource);
@@ -1831,12 +1831,12 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     }
 
     #[test]
-    fn rename_to_absent_destination_needs_no_delete_permit() {
+    fn when_a_rename_destination_is_absent_then_no_delete_permit_is_required() {
         rename_control(false, "", true);
     }
 
     #[test]
-    fn rename_explicitly_authorized_overwrite_records_completion() {
+    fn when_an_overwrite_is_explicitly_authorized_then_rename_records_completion() {
         rename_control(
             true,
             r#"permit(principal, action == Box::Action::"fs:delete", resource);"#,
@@ -1845,12 +1845,12 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     }
 
     #[test]
-    fn rename_existing_destination_without_delete_permit_is_refused() {
+    fn when_a_rename_destination_exists_without_delete_permission_then_rename_is_refused() {
         rename_control(true, "", false);
     }
 
     #[test]
-    fn rename_existing_destination_with_delete_forbid_is_refused() {
+    fn when_a_rename_destination_exists_under_a_delete_forbid_then_rename_is_refused() {
         rename_control(
             true,
             r#"
@@ -1863,12 +1863,12 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn rename_unsupported_operation_never_falls_back_to_replacement() {
+    fn when_the_rename_operation_is_unsupported_then_it_never_falls_back_to_replacement() {
         const CHILD_ERROR: &str = "BOX_RENAME_TEST_ERRNO";
         let Ok(error) = std::env::var(CHILD_ERROR) else {
             for error in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
                 let output = std::process::Command::new(std::env::current_exe().expect("test image"))
-                    .args(["--exact", "run::broker::python::effects::tests::rename_unsupported_operation_never_falls_back_to_replacement", "--nocapture"])
+                    .args(["--exact", "run::broker::python::effects::tests::when_the_rename_operation_is_unsupported_then_it_never_falls_back_to_replacement", "--nocapture"])
                     .env(CHILD_ERROR, error.to_string())
                     .output().expect("child test");
                 assert!(
@@ -1962,7 +1962,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `Resolve`/`Absolute` stay refused — they would return a host path.
     #[test]
-    fn resolve_and_absolute_stay_refused() {
+    fn when_resolve_or_absolute_is_called_then_it_remains_refused() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("f.txt"), "x").expect("a file");
         let policy = permissive();
@@ -1989,7 +1989,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `open(p, "ab")` appends bytes and does not truncate.
     #[test]
-    fn append_bytes_does_not_truncate() {
+    fn when_append_bytes_is_called_then_existing_content_is_not_truncated() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("log.bin"), [1u8, 2]).expect("seed the file");
         let policy = permissive();
@@ -2013,7 +2013,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A performed effect whose I/O fails returns an `OSError`, not a broker failure.
     #[test]
-    fn read_bytes_of_a_missing_file_returns_an_os_error() {
+    fn when_read_bytes_targets_a_missing_file_then_an_os_error_is_returned() {
         let (_root, reach) = fixture();
         let policy = permissive();
 
@@ -2036,7 +2036,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     /// caller's spelling — the same deny-only floor the read/write arms share.
     #[cfg(unix)]
     #[test]
-    fn read_bytes_through_a_symlink_out_of_the_home_is_refused() {
+    fn when_read_bytes_follows_a_symlink_outside_the_home_then_it_is_refused() {
         let (root, reach) = fixture();
         let resolved = root.path().canonicalize().expect("the root resolves");
         std::fs::write(resolved.join("outside.bin"), [7u8]).expect("a file outside");
@@ -2063,7 +2063,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `Stat` reports the real size and a regular-file mode, not just the normalized identity.
     #[test]
-    fn stat_reports_real_size_and_file_type() {
+    fn when_stat_reads_a_file_then_real_size_and_file_type_are_reported() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("g.txt"), "abcd").expect("a 4-byte file");
         let policy = permissive();
@@ -2128,7 +2128,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// No effect follows a directory that a workload swapped for a link after approval.
     #[test]
-    fn an_ancestor_swapped_for_a_link_after_approval_is_never_followed() {
+    fn when_an_approved_ancestor_is_swapped_for_a_symlink_then_the_link_is_never_followed() {
         let path = |leaf: &str| MontyPath::new(format!("dir/{leaf}"));
         let calls = [
             OsFunctionCall::ReadText(path("f.txt")),
@@ -2220,7 +2220,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// No effect follows a leaf that a workload swapped for a link after approval.
     #[test]
-    fn a_leaf_swapped_for_a_link_after_approval_is_never_followed() {
+    fn when_an_approved_leaf_is_swapped_for_a_symlink_then_the_link_is_never_followed() {
         let leaf = || MontyPath::new("f.txt".to_string());
         let calls = [
             OsFunctionCall::ReadText(leaf()),
@@ -2297,7 +2297,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// An ancestor the operator may search but not list is still walked to its leaf.
     #[test]
-    fn a_search_only_ancestor_is_still_walked() {
+    fn when_an_ancestor_allows_search_only_then_path_traversal_still_succeeds() {
         use std::os::unix::fs::PermissionsExt as _;
         let (root, _) = fixture();
         let locked = home(&root).join("locked");
@@ -2321,7 +2321,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A rename never lands in a directory that a workload swapped for a link after approval.
     #[test]
-    fn a_rename_never_lands_in_a_directory_swapped_for_a_link() {
+    fn when_a_rename_directory_is_swapped_for_a_symlink_then_the_rename_never_lands_there() {
         let (root, reach) = fixture();
         let (approved, outside) = swap_for_a_link_after_approval(&root, &reach);
         let source = home(&root).join("dir-moved/f.txt");
@@ -2342,7 +2342,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `os.mkdir('d')` at a single level under an `fs:write` permit creates one directory.
     #[test]
-    fn mkdir_creates_a_single_directory() {
+    fn when_mkdir_is_called_then_one_directory_is_created() {
         let (root, reach) = fixture();
         let policy = permissive();
 
@@ -2363,7 +2363,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `os.unlink` and `os.rmdir` remove a file and a directory under an `fs:delete` permit.
     #[test]
-    fn unlink_and_rmdir_delete_within_the_home() {
+    fn when_unlink_or_rmdir_targets_the_home_then_the_entry_is_deleted() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("gone.txt"), "x").expect("a file to remove");
         std::fs::create_dir(home(&root).join("gone-dir")).expect("a directory to remove");
@@ -2393,7 +2393,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// `os.path.exists`, `Path.is_file`, and `Path.is_dir` each answer from real metadata.
     #[test]
-    fn metadata_predicates_answer_from_real_metadata() {
+    fn when_metadata_predicates_are_called_then_real_metadata_determines_the_result() {
         let (root, reach) = fixture();
         std::fs::write(home(&root).join("f.txt"), "x").expect("a file");
         std::fs::create_dir(home(&root).join("sub")).expect("a directory");
@@ -2450,7 +2450,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     /// **An environment read is refused**, because the box projects credential phantoms into the
     /// environment and the schema cannot name that authority.
     #[test]
-    fn an_environment_read_is_refused_in_the_callers_spelling() {
+    fn when_environment_is_read_then_the_refusal_uses_the_caller_spelling() {
         let (root, reach) = fixture();
         let home = home(&root);
         let policy = permissive();
@@ -2483,7 +2483,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A read that cannot complete records `Failed`.
     #[test]
-    fn a_failed_read_records_failed() {
+    fn when_a_read_fails_then_its_outcome_is_recorded_as_failed() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let missing = dir
             .path()
@@ -2499,7 +2499,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A write whose I/O fails records `Indeterminate` — a partial write leaves an unknown state.
     #[test]
-    fn a_failed_write_records_indeterminate() {
+    fn when_a_write_fails_then_its_outcome_is_recorded_as_indeterminate() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         // Writing to a directory path fails, deterministically.
         let target = dir
@@ -2520,7 +2520,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A failed append records `Indeterminate` for the same reason a failed write does.
     #[test]
-    fn a_failed_append_records_indeterminate() {
+    fn when_an_append_fails_then_its_outcome_is_recorded_as_indeterminate() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let target = dir
             .path()
@@ -2540,7 +2540,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
 
     /// A successful read and a successful write both record `Completed`.
     #[test]
-    fn a_successful_effect_records_completed() {
+    fn when_an_effect_succeeds_then_its_outcome_is_recorded_as_completed() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let existing = dir
             .path()
@@ -2570,7 +2570,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     }
 
     #[test]
-    fn a_clock_read_returns_a_real_value_not_none() {
+    fn when_the_clock_is_read_then_a_real_value_is_returned() {
         let (_root, reach) = fixture();
         let policy = permissive();
         let ix = interceptor(&policy);

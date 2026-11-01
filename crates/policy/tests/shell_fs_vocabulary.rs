@@ -204,7 +204,7 @@ fn assert_same_variants(enum_name: &str, pinned: &BTreeSet<String>) {
         added.is_empty() && removed.is_empty(),
         "the vendored `{enum_name}` changed: added {added:?}, removed {removed:?}; \
          extend this list and the one in the box crate's `run/broker/shell.rs` test \
-         `every_kernel_verb_labels_the_action_the_policy_adapter_decides`, and map each new \
+         `when_a_kernel_verb_is_decided_then_its_label_matches_the_policy_adapter_action`, and map each new \
          variant to a named action or to no decision"
     );
 }

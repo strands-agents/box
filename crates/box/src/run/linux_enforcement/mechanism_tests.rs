@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn copied_path_ends_at_the_first_nul_and_rejects_unterminated_input() {
+fn when_a_copied_path_contains_nul_then_it_ends_there_and_unterminated_input_is_rejected() {
     let mut bytes = [b'x'; 4096];
     let mut request = notify::Request {
         pid: std::process::id(),
@@ -18,7 +18,7 @@ fn copied_path_ends_at_the_first_nul_and_rejects_unterminated_input() {
 }
 
 #[test]
-fn disabled_guard_removes_loader_capabilities_without_loading_hooks() {
+fn when_the_guard_is_disabled_then_loader_capabilities_are_removed_without_loading_hooks() {
     fn capabilities() -> Vec<u64> {
         std::fs::read_to_string("/proc/self/status")
             .unwrap()

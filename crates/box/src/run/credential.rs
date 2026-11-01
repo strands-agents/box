@@ -144,7 +144,7 @@ mod tests {
 
     /// A resolved binding mints exactly one phantom, and both copies agree.
     #[test]
-    fn a_resolved_binding_mints_one_phantom_both_sides_agree_on() {
+    fn when_a_binding_is_resolved_then_both_sides_share_one_phantom() {
         // SAFETY: the variable is namespaced to this test, so no other test reads or
         // writes it, and it is removed before the test returns.
         unsafe { std::env::set_var("STRANDS_BOX_PRESENT_FOR_TESTS", "sk-real-secret") };
@@ -192,7 +192,7 @@ mod tests {
 
     /// Every binding produces a capability, phantom or not.
     #[test]
-    fn every_binding_yields_a_capability() {
+    fn when_bindings_are_resolved_then_every_binding_produces_a_capability() {
         // SAFETY: both variables are namespaced to this test.
         unsafe {
             std::env::set_var("STRANDS_BOX_FIRST_FOR_TESTS", "first");
@@ -238,7 +238,7 @@ mod tests {
 
     /// A box that declares no egress resolves nothing.
     #[test]
-    fn a_box_with_no_declared_egress_resolves_nothing() {
+    fn when_no_egress_is_declared_then_no_credentials_are_resolved() {
         let projection = workspace(&[]).expect("no bindings is not a failure");
 
         assert!(projection.capabilities.is_empty());
@@ -250,7 +250,8 @@ mod tests {
     ///
     /// The two sets differ here and are equal for an opaque route. That asymmetry is the whole
     #[test]
-    fn a_signed_route_places_nothing_and_still_credentials_the_workload() {
+    fn when_a_route_is_signed_then_no_value_is_placed_and_the_workload_still_receives_credentials()
+    {
         let bindings = target(
             r#"
             destinations = ["bedrock-runtime.us-east-2.amazonaws.com"]
@@ -293,7 +294,7 @@ mod tests {
     /// Unlike the `aws://` case above, this needs no ambient AWS identity: a signed route resolves
     /// nothing at open, and credsd resolves per request, inferring the type from `material.type`.
     #[test]
-    fn a_credsd_route_opens_signed_and_credentials_the_workload() {
+    fn when_a_route_uses_credsd_then_it_opens_signed_and_credentials_the_workload() {
         let bindings = target(
             r#"
             destinations = ["bedrock-runtime.us-east-2.amazonaws.com"]

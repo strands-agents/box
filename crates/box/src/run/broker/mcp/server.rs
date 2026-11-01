@@ -758,7 +758,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approved_mcp_protocol_revisions_are_accepted_and_other_revisions_are_refused() {
+    fn when_protocol_revisions_are_negotiated_then_approved_revisions_pass_and_other_revisions_fail()
+     {
         for protocol_version in SUPPORTED_MCP_PROTOCOL_VERSIONS {
             validate_initialize_result(&json!({
                 "result": {
@@ -782,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn paginated_discovery_accepts_responses_within_the_aggregate_maximum() {
+    fn when_paginated_responses_fit_the_aggregate_limit_then_discovery_accepts_them() {
         let pages = [
             json!({
                 "jsonrpc": "2.0",
@@ -818,7 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_timeout_stops_and_reaps_the_server_before_returning() {
+    async fn when_discovery_times_out_then_the_server_is_stopped_and_reaped_before_returning() {
         let admitted = McpServer {
             name: "silent-server".to_string(),
             command: vec![
@@ -858,7 +859,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_discovery_refuses_responses_over_the_aggregate_maximum() {
+    async fn when_paginated_responses_exceed_the_aggregate_limit_then_discovery_refuses_them() {
         let initialize = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -954,7 +955,7 @@ done
     }
 
     #[tokio::test]
-    async fn an_internal_write_deadline_reaps_a_non_reading_child() {
+    async fn when_a_child_does_not_read_then_the_internal_write_deadline_reaps_it() {
         let (mut running, _stdout) = non_reading_server().await;
         let reaped = running.observe_stop_and_wait_completion();
         let payload = "x".repeat(MAXIMUM_PENDING_FRAME_BYTES);
@@ -990,7 +991,7 @@ done
     }
 
     #[tokio::test]
-    async fn server_output_frames_enforce_the_one_mebibyte_boundary() {
+    async fn when_server_output_frames_are_read_then_the_one_mebibyte_limit_is_enforced() {
         for (payload_bytes, accepted) in [
             (crate::run::broker::protocol::MAX_FRAME_BYTES - 1, true),
             (crate::run::broker::protocol::MAX_FRAME_BYTES, false),
@@ -1026,7 +1027,7 @@ done
     }
 
     #[tokio::test]
-    async fn graceful_disconnect_waits_for_buffered_output() {
+    async fn when_disconnect_is_graceful_then_buffered_output_is_delivered_before_completion() {
         use tokio::io::AsyncReadExt as _;
 
         let admitted = McpServer {
@@ -1083,7 +1084,7 @@ done
     ///
     /// The alias reads the agent's stdin in 8192-byte chunks, so a `tools/call` with large
     #[tokio::test]
-    async fn a_frame_split_across_two_input_frames_is_reassembled() {
+    async fn when_a_frame_spans_two_inputs_then_it_is_reassembled() {
         let mut running = running_over_cat().await;
         let (first, second) = ONE_LINE_SEARCH.split_at(ONE_LINE_SEARCH.len() / 2);
 
@@ -1107,7 +1108,8 @@ done
 
     /// Several frames in one `Input` are each returned, and a trailing partial is held.
     #[tokio::test]
-    async fn many_frames_in_one_input_are_split_and_a_partial_tail_is_held() {
+    async fn when_one_input_contains_multiple_frames_then_they_are_split_and_a_partial_tail_is_retained()
+     {
         let mut running = running_over_cat().await;
         let arriving =
             format!("{ONE_LINE_SEARCH}\n{ONE_LINE_COMMENT}\n{{\"jsonrpc\":\"2.0\",\"id\":3");
@@ -1135,7 +1137,7 @@ done
     ///
     /// The tail is held rather than forwarded, so a client that never sends a newline would
     #[tokio::test]
-    async fn an_unterminated_frame_is_bounded() {
+    async fn when_a_frame_has_no_terminator_then_its_size_is_bounded() {
         let mut running = running_over_cat().await;
         let refusal = running
             .complete_frames(&vec![b'x'; MAXIMUM_PENDING_FRAME_BYTES + 1])
@@ -1152,7 +1154,7 @@ done
     }
 
     #[tokio::test]
-    async fn a_character_split_across_two_chunks_survives_reassembly() {
+    async fn when_a_character_spans_two_chunks_then_reassembly_preserves_it() {
         let mut running = running_over_cat().await;
         let frame = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"Say","arguments":{{"text":"{}"}}}}}}"#,

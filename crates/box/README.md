@@ -106,7 +106,7 @@ line.
 What a grant costs is that no `fs:*` decision records these operations, so the box prints each one
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
-grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
+grant is disclosed as a warning, which `when_a_command_is_writable_then_its_disclosure_is_a_warning` pins.
 
 **A `filesystem` list governs one process, and nothing else.** The agent's lists do not govern a
 tool, and a tool's lists do not govern the agent. A path absent from a process's own lists is a path
@@ -117,7 +117,7 @@ what the policy permits.
 process cannot read it until a list names it, which
 `box_filesystem.rs::the_workspace_is_enterable_and_unreadable_until_listed` pins. A table with no
 `workspace` uses the agent's, judged by the same rules, which
-`a_fallback_working_directory_is_judged_like_a_declared_one` pins.
+`when_a_working_directory_is_a_fallback_then_it_is_judged_like_a_declared_directory` pins.
 
 `env` cannot claim a name the box owns: proxy routing, CA trust, the OTLP exporter family, `PWD`,
 `USER`, and every loader-hook name are refused at load. `HOME`, `PATH`, and `TMPDIR` are the
@@ -466,7 +466,7 @@ that boundary honest:
 | The alias image has no serving role at all | The workload can exec the alias, so a `--serve` flag would let it start its own Shell with no policy. The role is gone rather than guarded |
 | The alias derives its socket from its own path | An argument would let the workload aim requests at a socket it controls |
 | The hosted Shell has no network of its own | It is not behind the proxy, so egress there would bypass the only governed route |
-| The Shell's binds are **not** a floor | It gets one bind per reachable root, so the scope alone withholds nothing an operator keeps there. Policy decides every operation inside them, and deny-only floors sit beneath policy. `a_snapshotted_bind_refuses_to_serve` pins that a bind which drifts from its snapshot refuses to serve |
+| The Shell's binds are **not** a floor | It gets one bind per reachable root, so the scope alone withholds nothing an operator keeps there. Policy decides every operation inside them, and deny-only floors sit beneath policy. `when_a_bind_was_snapshotted_then_serving_it_is_refused` pins that a bind which drifts from its snapshot refuses to serve |
 
 The floors are not the bind scope. The product-state floor refuses the box product directory and
 every authority source this run loaded, whatever a rule permits. The authority-source floor refuses mutations to the exact configuration and
@@ -523,7 +523,7 @@ credential phantom can never displace proxy routing or CA trust:
 `PATH` is composed rather than owned. The box prepends its alias directory and keeps the rest, so
 an alias wins a bare-name search while the operator's own tools stay resolvable. A profile still
 permits exec on the literals the box granted, so a longer `PATH` advertises nothing the box will
-run. `a_declared_home_and_path_win_beneath_cores_names` pins the order.
+run. `when_home_and_path_are_declared_then_they_override_defaults_beneath_core_owned_names` pins the order.
 
 `TERM`, `TMPDIR`, `LANG`, and `TZ` are the operator's to set, in `env`.
 

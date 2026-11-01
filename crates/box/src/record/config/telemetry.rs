@@ -374,7 +374,7 @@ mod tests {
     /// and the guard is one `starts_with` against a directory a caller now chooses — so an
     /// anchor pointing at nothing would look identical to an anchor working.
     #[test]
-    fn a_destination_inside_the_box_directory_outside_private_is_refused() {
+    fn when_a_destination_is_inside_box_state_but_outside_private_storage_then_it_is_refused() {
         let box_directory = Path::new("/var/lib/boxes/codex");
 
         let refusal = refuse_a_workload_reachable_destination(
@@ -414,7 +414,7 @@ mod tests {
     /// its private tree, and accepted inside it.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_data_volume_destination_outside_private_is_refused() {
+    fn when_a_data_volume_destination_is_outside_private_storage_then_it_is_refused() {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let box_directory = scratch
             .path()
@@ -445,7 +445,7 @@ mod tests {
 
     /// A sibling whose path merely *starts with* the box directory's spelling is not inside it.
     #[test]
-    fn a_sibling_sharing_the_box_directorys_prefix_is_not_inside_it() {
+    fn when_a_sibling_shares_the_box_directory_prefix_then_it_is_not_classified_as_inside() {
         refuse_a_workload_reachable_destination(
             "/var/lib/boxes/codex-notes/records.jsonl",
             Path::new("/var/lib/boxes/codex"),
@@ -456,7 +456,8 @@ mod tests {
     /// **A secret reference is a reference.** `secret://NAME` means `env://NAME`, and a bare value is
     /// refused without being echoed, in case it is one.
     #[test]
-    fn a_secret_reference_is_normalized_and_a_literal_is_refused() {
+    fn when_a_secret_destination_is_loaded_then_references_are_normalized_and_literals_are_refused()
+    {
         assert_eq!(
             telemetry_secret_uri("secret://HONEYCOMB_KEY").expect("the alias is accepted"),
             format!("{ENV_SCHEME}HONEYCOMB_KEY")
@@ -480,7 +481,7 @@ mod tests {
 
     /// A file destination must be absolute or `~/`-relative, judged on the AUTHORED spelling.
     #[test]
-    fn a_relative_file_destination_is_refused() {
+    fn when_a_file_destination_is_relative_then_it_is_refused() {
         let entry = TelemetryEntry {
             kind: TargetKind::File,
             destination: "records.jsonl".to_string(),
@@ -501,7 +502,7 @@ mod tests {
     /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log is
     /// not a span and an operator narrowing to spans must not silently also take metrics.
     #[test]
-    fn the_five_words_expand_through_the_production_path() {
+    fn when_signal_names_are_expanded_then_all_five_use_the_production_path() {
         assert_eq!(
             signals_for(&[SignalGroup::Deny]),
             vec![Signal::PolicyDenied]
@@ -532,7 +533,7 @@ mod tests {
     /// `Signal::default_signals` — the box could otherwise call `receiving` with a narrower set and
     /// this assertion would still pass.
     #[test]
-    fn an_absent_include_takes_every_signal() {
+    fn when_include_is_absent_then_every_signal_is_selected() {
         let entry = TelemetryEntry {
             kind: TargetKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -559,7 +560,7 @@ mod tests {
     /// **An empty `include` and a repeated word are both refused in the operator's own vocabulary**,
     /// because the collector's own messages name the record spellings instead.
     #[test]
-    fn an_empty_or_repeated_include_is_refused_naming_the_five_words() {
+    fn when_include_is_empty_or_repeated_then_the_error_names_the_five_supported_signals() {
         let entry = |include: Vec<SignalGroup>| TelemetryEntry {
             kind: TargetKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -597,7 +598,7 @@ mod tests {
     /// array. `[[telemetry.file]]` with no entries was a kind naming no target, and `checked` had to
     /// refuse it; `[telemetry.<name>]` cannot be written that way.
     #[test]
-    fn no_declaration_can_name_a_kind_without_a_target() {
+    fn when_a_kind_has_no_target_then_its_declaration_is_refused() {
         assert!(
             checked(&BTreeMap::new(), Path::new("/var/lib/boxes/codex"))
                 .expect("no targets is not an error")

@@ -188,7 +188,7 @@ mod bounded_output;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn kernel_probe_completes_and_does_not_filter_the_parent() {
+    fn when_the_kernel_probe_runs_then_it_completes_without_filtering_the_parent() {
         const REFUSED: &str = "BOX_NATIVE_PROBE_TEST_REFUSE_SECCOMP";
         if std::env::var_os(REFUSED).is_some() {
             // The child test withholds only the primitive the probe must exercise.
@@ -238,7 +238,7 @@ mod tests {
         // SAFETY: getpid takes no pointers and must remain unfiltered in the parent.
         assert!(unsafe { libc::syscall(libc::SYS_getpid) } > 0);
         let name = format!(
-            "{}::kernel_probe_completes_and_does_not_filter_the_parent",
+            "{}::when_the_kernel_probe_runs_then_it_completes_without_filtering_the_parent",
             module_path!().split_once("::").unwrap().1
         );
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());

@@ -1451,7 +1451,7 @@ mod tests {
     /// `start_mcp_server`, the `recorder.record(...)` for `egress:native` must appear *after* the
     /// `launcher.spawn(...)` call, so a future reorder that emits it before the `?` fails here.
     #[test]
-    fn the_native_egress_record_is_emitted_after_launch_succeeds() {
+    fn when_native_launch_succeeds_then_the_native_egress_record_is_emitted() {
         let src = include_str!("host.rs");
         let launch = src
             .find(".spawn(boundary)")
@@ -1780,7 +1780,7 @@ done"#;
     /// An uncontained start runs only when `shell:spawn` permits the declared program and its
     /// arguments.
     #[test]
-    fn an_uncontained_start_is_decided_on_its_program_and_arguments() {
+    fn when_an_uncontained_start_is_decided_then_its_program_and_arguments_are_used() {
         let markers = tempfile::tempdir().expect("marker directory");
         let started = markers.path().join("started");
         let command = vec![
@@ -1886,7 +1886,7 @@ done"#;
     }
 
     #[test]
-    fn peer_poll_retries_only_interrupted_errors() {
+    fn when_peer_poll_is_interrupted_then_it_retries_but_other_errors_do_not() {
         let mut attempts = 0;
         let disconnected = poll_disconnect_with(|| {
             attempts += 1;
@@ -1985,7 +1985,7 @@ done"#;
 
     /// A client that abandons a running command costs only its own connection.
     #[test]
-    fn an_abandoned_command_does_not_stop_the_boundary() {
+    fn when_a_command_is_abandoned_then_the_boundary_keeps_serving() {
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let marker = marker_directory.path().join("started");
         let spec = connection_spec(marker_directory.path());
@@ -2016,7 +2016,7 @@ done"#;
 
     /// A Call's status is returned only after its write is on the host.
     #[test]
-    fn a_calls_write_is_on_the_host_when_its_status_returns() {
+    fn when_a_call_returns_its_status_then_its_write_is_visible_on_the_host() {
         const LENGTH: usize = 10 * 1024 * 1024 - 1;
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let destination = marker_directory.path().join("dst");
@@ -2048,7 +2048,7 @@ done"#;
 
     /// A later request does not inherit an abandoned command's session state.
     #[test]
-    fn a_later_request_does_not_inherit_abandoned_session_state() {
+    fn when_a_request_follows_an_abandoned_call_then_it_inherits_no_abandoned_state() {
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let marker = marker_directory.path().join("exported");
         let spec = connection_spec(marker_directory.path());
@@ -2081,7 +2081,7 @@ done"#;
 
     /// An expired deadline is reported to the client, and the boundary keeps serving.
     #[test]
-    fn an_expired_command_is_reported_and_the_boundary_keeps_serving() {
+    fn when_a_command_expires_then_it_is_reported_and_the_boundary_keeps_serving() {
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let spec = short_connection_spec(marker_directory.path());
         let (runtime, local) = runtime();
@@ -2115,7 +2115,7 @@ done"#;
     /// The broker's own deadline refuses a Call with `timeout`, distinct from the Shell's
     /// `command_timeout` (which reports an `Exit`).
     #[test]
-    fn a_call_that_outlives_the_broker_deadline_is_denied_with_timeout() {
+    fn when_a_call_exceeds_the_broker_deadline_then_it_is_denied_with_timeout() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2168,7 +2168,7 @@ done"#;
 
     /// A client that closes before sending anything costs nothing and is not an error.
     #[test]
-    fn a_connection_that_sends_nothing_builds_no_shell() {
+    fn when_a_connection_sends_nothing_then_no_shell_is_created() {
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let marker = marker_directory.path().join("must-not-exist");
         let spec = connection_spec(marker_directory.path());
@@ -2195,7 +2195,7 @@ done"#;
 
     /// A request naming an unknown protocol version is refused without building a Shell.
     #[test]
-    fn an_unknown_protocol_version_is_refused() {
+    fn when_the_protocol_version_is_unknown_then_the_connection_is_refused() {
         let marker_directory = tempfile::tempdir().expect("marker directory");
         let spec = connection_spec(marker_directory.path());
         let (runtime, local) = runtime();
@@ -2327,7 +2327,7 @@ done"#;
     }
 
     #[test]
-    fn a_background_effect_never_inherits_the_next_calls_trace() {
+    fn when_a_background_effect_outlives_its_call_then_it_never_inherits_the_next_trace() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2408,7 +2408,7 @@ done"#;
 
     /// A Program keeps its state across Calls on one connection.
     #[test]
-    fn a_program_keeps_its_state_across_calls() {
+    fn when_one_program_receives_multiple_calls_then_its_state_is_preserved() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2455,7 +2455,7 @@ done"#;
 
     /// Two Programs on ONE connection keep separate state.
     #[test]
-    fn two_programs_on_one_connection_are_isolated() {
+    fn when_two_programs_share_a_connection_then_their_state_is_isolated() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2503,7 +2503,7 @@ done"#;
 
     /// A Call's output arrives as `Output` frames, chunked and stream-tagged.
     #[test]
-    fn a_calls_output_arrives_as_tagged_chunks() {
+    fn when_a_call_produces_output_then_tagged_chunks_are_delivered() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2567,7 +2567,7 @@ done"#;
 
     /// Output arrives *before* the Call ends, not with its exit.
     #[test]
-    fn output_arrives_while_the_call_is_still_running() {
+    fn when_a_call_is_still_running_then_its_output_can_arrive() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2612,7 +2612,7 @@ done"#;
 
     /// Bytes sent as `Input` reach the Program's standard input.
     #[test]
-    fn input_frames_reach_the_programs_stdin() {
+    fn when_input_frames_arrive_then_they_reach_the_program_stdin() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2655,7 +2655,7 @@ done"#;
 
     /// A `Signal` ends the Call and leaves the Program usable.
     #[test]
-    fn a_signal_ends_the_call_but_not_the_program() {
+    fn when_a_call_receives_a_signal_then_the_call_ends_and_the_program_survives() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2712,7 +2712,7 @@ done"#;
 
     /// A request/reply session over one Program, using only the frames the protocol already has.
     #[test]
-    fn a_program_serves_a_request_reply_session() {
+    fn when_a_program_receives_requests_then_it_serves_replies_across_the_conversation() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2785,7 +2785,7 @@ done"#;
     }
 
     #[test]
-    fn a_discovery_release_waits_for_a_successful_flush() {
+    fn when_a_discovery_reply_flush_succeeds_then_discovery_is_released_after_the_flush() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let GuardedDiscovery {
@@ -2815,7 +2815,7 @@ done"#;
     }
 
     #[test]
-    fn a_discovery_release_waits_for_flush_even_when_flush_fails() {
+    fn when_a_discovery_reply_flush_fails_then_discovery_still_waits_for_the_flush() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let GuardedDiscovery {
@@ -2850,7 +2850,7 @@ done"#;
     }
 
     #[test]
-    fn a_discovery_release_waits_for_the_writer_timeout() {
+    fn when_a_discovery_writer_times_out_then_discovery_waits_for_that_timeout() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let GuardedDiscovery {
@@ -2879,7 +2879,7 @@ done"#;
     }
 
     #[test]
-    fn one_mcp_open_starts_the_declared_server_immediately() {
+    fn when_mcp_is_opened_then_the_declared_server_starts_immediately() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -2917,7 +2917,7 @@ done"#;
     }
 
     #[test]
-    fn a_cached_mcp_failure_denies_a_fresh_open_and_closes_its_connection() {
+    fn when_an_mcp_failure_is_cached_then_a_fresh_open_is_denied_and_its_connection_closes() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3019,7 +3019,8 @@ exit 17"#;
     }
 
     #[test]
-    fn a_completed_mcp_exchange_closes_transport_without_alias_eof_and_preserves_cache() {
+    fn when_an_mcp_exchange_completes_then_transport_closes_without_alias_eof_and_cache_is_preserved()
+     {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3161,7 +3162,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
 
     #[cfg(unix)]
     #[test]
-    fn broker_shutdown_joins_a_live_mcp_exchange_and_reaps_its_process_group() {
+    fn when_the_broker_shuts_down_then_a_live_mcp_exchange_is_joined_and_its_process_group_is_reaped()
+     {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3238,7 +3240,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
 
     #[cfg(unix)]
     #[test]
-    fn a_protocol_error_reaps_the_open_mcp_process_group() {
+    fn when_an_open_mcp_program_has_a_protocol_error_then_its_process_group_is_reaped() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3317,7 +3319,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
     }
 
     #[test]
-    fn each_root_list_reaches_the_server_and_an_unchanged_one_keeps_the_catalog() {
+    fn when_root_lists_repeat_then_each_reaches_the_server_and_an_unchanged_catalog_is_kept() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3469,7 +3471,7 @@ done"#,
     }
 
     #[test]
-    fn a_denied_mcp_tool_call_answers_and_keeps_the_server() {
+    fn when_an_mcp_tool_call_is_denied_then_the_client_gets_a_reply_and_the_server_survives() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3645,7 +3647,7 @@ done"#;
     }
 
     #[test]
-    fn a_call_on_one_program_does_not_block_another() {
+    fn when_one_program_has_an_active_call_then_another_program_can_run() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3716,7 +3718,7 @@ done"#;
 
     /// A second Call for a Program already running one is refused, not queued.
     #[test]
-    fn a_concurrent_call_on_one_program_is_refused() {
+    fn when_a_program_receives_a_concurrent_call_then_the_new_call_is_refused() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3784,7 +3786,7 @@ done"#;
 
     /// Closing a Program mid-Call is final: a later `Open` at the same id is not clobbered.
     #[test]
-    fn closing_a_running_program_does_not_resurrect_it() {
+    fn when_a_running_program_is_closed_then_completion_does_not_resurrect_it() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -3842,7 +3844,7 @@ done"#;
     }
 
     #[test]
-    fn a_stale_mcp_completion_does_not_remove_a_reopened_program() {
+    fn when_an_old_mcp_exchange_completes_then_a_reopened_program_is_not_removed() {
         let mut programs = HashMap::from([(
             7,
             OpenMcpProgram {
@@ -3871,7 +3873,7 @@ done"#;
 
     /// A completed Call preserves the next frame's partially read prefix.
     #[test]
-    fn a_partial_transport_frame_survives_another_calls_completion() {
+    fn when_another_call_completes_then_a_partial_transport_frame_is_preserved() {
         use std::os::fd::{AsFd, AsRawFd};
         use tokio::io::AsyncWriteExt;
 
@@ -3970,7 +3972,7 @@ done"#;
 
     /// A reused `ProgramId` is never answered with a closed Call's status.
     #[test]
-    fn a_reused_program_id_never_reports_a_closed_calls_status() {
+    fn when_a_program_id_is_reused_then_no_closed_call_status_is_reported() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4042,7 +4044,7 @@ done"#;
     /// and `InputEof` and `Signal` were dropped in silence — no way to interrupt a running script and
     /// no frame saying so. Nothing covered any of the three.
     #[test]
-    fn a_python_program_refuses_input_and_signal_by_name() {
+    fn when_a_python_program_receives_input_or_signal_then_it_is_refused_by_name() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4096,7 +4098,7 @@ done"#;
     ///
     /// This asserted that the daemon *dropped the connection*. Dropping it is what broke a denied
     #[test]
-    fn a_frame_for_an_unopened_program_is_refused() {
+    fn when_a_frame_names_an_unopened_program_then_it_is_refused() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4154,7 +4156,7 @@ done"#;
 
     /// A second `Open` on a live Program drops the connection.
     #[test]
-    fn reopening_a_live_program_is_refused() {
+    fn when_a_live_program_is_opened_again_then_it_is_refused() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4181,7 +4183,7 @@ done"#;
 
     /// A daemon-only body sent BY the client drops the connection.
     #[test]
-    fn a_client_sending_a_daemon_body_is_refused() {
+    fn when_a_client_sends_a_daemon_only_body_then_it_is_refused() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4199,7 +4201,7 @@ done"#;
 
     /// Past the per-connection cap, an `Open` is denied while open Programs keep serving.
     #[test]
-    fn the_program_cap_denies_rather_than_dropping() {
+    fn when_the_program_limit_is_reached_then_new_programs_are_denied_instead_of_dropped() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4259,7 +4261,7 @@ done"#;
     }
 
     #[test]
-    fn disconnect_before_first_call_poll_cancels_the_queued_call() {
+    fn when_a_client_disconnects_before_the_first_poll_then_the_queued_call_is_canceled() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4307,7 +4309,7 @@ done"#;
 
     /// Dropping the connection reaps every Program on it.
     #[test]
-    fn broker_shutdown_cancels_active_shell_calls_before_joining() {
+    fn when_the_broker_shuts_down_then_active_shell_calls_are_canceled_before_joining() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4356,7 +4358,7 @@ done"#;
 
     /// Dropping the connection reaps every Program on it.
     #[test]
-    fn dropping_a_connection_reaps_its_programs() {
+    fn when_a_connection_is_dropped_then_its_programs_are_reaped() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
@@ -4422,7 +4424,7 @@ done"#;
 
     /// The daemon reads the peer's pid, and it is the *test process* that connected.
     #[test]
-    fn the_daemon_reads_the_connecting_peers_pid() {
+    fn when_a_peer_connects_then_its_pid_is_read() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let directory = tempfile::tempdir().expect("socket directory");
@@ -4446,7 +4448,7 @@ done"#;
 
     /// Peer identity never reaches a policy request.
     #[test]
-    fn peer_identity_never_reaches_a_policy_request() {
+    fn when_peer_identity_is_observed_then_it_is_not_added_to_policy_requests() {
         // `Principal` is constructed from a *boundary*, taking no caller argument at all.
         let principal = Principal::agent();
         let rendered = format!("{principal:?}");
@@ -4473,7 +4475,7 @@ done"#;
 
     /// Version 1 still works, so the alias is unaffected while clients migrate.
     #[test]
-    fn the_previous_protocol_still_serves() {
+    fn when_a_client_uses_the_previous_protocol_then_it_is_still_served() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");

@@ -897,7 +897,7 @@ mod tests {
     /// between the boundary and the contained `exec` cannot be dropped without a failing test. The
     /// executable stays the last argument before the workload's own, whichever way it goes.
     #[test]
-    fn the_spelling_is_passed_as_argument_zero_and_omitted_when_absent() {
+    fn when_launch_spelling_is_present_then_it_becomes_argument_zero_and_absence_omits_it() {
         let file = File::open("/dev/null").expect("a descriptor");
         let config = Path::new("/tmp/containment.json");
         let program = Path::new("/usr/bin/python3.9");
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_image_is_accepted() {
+    fn when_a_helper_image_is_valid_then_it_is_accepted() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         write_executable(&path, &valid_image());
@@ -970,7 +970,7 @@ mod tests {
     /// A marker-bearing script is refused: the kernel would run it through an
     /// interpreter, so it is not the native image the box validated for.
     #[test]
-    fn a_marker_bearing_script_is_refused() {
+    fn when_a_script_contains_the_helper_marker_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         let mut script = b"#!/bin/sh\n".to_vec();
@@ -983,7 +983,7 @@ mod tests {
 
     /// A native image without the marker is refused.
     #[test]
-    fn an_image_without_the_marker_is_refused() {
+    fn when_an_image_has_no_helper_marker_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         let mut image = native_magic().to_vec();
@@ -996,7 +996,7 @@ mod tests {
 
     /// A marker straddling the read buffer boundary is still found.
     #[test]
-    fn a_marker_across_a_chunk_boundary_is_found() {
+    fn when_the_helper_marker_crosses_a_chunk_boundary_then_it_is_found() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         let mut image = native_magic().to_vec();
@@ -1011,7 +1011,7 @@ mod tests {
 
     /// A symlink is refused rather than followed.
     #[test]
-    fn a_symlink_is_refused_without_following_it() {
+    fn when_the_helper_path_is_a_symlink_then_it_is_refused_without_following_it() {
         let directory = tempfile::tempdir().unwrap();
         let real = directory.path().join("real-image");
         write_executable(&real, &valid_image());
@@ -1032,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn a_non_executable_file_is_refused() {
+    fn when_a_file_is_not_executable_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         std::fs::write(&path, valid_image()).unwrap();
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_is_refused() {
+    fn when_the_helper_path_is_a_directory_then_it_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         std::fs::create_dir(&path).unwrap();
@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_helper_names_the_install_expectation() {
+    fn when_the_helper_is_missing_then_the_error_names_the_install_expectation() {
         let directory = tempfile::tempdir().unwrap();
 
         let error = accepts(&directory.path().join(HELPER_NAME))
@@ -1073,7 +1073,7 @@ mod tests {
     /// A relative path is refused: the trampoline is located by install position,
     /// so a relative spelling could be reinterpreted by a cwd change.
     #[test]
-    fn a_relative_path_is_refused() {
+    fn when_the_helper_path_is_relative_then_it_is_refused() {
         let error = validate_installed(Path::new("strands-box-contain-trampoline"))
             .expect_err("a relative helper path must be refused");
         assert!(
@@ -1085,7 +1085,7 @@ mod tests {
     /// Bytes are read from the opened identity, so replacing the pathname after
     /// the open cannot change what was validated.
     #[test]
-    fn validation_reads_the_opened_identity_not_the_path() {
+    fn when_the_helper_path_is_replaced_then_validation_reads_the_opened_identity() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(HELPER_NAME);
         write_executable(&path, &valid_image());
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_materialization_uses_the_opened_directory_after_a_path_swap() {
+    fn when_the_cache_path_is_swapped_then_materialization_uses_the_opened_directory() {
         let parent = tempfile::tempdir().expect("cache parent");
         let cache = parent.path().join("cache");
         let moved = parent.path().join("moved-cache");
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_image_exec_uses_the_opened_directory_after_a_path_swap() {
+    async fn when_the_cache_path_is_swapped_then_cached_exec_uses_the_opened_directory() {
         let parent = tempfile::tempdir().expect("cache parent");
         let cache = parent.path().join("cache");
         let moved = parent.path().join("moved-cache");
@@ -1173,7 +1173,7 @@ mod tests {
     /// Silence means the workload ran: whatever status came back is authentically
     /// the workload's.
     #[test]
-    fn no_status_byte_means_the_workload_ran() {
+    fn when_no_status_byte_is_received_then_the_workload_is_reported_as_started() {
         let mut command = Command::new("/bin/true");
         let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
@@ -1185,7 +1185,7 @@ mod tests {
     /// One byte means containment failed at that stage, and the box reports the
     /// stage rather than the child's exit status.
     #[test]
-    fn one_status_byte_reports_its_stage() {
+    fn when_one_status_byte_is_received_then_its_stage_is_reported() {
         use std::io::Write as _;
 
         let mut command = Command::new("/bin/true");
@@ -1198,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn read_failure_reads_exactly_one_status_byte() {
+    fn when_setup_failure_is_read_then_exactly_one_status_byte_is_consumed() {
         use std::io::Write as _;
 
         let mut command = Command::new("/bin/true");
@@ -1215,7 +1215,7 @@ mod tests {
     /// The pipe passes the child a descriptor above stdio, so `Command`'s own
     /// stdin/stdout/stderr wiring cannot collide with it.
     #[test]
-    fn the_status_descriptor_is_above_stdio() {
+    fn when_a_status_descriptor_is_allocated_then_it_is_above_stdio() {
         let mut command = Command::new("/bin/true");
         let pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
@@ -1229,7 +1229,7 @@ mod tests {
     /// Both ends are close-on-exec in the parent, so an unrelated spawn cannot
     /// leak the pipe and hold it open forever.
     #[test]
-    fn both_pipe_ends_are_close_on_exec_in_the_parent() {
+    fn when_the_status_pipe_is_created_then_both_parent_ends_close_on_exec() {
         let mut command = Command::new("/bin/true");
         let pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
@@ -1250,7 +1250,7 @@ mod tests {
     /// Two trampolines in one process get distinct descriptors, so their status
     /// channels cannot be confused.
     #[test]
-    fn concurrent_trampolines_reserve_distinct_descriptors() {
+    fn when_trampolines_start_concurrently_then_they_reserve_distinct_descriptors() {
         let mut first_command = Command::new("/bin/true");
         let first = SetupStatusPipe::attach(&mut first_command).unwrap();
         let mut second_command = Command::new("/bin/true");

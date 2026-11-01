@@ -1302,7 +1302,8 @@ mod tests {
     }
 
     #[test]
-    fn process_policy_overrides_require_the_global_gate_and_a_new_record() {
+    fn when_process_policy_overrides_are_selected_then_the_global_gate_and_a_new_record_are_required()
+     {
         for table in ["agent", "tool.cargo", "mcp.files"] {
             let transport = if table.starts_with("mcp.") {
                 "type = \"stdio\"\n"
@@ -1336,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_mcp_cannot_select_local_filesystem_interception() {
+    fn when_remote_mcp_selects_local_filesystem_interception_then_configuration_is_refused() {
         let text = r#"name = "codex"
 box_dir = "/var/lib/box"
 [mcp.remote]
@@ -1348,7 +1349,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn experimental_selection_is_explicit_and_strict() {
+    fn when_experimental_features_are_selected_then_selection_is_explicit_and_strict() {
         let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
         let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
         assert!(absent.experimental_features.is_disabled());
@@ -1388,7 +1389,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn native_enforcement_cannot_hide_in_a_legacy_record() {
+    fn when_a_legacy_record_contains_native_enforcement_then_it_is_refused() {
         let mut ordinary = record(None, BTreeMap::new());
         let original = toml::to_string(&ordinary).unwrap();
         assert!(!original.contains("experimental-features"));
@@ -1414,7 +1415,7 @@ native-filesystem-policy = false
     // ── The four inputs ────────────────────────────────────────────────────────
 
     #[test]
-    fn box_names_outside_one_safe_component_are_refused() {
+    fn when_a_box_name_is_not_one_safe_component_then_it_is_refused() {
         // The name becomes a path component under a directory the profile grants read
         // and write on, so anything but one plain component is authority over wherever
         for name in [
@@ -1435,7 +1436,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn a_name_longer_than_one_readable_label_is_refused() {
+    fn when_a_box_name_exceeds_one_readable_label_then_it_is_refused() {
         let longest = "a".repeat(MAXIMUM_BOX_NAME);
         assert_eq!(BoxName::parse(&longest).unwrap().as_str(), longest);
 
@@ -1446,7 +1447,7 @@ native-filesystem-policy = false
             "the refusal must say why the cap exists: {error}"
         );
         // The cap no longer bounds a socket path. `box_dir` does, and
-        // `layout.rs::a_box_directory_whose_socket_exceeds_the_platform_limit_is_refused` pins it.
+        // `layout.rs::when_a_box_socket_path_exceeds_the_platform_limit_then_the_box_directory_is_refused` pins it.
         assert!(
             !error.to_string().contains("Unix-socket"),
             "the name sites no socket now, so the refusal must not claim it does: {error}"
@@ -1454,7 +1455,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn trailing_arguments_keep_their_order_and_refuse_non_utf8() {
+    fn when_trailing_arguments_are_loaded_then_order_is_preserved_and_non_utf8_is_refused() {
         assert_eq!(
             trailing_arguments(&["exec", "--json"].map(OsString::from)).unwrap(),
             ["exec", "--json"]
@@ -1471,7 +1472,8 @@ native-filesystem-policy = false
 
     /// Unknown keys remain errors when experimental enforcement is available.
     #[test]
-    fn the_config_accepts_the_nine_keys_and_refuses_unknown_keys() {
+    fn when_configuration_keys_are_loaded_then_the_nine_supported_keys_pass_and_unknown_keys_fail()
+    {
         // `name` and `box_dir` are the two required keys, so every accepted spelling carries both.
         let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
         for known in [
@@ -1500,7 +1502,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn a_tool_label_outside_one_component_is_refused() {
+    fn when_a_tool_label_is_not_one_component_then_it_is_refused() {
         for label in ["\"a b\"", "\"a/b\"", "\"..\""] {
             let refusal = load(&format!("[tool.{label}]\ncommand = [\"x\"]"))
                 .expect_err("a label that is not one component is refused");
@@ -1511,7 +1513,8 @@ native-filesystem-policy = false
     /// **A tool and a stdio MCP server may declare a network table, and the agent may not**, so the
     /// agent's egress always goes through the gateway.
     #[test]
-    fn a_tool_table_declares_network_and_the_agent_cannot() {
+    fn when_a_tool_declares_network_settings_then_they_are_accepted_but_agent_settings_are_refused()
+    {
         for table in [
             "[tool.x]\ncommand = [\"x\"]\n[tool.x.network]\ncontain_egress = false",
             "[tool.x]\ncommand = [\"x\"]\nnetwork = { contain_egress = false }",
@@ -1539,7 +1542,7 @@ native-filesystem-policy = false
 
     #[cfg(unix)]
     #[test]
-    fn an_authority_source_refuses_more_than_one_filesystem_name() {
+    fn when_an_authority_source_has_multiple_filesystem_names_then_it_is_refused() {
         let directory = tempfile::tempdir().expect("authority directory");
         let source_path = directory.path().join("control.any");
         let hard_link = directory.path().join("control-link");
@@ -1559,7 +1562,7 @@ native-filesystem-policy = false
 
     #[cfg(unix)]
     #[test]
-    fn an_authority_source_refuses_a_hard_link_added_after_load() {
+    fn when_an_authority_source_gains_a_hard_link_after_load_then_it_is_refused() {
         let directory = tempfile::tempdir().expect("authority directory");
         let source_path = directory.path().join("control.any");
         let hard_link = directory.path().join("control-link");
@@ -1582,7 +1585,7 @@ native-filesystem-policy = false
     // ── The wire record ────────────────────────────────────────────────────────
 
     #[test]
-    fn a_minimal_config_declares_a_policy_and_one_credential() {
+    fn when_minimal_configuration_is_loaded_then_it_declares_a_policy_and_one_credential() {
         let config = load(
             r#"
             policy = "box.cedar"
@@ -1601,7 +1604,7 @@ native-filesystem-policy = false
     /// **`name` and `box_dir` are the whole minimum**, and a file holding them declares nothing
     /// else. Every other key is absent rather than defaulted.
     #[test]
-    fn a_config_holding_a_name_and_a_box_directory_declares_nothing_else() {
+    fn when_only_name_and_box_directory_are_configured_then_no_other_inputs_are_declared() {
         let config = load("").expect("valid");
         assert!(config.policy.is_none());
         assert!(config.egress.is_empty());
@@ -1616,7 +1619,7 @@ native-filesystem-policy = false
     /// **An absent `box_dir` is a load error**, because Box sites no box for a caller who names
     /// no directory. Serde produces the refusal, the same way it does for an absent `name`.
     #[test]
-    fn an_absent_box_dir_is_refused_by_name() {
+    fn when_box_dir_is_absent_then_configuration_is_refused_by_name() {
         let error = toml::from_str::<ConfigFile>("name = \"codex\"\n")
             .expect_err("a config with no `box_dir` must be refused");
         assert!(
@@ -1627,7 +1630,7 @@ native-filesystem-policy = false
 
     /// A relative `box_dir` is refused, because no directory is its root.
     #[test]
-    fn a_relative_box_dir_is_refused() {
+    fn when_box_dir_is_relative_then_configuration_is_refused() {
         let directory = tempfile::tempdir().expect("a config directory");
         let config = directory.path().join("box.toml");
         std::fs::write(&config, "name = \"codex\"\nbox_dir = \"state\"\n").expect("write");
@@ -1647,7 +1650,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn a_relative_policy_path_resolves_beside_the_config() {
+    fn when_a_policy_path_is_relative_then_it_resolves_beside_the_configuration() {
         let config = load(r#"policy = "box.cedar""#).expect("valid");
         assert_eq!(
             config.policy_path(Path::new("/etc/boxes/strands-box.toml")),
@@ -1663,7 +1666,7 @@ native-filesystem-policy = false
 
     /// `type` is gone with remote MCP, so it is now a hard error rather than a dead key.
     #[test]
-    fn a_type_key_is_refused() {
+    fn when_a_type_key_is_declared_then_configuration_is_refused() {
         for spelling in ["http", "mcp", "stdio"] {
             let parsed: Result<ConfigFile, _> = toml::from_str(&format!(
                 "[egress.a]\ntype = {spelling:?}\ndestinations = [\"api.test\"]\n\
@@ -1677,7 +1680,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn an_unknown_field_is_a_load_error() {
+    fn when_a_configuration_field_is_unknown_then_loading_fails() {
         let parsed: Result<ConfigFile, _> = toml::from_str(
             "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://T\"\ncredentail_header = \"x\"",
         );
@@ -1693,7 +1696,7 @@ native-filesystem-policy = false
     // ── The stored record ──────────────────────────────────────────────────────
 
     #[test]
-    fn a_record_survives_the_gap_between_configure_and_start() {
+    fn when_configuration_and_start_are_separated_then_the_record_remains_usable() {
         let variable = present_variable();
         let mut stored = record(
             None,
@@ -1727,7 +1730,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn a_record_without_box_identity_is_refused_even_without_tool_sections() {
+    fn when_box_identity_is_missing_then_the_record_is_refused_even_without_tools() {
         for version in [8, 9] {
             let error = parsed_record(&format!("version = {version}\nname = \"codex\""))
                 .expect_err("a record without Box identity cannot load");
@@ -1740,7 +1743,7 @@ native-filesystem-policy = false
     }
 
     #[test]
-    fn an_old_record_carrying_a_removed_tool_key_is_refused_by_name() {
+    fn when_an_old_record_contains_a_removed_tool_key_then_it_is_refused_by_name() {
         let text = r#"
 version = 8
 name = "codex"
@@ -1769,7 +1772,7 @@ env = {}
     /// **Every key an earlier build read is refused by name, with its replacement**, on a stored
     /// record before the version gate and on an authored file before the unknown-field error.
     #[test]
-    fn every_removed_key_is_refused_by_name_with_its_replacement() {
+    fn when_a_removed_key_is_declared_then_the_error_names_the_key_and_its_replacement() {
         let cases: [(&str, &str, &str); 17] = [
             (
                 "[filesystem]\nworkspace = \"read-write\"\n",
@@ -1888,7 +1891,7 @@ env = {}
     /// removal the version gate refuses that record with a version mismatch, so the operator gets a
     /// stale-state remedy rather than a bare `unknown field` serde error.
     #[test]
-    fn a_prior_credsd_record_carrying_secret_type_is_refused_by_version() {
+    fn when_a_prior_credsd_record_contains_secret_type_then_its_version_is_refused() {
         let stale = format!(
             "version = {}\nbox_id = \"box-0123456789abcdef\"\nbox_dir = \"/var/lib/box\"\n\
              name = \"codex\"\n[egress.model]\n\
@@ -1912,7 +1915,7 @@ env = {}
 
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
-    fn a_record_from_another_format_is_refused() {
+    fn when_a_record_uses_another_format_then_it_is_refused() {
         for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
@@ -1933,7 +1936,7 @@ env = {}
     }
 
     #[test]
-    fn a_record_with_an_invalid_box_identity_is_refused() {
+    fn when_a_record_has_invalid_box_identity_then_it_is_refused() {
         for found in [
             "",
             "box-0123456789abcde",
@@ -1976,7 +1979,8 @@ env = {}
     /// **`[agent] env` may set `IS_SANDBOX`, `HOME`, `PATH`, and `TMPDIR`, and may not set a name
     /// Core owns.**
     #[test]
-    fn an_agent_env_may_set_the_operators_names_and_not_a_core_owned_one() {
+    fn when_agent_environment_is_declared_then_operator_names_are_allowed_and_core_names_are_refused()
+     {
         let file = load(
             "[agent]\ncommand = [\"claude\"]\nenv = { IS_SANDBOX = \"true\", HOME = \"/h\", \
              PATH = \"/usr/bin\", TMPDIR = \"/t\" }\n",
@@ -2006,7 +2010,7 @@ env = {}
     }
 
     #[test]
-    fn every_otlp_exporter_spelling_is_reserved() {
+    fn when_an_otlp_exporter_name_is_declared_then_every_spelling_is_reserved() {
         for name in [
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "OTEL_EXPORTER_OTLP_PROTOCOL",
@@ -2055,7 +2059,7 @@ env = {}
 
     /// An interpreter hook may not receive a phantom.
     #[test]
-    fn an_interpreter_hook_cannot_receive_a_phantom() {
+    fn when_a_phantom_names_an_interpreter_hook_then_it_is_refused() {
         // SAFETY: read back only through `bindings()`, and removed below.
         for hook in HOOKS {
             unsafe { std::env::set_var(hook, "/tmp/attacker") };
@@ -2117,7 +2121,7 @@ env = {}
 
     /// The stored record is validated on READ, not merely on write.
     #[test]
-    fn a_stored_record_is_revalidated_when_it_is_read() {
+    fn when_a_stored_record_is_read_then_it_is_revalidated() {
         let overlapping = record(
             None,
             BTreeMap::from([
@@ -2165,7 +2169,7 @@ env = {}
 
     /// A stored record holding an all-hosts host is refused on read too.
     #[test]
-    fn a_stored_all_hosts_record_is_refused_when_it_is_read() {
+    fn when_a_stored_record_grants_all_hosts_then_reading_it_is_refused() {
         let all_hosts = record(
             None,
             BTreeMap::from([(
@@ -2197,7 +2201,7 @@ env = {}
     }
 
     #[test]
-    fn an_unknown_record_field_is_refused() {
+    fn when_a_stored_record_contains_an_unknown_field_then_it_is_refused() {
         let text = format!(
             "version = {RECORD_VERSION}\n\
              box_id = \"box-0123456789abcdef\"\n\
@@ -2213,7 +2217,7 @@ env = {}
     }
 
     #[test]
-    fn a_stored_identity_and_every_process_survive_the_record_round_trip() {
+    fn when_a_record_round_trips_then_identity_and_every_process_are_preserved() {
         let mut agent = agent(&["codex", "--full-auto", "exec"]);
         agent.workspace = Some(PathBuf::from("/workspace/service"));
         agent
@@ -2260,7 +2264,7 @@ env = {}
     /// A record naming no `[agent]` parses: a box whose workload arrives on the command line every
     /// time is legitimate.
     #[test]
-    fn a_record_with_no_agent_still_parses() {
+    fn when_a_record_has_no_agent_then_it_still_parses() {
         let text = format!(
             "version = {RECORD_VERSION}\n\
              box_id = \"box-0123456789abcdef\"\n\
@@ -2285,7 +2289,7 @@ env = {}
     /// `box_dir`, and `box_dir` is the box, so a name selector would be a second way to say which
     /// box a verb acts on — and the two could disagree.
     #[test]
-    fn run_selects_a_box_by_its_configuration_alone() {
+    fn when_run_selects_a_box_then_only_its_configuration_determines_the_selection() {
         assert!(
             Cli::try_parse_from(["strands-box", "run"]).is_err(),
             "`run` with no `--config` must refuse rather than search for one"
@@ -2314,7 +2318,7 @@ env = {}
 
     /// The top-level surface is `run` plus the approved policy-artifact group.
     #[test]
-    fn the_command_surface_is_run_and_the_policy_group() {
+    fn when_commands_are_parsed_then_only_run_and_the_policy_group_are_available() {
         use clap::CommandFactory as _;
 
         let cli = Cli::command();
@@ -2387,7 +2391,7 @@ env = {}
     }
 
     #[test]
-    fn mcp_configuration_defers_complete_schema_validation() {
+    fn when_mcp_configuration_is_loaded_then_complete_schema_validation_is_deferred() {
         let directory = tempfile::tempdir().expect("configuration directory");
         crate::test_support::with_operator_home(directory.path(), || {
             let workspace = directory.path().join("workspace");
@@ -2473,7 +2477,7 @@ env = {}
 
     /// The load judges a path literal against the operator's home, not the agent's `HOME`.
     #[test]
-    fn a_path_literal_is_judged_against_the_operator_home_at_record_load() {
+    fn when_a_record_loads_a_path_literal_then_it_is_judged_against_the_operator_home() {
         let directory = tempfile::tempdir().expect("configuration directory");
         crate::test_support::with_operator_home(directory.path(), || {
             let workspace = directory.path().join("workspace");
@@ -2599,7 +2603,7 @@ env = {}
     /// A name shared between `[egress.foo]` and `[mcp.foo] type = "http"` is not a collision: the two
     /// live in separate collections, so the operator's credential binding is kept, not overwritten.
     #[test]
-    fn c1_egress_and_mcp_sharing_a_name_are_both_kept() {
+    fn when_egress_and_mcp_share_a_name_then_both_entries_are_kept() {
         let record = record_from_config(
             "[egress.foo]\ndestinations = [\"api.stripe.com\"]\nsecret.ref = \"aws://prod\"\n\
              [mcp.foo]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n",
@@ -2632,7 +2636,7 @@ env = {}
     /// `[egress.*]` and a remote `[mcp.*]` pointing at the SAME host are refused: the gateway routes a
     /// remote MCP server by host alone, so a host that names one may name nothing else.
     #[test]
-    fn c1_egress_and_mcp_on_the_same_host_are_refused() {
+    fn when_egress_and_mcp_share_a_host_then_the_entries_are_refused() {
         let error = record_from_config(
             "[egress.billing]\ndestinations = [\"api.example.com\"]\nsecret.ref = \"aws://prod\"\n\
              [mcp.search]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n",
@@ -2650,7 +2654,7 @@ env = {}
     /// PATHS do not save it — `mcp_server_for` routes by host alone, so the plain-HTTP path would be
     /// misclassified as this server's `mcp:call`.
     #[test]
-    fn c1_egress_and_mcp_same_name_same_host_distinct_paths_are_refused() {
+    fn when_egress_and_mcp_share_name_and_host_but_have_distinct_paths_then_they_are_refused() {
         let error = record_from_config(
             "[egress.foo]\ndestinations = [\"api.example.com/v1/\"]\nsecret.ref = \"aws://prod\"\n\
              [mcp.foo]\ntype = \"http\"\ndestinations = [\"api.example.com/mcp/\"]\n",
@@ -2665,7 +2669,7 @@ env = {}
     /// Same as above but with distinct explicit PORTS — the host normalizes identically, so the
     /// guard must still fire (the gateway's host match is port-blind).
     #[test]
-    fn c1_egress_and_mcp_same_name_same_host_distinct_ports_are_refused() {
+    fn when_egress_and_mcp_share_name_and_host_but_have_distinct_ports_then_they_are_refused() {
         let error = record_from_config(
             "[egress.foo]\ndestinations = [\"api.example.com:443\"]\nsecret.ref = \"aws://prod\"\n\
              [mcp.foo]\ntype = \"http\"\ndestinations = [\"api.example.com:8443\"]\n",
@@ -2684,7 +2688,7 @@ env = {}
     /// these was — or could regress to — a `record.egress`-only reader that silently drops remote MCP,
     /// which a review of this change found twice. If any consumer goes egress-only again, this fails.
     #[test]
-    fn c1_a_remote_mcp_only_source_reaches_every_consumer() {
+    fn when_only_remote_mcp_uses_a_source_then_that_source_reaches_every_consumer() {
         let host = "bedrock-runtime.us-west-2.amazonaws.com";
         let record = record_from_config(
             "[mcp.remote_bedrock]\ntype = \"http\"\n\

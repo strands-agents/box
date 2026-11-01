@@ -93,7 +93,7 @@ mod tests {
     /// null device — moved with the data, to
     /// `containment::floor::no_set_carries_exec_and_only_the_null_device_is_written`.
     #[test]
-    fn every_reported_cell_exists_in_the_kind_its_scope_names() {
+    fn when_runtime_cells_are_reported_then_every_path_exists_with_the_kind_named_by_its_scope() {
         let reported = leaf_cells();
         assert!(
             reported
@@ -112,7 +112,8 @@ mod tests {
 
     /// **The minimum reads the loader's directories as trees, and no program directory.**
     #[test]
-    fn the_minimum_carries_the_loader_directories_and_no_program_directory() {
+    fn when_runtime_minimum_is_constructed_then_loader_directories_are_present_without_program_directories()
+     {
         let reported = leaf_cells();
         let identities: Vec<PathBuf> = reported
             .iter()
@@ -166,7 +167,7 @@ mod tests {
 
     /// A loader directory's line says that code maps there, and on Linux that it runs there.
     #[test]
-    fn a_loader_directory_line_carries_its_note() {
+    fn when_a_loader_directory_is_disclosed_then_its_note_is_included() {
         let cell = MinimumCell {
             path: PathBuf::from(LOADER_DIRECTORIES[0]),
             operation: Operation::Read,
@@ -186,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disclosure_line_names_the_operation_and_the_path() {
+    fn when_a_runtime_cell_is_disclosed_then_its_operation_and_path_are_named() {
         let cell = MinimumCell {
             path: PathBuf::from("/etc"),
             operation: Operation::Metadata,

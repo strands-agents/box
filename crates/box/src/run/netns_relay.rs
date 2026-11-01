@@ -162,7 +162,7 @@ mod tests {
     /// The relay carries a request from a socket it did not create to a listener
     /// standing in for the gateway.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_relay_splices_an_accepted_connection_to_the_gateway() {
+    async fn when_the_relay_accepts_a_connection_then_it_splices_it_to_the_gateway() {
         // Stand in for the gateway: echo one line back, uppercased so the reply
         // cannot be confused with the request being reflected by the plumbing.
         let gateway = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gateway");
@@ -216,7 +216,7 @@ mod tests {
     /// A control socket that carries no descriptor is refused rather than left to
     /// hang: with no listener there is no egress route, and the box must say so.
     #[tokio::test]
-    async fn a_control_message_with_no_descriptor_is_refused() {
+    async fn when_a_control_message_has_no_descriptor_then_it_is_refused() {
         let (box_side, child_side) = NetnsRelay::control_pair().expect("control pair");
 
         // One ordinary byte, no ancillary data.

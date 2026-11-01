@@ -16,7 +16,7 @@ fn denied(result: io::Result<()>) {
     assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EACCES));
 }
 #[test]
-fn a_registered_worker_cannot_delete_without_an_approval() {
+fn when_a_registered_worker_has_no_approval_then_it_cannot_delete() {
     let guard = Guard::load().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("source");
@@ -26,7 +26,7 @@ fn a_registered_worker_cannot_delete_without_an_approval() {
     assert_eq!(std::fs::read(&file).unwrap(), b"original");
 }
 #[test]
-fn an_approval_cannot_be_reused_for_a_second_link_to_the_same_file() {
+fn when_an_approval_was_used_for_one_link_then_it_cannot_authorize_a_second_link() {
     let guard = Guard::load().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
@@ -46,7 +46,7 @@ fn an_approval_cannot_be_reused_for_a_second_link_to_the_same_file() {
     assert_eq!(std::fs::read(alias).unwrap(), b"original");
 }
 #[test]
-fn a_delete_approval_cannot_authorize_a_rename() {
+fn when_an_approval_authorizes_delete_then_it_cannot_authorize_rename() {
     let guard = Guard::load().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
@@ -62,7 +62,7 @@ fn a_delete_approval_cannot_authorize_a_rename() {
     assert!(!destination.exists());
 }
 #[test]
-fn simultaneous_workers_keep_separate_approvals() {
+fn when_workers_run_simultaneously_then_their_approvals_remain_separate() {
     let guard = Guard::load().unwrap();
     let barrier = Arc::new(Barrier::new(8));
     std::thread::scope(|scope| {
@@ -88,7 +88,7 @@ fn simultaneous_workers_keep_separate_approvals() {
     });
 }
 #[test]
-fn unregistering_a_worker_restores_its_unmonitored_operations() {
+fn when_a_worker_is_unregistered_then_its_unmonitored_operations_are_restored() {
     let guard = Guard::load().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
@@ -99,7 +99,7 @@ fn unregistering_a_worker_restores_its_unmonitored_operations() {
     std::fs::remove_file(source).unwrap();
 }
 #[test]
-fn dropping_a_different_box_guard_keeps_the_active_guard_attached() {
+fn when_another_box_guard_is_dropped_then_the_active_guard_remains_attached() {
     let first = Guard::load().unwrap();
     let second = Guard::load().unwrap();
     let directory = tempfile::tempdir().unwrap();
