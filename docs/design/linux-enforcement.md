@@ -126,8 +126,13 @@ The filter compares the low 32 bits of each request, as the kernel does.
 Nonzero upper bits do not bypass the restriction.
 
 Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
-Virtual-console keyboard modes, display modes, and switching remain permitted.
-A workload that inherits a Linux text console can still disable its keyboard input or text display.
+The filter also refuses virtual-console keyboard modes, display modes, switching, deallocation, and console-wide resizing.
+It refuses keyboard lock flags, indicator lights, accent-table changes, fonts, color palettes, and screen and Unicode map changes.
+Programs that manage these console features receive a permission error.
+Read-only console queries remain permitted when they have a separate request number.
+`KDFONTOP` combines font queries and changes behind a pointer, so the filter refuses both.
+Ordinary terminal resizing through `TIOCSWINSZ` remains permitted.
+Kernel capability checks still restrict keymap and function-key replacement.
 This restriction does not isolate every terminal operation or restore arbitrary terminal settings after workload exit.
 
 ## Network access

@@ -67,6 +67,96 @@ fn terminal_requests_are_denied_with_kernel_argument_truncation() {
 }
 
 #[test]
+fn console_mutations_are_refused_before_device_dispatch() {
+    for request in [
+        libc::KDSETMODE,
+        libc::KDSKBMODE,
+        libc::KDSKBMETA,
+        libc::KDSKBLED,
+        libc::KDSETLED,
+        libc::KDSKBDIACR,
+        libc::KDSKBDIACRUC,
+        libc::KDFONTOP,
+        libc::PIO_CMAP,
+        libc::PIO_SCRNMAP,
+        libc::PIO_UNISCRNMAP,
+        libc::PIO_UNIMAPCLR,
+        libc::PIO_UNIMAP,
+        libc::VT_SETMODE,
+        libc::VT_ACTIVATE,
+        libc::VT_SETACTIVATE,
+        libc::VT_RELDISP,
+        libc::VT_DISALLOCATE,
+        libc::VT_RESIZE,
+        libc::VT_RESIZEX,
+    ] {
+        for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+            let (_master, slave) = terminal();
+            for fd in [-1, slave.as_raw_fd()] {
+                for filtered in [false, true] {
+                    let expected = if filtered {
+                        libc::EPERM
+                    } else if fd == -1 {
+                        libc::EBADF
+                    } else {
+                        libc::ENOTTY
+                    };
+                    assert_eq!(
+                        child(filtered, || {
+                            // SAFETY: only an invalid descriptor or a private PTY is reachable.
+                            let result = unsafe {
+                                libc::syscall(
+                                    libc::SYS_ioctl,
+                                    fd,
+                                    high | u64::from(request as u32),
+                                    0,
+                                )
+                            };
+                            i32::from(
+                                result != -1 || unsafe { *libc::__errno_location() } != expected,
+                            )
+                        }),
+                        0,
+                        "request {request:#x}, high {high:#x}, fd {fd}, filtered {filtered}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn read_only_console_requests_reach_device_dispatch() {
+    for request in [
+        libc::KDGETMODE,
+        libc::KDGKBMODE,
+        libc::KDGKBMETA,
+        libc::KDGKBLED,
+        libc::KDGETLED,
+        libc::KDGKBDIACR,
+        libc::KDGKBDIACRUC,
+        libc::GIO_CMAP,
+        libc::GIO_SCRNMAP,
+        libc::GIO_UNISCRNMAP,
+        libc::GIO_UNIMAP,
+        libc::VT_GETMODE,
+        libc::VT_GETSTATE,
+        libc::VT_OPENQRY,
+        libc::VT_GETHIFONTMASK,
+    ] {
+        assert_eq!(
+            child(true, || {
+                // SAFETY: the invalid descriptor prevents a device operation.
+                let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
+                i32::from(result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF)
+            }),
+            0,
+            "query {request:#x}"
+        );
+    }
+}
+
+#[test]
 fn terminal_discipline_cannot_change_or_break_input() {
     for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
         for filtered in [false, true] {

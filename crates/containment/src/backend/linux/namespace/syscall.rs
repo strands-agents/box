@@ -606,8 +606,7 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         name: "ioctl",
         number: libc::SYS_ioctl,
         disposition: Disposition::ArgumentScoped,
-        reason: "terminal requests can inject input or change the line discipline \
-                 of an inherited terminal",
+        reason: "terminal requests can change shared input, display, or console state",
     },
     MediatedSyscall {
         name: "setuid",
@@ -871,22 +870,46 @@ impl SyscallPolicy {
 }
 
 fn terminal_control_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    [libc::TIOCSTI, libc::TIOCLINUX, libc::TIOCSETD]
-        .into_iter()
-        .map(|request| {
-            SeccompRule::new(vec![
-                // Linux interprets the ioctl request as an unsigned 32-bit integer.
-                SeccompCondition::new(
-                    1,
-                    SeccompCmpArgLen::Dword,
-                    SeccompCmpOp::Eq,
-                    u64::from(request as u32),
-                )
-                .map_err(filter_error)?,
-            ])
-            .map_err(filter_error)
-        })
-        .collect()
+    [
+        libc::TIOCSTI,
+        libc::TIOCLINUX,
+        libc::TIOCSETD,
+        libc::KDSETMODE,
+        libc::KDSKBMODE,
+        libc::KDSKBMETA,
+        libc::KDSKBLED,
+        libc::KDSETLED,
+        libc::KDSKBDIACR,
+        libc::KDSKBDIACRUC,
+        libc::KDFONTOP,
+        libc::PIO_CMAP,
+        libc::PIO_SCRNMAP,
+        libc::PIO_UNISCRNMAP,
+        libc::PIO_UNIMAPCLR,
+        libc::PIO_UNIMAP,
+        libc::VT_SETMODE,
+        libc::VT_ACTIVATE,
+        libc::VT_SETACTIVATE,
+        libc::VT_RELDISP,
+        libc::VT_DISALLOCATE,
+        libc::VT_RESIZE,
+        libc::VT_RESIZEX,
+    ]
+    .into_iter()
+    .map(|request| {
+        SeccompRule::new(vec![
+            // Linux interprets the ioctl request as an unsigned 32-bit integer.
+            SeccompCondition::new(
+                1,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                u64::from(request as u32),
+            )
+            .map_err(filter_error)?,
+        ])
+        .map_err(filter_error)
+    })
+    .collect()
 }
 
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {

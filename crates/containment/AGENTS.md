@@ -938,15 +938,15 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
 - **Linux terminal restrictions do not isolate the inherited terminal.** The filter refuses
   `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` by their low 32 request bits. Normal terminal settings and
   queries remain permitted. Keep the denial and successful-operation controls in `tests::terminal`.
-  - The workload can inherit the operator's controlling terminal. In upstream Linux 6.12,
-    `KDSKBMODE`, `KDSETMODE`, `VT_SETMODE`, and `VT_ACTIVATE` accept that relationship without an
-    extra capability. `KDSKBMETA` has no equivalent permission check in its dispatch branch.
-    These requests remain permitted and can change the operator's console keyboard or display state.
+  - The workload can inherit the operator's controlling terminal. Keep virtual-console mode,
+    switching, deallocation, resizing, keyboard-lock, accent-table, font, palette, and screen-map
+    mutations refused. `VT_SETACTIVATE` combines mode changes and switching. `KDFONTOP` combines
+    reads and writes behind a pointer, so its read operation is refused too.
   - Disposable pseudoterminals prove request refusal and unchanged line discipline and input.
-    They cannot reproduce virtual-console selection, paste, keyboard modes, or display modes.
+    They cannot reproduce virtual-console keyboard, display, or switching effects.
     Test those effects only on a disposable console with separate recovery access.
-  - Keep request numbers sourced from `libc`. Additional console restrictions need upstream names
-    and successful-operation controls; do not substitute handwritten request numbers.
+  - Keep request numbers sourced from `libc` and preserve successful-operation controls.
+    Ordinary terminal settings and `TIOCSWINSZ` remain permitted, so this is not full isolation.
 - **The reach modes have one legal value each.** Both backends refuse every non-default `SignalMode`,
   `ProcessInfoMode`, and `IpcMode`, so those four exported enums describe a widening the product does
   not offer. Kept deliberately for a future backend that honours them.
