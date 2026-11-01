@@ -945,8 +945,11 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   - Disposable pseudoterminals prove request refusal and unchanged line discipline and input.
     They cannot reproduce virtual-console keyboard, display, or switching effects.
     Test those effects only on a disposable console with separate recovery access.
-  - Keep request numbers sourced from `libc` and preserve successful-operation controls.
-    Ordinary terminal settings and `TIOCSWINSZ` remain permitted, so this is not full isolation.
+  - The private console constants follow Linux UAPI `include/uapi/linux/kd.h` and `vt.h`.
+    Check them against the headers when changing the list; keep independent values in the tests.
+    Do not require an unpublished dependency for constants already defined by the kernel.
+    Preserve successful-operation controls. Ordinary terminal settings and `TIOCSWINSZ` remain
+    permitted, so this is not full isolation.
 - **The reach modes have one legal value each.** Both backends refuse every non-default `SignalMode`,
   `ProcessInfoMode`, and `IpcMode`, so those four exported enums describe a widening the product does
   not offer. Kept deliberately for a future backend that honours them.

@@ -68,27 +68,28 @@ fn terminal_requests_are_denied_with_kernel_argument_truncation() {
 
 #[test]
 fn console_mutations_are_refused_before_device_dispatch() {
-    for request in [
-        libc::KDSETMODE,
-        libc::KDSKBMODE,
-        libc::KDSKBMETA,
-        libc::KDSKBLED,
-        libc::KDSETLED,
-        libc::KDSKBDIACR,
-        libc::KDSKBDIACRUC,
-        libc::KDFONTOP,
-        libc::PIO_CMAP,
-        libc::PIO_SCRNMAP,
-        libc::PIO_UNISCRNMAP,
-        libc::PIO_UNIMAPCLR,
-        libc::PIO_UNIMAP,
-        libc::VT_SETMODE,
-        libc::VT_ACTIVATE,
-        libc::VT_SETACTIVATE,
-        libc::VT_RELDISP,
-        libc::VT_DISALLOCATE,
-        libc::VT_RESIZE,
-        libc::VT_RESIZEX,
+    // Independent Linux UAPI values also catch a wrong constant in the filter.
+    for (name, request) in [
+        ("KDSETMODE", 0x4b3a_u32),
+        ("KDSKBMODE", 0x4b45),
+        ("KDSKBMETA", 0x4b63),
+        ("KDSKBLED", 0x4b65),
+        ("KDSETLED", 0x4b32),
+        ("KDSKBDIACR", 0x4b4b),
+        ("KDSKBDIACRUC", 0x4bfb),
+        ("KDFONTOP", 0x4b72),
+        ("PIO_CMAP", 0x4b71),
+        ("PIO_SCRNMAP", 0x4b41),
+        ("PIO_UNISCRNMAP", 0x4b6a),
+        ("PIO_UNIMAPCLR", 0x4b68),
+        ("PIO_UNIMAP", 0x4b67),
+        ("VT_SETMODE", 0x5602),
+        ("VT_ACTIVATE", 0x5606),
+        ("VT_SETACTIVATE", 0x560f),
+        ("VT_RELDISP", 0x5605),
+        ("VT_DISALLOCATE", 0x5608),
+        ("VT_RESIZE", 0x5609),
+        ("VT_RESIZEX", 0x560a),
     ] {
         for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
             let (_master, slave) = terminal();
@@ -105,19 +106,14 @@ fn console_mutations_are_refused_before_device_dispatch() {
                         child(filtered, || {
                             // SAFETY: only an invalid descriptor or a private PTY is reachable.
                             let result = unsafe {
-                                libc::syscall(
-                                    libc::SYS_ioctl,
-                                    fd,
-                                    high | u64::from(request as u32),
-                                    0,
-                                )
+                                libc::syscall(libc::SYS_ioctl, fd, high | u64::from(request), 0)
                             };
                             i32::from(
                                 result != -1 || unsafe { *libc::__errno_location() } != expected,
                             )
                         }),
                         0,
-                        "request {request:#x}, high {high:#x}, fd {fd}, filtered {filtered}"
+                        "{name} request {request:#x}, high {high:#x}, fd {fd}, filtered {filtered}"
                     );
                 }
             }
@@ -127,22 +123,23 @@ fn console_mutations_are_refused_before_device_dispatch() {
 
 #[test]
 fn read_only_console_requests_reach_device_dispatch() {
-    for request in [
-        libc::KDGETMODE,
-        libc::KDGKBMODE,
-        libc::KDGKBMETA,
-        libc::KDGKBLED,
-        libc::KDGETLED,
-        libc::KDGKBDIACR,
-        libc::KDGKBDIACRUC,
-        libc::GIO_CMAP,
-        libc::GIO_SCRNMAP,
-        libc::GIO_UNISCRNMAP,
-        libc::GIO_UNIMAP,
-        libc::VT_GETMODE,
-        libc::VT_GETSTATE,
-        libc::VT_OPENQRY,
-        libc::VT_GETHIFONTMASK,
+    // Independent Linux UAPI values also catch a wrong constant in the filter.
+    for (name, request) in [
+        ("KDGETMODE", 0x4b3b_u32),
+        ("KDGKBMODE", 0x4b44),
+        ("KDGKBMETA", 0x4b62),
+        ("KDGKBLED", 0x4b64),
+        ("KDGETLED", 0x4b31),
+        ("KDGKBDIACR", 0x4b4a),
+        ("KDGKBDIACRUC", 0x4bfa),
+        ("GIO_CMAP", 0x4b70),
+        ("GIO_SCRNMAP", 0x4b40),
+        ("GIO_UNISCRNMAP", 0x4b69),
+        ("GIO_UNIMAP", 0x4b66),
+        ("VT_GETMODE", 0x5601),
+        ("VT_GETSTATE", 0x5603),
+        ("VT_OPENQRY", 0x5600),
+        ("VT_GETHIFONTMASK", 0x560d),
     ] {
         assert_eq!(
             child(true, || {
@@ -151,7 +148,7 @@ fn read_only_console_requests_reach_device_dispatch() {
                 i32::from(result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF)
             }),
             0,
-            "query {request:#x}"
+            "{name} query {request:#x}"
         );
     }
 }

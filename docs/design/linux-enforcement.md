@@ -124,6 +124,10 @@ These requests can inject terminal input, paste console selections, or replace t
 The line discipline controls how the kernel processes terminal input.
 The filter compares the low 32 bits of each request, as the kernel does.
 Nonzero upper bits do not bypass the restriction.
+Console request numbers follow the Linux user API headers
+[`kd.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/kd.h)
+and [`vt.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/vt.h).
+The filter defines missing constants privately; it needs no unreleased library definitions.
 
 Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
 The filter also refuses virtual-console keyboard modes, display modes, switching, deallocation, and console-wide resizing.
