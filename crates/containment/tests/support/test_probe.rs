@@ -174,6 +174,13 @@ use std::process::ExitCode;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod user_namespace;
 
+#[cfg(target_os = "linux")]
+mod proc_mem_probe;
+
+#[cfg(target_os = "linux")]
+static SUPERVISOR_MEMORY_MARKER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x1020_3040_5060_7080);
+
 #[cfg(target_os = "macos")]
 fn main() -> ExitCode {
     macos_main()
@@ -761,10 +768,21 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
+        Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
+        Some("--attempt-supervisor-memory-write") => {
+            match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
+                Some(launcher_uid) => attempt_supervisor_memory_write(launcher_uid),
+                None => {
+                    eprintln!("probe: supervisor memory check requires the host launcher uid");
+                    ExitCode::from(2)
+                }
+            }
+        }
         _ => {
             eprintln!(
                 "usage: containment-test-probe \
-                 (--unix-ipc | --shell-child | --verify-no-inherited-handles) ..."
+                 (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
+                 --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
         }
@@ -863,6 +881,100 @@ fn verify_no_inherited_handles(args: &[String]) -> ExitCode {
         .exec();
     eprintln!("probe: re-exec failed: {error}");
     ExitCode::from(2)
+}
+
+#[cfg(target_os = "linux")]
+fn attempt_supervisor_memory_write(launcher_uid: libc::uid_t) -> ExitCode {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let address = (&SUPERVISOR_MEMORY_MARKER as *const _) as u64;
+    let mut self_mem = match std::fs::OpenOptions::new()
+        .read(true)
+        .open("/proc/self/mem")
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("probe: cannot open own memory control: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = self_mem.seek(SeekFrom::Start(address)) {
+        eprintln!("probe: cannot seek own memory control: {error}");
+        return ExitCode::from(2);
+    }
+    let mut control = [0_u8; 8];
+    if let Err(error) = self_mem.read_exact(&mut control) {
+        eprintln!("probe: cannot read own memory control: {error}");
+        return ExitCode::from(2);
+    }
+
+    let owner = match std::fs::metadata("/proc/1/mem").map(|metadata| metadata.uid()) {
+        Ok(owner) => owner,
+        Err(error) => {
+            eprintln!("probe: cannot stat supervisor memory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    // SAFETY: `getuid` has no failure mode.
+    let workload_uid = unsafe { libc::getuid() };
+    // Root ownership can remain unchanged. Root read denial proves this guard only with Yama 0.
+    if launcher_uid != 0 && owner == workload_uid {
+        eprintln!("probe FAILED: /proc/1/mem retained the non-root workload owner");
+        return ExitCode::from(1);
+    }
+
+    match std::fs::File::open("/proc/1/mem") {
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {}
+        Err(error) => {
+            eprintln!("probe: supervisor memory read returned unexpected error: {error}");
+            return ExitCode::from(2);
+        }
+        Ok(_) => {
+            eprintln!("probe FAILED: supervisor memory opened for reading");
+            return ExitCode::from(1);
+        }
+    }
+
+    let mut supervisor_mem = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open("/proc/1/mem")
+    {
+        Ok(file) => file,
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EROFS)) => {
+            println!("SUPERVISOR_MEMORY_DENIED");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("probe: supervisor memory returned unexpected error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let original = SUPERVISOR_MEMORY_MARKER.load(std::sync::atomic::Ordering::SeqCst);
+    if let Err(error) = supervisor_mem.seek(SeekFrom::Start(address)) {
+        eprintln!("probe FAILED: supervisor memory opened; seek failed: {error}");
+        return ExitCode::from(1);
+    }
+    let replacement = original ^ 0xffff_ffff_ffff_ffff;
+    let write_result = supervisor_mem.write_all(&replacement.to_ne_bytes());
+    if let Err(error) = supervisor_mem.seek(SeekFrom::Start(address)) {
+        eprintln!("probe FAILED: supervisor memory opened; second seek failed: {error}");
+        return ExitCode::from(1);
+    }
+    let mut bytes = [0_u8; 8];
+    let read_result = supervisor_mem.read_exact(&mut bytes);
+    let observed = u64::from_ne_bytes(bytes);
+    eprintln!(
+        "probe FAILED: supervisor memory opened; write={:?}, read={:?}, changed={}",
+        write_result.err(),
+        read_result.err(),
+        observed == replacement
+    );
+    ExitCode::from(1)
 }
 
 #[cfg(target_os = "macos")]

@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(seen, [HEAD, b"ok"].concat(), "exactly the box's bytes");
         assert_eq!(accepted, HEAD.len() + 2);
         assert_eq!(status, Some(200));
-        assert_eq!(result.unwrap().body, b"yes");
+        assert_eq!(result.unwrap().response.body, b"yes");
     }
 
     #[test]

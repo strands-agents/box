@@ -601,8 +601,7 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         name: "ioctl",
         number: libc::SYS_ioctl,
         disposition: Disposition::ArgumentScoped,
-        reason: "terminal input injection can feed commands to the operator's shell \
-                 through an inherited terminal",
+        reason: "terminal requests can change shared input, display, or console state",
     },
     MediatedSyscall {
         name: "setuid",
@@ -811,7 +810,7 @@ impl SyscallPolicy {
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
         if entry.number == libc::SYS_ioctl {
-            return terminal_input_injection_rules();
+            return terminal_control_rules();
         }
         if entry.number == libc::SYS_socket {
             return self.socket_rules();
@@ -865,21 +864,69 @@ impl SyscallPolicy {
     }
 }
 
-fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    Ok(vec![
+fn terminal_control_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    // Linux console request numbers from include/uapi/linux/{kd,vt}.h.
+    const KDSETMODE: u32 = 0x4b3a;
+    const KDSKBMODE: u32 = 0x4b45;
+    const KDSKBMETA: u32 = 0x4b63;
+    const KDSKBLED: u32 = 0x4b65;
+    const KDSETLED: u32 = 0x4b32;
+    const KDSKBDIACR: u32 = 0x4b4b;
+    const KDSKBDIACRUC: u32 = 0x4bfb;
+    const KDFONTOP: u32 = 0x4b72;
+    const PIO_CMAP: u32 = 0x4b71;
+    const PIO_SCRNMAP: u32 = 0x4b41;
+    const PIO_UNISCRNMAP: u32 = 0x4b6a;
+    const PIO_UNIMAPCLR: u32 = 0x4b68;
+    const PIO_UNIMAP: u32 = 0x4b67;
+    const VT_SETMODE: u32 = 0x5602;
+    const VT_ACTIVATE: u32 = 0x5606;
+    const VT_SETACTIVATE: u32 = 0x560f;
+    const VT_RELDISP: u32 = 0x5605;
+    const VT_DISALLOCATE: u32 = 0x5608;
+    const VT_RESIZE: u32 = 0x5609;
+    const VT_RESIZEX: u32 = 0x560a;
+
+    [
+        libc::TIOCSTI as u32,
+        libc::TIOCLINUX as u32,
+        libc::TIOCSETD as u32,
+        KDSETMODE,
+        KDSKBMODE,
+        KDSKBMETA,
+        KDSKBLED,
+        KDSETLED,
+        KDSKBDIACR,
+        KDSKBDIACRUC,
+        KDFONTOP,
+        PIO_CMAP,
+        PIO_SCRNMAP,
+        PIO_UNISCRNMAP,
+        PIO_UNIMAPCLR,
+        PIO_UNIMAP,
+        VT_SETMODE,
+        VT_ACTIVATE,
+        VT_SETACTIVATE,
+        VT_RELDISP,
+        VT_DISALLOCATE,
+        VT_RESIZE,
+        VT_RESIZEX,
+    ]
+    .into_iter()
+    .map(|request| {
         SeccompRule::new(vec![
-            // Linux interprets the ioctl request as an unsigned int. Match its low
-            // 32 bits so nonzero upper bits cannot bypass the refusal.
+            // Linux interprets the ioctl request as an unsigned 32-bit integer.
             SeccompCondition::new(
                 1,
                 SeccompCmpArgLen::Dword,
                 SeccompCmpOp::Eq,
-                u64::from(libc::TIOCSTI as u32),
+                u64::from(request),
             )
             .map_err(filter_error)?,
         ])
-        .map_err(filter_error)?,
-    ])
+        .map_err(filter_error)
+    })
+    .collect()
 }
 
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {

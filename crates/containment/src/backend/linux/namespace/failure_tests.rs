@@ -209,6 +209,27 @@ fn failed_no_new_privileges_refuses_launch() {
 }
 
 #[test]
+fn failed_non_dumpable_refuses_launch() {
+    in_fresh_process(|| {
+        refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
+        refusal_names(
+            authority::refuse_process_memory_access().unwrap_err(),
+            "non-dumpable",
+        );
+    });
+}
+
+#[test]
+fn a_reaper_that_remains_dumpable_terminates_its_namespace() {
+    in_fresh_process_expecting_exit(true, Some(127), Some("process-memory access"), || {
+        refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
+        let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
+        let keep = [0, 1, 2];
+        establish_pid_namespace_and_reaper(&view, &keep, None).unwrap();
+    });
+}
+
+#[test]
 fn failed_loopback_control_socket_refuses_network_setup() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_socket, None);

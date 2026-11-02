@@ -7,13 +7,10 @@ use std::net::TcpStream;
 use crate::audit::RequestId;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
-use super::request_leg::{self, RequestDecision};
-use super::response_leg::{self, ResponseDecision};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
-use crate::audit::{EgressDecision, NetworkAuditEvent};
-use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
-use crate::capability::CapabilityContext;
+use crate::audit::EgressDecision;
+use crate::boundary::{HeaderMap, InterceptedRequest, Target};
 use crate::client::http::Upstream;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
@@ -23,7 +20,7 @@ use crate::mcp::{
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 pub(crate) async fn forward_tls(
-    parsed: http1::ParsedRequest,
+    mut parsed: http1::ParsedRequest,
     upstream: TcpStream,
     connect: &ConnectRequest,
     state: &SharedState,
@@ -40,44 +37,13 @@ pub(crate) async fn forward_tls(
     if let Err(error) =
         validate_request_binding(connect, &parsed.method, &parsed.target, &parsed.headers)
     {
+        let refusal = WorkloadResponse::refusal(error.http_status(), b"request authority rejected");
+        let request = (parsed.method.as_str(), parsed.target.as_str());
         let reason = error.to_string();
-        emit_decision(
-            state,
-            DecisionSubject {
-                host: &connect.host,
-                port: connect.port,
-                method: &parsed.method,
-                path: &parsed.target,
-            },
-            AuditDecision::Deny,
-            &reason,
-            correlation.clone(),
-        );
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason,
-            correlation,
-        ));
-        return Ok(WorkloadResponse::refusal(
-            error.http_status(),
-            b"request authority rejected",
-        ));
+        return Ok(deny(state, connect, request, &reason, correlation, refusal));
     }
-    let mut target = Target::new(connect.host.clone(), connect.port);
-    let (path, query) = split_target(&parsed.target);
-    target.path = path;
-    target.query = query;
-
-    // Move the parsed fields into the boundary request — `parsed` is dead after this, so cloning the
-    // (potentially large) body/headers would be a wasted full copy on every request.
-    let req = InterceptedRequest {
-        target,
-        method: Some(parsed.method),
-        headers: parsed.headers,
-        body: BodyRef::Bytes(parsed.body),
-        advisory_note: None,
-    };
+    let target = std::mem::take(&mut parsed.target);
+    let req = intercepted_request(connect, &target, parsed);
 
     // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
     // flag inside the shared core.
@@ -105,12 +71,12 @@ async fn run_l7_legs(
     let intercepted = upstream.is_tls();
     let correlation = correlation.with_headers(&req.headers);
     let correlation = if state.mcp_server_for(&connect.host).is_some() {
-        correlation.with_mcp(req.body.as_bytes())
+        correlation.with_mcp(&req.body)
     } else {
         correlation
     };
     // Canonicalize the request path ONCE, before it is judged (`workload_path`), matched for
-    // credentials (`cx`), or forwarded (`reconstruct_target`) — so the box judges, matches, and
+    // credentials (`target`), or forwarded (`reconstruct_target`) — so the box judges, matches, and
     // forwards the SAME bytes the origin will resolve. Percent-decodes only unreserved octets (never
     // `%2F`, which would change segment structure) and removes dot-segments, closing the "judge one
     // spelling, forward another" gap where `/%61dmin` or `/x/../admin` dodges a path `forbid` yet the
@@ -119,105 +85,60 @@ async fn run_l7_legs(
     req.target.path = match canonicalize_request_path(&req.target.path) {
         Ok(path) => path,
         Err(reason) => {
-            return Ok(refuse_request(
-                state,
-                connect,
-                RefusedRequest {
-                    method: req.method.as_deref(),
-                    path: &req.target.path,
-                    reason: &reason,
-                    diagnostic: b"request path is not a valid address",
-                },
-                correlation,
-            ));
+            let refusal = WorkloadResponse::refusal(403, b"request path is not a valid address");
+            let request = (req.method.as_str(), req.target.path.as_str());
+            return Ok(deny(state, connect, request, &reason, correlation, refusal));
         }
     };
 
-    // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
-    if !intercepted && state.controls.matches_any(&req.target.as_destination()) {
-        return Ok(refuse_request(
+    // The method, and the path as the workload sent it, captured BEFORE any credential mutation is
+    // applied.
+    //
+    // A `UrlPath` credential splices the secret into the path, so after the request edits
+    // `req.target.path` *is* the secret. Every authorization and decision input below reads this
+    // value instead, so an attempt or a durable record never carries credential material.
+    let method = req.method.clone();
+    let workload_path = req.target.path.clone();
+    // The target every credential matches, on the request and on its response.
+    let target = req.target.clone();
+    let refuse = |reason: &str, refusal: WorkloadResponse| {
+        let request = (method.as_str(), workload_path.as_str());
+        deny(
             state,
             connect,
-            RefusedRequest {
-                method: req.method.as_deref(),
-                path: &req.target.path,
-                reason: "credential would attach on a plaintext request; refused — a secret must ride TLS",
-                diagnostic: b"credential not permitted on a plaintext request",
-            },
-            correlation,
+            request,
+            reason,
+            correlation.clone(),
+            refusal,
+        )
+    };
+
+    // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
+    if !intercepted && state.controls.matches_any(&target.as_destination()) {
+        return Ok(refuse(
+            "credential would attach on a plaintext request; refused — a secret must ride TLS",
+            WorkloadResponse::refusal(403, b"credential not permitted on a plaintext request"),
         ));
     }
 
-    let cx = CapabilityContext::new(
-        correlation.clone(),
-        state.now_unix_secs(),
-        req.target.clone(),
-    );
-
-    // The path as the workload sent it, captured BEFORE any credential mutation is applied.
-    //
-    // A `UrlPath` credential splices the secret into the path, so after `evaluate_and_apply`
-    // `req.target.path` *is* the secret. Every authorization and audit input below reads this value
-    // instead, so an attempt or a durable record never carries credential material.
-    let workload_path = req.target.path.clone();
-
-    match request_leg::evaluate_and_apply(&state.controls, &mut req, &cx) {
-        RequestDecision::Block(reason) => {
-            let reason = reason.to_string(); // format once, use for both audit sinks
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            emit_decision(
-                state,
-                DecisionSubject {
-                    host: &connect.host,
-                    port: connect.port,
-                    method: req.method.as_deref().unwrap_or_default(),
-                    path: &workload_path,
-                },
-                AuditDecision::Deny,
-                &reason,
-                correlation,
-            );
-            return Ok(WorkloadResponse::refusal(403, b"blocked by egress control"));
-        }
-        RequestDecision::Forward => {}
+    if let Err(reason) = state.controls.apply_to_request(&mut req) {
+        return Ok(refuse(
+            &reason,
+            WorkloadResponse::refusal(403, b"blocked by egress control"),
+        ));
     }
 
     // A capability may annotate this allow — an advisory credential injection records that a secret
     // was attached against an absent or unrecognised placeholder. Journalled on the allow decision
     // below, so the injection is reconstructable (destination, reason, and requester correlation).
-    let allow_reason = req.advisory_note.clone().unwrap_or_default();
+    let allow_reason = req.advisory_note.take().unwrap_or_default();
 
     // Serialize the fully mutated request before claiming its effect permit.
     let fwd_target = reconstruct_target(&req.target);
-    let request_method = req.method.clone().unwrap_or_else(|| "GET".to_string());
-    if let Err(error) = revalidate(&request_method, &fwd_target, &req.headers) {
-        let reason = error.to_string();
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason.clone(),
-            correlation.clone(),
-        ));
-        emit_decision(
-            state,
-            DecisionSubject {
-                host: &connect.host,
-                port: connect.port,
-                method: req.method.as_deref().unwrap_or_default(),
-                path: &workload_path,
-            },
-            AuditDecision::Deny,
-            &reason,
-            correlation,
-        );
-        return Ok(WorkloadResponse::refusal(
-            error.http_status(),
-            b"request authority rejected",
+    if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
+        return Ok(refuse(
+            &error.to_string(),
+            WorkloadResponse::refusal(error.http_status(), b"request authority rejected"),
         ));
     }
     // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
@@ -228,30 +149,14 @@ async fn run_l7_legs(
     // A protocol-floor frame (`ping`, `server/discover`) yields no target and stays a plain
     // `http:request`.
     let mcp_target: Option<(&str, McpTarget)> = match state.mcp_server_for(&connect.host) {
-        Some(server) => match McpTarget::of_http_request(req.body.as_bytes()) {
+        Some(server) => match McpTarget::of_http_request(&req.body) {
             Ok(Some(target)) => Some((server, target)),
             Ok(None) => None,
             Err(error) => {
-                let reason = format!("MCP frame refused: {error}");
-                state.audit.push(NetworkAuditEvent::deny(
-                    &connect.host,
-                    connect.port,
-                    reason.clone(),
-                    correlation.clone(),
+                return Ok(refuse(
+                    &format!("MCP frame refused: {error}"),
+                    WorkloadResponse::refusal(403, b"MCP frame refused"),
                 ));
-                emit_decision(
-                    state,
-                    DecisionSubject {
-                        host: &connect.host,
-                        port: connect.port,
-                        method: &request_method,
-                        path: &workload_path,
-                    },
-                    AuditDecision::Deny,
-                    &reason,
-                    correlation,
-                );
-                return Ok(WorkloadResponse::refusal(403, b"MCP frame refused"));
             }
         },
         None => None,
@@ -267,21 +172,16 @@ async fn run_l7_legs(
     // other frame (and an unparseable body) forwards byte-identical.
     let forwarded_body: Cow<[u8]> = match &mcp_target {
         Some((_, target)) if matches!(target.identity, McpTargetIdentity::Resource(_)) => {
-            canonicalize_mcp_frame(req.body.as_bytes())
-                .map_or_else(|| Cow::Borrowed(req.body.as_bytes()), Cow::Owned)
+            canonicalize_mcp_frame(&req.body).map_or(Cow::Borrowed(&req.body), Cow::Owned)
         }
-        _ => Cow::Borrowed(req.body.as_bytes()),
+        _ => Cow::Borrowed(&req.body),
     };
-    let prepared_request = http1::write_request(
-        &request_method,
-        &fwd_target,
-        &req.headers,
-        forwarded_body.len(),
-    )?;
+    let prepared_request =
+        http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
         port: connect.port,
-        method: &request_method,
+        method: &method,
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
@@ -311,88 +211,44 @@ async fn run_l7_legs(
     let request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
         Err(error) => {
-            let reason = format!("request effect interception failed: {error}");
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            emit_decision(
-                state,
-                DecisionSubject {
-                    host: &connect.host,
-                    port: connect.port,
-                    method: req.method.as_deref().unwrap_or_default(),
-                    path: &workload_path,
-                },
-                AuditDecision::Deny,
-                &reason,
-                correlation.clone(),
-            );
-            return Ok(interceptor_error(
-                &error,
-                state
-                    .mcp_server_for(&connect.host)
-                    .map(|_| req.body.as_bytes()),
+            let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
+            return Ok(refuse(
+                &format!("request effect interception failed: {error}"),
+                interceptor_error(&error, mcp_request),
             ));
         }
     };
+    let request = (method.as_str(), workload_path.as_str());
     emit_decision(
         state,
-        DecisionSubject {
-            host: &connect.host,
-            port: connect.port,
-            method: &request_method,
-            path: &workload_path,
-        },
+        connect,
+        request,
         AuditDecision::Allow,
         &allow_reason,
         correlation.clone(),
     );
     // The request permit is consumed at reply time, or when no reply comes.
     let (outcome, response) = upstream
-        .send(
-            state,
-            &request_method,
-            prepared_request.as_bytes(),
-            &forwarded_body,
-        )
+        .send(state, &method, prepared_request.as_bytes(), &forwarded_body)
         .await;
     request_permit
         .record_outcome(outcome)
         .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
 
-    // --- Response leg: read, evaluate+apply, return ---
-    let parsed_res = response?;
-    // Move, don't clone — `parsed_res` is dead after this; the body can be large.
-    let mut res = InterceptedResponse::http(
-        parsed_res.status,
-        parsed_res.headers,
-        BodyRef::Bytes(parsed_res.body),
-    );
+    // --- Response leg: read, scrub, return ---
+    let parsed = response?;
+    let mut res = parsed.response;
     // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
     // that set it would otherwise make a permitted answer read as a denial, with its own first body
     // line as the reason.
     res.headers.remove(crate::PROXY_ORIGIN_HEADER);
 
-    let redirect_location = match response_leg::evaluate_and_apply(&state.controls, &mut res, &cx) {
-        ResponseDecision::Block(reason) => {
-            let reason = reason.to_string(); // format once, use for both audit sinks
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            return Ok(WorkloadResponse::refusal(
-                403,
-                b"response blocked by egress control",
-            ));
-        }
-        ResponseDecision::RedirectReentry(location) => Some(location),
-        ResponseDecision::Return => None,
-    };
+    if state.controls.apply_to_response(&mut res, &target).is_err() {
+        return Ok(WorkloadResponse::refusal(
+            403,
+            b"response blocked by egress control",
+        ));
+    }
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
@@ -404,8 +260,8 @@ async fn run_l7_legs(
             server,
             McpListReply {
                 session: req.headers.get("mcp-session-id"),
-                cursor: list_cursor(req.body.as_bytes()).as_deref(),
-                body: res.body.as_bytes(),
+                cursor: list_cursor(&req.body).as_deref(),
+                body: &res.body,
             },
         )
     {
@@ -419,53 +275,23 @@ async fn run_l7_legs(
     let response_attempt = EffectAttempt::ResponseRelease {
         host: &connect.host,
         port: connect.port,
-        method: &request_method,
+        method: &method,
         path: &workload_path,
         status: res.status,
-        body_bytes: res.body.as_bytes().len(),
+        body_bytes: res.body.len(),
     };
     let response_permit = match claim_effect(state, &response_attempt) {
         Ok(permit) => permit,
-        Err(error) => {
-            let reason = format!("response release interception failed: {error}");
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                reason.clone(),
-                correlation.clone(),
-            ));
-            return Ok(interceptor_error(&error, None));
-        }
+        Err(error) => return Ok(interceptor_error(&error, None)),
     };
-
-    if let Some(location) = redirect_location {
-        // The client, not the proxy, follows this redirect and therefore re-enters all connection
-        // checks. The already-scrubbed redirect response still crosses the governed release boundary.
-        let reason = format!("cross-host redirect not followed: {location}");
-        state.audit.push(NetworkAuditEvent::deny(
-            &connect.host,
-            connect.port,
-            reason.clone(),
-            correlation.clone(),
-        ));
-    } else {
-        state.audit.push(NetworkAuditEvent::allow(
-            &connect.host,
-            connect.port,
-            correlation.clone(),
-        ));
-    }
 
     Ok(WorkloadResponse {
         status: res.status,
         reason: None,
         headers: res.headers,
-        body: match res.body {
-            BodyRef::Bytes(body) => body,
-            BodyRef::Empty => Vec::new(),
-        },
+        body: res.body,
         release: Some(response_permit),
-        header_case: parsed_res.header_case,
+        header_case: parsed.header_case,
     })
 }
 
@@ -479,19 +305,7 @@ pub(crate) async fn forward_plain(
     correlation: RequestId,
 ) -> Result<WorkloadResponse> {
     let upstream = Upstream::new(upstream, None, state);
-
-    let mut target = Target::new(connect.host.clone(), connect.port);
-    let (path, query) = split_target(&origin_target);
-    target.path = path;
-    target.query = query;
-
-    let mut req = InterceptedRequest {
-        target,
-        method: Some(parsed.method),
-        headers: parsed.headers,
-        body: BodyRef::Bytes(parsed.body),
-        advisory_note: None,
-    };
+    let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
     // destination twice — in the absolute-form request line and in `Host` — and the workload controls
@@ -518,6 +332,27 @@ pub(crate) async fn forward_plain(
         |_method, _target, _headers| Ok(()),
     )
     .await
+}
+
+/// The boundary request for `parsed`, sent to `connect` with the origin-form `target`.
+fn intercepted_request(
+    connect: &ConnectRequest,
+    target: &str,
+    parsed: http1::ParsedRequest,
+) -> InterceptedRequest {
+    let (path, query) = split_target(target);
+    InterceptedRequest {
+        target: Target {
+            host: connect.host.clone(),
+            port: connect.port,
+            path,
+            query,
+        },
+        method: parsed.method,
+        headers: parsed.headers,
+        body: parsed.body,
+        advisory_note: None,
+    }
 }
 
 /// The response to the workload: a gateway diagnostic, or the governed response.
@@ -609,31 +444,44 @@ fn proxy_originated_headers() -> crate::boundary::HeaderMap {
     headers
 }
 
-/// What an egress decision is *about* — the non-secret identity of one exchange.
-struct DecisionSubject<'a> {
-    host: &'a str,
-    port: u16,
-    method: &'a str,
-    path: &'a str,
-}
-
-/// Emit one final egress decision.
-fn emit_decision(
+/// Emit one final egress decision about `request`, its method and path, on `connect`.
+pub(crate) fn emit_decision(
     state: &SharedState,
-    subject: DecisionSubject<'_>,
+    connect: &ConnectRequest,
+    (method, path): (&str, &str),
     decision: AuditDecision,
     reason: &str,
     correlation: RequestId,
 ) {
     state.emitter.emit(EgressDecision {
-        host: subject.host.to_string(),
-        port: subject.port,
-        method: subject.method.to_string(),
-        path: subject.path.to_string(),
+        host: connect.host.clone(),
+        port: connect.port,
+        method: method.to_string(),
+        path: path.to_string(),
         decision,
         reason: reason.to_string(),
         correlation,
     });
+}
+
+/// Record the denial of `request` on `connect`, and return `refusal`, the response that answers it.
+fn deny(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    request: (&str, &str),
+    reason: &str,
+    correlation: RequestId,
+    refusal: WorkloadResponse,
+) -> WorkloadResponse {
+    emit_decision(
+        state,
+        connect,
+        request,
+        AuditDecision::Deny,
+        reason,
+        correlation,
+    );
+    refusal
 }
 
 /// The RFC 3986 normal form of an origin-form request path, `/` when it is empty, or why it is refused.
@@ -644,42 +492,6 @@ fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> 
     } else {
         normal
     })
-}
-
-/// A request the gateway refuses before any request leg runs.
-struct RefusedRequest<'a> {
-    method: Option<&'a str>,
-    path: &'a str,
-    reason: &'a str,
-    diagnostic: &'a [u8],
-}
-
-/// Record a refused request and answer the client 403.
-fn refuse_request(
-    state: &SharedState,
-    connect: &ConnectRequest,
-    refused: RefusedRequest<'_>,
-    correlation: RequestId,
-) -> WorkloadResponse {
-    state.audit.push(NetworkAuditEvent::deny(
-        &connect.host,
-        connect.port,
-        refused.reason.to_string(),
-        correlation.clone(),
-    ));
-    emit_decision(
-        state,
-        DecisionSubject {
-            host: &connect.host,
-            port: connect.port,
-            method: refused.method.unwrap_or_default(),
-            path: refused.path,
-        },
-        AuditDecision::Deny,
-        refused.reason,
-        correlation,
-    );
-    WorkloadResponse::refusal(403, refused.diagnostic)
 }
 
 /// The `params.cursor` a `tools/list` request names.
