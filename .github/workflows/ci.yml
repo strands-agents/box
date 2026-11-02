@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -139,3 +139,9 @@ jobs:
         with:
           allowed-skips: rust, containment, verdict, native
           jobs: ${{ toJSON(needs) }}
+
+      - name: Refuse a draft as merge evidence
+        if: ${{ github.event.pull_request.draft == true }}
+        run: |
+          echo "::error::Draft run: containment and verdict did not run. Mark the pull request ready to run the full suite."
+          exit 1
