@@ -7,7 +7,7 @@ The source must belong to `main` history for publication.
 ## Choose a version
 
 Both channels publish macOS Apple silicon. Set `publish_linux=true` to include Amazon Linux 2023 ARM64.
-For a macOS-only stable release, set `publish_linux=false`. Linux preview versions require `publish_linux=true`.
+The default, `publish_linux=false`, keeps stable releases macOS-only. Linux preview versions require `publish_linux=true`.
 The x86_64 Linux build remains a workflow artifact and is not published as a release asset.
 
 | Version input | GitHub release | Latest stable release |

@@ -11,6 +11,17 @@ import unittest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-box-artifact.yml"
 
 
+def workflow_input_default(name):
+    lines = WORKFLOW.read_text().splitlines()
+    start = lines.index(f"      {name}:") + 1
+    for line in lines[start:]:
+        if not line.startswith("        "):
+            break
+        if line.startswith("        default: "):
+            return line.split(": ", 1)[1]
+    raise ValueError(f"workflow input {name} has no default")
+
+
 def workflow_command(name):
     lines = WORKFLOW.read_text().splitlines()
     start = lines.index(f"      - name: {name}")
@@ -123,6 +134,19 @@ class ReleaseSourceTests(unittest.TestCase):
         result, output = self.scan_source("true")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("linux_preview=false\n", output)
+
+    def test_default_platform_selection_keeps_stable_macos_only(self):
+        selection = workflow_input_default("publish_linux")
+        result, output = self.scan_source("false", publish_linux=selection)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("publish_linux=false\n", output)
+        self.assertIn("linux_preview=false\n", output)
+        result, output = self.scan_source(
+            "true", version="0.1.1-linux-preview.1", publish_linux=selection
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a Linux preview requires publish_linux=true", result.stdout)
+        self.assertEqual(output, "")
 
     def test_stable_can_omit_linux_without_changing_the_channel(self):
         result, output = self.scan_source("false", publish_linux="false")

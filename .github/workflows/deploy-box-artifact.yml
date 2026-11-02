@@ -34,7 +34,7 @@ on:
       publish_linux:
         description: 'Include the Linux ARM64 archive. Set false for a macOS-only stable release. Required for Linux previews.'
         required: true
-        default: true
+        default: false
         type: boolean
       sha:
         description: 'Optional source SHA. Releases require main history. Dry runs also accept the dispatched commit and default to it.'
