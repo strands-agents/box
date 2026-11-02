@@ -1,10 +1,8 @@
-# Project BeatBox | Supporting request re-routing on Box
+# Supporting request re-routing on Box
 
 ## **Overview**
 
 The goal of this document is to align on key decisions for supporting routing egress HTTP calls to a different destinations.
-
-Today, Box supports matching outbound HTTP destinations and injecting credentials. For Project BeatBox ([https://pippin.amazon.dev/docs/4vSCg2Yl5TU7pG/project-beatbox-strands-box-on-agentcore-architecture-and-ux?tab=comments](https://pippin.amazon.dev/docs/4vSCg2Yl5TU7pG/project-beatbox-strands-box-on-agentcore-architecture-and-ux?tab=comments)), we need to support the pattern of forwarding egress calls to an external gateway.
 
 ## Key Decisions
 
@@ -37,8 +35,8 @@ At launch, we will validate that there can be only a single backend defined. In 
 destinations = ["api.github.com"]
 
 [[egress.github.backends]]
-name = "agentcore-workload"
-url  = "https://agentcore-gw-1.example.aws"
+name = "primary"
+url  = "https://gateway-1.example.com"
 auth.ref = "env://BOX_GW_TOKEN"
 
 ## At launch support a single backend. 
@@ -60,12 +58,12 @@ destinations = ["api.github.com"]
 ﻿
 [[egress.github.backends]]
 name = "control"
-url  = "https://agentcore-gw-1.example.aws"
+url  = "https://gateway-1.example.com"
 auth.ref = "env://BOX_GW_TOKEN"
 
 [[egress.github.backends]]
 name = "experiment"
-url  = "https://agentcore-gw-2.example.aws"
+url  = "https://gateway-2.example.com"
 auth.ref = "env://BOX_GW_TOKEN"
 
 [[egress.github.route-rules]]
@@ -90,17 +88,17 @@ If the Box Developer does not want the agent to reach the backend directly, no a
 ```
 ## Option 2
 
-@id("agentcore_connect")
+@id("github_connect")
 permit (principal, action == Box::Action::"net:connect", resource)
 when {
   context.input.host == "api.github.com" &&
   context.input.port == 443
 };
 
-@id("agentcore_connect")
+@id("backend_connect")
 permit (principal, action == Box::Action::"backend:connect", resource) #example action name
 when {
-  context.input.host == "gateway-id.gateway.bedrock-agentcore.us-west-2.amazonaws.com" &&
+  context.input.host == "gateway-1.example.com" &&
   context.input.port == 443
 };
 
