@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use containment::{Operation, Scope};
 
+use crate::GrantRefusal;
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
 
@@ -128,7 +129,7 @@ pub(crate) fn direct_grants(
     for (kind, entry) in lists.entries() {
         match kind {
             Grant::Deny => refusals.push(denial(entry, context)?),
-            _ => grants.push(entry_grant(kind, entry, context)?),
+            _ => grants.push(entry_grant(kind, entry, context).map_err(|(_, error)| error)?),
         }
     }
     require_no_overlap(&grants, context)?;
@@ -338,8 +339,11 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
 
 /// Judge a read grant on `path` as a box judges a `read` entry, and return whether it lies in a
 /// credential store.
-pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, BoxError> {
-    let home = crate::record::layout::canonical(&crate::record::layout::operator_home_directory()?);
+pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxError)> {
+    let home = crate::record::layout::canonical(
+        &crate::record::layout::operator_home_directory()
+            .map_err(|error| (GrantRefusal::Other, error))?,
+    );
     let context = FilesystemContext {
         table: "check_read_grant",
         operator_home: &home,
@@ -349,61 +353,74 @@ pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, BoxError> {
     };
     entry_grant(Grant::Read, path, &context)
         .map(|grant| grant.credential_store)
-        .map_err(BoxError::from)
+        .map_err(|(kind, error)| (kind, BoxError::from(error)))
 }
 
-/// One authorizing entry as a grant, refused by name for each class it falls in.
+/// One authorizing entry as a grant, refused by name for each class it falls in, with the kind of
+/// each refusal.
 fn entry_grant(
     kind: Grant,
     entry: &Path,
     context: &FilesystemContext<'_>,
-) -> Result<DirectGrant, ConfigError> {
+) -> Result<DirectGrant, (GrantRefusal, ConfigError)> {
     let authored = entry.display().to_string();
-    let named = |reason: &str| refuse(context, &authored, reason);
-    let lexical = expand_home(entry, &authored, context)?;
+    let refused = |kind, reason: &str| (kind, refuse(context, &authored, reason));
+    let other = |reason: &str| refused(GrantRefusal::Other, reason);
+    let lexical = expand_home(entry, &authored, context)
+        .map_err(|error| (GrantRefusal::NotAbsolute, error))?;
 
     // **An authored grant on an absent path is refused, never skipped.** A grant that silently
     // does nothing is the defect class this repository has recorded twice.
     let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| {
-        named(&format!(
-            "{} is not there: {source}. A grant on a path that does not exist grants nothing \
-             and says so nowhere",
-            lexical.display()
-        ))
+        refused(
+            GrantRefusal::Absent,
+            &format!(
+                "{} is not there: {source}. A grant on a path that does not exist grants nothing \
+                 and says so nowhere",
+                lexical.display()
+            ),
+        )
     })?;
     if metadata.is_symlink() {
         // Name the target so the operator can paste it into the grant. A missing target and a
         // resolve failure (permission, link loop) are different problems; say which one it is.
-        return Err(match lexical.canonicalize() {
-            Ok(target) => named(&format!(
-                "{} is a symbolic link to {}. A grant carries the identity the kernel checks,                  so a link renders a rule that matches nothing; name {} instead",
-                lexical.display(),
-                target.display(),
-                target.display()
-            )),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => named(&format!(
-                "{} is a symbolic link whose target is missing. A grant carries the identity                  the kernel checks, so a link renders a rule that matches nothing; repair the                  link or name a path that exists",
-                lexical.display()
-            )),
-            Err(source) => named(&format!(
-                "{} is a symbolic link that cannot be resolved: {source}. A grant carries the                  identity the kernel checks, so a link renders a rule that matches nothing;                  repair the link or name a path that exists",
-                lexical.display()
-            )),
-        });
+        let named = |reason: &str| refuse(context, &authored, reason);
+        return Err((
+            GrantRefusal::Link,
+            match lexical.canonicalize() {
+                Ok(target) => named(&format!(
+                    "{} is a symbolic link to {}. A grant carries the identity the kernel checks,                  so a link renders a rule that matches nothing; name {} instead",
+                    lexical.display(),
+                    target.display(),
+                    target.display()
+                )),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => named(&format!(
+                    "{} is a symbolic link whose target is missing. A grant carries the identity                  the kernel checks, so a link renders a rule that matches nothing; repair the                  link or name a path that exists",
+                    lexical.display()
+                )),
+                Err(source) => named(&format!(
+                    "{} is a symbolic link that cannot be resolved: {source}. A grant carries the                  identity the kernel checks, so a link renders a rule that matches nothing;                  repair the link or name a path that exists",
+                    lexical.display()
+                )),
+            },
+        ));
     }
     let resolved = lexical
         .canonicalize()
-        .map_err(|source| named(&format!("cannot resolve {}: {source}", lexical.display())))?;
+        .map_err(|source| other(&format!("cannot resolve {}: {source}", lexical.display())))?;
     if resolved != lexical {
         // Not necessarily a link: `canonicalize` also folds `.` and `..`, so the message names
         // what is actually wrong, which is that the authored spelling is not the identity the kernel
         // checks.
-        return Err(named(&format!(
-            "{} is not the path the kernel checks, which is {}. A grant carries the identity it \
-             acts on, so name that path instead",
-            lexical.display(),
-            resolved.display()
-        )));
+        return Err(refused(
+            GrantRefusal::NotCanonical,
+            &format!(
+                "{} is not the path the kernel checks, which is {}. A grant carries the identity it \
+                 acts on, so name that path instead",
+                lexical.display(),
+                resolved.display()
+            ),
+        ));
     }
 
     let is_directory = metadata.is_dir();
@@ -416,7 +433,7 @@ fn entry_grant(
         (Grant::ReadFile, false) => (Operation::Read, Scope::File),
         (Grant::WriteFile, false) => (Operation::Write, Scope::File),
         (Grant::ReadFile | Grant::WriteFile, true) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a directory; `{key}` names one file, and a tree belongs in `{}`",
                 resolved.display(),
                 if kind == Grant::ReadFile {
@@ -428,7 +445,7 @@ fn entry_grant(
         }
         (Grant::List, true) => {
             if cfg!(target_os = "linux") {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} cannot be listed without its contents on Linux: the namespace backend \
                      has no lowering for `list`; grant `read` instead",
                     resolved.display()
@@ -437,14 +454,14 @@ fn entry_grant(
             (Operation::List, Scope::Root)
         }
         (Grant::List, false) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a file, and `list` enumerates a directory tree",
                 resolved.display()
             )));
         }
         (Grant::Metadata, true) => (Operation::Metadata, Scope::Root),
         (Grant::Metadata, false) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a file, and a file's metadata comes with the `read_file` or `exec` grant \
                  that names it",
                 resolved.display()
@@ -453,7 +470,7 @@ fn entry_grant(
         (Grant::Exec, true) => (Operation::Exec, Scope::Root),
         (Grant::Exec, false) => {
             if !crate::run::contain::executable::is_executable(&resolved) {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} is not an executable regular file",
                     resolved.display()
                 )));
@@ -469,7 +486,7 @@ fn entry_grant(
     if kind.writes() {
         for directory in &context.program_search_directories {
             if directory.starts_with(&resolved) {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} is at or above {}, which is on the search path this box resolves a \
                      bare-name MCP program against. That program starts outside containment at \
                      the operator's identity, so a writable directory there is a program the \
@@ -486,10 +503,14 @@ fn entry_grant(
     let credential_store =
         containment::validate_grant(&lexical, context.operator_home, operation, scope).map_err(
             |error| {
-                named(&format!(
+                let (_, refused) = other(&format!(
                     "{} is refused beneath every grant: {error}",
                     resolved.display()
-                ))
+                ));
+                let kind = error
+                    .forbidden_class()
+                    .map_or(GrantRefusal::Other, GrantRefusal::Forbidden);
+                (kind, refused)
             },
         )?;
 
@@ -791,7 +812,11 @@ mod tests {
         ] {
             let grants: Vec<_> = lists(body)
                 .entries()
-                .map(|(kind, path)| entry_grant(kind, path, &context).unwrap())
+                .map(|(kind, path)| {
+                    entry_grant(kind, path, &context)
+                        .map_err(|(_, error)| error)
+                        .unwrap()
+                })
                 .collect();
             let result = require_supported_grants(&grants, &context);
             assert_eq!(
