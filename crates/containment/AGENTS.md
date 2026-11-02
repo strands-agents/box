@@ -794,8 +794,12 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `AF_RDS` through.
 - **Deny `io_uring_setup` beside `socket(AF_INET)`**, because `IORING_OP_SOCKET` needs no `socket(2)`
   since 5.19 and seccomp cannot read a ring's SQEs.
-- **Take every number from `libc`**, never a hand-written `#ifdef` table. Fix a missing name upstream;
-  never `#[cfg]` it away.
+- **Take every number from `libc`**, never a hand-written `#ifdef` table.
+  The twenty legacy console requests in `terminal_control_rules` are an explicit exception when
+  `libc` lacks their names. Define those private `u32` constants from the pinned Linux UAPI `kd.h`
+  and `vt.h` headers. Verify production and independent test values against those headers when
+  changing the list. Upstream work is optional for this exception; no merge or release is required.
+  Fix other missing names upstream; never `#[cfg]` them away.
 
 ### W^X
 
@@ -935,19 +939,21 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     process; neither stops a runtime reading a file and interpreting it. The AGENTS.md W^X section says
     the same thing in its own words: an exec view is safe only when no reachable program is
     universal over authored data, and the harness always is.
-- **`ioctl` is permitted wholesale on Linux, and nothing filters `TIOCSTI`. Unmeasured, and Linux is
-  the more exposed platform.** `ioctl` sits in `WORKLOAD_PERMITTED` with no `MEDIATED` entry, so no
-  request number is scoped. The workload's descriptor 0 is the operator's real controlling terminal on
-  both platforms: `terminal.rs` hands the terminal to the child's process group and the box calls no
-  `setsid`. On macOS Apple's kernel refuses `TIOCSTI` — measured, and by the platform rather than by
-  the profile. Linux's historic check permits it with **no capability** when the descriptor is the
-  caller's own controlling terminal, and the `dev.tty.legacy_tiocsti` sysctl that closes it arrived in
-  6.2. So the target kernel decides, and nobody has run the probe.
-  - **Measure before designing.** Drive `ioctl(0, TIOCSTI, &byte)` from a contained workload on a real
-    terminal, with an uncontained control, exactly as `tests/inherited_handles_macos.rs` does.
-  - **Unlike Seatbelt, seccomp can express the narrow denial.** The request number is `arg1`, a
-    scalar, so an `ArgumentScoped` entry is the same shape `mmap`, `mprotect`, and `execveat` already
-    use. That is a cheap floor whichever way the measurement goes.
+- **Linux terminal restrictions do not isolate the inherited terminal.** The filter refuses
+  `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` by their low 32 request bits. Normal terminal settings and
+  queries remain permitted. Keep the denial and successful-operation controls in `tests::terminal`.
+  - The workload can inherit the operator's controlling terminal. Keep virtual-console mode,
+    switching, deallocation, resizing, keyboard-lock, accent-table, font, palette, and screen-map
+    mutations refused. `VT_SETACTIVATE` combines mode changes and switching. `KDFONTOP` combines
+    reads and writes behind a pointer, so its read operation is refused too.
+  - Disposable pseudoterminals prove request refusal and unchanged line discipline and input.
+    They cannot reproduce virtual-console keyboard, display, or switching effects.
+    Test those effects only on a disposable console with separate recovery access.
+  - The private console constants follow Linux UAPI `include/uapi/linux/kd.h` and `vt.h`.
+    Check them against the headers when changing the list; keep independent values in the tests.
+    Do not require an unpublished dependency for constants already defined by the kernel.
+    Preserve successful-operation controls. Ordinary terminal settings and `TIOCSWINSZ` remain
+    permitted, so this is not full isolation.
 - **The reach modes have one legal value each.** Both backends refuse every non-default `SignalMode`,
   `ProcessInfoMode`, and `IpcMode`, so those four exported enums describe a widening the product does
   not offer. Kept deliberately for a future backend that honours them.
