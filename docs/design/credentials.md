@@ -42,7 +42,7 @@ An http MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. 
 the same route, and everything on this page applies to it
 ([the `[mcp.<name>]` table](../user/mcp.md)).
 
-Box accepts only these two schemes. A route that names any other scheme is refused when the
+Box accepts only `env://`, `op://`, and `aws://`. An `op://` route behaves like an `env://` route, except that `secret.variable` names the placeholder variable. A route that names any other scheme is refused when the
 configuration loads
 ([a credential the box can't deliver is refused at load](./decisions.md#an-undeliverable-credential-is-refused-at-load)).
 

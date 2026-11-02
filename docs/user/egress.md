@@ -50,13 +50,14 @@ when { context.input.host == "api.github.com" };
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
-| `secret.ref` | string | required | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
-| `secret.placement` | string | `header` | For `env://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
-| `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
-| `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` with `placement = "header"`: the text before the credential. |
-| `secret.param` | string | none | For `env://` with `placement = "query_param"`: the query parameter name. Required for that placement. |
-| `secret.inject` | string | `phantom` | For `env://`: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. |
-| `secret.phantom_prefix` | string | `strands_box_` | For `env://`: the start of the placeholder, such as `sk-ant-` for a client that checks the key's format. 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
+| `secret.ref` | string | required | Where the credential comes from: `env://NAME`, `op://VAULT/ITEM/FIELD`, or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `secret.variable` | string | none | For `op://`: the variable that holds the placeholder in each process. Required for `op://`, and refused with any other scheme. |
+| `secret.placement` | string | `header` | For `env://` or `op://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
+| `secret.header` | string | `Authorization` | For `env://` or `op://` with `placement = "header"`: the header name. |
+| `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` or `op://` with `placement = "header"`: the text before the credential. |
+| `secret.param` | string | none | For `env://` or `op://` with `placement = "query_param"`: the query parameter name. Required for that placement. |
+| `secret.inject` | string | `phantom` | For `env://` or `op://`: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. |
+| `secret.phantom_prefix` | string | `strands_box_` | For `env://` or `op://`: the start of the placeholder, such as `sk-ant-` for a client that checks the key's format. 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 
 ### Placement
 
@@ -92,6 +93,7 @@ paths in policy.
 | `secret.ref` | Read from | When |
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. |
+| `op://VAULT/ITEM/FIELD` | The 1Password field, read with the `op` command | Once, when the box starts. The agent and each tool and MCP server get a placeholder in the variable that `secret.variable` names. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
@@ -111,7 +113,9 @@ names is refused.
 | A route has no `destinations`, or an entry is empty, `*`, or has port `0` | Name each host the credential goes to. |
 | Two routes, or two entries in one route, match the same destination | Narrow one of them, for example by path or port. |
 | A route names an http MCP server's host | Put the credential on the `[mcp.<name>]` table. |
-| `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
+| `secret.ref` has a scheme other than `env`, `op`, or `aws` | Use one of the three schemes. |
+| An `op://` route has no `secret.variable`, or another scheme sets `secret.variable` | Name the variable on an `op://` route only. |
+| `secret.variable` is empty, invalid, or reserved by the box | Choose another name. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |
 | `placement` is not `header`, `basic_auth`, or `query_param`, or is set with a key it does not take | Use one of the three, with only its own keys. |

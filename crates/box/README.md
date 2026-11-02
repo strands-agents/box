@@ -276,13 +276,14 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.ref` | required | `env://NAME`, `op://vault/item/field`, or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.variable` | required for `op://` | The variable that holds the phantom in the workload. `op://` only. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
 | `secret.param` | required for `query_param` | The query-parameter name the credential is attached under. |
-| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` only. |
-| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` only, so a harness that checks its key format accepts the phantom. |
+| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` and `op://` only. |
+| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` and `op://` only, so a harness that checks its key format accepts the phantom. |
 
 The entry carries no credential-type key, so a `secret.type` on any scheme is an unknown key the box
 refuses.
@@ -319,14 +320,15 @@ permitting writes across the home would turn an agent write into trusted-process
 A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
 the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
 
-**Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
+**Only `env://`, `op://`, and `aws://` are accepted**, and the config load refuses the rest by
 name.
-`file://` and `op://` resolve host-side and place nothing in the workload's
+An `op://` route takes its variable from `secret.variable`, because the reference names none.
+`file://` resolves host-side and places nothing in the workload's
 environment — which for a credential the workload must present is not a different
 mode but an unusable one: the vault mints a phantom the box cannot deliver, so every
 request to that destination is refused for a missing placeholder. `cmd://` and
 `oauth2://` have no mint path at all. The vault still dereferences `file://` and
-`op://` for callers that need one secret and no placeholder, such as an ingress
+`op://` without a placeholder for callers that need one secret and no placeholder, such as an ingress
 front door; this narrows the box's config surface, not the crate's.
 
 A credential whose value is empty, only whitespace, or carrying a control character
@@ -357,6 +359,8 @@ Refused, each at startup with the destination named:
 | `secret.ref = "STRIPE_KEY"` | A bare name is not a URI. |
 | `secret.ref = "env://PATH"` | The box sets that variable itself. |
 | `secret.ref = "env://UNSET"` | A phantom would stand in for nothing. |
+| An `op://` secret with no `secret.variable` | The workload has no variable to hold the phantom. |
+| `secret.variable` with any other scheme | Only an `op://` reference names no variable. |
 | An `aws://` secret with any other `secret` key | A signature has no single attach location. |
 | `secret.header = "X-Bad: injected"` | An HTTP field name is a token (RFC 7230 §3.2.6). |
 | `heder = "x-api-key"` | An unknown key is a load error, not a silent drop. |
