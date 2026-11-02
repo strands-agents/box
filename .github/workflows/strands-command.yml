@@ -85,7 +85,7 @@ jobs:
       issues: write
       pull-requests: write
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       # The reviewer prompt comes from the commit this workflow runs from (the
       # default branch for a comment, the dispatched ref for a dispatch), never

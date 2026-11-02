@@ -674,7 +674,7 @@ jobs:
       needs.build.result == 'success' &&
       needs.inspect.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     environment:
       # Configure reviewers + main-only deployment branches in repo settings.
       # A fork has no reviewer config here, so this just passes on a fork; the
