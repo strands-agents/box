@@ -33,7 +33,6 @@ The [network exception](#network-access) changes only the network namespace choi
 Inside the process namespace, process ID 1 is the supervisor that collects child exit statuses.
 Before creating the workload, it sets `PR_SET_DUMPABLE=0` to restrict workload access to its memory through `/proc/1/mem`.
 If that operation fails, it reports setup failure and terminates the namespace before the workload starts.
-`workload_cannot_write_namespace_supervisor_memory` and `a_reaper_that_remains_dumpable_terminates_its_namespace` check these paths.
 
 This guard restricts memory access independently of whether `/proc` permits writes.
 A read-only `/proc` does not itself establish that supervisor-memory reads are refused.
