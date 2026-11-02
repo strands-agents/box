@@ -212,7 +212,13 @@ Write, Exec, metadata, and directory-listing permissions do not substitute for c
 Linux also checks execution authority for each writable dependency, including the program's native loader.
 It refuses automatic executable access unless an explicit Exec grant covers the dependency or the workload has broad execution permission.
 This check applies inside system-library directories too.
-The conservative hard-link check can require execution authority even when every current link is outside the writable directories.
+The hard-link execution check excludes an inode only when ownership, permissions, and an effective-credential write check exclude workload writes through those aliases.
+The dependency and writable directory must share a mount, with no nested mounts under the writable directory.
+Different mounts can present different ownership for the same inode, so those aliases remain restricted.
+Unknown permission or mount information also remains restricted.
+This can require execution authority even when every current link is outside the writable directories.
+A read-only file owned by the workload remains restricted because its owner can change its permissions.
+These exceptions affect execution admission only; the conservative dependency-read checks above remain unchanged.
 Read access cannot authorize execution of writable bytes.
 An immutable dependency of a writable program retains its existing read checks without an additional Exec requirement.
 

@@ -11,8 +11,12 @@ use crate::error::ContainmentError;
 use crate::model::{ObjectIdentity, ObjectPin, Operation, Scope};
 
 use super::MECHANISM;
-use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
+use crate::backend::dependencies::{
+    MissingReads, folded, require_not_refused, workload_writable,
+    workload_writable_with_alias_check,
+};
 
+mod dependency_permissions;
 mod targets;
 
 /// What provides an entry's bytes.
@@ -1438,8 +1442,8 @@ fn require_loadable(
         missing.add(&granted.resolved, image);
         return Ok(None);
     }
-    if writable
-        && !config.broad_exec()
+    let file = Rc::new(open_dependency(&granted.resolved)?);
+    if !config.broad_exec()
         && !config.authorizations().iter().any(|grant| {
             grant.operation == Operation::Exec
                 && match grant.scope {
@@ -1448,6 +1452,15 @@ fn require_loadable(
                     Scope::Dir => false,
                 }
         })
+        && workload_writable_with_alias_check(
+            config,
+            library,
+            MECHANISM,
+            Some(&file.metadata().map_err(|error| {
+                refusal(format!("checking admitted dependency identity: {error}"))
+            })?),
+            |root| dependency_permissions::hard_link_alias_may_be_writable(&file, root),
+        )?
     {
         return Err(refusal(format!(
             "writable dependency {:?} needed by {:?} has no explicit execution grant. \
@@ -1456,7 +1469,6 @@ fn require_loadable(
             granted.resolved, image
         )));
     }
-    let file = Rc::new(open_dependency(&granted.resolved)?);
     Ok(Some((granted.resolved, file, restricted)))
 }
 
