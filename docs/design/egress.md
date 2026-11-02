@@ -159,7 +159,7 @@ a request that does.
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
-| A 1Password field | `op://VAULT/ITEM/FIELD` | Reads the field with the `op` command once, at startup, and swaps it in for a placeholder in the variable that `secret.variable` names |
+| A 1Password field | `op://VAULT/ITEM/FIELD` | Reads the field with the `op` command at startup, once for each destination, and swaps it in for a placeholder in the variable that `secret.variable` names |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
 
 ### The placeholder swap

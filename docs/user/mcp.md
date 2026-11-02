@@ -161,12 +161,13 @@ to the server in both modes.
 | `type` | string | required | `"http"`. |
 | `destinations` | string array | required | The server's hosts. Each is a host, `host:port`, a host with a path prefix, or a `*.` wildcard host. |
 | `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `op://VAULT/ITEM/FIELD`, or `aws://PROFILE`. |
+| `secret.variable` | string | none | For `op://`: the variable that holds the placeholder. Required for `op://`, and refused with any other scheme. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
 | `secret.placement` | string | `header` | `header`, `basic_auth`, or `query_param`. |
 | `secret.param` | string | none | The query parameter's name, for `placement = "query_param"`. |
-| `secret.inject` | string | `phantom` | For `env://`: `phantom` attaches the credential to a request that carries the placeholder, and `always` attaches it to every request to the destinations. |
-| `secret.phantom_prefix` | string | `strands_box_` | For `env://`: the start of the placeholder value. |
+| `secret.inject` | string | `phantom` | For `env://` or `op://`: `phantom` attaches the credential to a request that carries the placeholder, and `always` attaches it to every request to the destinations. |
+| `secret.phantom_prefix` | string | `strands_box_` | For `env://` or `op://`: the start of the placeholder value. |
 
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets
 a placeholder in `NAME`, and the gateway swaps in the real value on each request to the server.

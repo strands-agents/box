@@ -93,7 +93,7 @@ paths in policy.
 | `secret.ref` | Read from | When |
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. |
-| `op://VAULT/ITEM/FIELD` | The 1Password field, read with the `op` command | Once, when the box starts. The agent and each tool and MCP server get a placeholder in the variable that `secret.variable` names. |
+| `op://VAULT/ITEM/FIELD` | The 1Password field, read with the `op` command | When the box starts, once for each destination the route names. The agent and each tool and MCP server get a placeholder in the variable that `secret.variable` names. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
