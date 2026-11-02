@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 /// Why a box refused to run or reload, or stopped running.
 #[derive(Debug)]
-pub struct BoxError(Internal);
+pub(crate) struct BoxError(Internal);
 
 impl BoxError {
     /// Whether no box is open for reload in this process.
-    pub fn is_not_running(&self) -> bool {
+    pub(crate) fn is_not_running(&self) -> bool {
         matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
     }
 }

@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use command::cli::{Cli, Command, PolicyCommand};
 
-pub use error::BoxError;
 pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -53,9 +52,28 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
 }
 
 /// Replace the running box's authored policies with the supplied text.
-pub fn reload(sources: &[Policy]) -> Result<(), BoxError> {
-    run::hosted::reload(sources)
+pub fn reload(sources: &[Policy]) -> Result<(), ReloadRefused> {
+    run::hosted::reload(sources).map_err(ReloadRefused)
 }
+
+/// A reload that the box refused, or that found no box open in this process.
+#[derive(Debug)]
+pub struct ReloadRefused(error::BoxError);
+
+impl ReloadRefused {
+    /// Whether no box is open for reload in this process.
+    pub fn is_not_running(&self) -> bool {
+        self.0.is_not_running()
+    }
+}
+
+impl std::fmt::Display for ReloadRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ReloadRefused {}
 
 /// Check the policy that a Box configuration selects, as a box checks it when it opens.
 pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {

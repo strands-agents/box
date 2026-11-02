@@ -432,7 +432,7 @@ mod reload_tests {
                 "policy_refused refused library-policy.dw",
                 "policy_refused refused library-policy.dw",
                 "policy_refused refused library-policy.dw",
-                "policy_installed ok library-policy.dw",
+                "policy_refused refused library-policy.dw",
                 "policy_installed ok library-policy.dw",
                 "policy_installed ok <no authored policy>",
             ]
@@ -497,15 +497,12 @@ mod reload_tests {
                         r#"permit(principal, action == Box::Action::"not:declared", resource);"#,
                         r#"permit(principal, action, resource);
                            forbid(principal, action == alpah::Action::"read", resource);"#,
+                        r#"permit(principal, action, resource);
+                           forbid(principal, action == alpha_mcp::Action::"read", resource);"#,
                     ] {
                         let error = strands_box::reload(&sources(invalid)).unwrap_err();
                         assert!(!error.is_not_running(), "{error}");
                     }
-                    strands_box::reload(&sources(
-                        r#"permit(principal, action, resource);
-                           forbid(principal, action == alpha_mcp::Action::"read", resource);"#,
-                    ))
-                    .unwrap();
                 }
                 3 => strands_box::reload(&sources(RESTRICTED)).unwrap(),
                 4 => strands_box::reload(&[]).unwrap(),
