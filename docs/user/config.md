@@ -300,7 +300,8 @@ Remove write access to the library, or grant execution if the agent should run c
 The same check covers writable symbolic-link paths and hard-link aliases.
 Immutable hard-linked libraries retain automatic execution access when Box can verify their ownership, permissions, and mount boundaries.
 A read-only file that the workload owns remains writable for this check because its owner can change its permissions.
-Different or nested mounts, and checks that cannot establish immutability, can still require explicit execution permission.
+Ordinary local mounts can retain this exception when their ownership rules agree.
+Remapped ownership, nested mounts, unrecognized filesystem types, and inconclusive checks can still require explicit execution permission.
 Tools retain their broader execution permission for their own filesystem grants.
 
 ## `[tool.<name>]` selection

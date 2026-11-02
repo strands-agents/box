@@ -213,9 +213,11 @@ Linux also checks execution authority for each writable dependency, including th
 It refuses automatic executable access unless an explicit Exec grant covers the dependency or the workload has broad execution permission.
 This check applies inside system-library directories too.
 The hard-link execution check excludes an inode only when ownership, permissions, and an effective-credential write check exclude workload writes through those aliases.
-The dependency and writable directory must share a mount, with no nested mounts under the writable directory.
-Different mounts can present different ownership for the same inode, so those aliases remain restricted.
-Unknown permission or mount information also remains restricted.
+The writable directory must contain no nested mounts.
+A shared mount uses the same ownership rules for the source and any alias.
+Different mounts qualify only when neither remaps ownership and both use recognized local filesystems.
+This check recognizes ext2, ext3, ext4, XFS, Btrfs, tmpfs, and ramfs across mount boundaries.
+Other filesystem types, inconsistent device information, and unknown permission or mount information remain restricted.
 This can require execution authority even when every current link is outside the writable directories.
 A read-only file owned by the workload remains restricted because its owner can change its permissions.
 These exceptions affect execution admission only; the conservative dependency-read checks above remain unchanged.

@@ -47,16 +47,14 @@ pub(super) fn hard_link_alias_may_be_writable(file: &File, write_root: &PathGran
     let (Some(source_mount), Some(root_mount)) = (mount_id(file), mount_id(&root)) else {
         return true;
     };
-    if source_mount != root_mount {
-        return true;
-    }
     let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return true;
     };
-    !root_uses_only_mount(
+    !root_uses_compatible_mounts(
         &table,
         [&write_root.original, &write_root.resolved],
-        source_mount,
+        (source_mount, metadata.dev()),
+        (root_mount, root_metadata.dev()),
     )
 }
 
@@ -91,23 +89,61 @@ fn mount_id(file: &File) -> Option<u64> {
     (metadata.stx_mask & libc::STATX_MNT_ID != 0).then_some(metadata.stx_mnt_id)
 }
 
-fn root_uses_only_mount(table: &str, roots: [&Path; 2], mount: u64) -> bool {
-    let mut found = false;
-    for line in table.lines() {
-        let Some((identity, point)) = mount_point(line) else {
-            return false;
-        };
-        if identity == mount && roots[1].starts_with(&point) {
-            found = true;
-        }
-        if identity != mount && roots.iter().any(|root| point.starts_with(root)) {
-            return false;
-        }
-    }
-    found
+#[derive(Debug, PartialEq, Eq)]
+struct MountRecord<'a> {
+    identity: u64,
+    device: u64,
+    point: PathBuf,
+    idmapped: bool,
+    filesystem: &'a str,
 }
 
-fn mount_point(line: &str) -> Option<(u64, PathBuf)> {
+fn root_uses_compatible_mounts(
+    table: &str,
+    roots: [&Path; 2],
+    source_identity: (u64, u64),
+    root_identity: (u64, u64),
+) -> bool {
+    let Some(mounts) = table.lines().map(mount_record).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    let identities: std::collections::BTreeSet<_> =
+        mounts.iter().map(|mount| mount.identity).collect();
+    if identities.len() != mounts.len() {
+        return false;
+    }
+    let Some(source) = mounts
+        .iter()
+        .find(|mount| (mount.identity, mount.device) == source_identity)
+    else {
+        return false;
+    };
+    let Some(root) = mounts.iter().find(|mount| {
+        (mount.identity, mount.device) == root_identity && roots[1].starts_with(&mount.point)
+    }) else {
+        return false;
+    };
+    if source.identity != root.identity
+        && (source.idmapped
+            || root.idmapped
+            || !ordinary_local_filesystem(source.filesystem)
+            || !ordinary_local_filesystem(root.filesystem))
+    {
+        return false;
+    }
+    !mounts.iter().any(|mount| {
+        mount.identity != root.identity && roots.iter().any(|root| mount.point.starts_with(root))
+    })
+}
+
+fn ordinary_local_filesystem(filesystem: &str) -> bool {
+    matches!(
+        filesystem,
+        "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "tmpfs" | "ramfs"
+    )
+}
+
+fn mount_record(line: &str) -> Option<MountRecord<'_>> {
     let fields: Vec<_> = line.split_ascii_whitespace().collect();
     let separator = fields.iter().position(|field| *field == "-")?;
     if separator < 6 || fields.len() != separator + 4 {
@@ -116,8 +152,7 @@ fn mount_point(line: &str) -> Option<(u64, PathBuf)> {
     let identity = fields[0].parse().ok()?;
     fields[1].parse::<u64>().ok()?;
     let (major, minor) = fields[2].split_once(':')?;
-    major.parse::<u64>().ok()?;
-    minor.parse::<u64>().ok()?;
+    let device = libc::makedev(major.parse().ok()?, minor.parse().ok()?);
     let raw = fields[4];
     let mut remaining = raw;
     while let Some(index) = remaining.find('\\') {
@@ -131,7 +166,13 @@ fn mount_point(line: &str) -> Option<(u64, PathBuf)> {
         remaining = &remaining[4..];
     }
     let point = PathBuf::from(super::unescape_mount_field(raw));
-    point.is_absolute().then_some((identity, point))
+    point.is_absolute().then_some(MountRecord {
+        identity,
+        device,
+        point,
+        idmapped: fields[5].split(',').any(|option| option == "idmapped"),
+        filesystem: fields[separator + 1],
+    })
 }
 
 #[cfg(test)]
@@ -177,30 +218,113 @@ mod tests {
         }
     }
 
+    fn check_mounts(table: &str, source: u64, root: u64, root_device: u64) -> bool {
+        root_uses_compatible_mounts(
+            table,
+            [Path::new("/work/project"), Path::new("/work/project")],
+            (source, libc::makedev(8, 1)),
+            (root, root_device),
+        )
+    }
+
+    #[test]
+    fn plain_bind_mounts_and_separate_local_filesystems_preserve_inode_permissions() {
+        let base = "20 1 8:1 / / rw - ext4 /dev/root rw\n";
+        let device = libc::makedev(8, 1);
+        assert!(check_mounts(base, 20, 20, device));
+        for (filesystem, numbers, device) in [
+            ("ext4", "8:1", device),
+            ("tmpfs", "0:42", libc::makedev(0, 42)),
+        ] {
+            let table =
+                format!("{base}21 20 {numbers} / /work/project rw - {filesystem} none rw\n");
+            assert!(check_mounts(&table, 20, 21, device));
+        }
+    }
+
+    #[test]
+    fn different_idmapped_mounts_keep_aliases_restricted() {
+        let device = libc::makedev(8, 1);
+        for (source_options, root_options) in [
+            ("rw,idmapped", "rw"),
+            ("rw", "rw,idmapped"),
+            ("rw,idmapped", "rw,idmapped"),
+        ] {
+            let table = format!(
+                "20 1 8:1 / / {source_options} - ext4 /dev/root rw\n\
+                 21 20 8:1 / /work/project {root_options} - ext4 /dev/root rw\n"
+            );
+            assert!(!check_mounts(&table, 20, 21, device));
+        }
+        let same = "20 1 8:1 / / rw,idmapped - ext4 /dev/root rw\n";
+        assert!(check_mounts(same, 20, 20, device));
+        let ordinary = "20 1 8:1 / / rw - ext4 /dev/root rw\n\
+                        21 20 8:1 / /work/project rw,not-idmapped - ext4 /dev/root rw\n";
+        assert!(check_mounts(ordinary, 20, 21, device));
+    }
+
+    #[test]
+    fn layered_and_unknown_filesystems_keep_cross_mount_aliases_restricted() {
+        let device = libc::makedev(8, 1);
+        for filesystem in ["overlay", "fuse", "fuse.sshfs", "vfat", "nfs", "unknown"] {
+            for (source, root) in [(filesystem, "ext4"), ("ext4", filesystem)] {
+                let table = format!(
+                    "20 1 8:1 / / rw - {source} none rw\n\
+                     21 20 8:1 / /work/project rw - {root} none rw\n"
+                );
+                assert!(!check_mounts(&table, 20, 21, device));
+            }
+            let same = format!("20 1 8:1 / / rw - {filesystem} none rw\n");
+            assert!(check_mounts(&same, 20, 20, device));
+        }
+    }
+
     #[test]
     fn an_unknown_or_nested_mount_keeps_aliases_restricted() {
         let base = "20 1 8:1 / / rw - ext4 /dev/root rw\n";
-        let roots = [Path::new("/work/project"), Path::new("/work/project")];
-        assert!(root_uses_only_mount(base, roots, 20));
-        assert!(!root_uses_only_mount(base, roots, 21));
+        let device = libc::makedev(8, 1);
+        assert!(!check_mounts(base, 21, 20, device));
+        assert!(!check_mounts(base, 20, 21, device));
+        assert!(!check_mounts(base, 20, 20, libc::makedev(8, 2)));
+        let source_mismatch = "20 1 8:2 / / rw - ext4 /dev/root rw\n";
+        assert!(!check_mounts(source_mismatch, 20, 20, libc::makedev(8, 2)));
         for point in ["/work/project", "/work/project/nested"] {
             let table = format!("{base}21 20 8:1 / {point} rw - ext4 /dev/root rw\n");
-            assert!(!root_uses_only_mount(&table, roots, 20));
+            assert!(!check_mounts(&table, 20, 20, device));
         }
+        let cross_mount = format!(
+            "{base}21 20 0:42 / /work/project rw - tmpfs none rw\n\
+             22 21 8:1 / /work/project/nested rw,idmapped - ext4 /dev/root rw\n"
+        );
+        assert!(!check_mounts(&cross_mount, 20, 21, libc::makedev(0, 42)));
         let sibling = format!("{base}21 20 8:1 / /work/project-other rw - ext4 /dev/root rw\n");
-        assert!(root_uses_only_mount(&sibling, roots, 20));
+        assert!(check_mounts(&sibling, 20, 20, device));
     }
 
     #[test]
     fn mount_paths_preserve_unicode_and_decode_kernel_escapes() {
         let point = "/work/café\u{a0}data/two words\ttab\nline\\end";
         let line = r"21 20 8:1 / /work/café data/two\040words\011tab\012line\134end rw - ext4 /dev/root rw";
-        assert_eq!(mount_point(line), Some((21, PathBuf::from(point))));
+        assert_eq!(
+            mount_record(line),
+            Some(MountRecord {
+                identity: 21,
+                device: libc::makedev(8, 1),
+                point: PathBuf::from(point),
+                idmapped: false,
+                filesystem: "ext4",
+            })
+        );
         let table = format!("20 1 8:1 / / rw - ext4 /dev/root rw\n{line}\n");
+        let identity = (20, libc::makedev(8, 1));
         let roots = [Path::new("/work/link"), Path::new("/work/café\u{a0}data")];
-        assert!(!root_uses_only_mount(&table, roots, 20));
+        assert!(!root_uses_compatible_mounts(
+            &table, roots, identity, identity
+        ));
         let roots = [Path::new("/work/café\u{a0}data"), Path::new("/work/target")];
-        assert!(!root_uses_only_mount(&table, roots, 20));
+        assert!(!root_uses_compatible_mounts(
+            &table, roots, identity, identity
+        ));
     }
 
     #[test]
@@ -214,12 +338,9 @@ mod tests {
             r"20 1 8:1 / /bad\777path rw - ext4 /dev/root rw",
             r"20 1 8:1 / /bad\path rw - ext4 /dev/root rw",
             "20 1 8:1 / / rw - ext4 /dev/root rw\nmalformed\n",
+            "20 1 8:1 / / rw - ext4 /dev/root rw\n20 1 8:1 / / rw - ext4 /dev/root rw\n",
         ] {
-            assert!(!root_uses_only_mount(
-                table,
-                [Path::new("/work"), Path::new("/work")],
-                20
-            ));
+            assert!(!check_mounts(table, 20, 20, libc::makedev(8, 1)));
         }
     }
 }
