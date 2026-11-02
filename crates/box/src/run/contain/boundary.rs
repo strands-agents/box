@@ -4463,6 +4463,31 @@ write = ["/Users/example/box-demo/aws-tmp"]
         use crate::run::contain::supervise::{CapturedLeaf, LeafBox};
         use std::os::unix::fs::PermissionsExt as _;
 
+        mod namespace_launcher {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/namespace_launcher.rs"
+            ));
+        }
+
+        fn launcher_is_usable() -> bool {
+            let helper = crate::run::installation::executable()
+                .expect("locate the running test binary")
+                .with_file_name("strands-box-contain-trampoline");
+            let installed = match std::fs::symlink_metadata(&helper) {
+                Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => panic!("cannot inspect {}: {error}", helper.display()),
+            };
+            if !installed {
+                eprintln!(
+                    "skipping: no plain executable strands-box-contain-trampoline beside the test binary"
+                );
+                return false;
+            }
+            namespace_launcher::namespace_launcher_is_usable()
+        }
+
         fn fixture() -> Fixture {
             Fixture::from_operator(
                 tempfile::Builder::new()
@@ -4523,6 +4548,9 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
         #[tokio::test]
         async fn replacing_a_script_after_translation_cannot_add_an_interpreter() {
+            if !launcher_is_usable() {
+                return;
+            }
             for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
                 for replace in [false, true] {
                     let fixture = fixture();
@@ -4603,6 +4631,9 @@ write = ["/Users/example/box-demo/aws-tmp"]
 
         #[tokio::test]
         async fn changed_script_bytes_cannot_read_an_ungranted_file_after_translation() {
+            if !launcher_is_usable() {
+                return;
+            }
             for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
                 let fixture = fixture();
                 let mut spec = script_spec(&fixture, reach);
