@@ -55,6 +55,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       approval-env: ${{ steps.auth.outputs.approval-env }}
       # Head resolved once here so downstream jobs act on the same commit the
@@ -84,6 +85,7 @@ jobs:
       issues: write
       pull-requests: write
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # The reviewer prompt comes from the commit this workflow runs from (the
       # default branch for a comment, the dispatched ref for a dispatch), never
