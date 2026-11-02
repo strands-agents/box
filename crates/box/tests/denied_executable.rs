@@ -3,7 +3,7 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[path = "support/fixture.rs"]
 mod fixture;
@@ -23,6 +23,34 @@ enum Replacement {
     Symlink,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Executable {
+    Binary,
+    Script(Interpreter),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Interpreter {
+    Listed,
+    Unlisted,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Invocation {
+    Direct,
+    ThroughSymlink,
+}
+
+struct Relocation {
+    _box: fixture::Configured,
+    denied: PathBuf,
+    home: PathBuf,
+    denied_identity: (u64, u64),
+    stdout: String,
+    stderr: String,
+    evidence: serde_json::Value,
+}
+
 fn marker(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -39,11 +67,18 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
-fn relocation(replacement: Replacement, script: bool, listed: bool, linked: bool) {
+fn relocation(
+    replacement: Replacement,
+    executable: Executable,
+    invocation: Invocation,
+) -> Option<Relocation> {
     if !fixture::namespace_launcher_is_usable() {
         eprintln!("skipping: this platform cannot run the namespace launcher");
-        return;
+        return None;
     }
+    let script = matches!(executable, Executable::Script(_));
+    let listed = matches!(executable, Executable::Script(Interpreter::Listed));
+    let linked = matches!(invocation, Invocation::ThroughSymlink);
     let mut request = fixture::Request::with_policy("deny-exec", POLICY)
         .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
     let tools = request.operator_home().join("tools");
@@ -196,72 +231,152 @@ printf 'UNRELATED_AFTER=%s\n' "$?"
     );
     assert!(!tools.join("unrelated-a").exists(), "{evidence}");
     assert!(!tools.join("unrelated-b").exists(), "{evidence}");
-    if script {
-        let status = if listed {
-            "SCRIPT_CONTROL=0"
-        } else {
-            "SCRIPT_CONTROL=126"
-        };
-        assert!(stdout.lines().any(|line| line == status), "{evidence}");
-        assert_eq!(
-            marker(&home.join("allowed-script")).as_deref(),
-            listed.then_some("EXECUTED\n"),
-            "{evidence}"
-        );
-    }
-    match replacement {
-        Replacement::Directory => {
-            assert!(denied.is_dir(), "{evidence}");
-            assert_eq!(std::fs::read_dir(&denied).unwrap().count(), 0, "{evidence}");
-            assert_ne!(identity(&denied), Some(denied_identity), "{evidence}");
-            assert!(stderr.contains("was replaced"), "{evidence}");
-        }
-        Replacement::Missing => {
-            assert_eq!(identity(&denied), None, "{evidence}");
-            assert!(stderr.contains("cannot be read"), "{evidence}");
-        }
-        Replacement::Symlink => {
-            assert!(
-                stdout.lines().any(|line| line == "LINK_STATUS=0"),
-                "{evidence}"
-            );
-            assert!(denied.is_symlink(), "{evidence}");
-            assert_eq!(
-                std::fs::read_link(&denied).unwrap(),
-                Path::new("empty"),
-                "{evidence}"
-            );
-            assert!(stderr.contains("was replaced"), "{evidence}");
-        }
-    }
+    Some(Relocation {
+        _box: box_,
+        denied,
+        home,
+        denied_identity,
+        stdout: stdout.into_owned(),
+        stderr: stderr.into_owned(),
+        evidence,
+    })
 }
 
 #[test]
 fn a_denied_binary_stays_refused_after_rename_and_directory_replacement() {
-    relocation(Replacement::Directory, false, false, false);
+    let Some(run) = relocation(
+        Replacement::Directory,
+        Executable::Binary,
+        Invocation::Direct,
+    ) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert!(run.denied.is_dir(), "{evidence}");
+    assert_eq!(
+        std::fs::read_dir(&run.denied).unwrap().count(),
+        0,
+        "{evidence}"
+    );
+    assert_ne!(
+        identity(&run.denied),
+        Some(run.denied_identity),
+        "{evidence}"
+    );
+    assert!(run.stderr.contains("was replaced"), "{evidence}");
 }
 
 #[test]
 fn a_denied_binary_stays_refused_when_its_original_name_vanishes() {
-    relocation(Replacement::Missing, false, false, false);
+    let Some(run) = relocation(Replacement::Missing, Executable::Binary, Invocation::Direct) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert_eq!(identity(&run.denied), None, "{evidence}");
+    assert!(run.stderr.contains("cannot be read"), "{evidence}");
 }
 
 #[test]
 fn a_denied_binary_stays_refused_after_symlink_replacement() {
-    relocation(Replacement::Symlink, false, false, false);
+    let Some(run) = relocation(Replacement::Symlink, Executable::Binary, Invocation::Direct) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert!(
+        run.stdout.lines().any(|line| line == "LINK_STATUS=0"),
+        "{evidence}"
+    );
+    assert!(run.denied.is_symlink(), "{evidence}");
+    assert_eq!(
+        std::fs::read_link(&run.denied).unwrap(),
+        Path::new("empty"),
+        "{evidence}"
+    );
+    assert!(run.stderr.contains("was replaced"), "{evidence}");
 }
 
 #[test]
 fn a_link_to_the_relocated_denied_binary_stays_refused() {
-    relocation(Replacement::Directory, false, false, true);
+    let Some(run) = relocation(
+        Replacement::Directory,
+        Executable::Binary,
+        Invocation::ThroughSymlink,
+    ) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert!(run.denied.is_dir(), "{evidence}");
+    assert_eq!(
+        std::fs::read_dir(&run.denied).unwrap().count(),
+        0,
+        "{evidence}"
+    );
+    assert_ne!(
+        identity(&run.denied),
+        Some(run.denied_identity),
+        "{evidence}"
+    );
+    assert!(run.stderr.contains("was replaced"), "{evidence}");
 }
 
 #[test]
 fn a_denied_script_with_a_listed_interpreter_stays_refused_after_relocation() {
-    relocation(Replacement::Directory, true, true, false);
+    let Some(run) = relocation(
+        Replacement::Directory,
+        Executable::Script(Interpreter::Listed),
+        Invocation::Direct,
+    ) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert!(
+        run.stdout.lines().any(|line| line == "SCRIPT_CONTROL=0"),
+        "{evidence}"
+    );
+    assert_eq!(
+        marker(&run.home.join("allowed-script")).as_deref(),
+        Some("EXECUTED\n"),
+        "{evidence}"
+    );
+    assert!(run.denied.is_dir(), "{evidence}");
+    assert_eq!(
+        std::fs::read_dir(&run.denied).unwrap().count(),
+        0,
+        "{evidence}"
+    );
+    assert_ne!(
+        identity(&run.denied),
+        Some(run.denied_identity),
+        "{evidence}"
+    );
+    assert!(run.stderr.contains("was replaced"), "{evidence}");
 }
 
 #[test]
 fn a_denied_script_with_an_unlisted_interpreter_stays_refused_after_relocation() {
-    relocation(Replacement::Directory, true, false, false);
+    let Some(run) = relocation(
+        Replacement::Directory,
+        Executable::Script(Interpreter::Unlisted),
+        Invocation::Direct,
+    ) else {
+        return;
+    };
+    let evidence = &run.evidence;
+    assert!(
+        run.stdout.lines().any(|line| line == "SCRIPT_CONTROL=126"),
+        "{evidence}"
+    );
+    assert_eq!(marker(&run.home.join("allowed-script")), None, "{evidence}");
+    assert!(run.denied.is_dir(), "{evidence}");
+    assert_eq!(
+        std::fs::read_dir(&run.denied).unwrap().count(),
+        0,
+        "{evidence}"
+    );
+    assert_ne!(
+        identity(&run.denied),
+        Some(run.denied_identity),
+        "{evidence}"
+    );
+    assert!(run.stderr.contains("was replaced"), "{evidence}");
 }
