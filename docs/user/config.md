@@ -221,6 +221,13 @@ directory and its descendants. Execute grants do not satisfy this requirement.
 For Linux read-write access, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
+An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
+If overlapping writes make that directory writable, startup refuses it without a directory `exec` grant.
+This includes writes granted through another spelling or an ancestor directory.
+Remove the write access, or explicitly grant execution where the existing path protections permit it.
+An `exec` entry for one file does not authorize the whole directory.
+Ordinary read-write data directories and the broader execution mode for tools remain unchanged.
+
 Startup output states `read-only`, `write-only`, or `read-write` for each content-access grant.
 For partial overlaps, the parent entry also identifies the overlapping grants that allow both.
 Denials and protected paths still restrict access. Duplicate or nested grants of the same

@@ -326,6 +326,7 @@ impl MountView {
         let write_roots = config.grants_in(Operation::Write, Scope::Root);
         let write_files = config.grants_in(Operation::Write, Scope::File);
         let exec_roots = config.grants_in(Operation::Exec, Scope::Root);
+        let explicit_exec_files = config.grants_in(Operation::Exec, Scope::File);
         for entry in entries
             .iter_mut()
             .filter(|entry| entry.kind == MountKind::Bind && entry.origin == MountOrigin::Grant)
@@ -348,6 +349,22 @@ impl MountView {
                 .any(|tree| source.starts_with(&tree.resolved))
             {
                 entry.executable = true;
+            }
+            if entry.writable
+                && entry.executable
+                && !config.broad_exec()
+                && !exec_roots
+                    .iter()
+                    .any(|grant| source.starts_with(&grant.resolved))
+                && !explicit_exec_files
+                    .iter()
+                    .any(|grant| source == grant.resolved)
+            {
+                return Err(refusal(format!(
+                    "writable executable mount for '{}' has no explicit execution grant. \
+                     Remove its write access or explicitly grant execution for this path.",
+                    source.display()
+                )));
             }
         }
 
@@ -1760,6 +1777,7 @@ fn refusal(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod combined_grants;
     mod loader_admission;
     mod refusal;
     use super::*;

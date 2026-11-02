@@ -89,6 +89,10 @@ This also permits execution of programs in those directories.
 
 On ARM64, the recognized paths are `/lib64`, `/usr/lib64`, `/lib/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`, `/lib`, and `/usr/lib`.
 Box compares their resolved directory identities with the granted directory.
+After combining overlapping grants, Box refuses a writable, executable mount without an explicit execution grant covering its source.
+This includes a loader-directory read combined with a write on the same directory or an ancestor.
+An execution grant for one file does not authorize execution across its containing directory.
+Read-only library directories keep their automatic execution access.
 
 ELF means Executable and Linkable Format, the Linux binary format.
 For an exact ELF binary grant, Box discovers its executable-format interpreter and declared library dependencies.
