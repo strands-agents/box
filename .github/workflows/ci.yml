@@ -30,9 +30,9 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
-          # `**/!(*.md)` excludes docs-only changes from the matrix; keep it an
-          # extglob, not a `!**/*.md` negation (paths-filter OR-s patterns, so a
-          # bare negation fires on everything).
+          # `**/!(*.md)` excludes ordinary docs-only changes. The explicit
+          # publication paths below run their contract test in the Rust job.
+          # Keep this an extglob because paths-filter OR-s its patterns.
           filters: |
             native:
               - '.cargo/**'
