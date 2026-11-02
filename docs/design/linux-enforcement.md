@@ -30,6 +30,10 @@ The process namespace gives the workload its own process identifiers and a fresh
 Separate namespaces also isolate system identity and interprocess communication.
 The [network exception](#network-access) changes only the network namespace choice.
 
+The workload's `/proc` is read-only to prevent writes through process-memory files to executable pages.
+Process inspection remains available.
+The filters permit creation of nested user namespaces, but read-only `/proc` prevents writes to their user and group identity maps.
+
 Strands Shell, Monty, and the policy engine run in the box's trusted process, outside these sandboxes.
 Policy decides requests that reach those components.
 The workload's own file operations use its filesystem grants and produce no individual policy decision.
