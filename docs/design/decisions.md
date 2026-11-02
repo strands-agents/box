@@ -1074,8 +1074,8 @@ link it bound through, leads to another file now, for example after an update wh
 a new name, a new link, or a new file can't fall back to a `shell:spawn` rule that permits more. Reading an undeclared
 name as the pack's `unmodeled` action was rejected. When several packs bind one file, no single pack
 owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
-named. A name that a `[tool]` declares with no pack stays a `shell:spawn`, because the operator named
-it and chose no pack for it.
+named. A name that a `[tool]` declares with no pack stays a `shell:spawn`, also after its file is
+replaced, because the operator named it and chose no pack for it.
 
 The cost has three parts. An operator must declare each name that runs a bound file, or Box refuses
 that name. An update that replaces a bound binary while the box runs refuses that program until the

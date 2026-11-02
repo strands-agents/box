@@ -234,9 +234,8 @@ impl PackBindings {
             .is_some_and(|((bound, _), _)| *bound == identity)
     }
 
-    /// Whether a bound spelling now leads somewhere other than the file it was bound to: a
-    /// spelling of `program` itself, or a bound spelling that now resolves to `program` where its
-    /// bound file covered `name`.
+    /// Whether a bound spelling now leads somewhere other than a file it was bound to that covered
+    /// `name`: a spelling of `program` itself, or a bound spelling that now resolves to `program`.
     fn replaced(&self, program: &ProgramFile, name: &str) -> bool {
         let moved = |identity: &FileIdentity| *identity != program.identity;
         let covered = |identity: FileIdentity| {
@@ -244,15 +243,15 @@ impl PackBindings {
             self.bound.contains_key(&pair)
                 || (!self.declared.contains(&pair) && !self.binds_file(program.identity))
         };
-        program
-            .spellings
-            .iter()
-            .any(|spelling| self.spellings.get(spelling).is_some_and(moved))
-            || self.spellings.iter().any(|(spelling, identity)| {
-                moved(identity)
-                    && covered(*identity)
-                    && std::fs::canonicalize(spelling).is_ok_and(|now| now == program.path)
-            })
+        program.spellings.iter().any(|spelling| {
+            self.spellings
+                .get(spelling)
+                .is_some_and(|identity| moved(identity) && covered(*identity))
+        }) || self.spellings.iter().any(|(spelling, identity)| {
+            moved(identity)
+                && covered(*identity)
+                && std::fs::canonicalize(spelling).is_ok_and(|now| now == program.path)
+        })
     }
 
     /// How the packs cover a spawn spelled `spelling` of the program file that `read` found, or
@@ -303,6 +302,10 @@ mod tests {
     const GIT: &str = "usr/bin/git";
     const CARGO: &str = "home/operator/.cargo/bin/cargo";
     const MISE: &str = "home/operator/.local/bin/mise";
+    const RENAMED_MISE: &str = "opt/renamed/bin/mise";
+    const LINKED_MISE: &str = "opt/linked/bin/mise";
+    const FIRST_MISE: &str = "opt/linked/mise-1/mise";
+    const SECOND_MISE: &str = "opt/linked/mise-2/mise";
 
     /// A temporary host directory that holds real program files.
     struct Host(tempfile::TempDir);
@@ -408,6 +411,20 @@ mod tests {
         bindings
             .bind(&host.program(MISE), "git", "git")
             .expect("the mise shim binary binds");
+        for shim in [
+            host.program(RENAMED_MISE),
+            host.symlink(FIRST_MISE, LINKED_MISE),
+        ] {
+            bindings.declare(&shim, "node");
+            bindings
+                .bind(&shim, "cargo", "cargo")
+                .expect("cargo binds the shim binary");
+        }
+        host.replace(RENAMED_MISE);
+        host.program(SECOND_MISE);
+        std::fs::remove_file(host.path(LINKED_MISE)).expect("the old link is removed");
+        std::os::unix::fs::symlink(host.path(SECOND_MISE), host.path(LINKED_MISE))
+            .expect("a new link");
 
         for (case, program, name, expected) in [
             ("a bound pair parses", GIT, "git", parsed("git")),
@@ -459,6 +476,30 @@ mod tests {
                 MISE,
                 "python",
                 REFUSED,
+            ),
+            (
+                "a shim binary replaced in place, by its bound name",
+                RENAMED_MISE,
+                "cargo",
+                Some(Answer::Replaced),
+            ),
+            (
+                "a shim binary replaced in place, by a declared name",
+                RENAMED_MISE,
+                "node",
+                None,
+            ),
+            (
+                "a shim binary behind a retargeted link, by its bound name",
+                SECOND_MISE,
+                "cargo",
+                Some(Answer::Replaced),
+            ),
+            (
+                "a shim binary behind a retargeted link, by a declared name",
+                SECOND_MISE,
+                "node",
+                None,
             ),
         ] {
             assert_eq!(
@@ -566,7 +607,11 @@ mod tests {
         let replaced = host.replace(GIT);
 
         assert_eq!(replaced.path(), original.path());
-        for name in ["git", "git-lfs", "gitk"] {
+        assert!(
+            bindings.coverage(Ok(replaced.clone()), "git-lfs").is_none(),
+            "a declared name with no pack stays a spawn"
+        );
+        for name in ["git", "gitk"] {
             assert_eq!(
                 bindings
                     .coverage(Ok(replaced.clone()), name)
