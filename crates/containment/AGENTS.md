@@ -851,6 +851,12 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   again. `a_read_root_on_a_loader_directory_is_bound_executable_and_read_only` and
   `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
+  Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
+  refuses reads with `EACCES`. Its owner changes for a non-root launcher; root ownership can
+  remain unchanged. Writes fail with `EACCES` or `EROFS` on read-only procfs.
+  Root proof requires a verified host `kernel.yama.ptrace_scope=0`; the guard prints a skip
+  otherwise, because Yama alone can refuse the open without supervisor memory protection.
+  Guard: `supervisor_memory_linux::workload_cannot_write_namespace_supervisor_memory`.
   Namespace PID 1 forwards `SIGTERM` and `SIGINT`, stores the workload pid *before* installing the
   handlers, and reaps in a loop.
 - **`netns`:** a socket's namespace is fixed at creation, so bind inside and pass the descriptor out
