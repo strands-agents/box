@@ -90,12 +90,25 @@ pub(crate) struct SelectedTool {
 /// The prefix is compared expanded, because the translator runs the expanded arguments. Among
 /// prefixes of one length, a command with the file name of `called` wins. `called` is the path the
 /// caller used, and `program` is the file it resolves to.
-pub(crate) fn select_tool(
+#[cfg(test)]
+fn select_tool(
     record: &Record,
     attachment: &Attachment,
     program: &Path,
     called: &Path,
     args: &[String],
+) -> Result<SelectedTool, BoxError> {
+    let commands = crate::run::commands::ConfiguredCommands::load(record)?;
+    select_tool_with_commands(record, attachment, program, called, args, &commands)
+}
+
+fn select_tool_with_commands(
+    record: &Record,
+    attachment: &Attachment,
+    program: &Path,
+    called: &Path,
+    args: &[String],
+    commands: &crate::run::commands::ConfiguredCommands,
 ) -> Result<SelectedTool, BoxError> {
     let refuse = |reason: String| {
         BoxError::from(ConfigError::ToolSelection {
@@ -122,14 +135,13 @@ pub(crate) fn select_tool(
     let mut unexpandable: Vec<String> = Vec::new();
     let mut named_by_a_table = false;
     for (label, spec) in &record.tool {
-        let Ok(resolved) =
-            crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
-        else {
+        let Some(command) = commands.get(label) else {
             continue;
         };
-        if resolved.granted_path() != invoked {
+        if command.path() != invoked {
             continue;
         }
+        command.verify()?;
         named_by_a_table = true;
         // A token this build cannot expand is the operator's error, so the refusal names it rather
         // than reporting a non-match. It is held until the loop ends, so a malformed table cannot
@@ -257,12 +269,13 @@ fn tool_spawner(
         let workspace = workspace.clone();
         let protected_sources = protected_sources.clone();
         Box::pin(async move {
-            let selected = select_tool(
+            let mut selected = select_tool_with_commands(
                 &record,
                 &attachment,
                 &spawn.program,
                 &spawn.invoked,
                 &spawn.args,
+                approved.commands(),
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
@@ -272,6 +285,9 @@ fn tool_spawner(
             let reach = approved.table(&table).ok_or_else(|| {
                 std::io::Error::other(format!("{table} has no reach judged for this run"))
             })?;
+            if let Some(command) = reach.command.as_ref() {
+                selected.spec.command[0] = command.invoked().display().to_string();
+            }
             let site = Site {
                 attachment: &attachment,
                 layout: &layout,
@@ -749,6 +765,7 @@ impl HostedBox {
             host_spawner,
             mcp_leaf_launcher,
             protected_sources,
+            std::sync::Arc::clone(approved.commands()),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());

@@ -90,6 +90,7 @@ impl FileIdentity {
 /// the grant without them is the configuration these keys must never produce.
 #[derive(Debug)]
 pub(crate) struct DirectReach {
+    pub(crate) command: Option<std::sync::Arc<crate::run::commands::ConfiguredCommand>>,
     /// What the process's own syscalls reach.
     pub(crate) grants: Vec<DirectGrant>,
     /// What stays unreachable inside those grants: `deny` entries, and the directory holding each
@@ -178,7 +179,11 @@ pub(crate) fn direct_grants(
     for (grant, access) in grants.iter_mut().zip(access) {
         grant.access = access;
     }
-    Ok(DirectReach { grants, refusals })
+    Ok(DirectReach {
+        grants,
+        refusals,
+        command: None,
+    })
 }
 
 fn covers(outer: &DirectGrant, inner: &DirectGrant) -> bool {

@@ -67,7 +67,9 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority)):
 
 - **The reachable paths check** runs in the Shell and Monty after the engine. It refuses the box directory,
   the `box.toml` and policy this run loaded, and anything outside the operator's home and the
-  workspace. Policy decides first, so a counting rule still sees the attempt, and the refusal is
+  workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
+  configured tool programs. Reads of those programs remain subject to policy.
+  Policy decides first, so a counting rule still sees the attempt, and the refusal is
   recorded beside policy's verdict.
 
 Cloud metadata protection comes from the operator's policy. The gateway asks policy about
@@ -213,7 +215,9 @@ and their `@id`, the line and column when the engine reports a span, and the val
 as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
-[durable history](#durable-history) lists them.
+[durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
+tool programs with multiple hard links or overlap with direct writable grants.
+[Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
 
 The inert-rule check sorts each rule into one of three classes:
 

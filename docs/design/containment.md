@@ -169,6 +169,9 @@ include:
   and their directories are cut out of any wider tree a grant names. Without this, a tool the agent
   runs could rewrite the policy for the next run
   ([direct reach is declared and disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)).
+- **Configured tool programs:** Box refuses direct writable grants that can overwrite a configured
+  command or replace its path, including its symbolic-link route and enclosing directories.
+  The check covers the agent, every tool, and every local MCP server.
 
 The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
@@ -308,6 +311,17 @@ A tool is a program on the surrounding OS that Strands Shell starts for the agen
 sandbox, which ends when the program does
 ([a tool's sandbox reuses the policy engine of the box's trusted process](decisions.md#a-host-binary-runs-in-a-contained-leaf-box)).
 
+Box resolves every configured tool command before the workload starts and keeps an open handle to
+its file. Tool selection uses this startup identity, and the launcher checks the identity before
+execution. Box refuses command files with multiple hard links because another name could expose
+the same contents to writes.
+
+An identity check detects replacement, but an in-place overwrite keeps the same identity.
+Direct writable-grant refusals and the broker's mutation checks protect the program's contents.
+This protection covers the program in element 0 of `[tool.<name>] command`.
+Libraries, plugins, and scripts named only in arguments still follow their own access checks.
+The file handle does not freeze bytes against changes by other processes in the surrounding OS.
+
 That `shell:spawn` decision is the only policy decision a tool raises for itself. After it, the tool
 makes raw system calls, and its sandbox bounds them. No `fs:*` decision fires for a file a tool opens,
 and its children raise no decisions of their own
@@ -414,8 +428,10 @@ what the harness needs, what else the grant allows, and which tests pin the rest
 Strands Shell and Monty run in Box's trusted process, outside every box. We run them there so one
 policy engine decides for the whole box
 ([the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
-Each one asks policy before it touches a file, so its reach is whatever policy permits, and that's
-separate from the agent's own grants.
+Each one asks policy before it touches a file, then applies the reachable paths check.
+This check also refuses writes, deletion, replacement, and enclosing-path changes for configured
+tool programs. Their read access remains subject to policy. These checks are separate from the
+agent's own grants.
 
 No credential floor sits beneath them. A broad `fs:read` permit lets Strands Shell read `~/.aws`,
 even though no grant could give the agent that path

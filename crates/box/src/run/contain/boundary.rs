@@ -60,6 +60,7 @@ pub(crate) struct Launch<'a> {
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
 }
 
 impl ApprovedReach {
@@ -68,6 +69,7 @@ impl ApprovedReach {
         stored: &Record,
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
+        let commands = std::sync::Arc::new(crate::run::commands::ConfiguredCommands::load(stored)?);
         let agent = stored
             .agent
             .iter()
@@ -84,11 +86,17 @@ impl ApprovedReach {
             .chain(tools)
             .chain(servers)
             .map(|(table, spec)| {
-                judge_filesystem(spec, &table, stored, protected_sources)
-                    .map(|reach| (table, reach))
+                let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
+                commands.validate_reach(&table, &reach)?;
+                reach.command = commands.get(&table).cloned();
+                Ok((table, reach))
             })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        Ok(Self { tables })
+            .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
+        Ok(Self { tables, commands })
+    }
+
+    pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
+        &self.commands
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -591,6 +599,18 @@ impl Boundary {
             } else {
                 allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
             };
+        }
+
+        if let Some(command) = reach.command.as_ref() {
+            command.verify()?;
+            if command.path() != program_identity {
+                return Err(ConfigError::Process {
+                    table: table.to_string(),
+                    reason: "configured command identity changed before launch".to_string(),
+                }
+                .into());
+            }
+            containment = containment.require_file_identity(command.path(), command.opened())?;
         }
 
         containment = protect_authorities(

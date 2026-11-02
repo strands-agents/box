@@ -295,9 +295,9 @@ can replace the program it runs`.
 ## `[tool.<name>]` selection
 
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
-same program, then the same fixed arguments. Box resolves the program to its canonical path before
-it matches. The longest matching prefix wins. Every declared tool is selectable, and a
-program under one of the agent's own `exec` entries needs no table of its own.
+same program, then the same fixed arguments. Box resolves each configured tool program before the
+workload starts and keeps that file identity for the run. The longest matching prefix wins.
+Every declared tool is selectable, and a program under one of the agent's own `exec` entries needs no table of its own.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
@@ -322,6 +322,24 @@ A `shell:spawn` permit that admits `git` goes with the table, which by itself st
 A list entry that names a credential store gives the selected tool the operator's long-lived
 credential bytes. To give a tool a secret, bind it with an `[egress.<name>] secret.ref`, and keep a
 tool's `env` for non-secret literals.
+
+### Configured command integrity
+
+Each configured tool program must exist before the run starts. Box checks grants in `[agent]`,
+every `[tool.<name>]`, and every local `[mcp.<name>]` table against those programs.
+
+| Condition | Refusal text | Next action |
+|---|---|---|
+| A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
+| A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
+| The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+
+During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
+even when policy permits the operation. Reads still require the applicable policy permission.
+Build output covered by the agent's own grants remains writable when no tool table names it.
+
+To update a configured tool, end the current run. Update the program from the surrounding OS.
+Start a new run to resolve and validate the updated program.
 
 ## `[egress.<name>]`
 
