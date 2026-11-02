@@ -1828,10 +1828,16 @@ string, so a spliced secret leaves bytes in its heap that nothing wipes.
 <a id="an-undeliverable-credential-is-refused-at-load"></a>
 ### A credential the box cannot deliver is refused when the config loads
 
-A box egress entry may name the `env://` or `aws://` credential scheme. Every other scheme
-is refused when the config loads, and the message names the accepted set. The credentials crate can
-also resolve `file://` and `op://`, but a box egress entry may not name them, because the box has no way
-to deliver them. `an_undeliverable_credential_scheme_is_refused` pins the refusal.
+A box egress entry may name the `env://`, `op://`, or `aws://` credential scheme. Every other scheme
+is refused when the config loads, and the message names the accepted set. An `op://` reference names
+no workload variable, so the entry must set `secret.variable`, and no other scheme accepts it. The
+box reads the field with the `op` command in the trusted process, and the workload holds a
+phantom. The credentials crate can also resolve `file://`, but a box egress entry may not name it,
+because the box has no way to deliver it. Reading the secret in the operator's shell and naming it
+with `env://` was the alternative, and it leaves the secret in the operator's environment.
+`an_undeliverable_credential_scheme_is_refused` pins the refusal, and
+`an_op_reference_provisions_its_phantom_under_the_named_variable` pins the delivery. A box that
+holds a `secret.variable` stores record version 25.
 
 <a id="endpoint-breadth-is-refused-by-the-parsed-pattern"></a>
 ### Endpoint breadth is refused by the parsed pattern, and never by its text
