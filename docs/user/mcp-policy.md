@@ -180,10 +180,13 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
+| A refusal that says `[default-deny]` on a tool of a server the startup warning names | That server's per-tool rule never loaded, so every call the rule decides is refused. The permit is there; the rule is the problem. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
-When a per-tool rule cannot load, the box starts and that rule never takes effect. stderr names the
-servers it was waiting for: `a per-tool rule never loaded for ["<server>"]`. Three things cause it.
+When a per-tool rule cannot load, the box starts and that rule never takes effect. Every call it
+would have decided is refused instead, with `[default-deny]`, so an unenforceable rule costs the
+agent that tool rather than letting the call through. stderr names the servers the rule was waiting
+for: `a per-tool rule never loaded for ["<server>"]`. Three things cause it.
 A rule refuses `tools/list` for the server, so the server has no tools at all — permit its
 `tools/list`. Or the server's catalog does not offer the tool the rule names, because the name is
 misspelled or the server dropped it — correct the tool name. Or the rule reads an argument the
