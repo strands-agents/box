@@ -918,7 +918,7 @@ fn special_file_mode_rules(
     flags_argument: Option<u8>,
 ) -> Result<Vec<SeccompRule>, ContainmentError> {
     let mut rules = Vec::new();
-    for bit in [0o4000, 0o2000] {
+    for bit in [u64::from(libc::S_ISUID), u64::from(libc::S_ISGID)] {
         let mode = SeccompCondition::new(
             mode_argument,
             SeccompCmpArgLen::Dword,
