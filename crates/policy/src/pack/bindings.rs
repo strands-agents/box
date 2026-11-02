@@ -7,11 +7,15 @@ use std::path::{Path, PathBuf};
 
 use super::Pack;
 
-/// One resolved program file, compared by its device and inode.
+/// The most links Box records from one spelling.
+const MAXIMUM_LINKS: usize = 40;
+
+/// One resolved program file: the device and inode found there, and each spelling that led to it.
 #[derive(Debug, Clone)]
 pub(crate) struct ProgramFile {
     identity: FileIdentity,
     path: PathBuf,
+    spellings: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,60 +36,137 @@ impl ProgramFile {
     /// Read the identity of the file at `path`, after the host resolves each link in it.
     pub(crate) fn read(path: impl Into<PathBuf>) -> Result<Self, UnreadableProgramFile> {
         let path = path.into();
-        match std::fs::metadata(&path) {
-            Ok(metadata) => Ok(Self {
-                identity: FileIdentity {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                },
-                path,
-            }),
+        let read = std::fs::canonicalize(&path)
+            .and_then(|canonical| std::fs::metadata(&canonical).map(|found| (canonical, found)));
+        match read {
+            Ok((canonical, metadata)) => {
+                let mut spellings = links_from(&path);
+                if !spellings.contains(&canonical) {
+                    spellings.push(canonical.clone());
+                }
+                Ok(Self {
+                    identity: FileIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                    path: canonical,
+                    spellings,
+                })
+            }
             Err(reason) => Err(UnreadableProgramFile { path, reason }),
         }
     }
 
+    /// A program file at `path` with a fixed identity, for a test that runs no host file.
+    #[cfg(test)]
+    pub(crate) fn fixed(path: &str, inode: u64) -> Self {
+        Self {
+            identity: FileIdentity { device: 0, inode },
+            path: PathBuf::from(path),
+            spellings: vec![PathBuf::from(path)],
+        }
+    }
+
+    /// The canonical path the identity was read at.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
 
-/// The installed packs, and the (program file, called name) pairs each one covers.
+/// `path`, then the path each link on the way names, as the host follows them.
+fn links_from(path: &Path) -> Vec<PathBuf> {
+    let mut spellings = vec![path.to_path_buf()];
+    let mut current = path.to_path_buf();
+    while spellings.len() <= MAXIMUM_LINKS {
+        let Ok(target) = std::fs::read_link(&current) else {
+            break;
+        };
+        current = match current.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+        spellings.push(current.clone());
+    }
+    spellings
+}
+
+/// The installed tool packs, the (program file, called name) pairs each one covers, and the file
+/// identity that each bound spelling led to when it was bound.
 #[derive(Debug, Default)]
 pub(crate) struct PackBindings {
     packs: Vec<Pack>,
-    by_file: BTreeMap<FileIdentity, usize>,
-    bound: BTreeSet<(FileIdentity, String)>,
+    bound: BTreeMap<(FileIdentity, String), usize>,
+    spellings: BTreeMap<PathBuf, FileIdentity>,
     declared: BTreeSet<(FileIdentity, String)>,
 }
 
-/// How a pack covers one spawn.
-#[derive(Debug, Clone, Copy)]
+/// How the installed packs cover one spawn.
+#[derive(Debug)]
 pub(crate) enum PackCoverage<'a> {
     /// The file and the name are bound to this pack, so the command parses with its grammar.
-    Parsed(&'a Pack),
-    /// The file is bound to this pack, and no `[tool]` declares the name it was called by.
-    Unmodeled(&'a Pack),
+    Parsed { pack: &'a Pack, file: ProgramFile },
+    /// A pack binds the file or a spelling of it, and Box refuses the spawn before any policy
+    /// decides it.
+    Refused(CoverageRefusal),
+}
+
+/// Why Box refuses a spawn of a file that a pack binds, whatever the policy permits.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum CoverageRefusal {
+    #[error(
+        "`{name}` runs `{}`, which a tool pack covers, but no `[tool]` declares the name `{name}`",
+        .program_path.display()
+    )]
+    UndeclaredName { name: String, program_path: PathBuf },
+    #[error(
+        "`{name}` runs `{}`, which a tool pack bound, but the file at that path is no longer the file it bound",
+        .program_path.display()
+    )]
+    ReplacedFile { name: String, program_path: PathBuf },
 }
 
 /// Why Box refuses the installed packs or one binding.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum BindingRefusal {
+    /// Two installed packs have one name.
     #[error("two installed tool packs are named {pack:?}")]
-    NamedTwice { pack: String },
+    NamedTwice {
+        /// The name that two packs have.
+        pack: String,
+    },
+    /// A binding names a pack that is not installed.
     #[error("no installed tool pack is named {pack:?}")]
-    UnknownPack { pack: String },
+    UnknownPack {
+        /// The name that no installed pack has.
+        pack: String,
+    },
+    /// A binding reuses a (program file, called name) pair that another pack binds.
     #[error(
-        "{} is bound to tool pack {bound:?}, so it cannot also bind {pack:?}",
+        "{} called as {name:?} is bound to tool pack {bound:?}, so it cannot also bind {pack:?}",
         .program_path.display()
     )]
     BoundToAnotherPack {
+        /// The canonical path of the program file.
         program_path: PathBuf,
+        /// The called name.
+        name: String,
+        /// The pack that binds the pair.
         bound: String,
+        /// The pack that the refused binding names.
         pack: String,
     },
 }
 
+/// The name a program was called by: the last component of its spelling.
+pub(crate) fn called_name(spelling: &str) -> &str {
+    Path::new(spelling)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(spelling)
+}
+
 impl PackBindings {
+    /// Hold the installed `packs`, each with a distinct name, and no binding yet.
     pub(crate) fn new(packs: Vec<Pack>) -> Result<Self, BindingRefusal> {
         let mut seen = BTreeMap::<&str, usize>::new();
         for pack in &packs {
@@ -121,31 +202,96 @@ impl PackBindings {
             .ok_or_else(|| BindingRefusal::UnknownPack {
                 pack: pack.to_string(),
             })?;
-        if let Some(&bound) = self.by_file.get(&program.identity)
+        let pair = (program.identity, name.into());
+        if let Some(&bound) = self.bound.get(&pair)
             && bound != index
         {
             return Err(BindingRefusal::BoundToAnotherPack {
                 program_path: program.path.clone(),
+                name: pair.1,
                 bound: self.packs[bound].name.clone(),
                 pack: pack.to_string(),
             });
         }
-        self.by_file.insert(program.identity, index);
-        self.bound.insert((program.identity, name.into()));
+        for spelling in &program.spellings {
+            self.spellings
+                .entry(spelling.clone())
+                .or_insert(program.identity);
+        }
+        self.bound.insert(pair, index);
         Ok(())
     }
 
-    /// The pack that covers a spawn of `program` called by `name`, if any.
-    pub(crate) fn coverage(&self, program: &ProgramFile, name: &str) -> Option<PackCoverage<'_>> {
-        let pack = &self.packs[*self.by_file.get(&program.identity)?];
-        let pair = (program.identity, name.to_string());
-        if self.bound.contains(&pair) {
-            Some(PackCoverage::Parsed(pack))
-        } else if self.declared.contains(&pair) {
-            None
-        } else {
-            Some(PackCoverage::Unmodeled(pack))
+    /// Whether no pack binds any file.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bound.is_empty()
+    }
+
+    fn binds_file(&self, identity: FileIdentity) -> bool {
+        self.bound
+            .range((identity, String::new())..)
+            .next()
+            .is_some_and(|((bound, _), _)| *bound == identity)
+    }
+
+    /// Whether a bound spelling now leads somewhere other than a file it was bound to that covered
+    /// `name`: a spelling of `program` itself, or a bound spelling that now resolves to `program`.
+    fn replaced(&self, program: &ProgramFile, name: &str) -> bool {
+        let moved = |identity: &FileIdentity| *identity != program.identity;
+        let covered = |identity: FileIdentity| {
+            let pair = (identity, name.to_string());
+            self.bound.contains_key(&pair)
+                || (!self.declared.contains(&pair) && !self.binds_file(program.identity))
+        };
+        program.spellings.iter().any(|spelling| {
+            self.spellings
+                .get(spelling)
+                .is_some_and(|identity| moved(identity) && covered(*identity))
+        }) || self.spellings.iter().any(|(spelling, identity)| {
+            moved(identity)
+                && covered(*identity)
+                && std::fs::canonicalize(spelling).is_ok_and(|now| now == program.path)
+        })
+    }
+
+    /// How the packs cover a spawn spelled `spelling` of the program file that `read` found, or
+    /// `None` when no pack does.
+    pub(crate) fn coverage(
+        &self,
+        read: Result<ProgramFile, UnreadableProgramFile>,
+        spelling: &str,
+    ) -> Option<PackCoverage<'_>> {
+        let name = called_name(spelling);
+        let refused = |refusal: fn(String, PathBuf) -> CoverageRefusal, path: &Path| {
+            Some(PackCoverage::Refused(refusal(
+                name.to_string(),
+                path.to_path_buf(),
+            )))
+        };
+        let replaced = |name, program_path| CoverageRefusal::ReplacedFile { name, program_path };
+        let undeclared =
+            |name, program_path| CoverageRefusal::UndeclaredName { name, program_path };
+        let program = match read {
+            Ok(program) => program,
+            Err(unreadable) if self.spellings.contains_key(&unreadable.path) => {
+                return refused(replaced, &unreadable.path);
+            }
+            Err(_) => return None,
+        };
+        if self.replaced(&program, name) {
+            return refused(replaced, &program.path);
         }
+        let pair = (program.identity, name.to_string());
+        if let Some(&index) = self.bound.get(&pair) {
+            return Some(PackCoverage::Parsed {
+                pack: &self.packs[index],
+                file: program,
+            });
+        }
+        if self.binds_file(program.identity) && !self.declared.contains(&pair) {
+            return refused(undeclared, &program.path);
+        }
+        None
     }
 }
 
@@ -156,6 +302,10 @@ mod tests {
     const GIT: &str = "usr/bin/git";
     const CARGO: &str = "home/operator/.cargo/bin/cargo";
     const MISE: &str = "home/operator/.local/bin/mise";
+    const RENAMED_MISE: &str = "opt/renamed/bin/mise";
+    const LINKED_MISE: &str = "opt/linked/bin/mise";
+    const FIRST_MISE: &str = "opt/linked/mise-1/mise";
+    const SECOND_MISE: &str = "opt/linked/mise-2/mise";
 
     /// A temporary host directory that holds real program files.
     struct Host(tempfile::TempDir);
@@ -194,7 +344,15 @@ mod tests {
             self.program(original);
             self.parent_of(link);
             std::os::unix::fs::symlink(self.path(original), self.path(link)).expect("a symlink");
-            self.program(link)
+            ProgramFile::read(self.path(link)).expect("a readable link")
+        }
+
+        /// Put a new file at `relative`, as an update does: a rename over the old name.
+        fn replace(&self, relative: &str) -> ProgramFile {
+            let staged = self.path(&format!("{relative}.new"));
+            std::fs::write(&staged, "a new build").expect("a new program file");
+            std::fs::rename(&staged, self.path(relative)).expect("the rename");
+            self.program(relative)
         }
     }
 
@@ -216,20 +374,26 @@ mod tests {
         pack
     }
 
-    fn answer(coverage: Option<PackCoverage<'_>>) -> Option<(&'static str, String)> {
+    #[derive(Debug, PartialEq, Eq)]
+    enum Answer {
+        Parsed(String),
+        Undeclared,
+        Replaced,
+    }
+
+    fn answer(coverage: Option<PackCoverage<'_>>) -> Option<Answer> {
         coverage.map(|coverage| match coverage {
-            PackCoverage::Parsed(pack) => ("parsed", pack.name.clone()),
-            PackCoverage::Unmodeled(pack) => ("unmodeled", pack.name.clone()),
+            PackCoverage::Parsed { pack, .. } => Answer::Parsed(pack.name.clone()),
+            PackCoverage::Refused(CoverageRefusal::UndeclaredName { .. }) => Answer::Undeclared,
+            PackCoverage::Refused(CoverageRefusal::ReplacedFile { .. }) => Answer::Replaced,
         })
     }
 
-    fn parsed(pack: &str) -> Option<(&'static str, String)> {
-        Some(("parsed", pack.to_string()))
+    fn parsed(pack: &str) -> Option<Answer> {
+        Some(Answer::Parsed(pack.to_string()))
     }
 
-    fn unmodeled(pack: &str) -> Option<(&'static str, String)> {
-        Some(("unmodeled", pack.to_string()))
-    }
+    const REFUSED: Option<Answer> = Some(Answer::Undeclared);
 
     #[test]
     fn each_spawn_resolves_by_its_program_file_and_its_called_name() {
@@ -242,11 +406,25 @@ mod tests {
         bindings
             .bind(&host.program(CARGO), "cargo", "cargo")
             .expect("cargo binds");
+        bindings.declare(&host.program(MISE), "node");
+        bindings.declare(&host.program(MISE), "npm");
         bindings
             .bind(&host.program(MISE), "git", "git")
             .expect("the mise shim binary binds");
-        bindings.declare(&host.program(MISE), "node");
-        bindings.declare(&host.program(MISE), "npm");
+        for shim in [
+            host.program(RENAMED_MISE),
+            host.symlink(FIRST_MISE, LINKED_MISE),
+        ] {
+            bindings.declare(&shim, "node");
+            bindings
+                .bind(&shim, "cargo", "cargo")
+                .expect("cargo binds the shim binary");
+        }
+        host.replace(RENAMED_MISE);
+        host.program(SECOND_MISE);
+        std::fs::remove_file(host.path(LINKED_MISE)).expect("the old link is removed");
+        std::os::unix::fs::symlink(host.path(SECOND_MISE), host.path(LINKED_MISE))
+            .expect("a new link");
 
         for (case, program, name, expected) in [
             ("a bound pair parses", GIT, "git", parsed("git")),
@@ -266,7 +444,7 @@ mod tests {
                 "an undeclared name on a bound file",
                 CARGO,
                 "cargo-clippy",
-                unmodeled("cargo"),
+                REFUSED,
             ),
             ("an unbound file", "usr/bin/ls", "ls", None),
             (
@@ -297,13 +475,64 @@ mod tests {
                 "the mise shim binary, by an undeclared name",
                 MISE,
                 "python",
-                unmodeled("git"),
+                REFUSED,
+            ),
+            (
+                "a shim binary replaced in place, by its bound name",
+                RENAMED_MISE,
+                "cargo",
+                Some(Answer::Replaced),
+            ),
+            (
+                "a shim binary replaced in place, by a declared name",
+                RENAMED_MISE,
+                "node",
+                None,
+            ),
+            (
+                "a shim binary behind a retargeted link, by its bound name",
+                SECOND_MISE,
+                "cargo",
+                Some(Answer::Replaced),
+            ),
+            (
+                "a shim binary behind a retargeted link, by a declared name",
+                SECOND_MISE,
+                "node",
+                None,
             ),
         ] {
             assert_eq!(
-                answer(bindings.coverage(&host.program(program), name)),
+                answer(bindings.coverage(Ok(host.program(program)), name)),
                 expected,
                 "{case}: {program} called as {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_packs_bind_one_shim_binary_by_two_names() {
+        let host = Host::new();
+        let mut bindings = PackBindings::new(installed(&["cargo", "aws"])).expect("distinct packs");
+        let mise = host.program(MISE);
+        bindings
+            .bind(&mise, "cargo", "cargo")
+            .expect("cargo binds the shim binary");
+        bindings
+            .bind(&mise, "aws", "aws")
+            .expect("aws binds the same shim binary by another name");
+        bindings.declare(&mise, "node");
+
+        for (case, name, expected) in [
+            ("the first pack's name", "cargo", parsed("cargo")),
+            ("the second pack's name", "aws", parsed("aws")),
+            ("a declared name with no pack", "node", None),
+            ("an undeclared name", "python", REFUSED),
+        ] {
+            assert_eq!(
+                answer(bindings.coverage(Ok(mise.clone()), name)),
+                expected,
+                "{case}: {MISE} called as {name}"
             );
         }
     }
@@ -319,7 +548,7 @@ mod tests {
             ("an undeclared name", "python"),
         ] {
             assert!(
-                bindings.coverage(&host.program(MISE), name).is_none(),
+                bindings.coverage(Ok(host.program(MISE)), name).is_none(),
                 "{case}: {MISE} called as {name}"
             );
         }
@@ -338,28 +567,114 @@ mod tests {
             ("the original path", host.program(GIT)),
             ("a hard link", host.hard_link(GIT, "opt/git-hard")),
             ("a symlink", host.symlink(GIT, "opt/git-symbolic")),
+            ("a short symlink", host.symlink(GIT, "opt/g")),
         ] {
             let at = program.path().display().to_string();
             for (name, expected) in [
                 ("git", parsed("git")),
                 ("git-lfs", None),
-                ("gitk", unmodeled("git")),
+                ("gitk", REFUSED),
+                ("g", REFUSED),
+                ("git-hard", REFUSED),
             ] {
                 assert_eq!(
-                    answer(bindings.coverage(&program, name)),
+                    answer(bindings.coverage(Ok(program.clone()), name)),
                     expected,
                     "{case}: {at} called as {name}"
                 );
             }
             assert_eq!(
-                bindings.bind(&program, "cargo", "cargo"),
+                bindings.bind(&program, "git", "cargo"),
                 Err(BindingRefusal::BoundToAnotherPack {
                     program_path: program.path().to_path_buf(),
+                    name: "git".to_string(),
                     bound: "git".to_string(),
                     pack: "cargo".to_string(),
                 }),
-                "{case}: a second pack through {at}"
+                "{case}: a second pack on the bound pair through {at}"
             );
+        }
+    }
+
+    #[test]
+    fn a_replaced_file_at_a_bound_path_is_refused() {
+        let host = Host::new();
+        let mut bindings = PackBindings::new(installed(&["git"])).expect("distinct packs");
+        let original = host.program(GIT);
+        bindings.bind(&original, "git", "git").expect("git binds");
+        bindings.declare(&original, "git-lfs");
+
+        let replaced = host.replace(GIT);
+
+        assert_eq!(replaced.path(), original.path());
+        assert!(
+            bindings.coverage(Ok(replaced.clone()), "git-lfs").is_none(),
+            "a declared name with no pack stays a spawn"
+        );
+        for name in ["git", "gitk"] {
+            assert_eq!(
+                bindings
+                    .coverage(Ok(replaced.clone()), name)
+                    .map(|coverage| match coverage {
+                        PackCoverage::Refused(refusal) => Some(refusal),
+                        PackCoverage::Parsed { .. } => None,
+                    }),
+                Some(Some(CoverageRefusal::ReplacedFile {
+                    name: name.to_string(),
+                    program_path: original.path().to_path_buf(),
+                })),
+                "the new file at {} called as {name}",
+                replaced.path().display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_file_behind_a_bound_link_is_refused() {
+        let host = Host::new();
+        let mut bindings = PackBindings::new(installed(&["git"])).expect("distinct packs");
+        let linked = host.symlink("opt/cellar/git/1/bin/git", "opt/bin/git");
+        bindings
+            .bind(&linked, "git", "git")
+            .expect("git binds through the link");
+
+        let upgraded = host.program("opt/cellar/git/2/bin/git");
+        std::fs::remove_file(host.path("opt/bin/git")).expect("the old link is removed");
+        std::os::unix::fs::symlink(upgraded.path(), host.path("opt/bin/git")).expect("a new link");
+
+        assert_eq!(
+            answer(bindings.coverage(Ok(upgraded.clone()), "git")),
+            Some(Answer::Replaced),
+            "the file that the bound link leads to now"
+        );
+        assert_eq!(
+            answer(bindings.coverage(Ok(host.program("opt/cellar/git/3/bin/git")), "git")),
+            None,
+            "a file that no bound path leads to"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_called_name_and_the_program_file() {
+        for (refusal, message) in [
+            (
+                CoverageRefusal::UndeclaredName {
+                    name: "python".to_string(),
+                    program_path: PathBuf::from("/usr/local/bin/mise"),
+                },
+                "`python` runs `/usr/local/bin/mise`, which a tool pack covers, but no `[tool]` \
+                 declares the name `python`",
+            ),
+            (
+                CoverageRefusal::ReplacedFile {
+                    name: "git".to_string(),
+                    program_path: PathBuf::from("/usr/bin/git"),
+                },
+                "`git` runs `/usr/bin/git`, which a tool pack bound, but the file at that path \
+                 is no longer the file it bound",
+            ),
+        ] {
+            assert_eq!(refusal.to_string(), message);
         }
     }
 
@@ -374,7 +689,18 @@ mod tests {
     }
 
     #[test]
-    fn a_binding_that_names_no_installed_pack_or_a_second_pack_on_one_file_is_refused() {
+    fn a_program_file_is_read_at_its_canonical_path() {
+        let host = Host::new();
+        let original = host.program(GIT);
+
+        let link = host.symlink(GIT, "opt/git-symbolic");
+
+        assert_eq!(link.path(), original.path());
+        assert_eq!(link.identity, original.identity);
+    }
+
+    #[test]
+    fn a_second_pack_is_refused_only_on_a_bound_pair() {
         let host = Host::new();
         let mut bindings = PackBindings::new(installed(&["git", "cargo"])).expect("distinct packs");
         bindings
@@ -387,9 +713,10 @@ mod tests {
             .bind(&host.program(MISE), "git", "git")
             .expect("the mise shim binary binds");
 
-        let another_pack = |program: &str| {
+        let another_pack = |program: &str, name: &str| {
             Err(BindingRefusal::BoundToAnotherPack {
-                program_path: host.path(program),
+                program_path: host.program(program).path().to_path_buf(),
+                name: name.to_string(),
                 bound: "git".to_string(),
                 pack: "cargo".to_string(),
             })
@@ -409,14 +736,21 @@ mod tests {
                 GIT,
                 "git",
                 "cargo",
-                another_pack(GIT),
+                another_pack(GIT, "git"),
             ),
             (
-                "another name, to another pack",
+                "a bound pair on the shim binary, to another pack",
+                MISE,
+                "git",
+                "cargo",
+                another_pack(MISE, "git"),
+            ),
+            (
+                "another name on the shim binary, to another pack",
                 MISE,
                 "cargo",
                 "cargo",
-                another_pack(MISE),
+                Ok(()),
             ),
             (
                 "a bound pair, to the same pack again",
@@ -441,18 +775,19 @@ mod tests {
         }
 
         for (case, program, name, expected) in [
-            (
-                "the refused unknown pack",
-                CARGO,
-                "rustc",
-                unmodeled("cargo"),
-            ),
+            ("the refused unknown pack", CARGO, "rustc", REFUSED),
             ("the refused pair", GIT, "git", parsed("git")),
-            ("the refused name", MISE, "cargo", unmodeled("git")),
+            ("the refused pair on the shim", MISE, "git", parsed("git")),
+            (
+                "the accepted name on the shim",
+                MISE,
+                "cargo",
+                parsed("cargo"),
+            ),
             ("the accepted name", GIT, "git-upload-pack", parsed("git")),
         ] {
             assert_eq!(
-                answer(bindings.coverage(&host.program(program), name)),
+                answer(bindings.coverage(Ok(host.program(program)), name)),
                 expected,
                 "{case}: {program} called as {name}"
             );

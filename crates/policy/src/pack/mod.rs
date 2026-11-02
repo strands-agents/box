@@ -28,6 +28,9 @@ mod fuzz;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub(crate) use bindings::ProgramFile;
+#[cfg(feature = "shell-adapter")]
+pub(crate) use bindings::{CoverageRefusal, PackBindings, PackCoverage};
 pub(crate) use invocation::{PackInvocation, PackRequest, PendingPackResponse};
 pub(crate) use model::Pack;
 pub(crate) use schema::PACK_NAMESPACE;

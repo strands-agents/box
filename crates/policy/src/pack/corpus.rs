@@ -10,7 +10,7 @@ use serde::Deserialize;
 use super::grammar::{FieldKind, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
 use super::schema::pack_action_schema;
-use super::{Pack, PackInvocation, PendingPackResponse};
+use super::{Pack, PackInvocation, PendingPackResponse, ProgramFile};
 use crate::check::Refused;
 use crate::dogwood::check_against;
 use crate::spelling::Operator;
@@ -359,9 +359,16 @@ impl Engine {
         pack: &Pack,
         argv: &[String],
     ) -> (Decision, Option<PendingPackResponse>) {
-        let program_path = format!("{PROGRAM_DIRECTORY}/{}", pack.program);
-        let invocation =
-            PackInvocation::new(pack, &pack.program, &program_path, CWD, &argv[1..], &[]);
+        let program_file = ProgramFile::fixed(&format!("{PROGRAM_DIRECTORY}/{}", pack.program), 1);
+        let invocation = PackInvocation::new(
+            pack,
+            &pack.program,
+            &program_file,
+            None,
+            CWD,
+            &argv[1..],
+            &[],
+        );
         self.engine.decide_pack_action(
             &GovernedBox::assigned("corpus"),
             &Principal::agent(),

@@ -470,8 +470,8 @@ impl DogwoodEngine {
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller records a pack response yet")
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter records a pack response")
     )]
     pub(crate) fn observe_response(
         &self,
@@ -1815,8 +1815,15 @@ when temporal {
         )
         .expect("policy loads");
         let args = ["push".to_string(), "origin".to_string()];
-        let invocation =
-            crate::pack::PackInvocation::new(&pack, "git", "/usr/bin/git", "/work", &args, &[]);
+        let invocation = crate::pack::PackInvocation::new(
+            &pack,
+            "git",
+            &crate::pack::ProgramFile::fixed("/usr/bin/git", 1),
+            None,
+            "/work",
+            &args,
+            &[],
+        );
         let typed = invocation.request();
         let mut input = typed.input().clone();
         input["force"] = serde_json::json!("yes");
