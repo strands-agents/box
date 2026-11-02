@@ -172,6 +172,9 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
+mod proc_mem_probe;
+
+#[cfg(target_os = "linux")]
 static SUPERVISOR_MEMORY_MARKER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0x1020_3040_5060_7080);
 
@@ -758,6 +761,7 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
+        Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
         Some("--attempt-supervisor-memory-write") => {
             match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
                 Some(launcher_uid) => attempt_supervisor_memory_write(launcher_uid),
@@ -771,7 +775,7 @@ fn linux_main() -> ExitCode {
             eprintln!(
                 "usage: containment-test-probe \
                  (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
-                 --attempt-supervisor-memory-write) ..."
+                 --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
         }

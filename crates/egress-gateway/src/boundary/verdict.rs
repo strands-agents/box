@@ -1,4 +1,4 @@
-//! [`Verdict`], [`Mutation`], and [`DenyReason`] — the folded result the interceptor acts on.
+//! [`Mutation`] — one edit the gateway applies to a request or a response.
 
 use zeroize::Zeroizing;
 
@@ -59,15 +59,9 @@ impl Mutation {
         }
     }
 
-    /// Apply this mutation to a request's `headers` and `target` in place, by reference.
-    pub fn apply(&self, headers: &mut HeaderMap, target: &mut Target) {
-        self.clone().into_apply(headers, target);
-    }
-
-    /// Apply this mutation by **value**, moving its owned strings into `headers`/`target` — no copy of
-    /// the (possibly secret) value. This is how the interceptor applies the `Vec<Mutation>` it owns
-    /// from a [`Verdict::Allow`], which is consumed exactly once.
-    pub fn into_apply(self, headers: &mut HeaderMap, target: &mut Target) {
+    /// Apply this mutation to a request's `headers` and `target` in place, moving its owned strings
+    /// in, with no copy of the (possibly secret) value.
+    pub fn apply(self, headers: &mut HeaderMap, target: &mut Target) {
         match self {
             // `Zeroizing<String>` derefs to `String`, but `set` takes `impl Into<String>`, so the
             // inner value is moved out and re-wrapped by the map. No copy: `Zeroizing` is a newtype,
@@ -150,13 +144,8 @@ fn decode_query_key(key: &str) -> String {
 }
 
 /// The value of one hex digit, upper or lower case; `None` for any other byte.
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+pub(crate) fn hex_value(byte: u8) -> Option<u8> {
+    (byte as char).to_digit(16).map(|digit| digit as u8)
 }
 
 /// Percent-encode a query-string component per RFC 3986: the unreserved set (`A-Z a-z 0-9 - _ . ~`)
@@ -220,47 +209,6 @@ pub enum MutationTarget {
     Path,
     /// A query parameter, keyed by its name.
     QueryParam(String),
-}
-
-/// Why a request or response was denied — a non-secret, log-safe reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DenyReason {
-    /// Two mutators tried to edit the same target on one request (fail closed).
-    MutationCollision(String),
-    /// A credential binding was ambiguous or a phantom mismatched (fail closed).
-    Credential(String),
-}
-
-impl std::fmt::Display for DenyReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DenyReason::MutationCollision(m) => write!(f, "mutation collision: {m}"),
-            DenyReason::Credential(m) => write!(f, "credential denied: {m}"),
-        }
-    }
-}
-
-/// The folded result the interceptor acts on: forward with accumulated mutations, or
-/// block with a reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    /// Forward, applying the accumulated mutations first.
-    Allow {
-        /// The mutations to apply, accumulated from every matching `Allow` Control.
-        mutations: Vec<Mutation>,
-    },
-    /// Block, with a non-secret reason.
-    Deny {
-        /// Why the request/response was denied.
-        reason: DenyReason,
-    },
-}
-
-impl Verdict {
-    /// Whether this verdict is a deny.
-    pub fn is_deny(&self) -> bool {
-        matches!(self, Verdict::Deny { .. })
-    }
 }
 
 #[cfg(test)]

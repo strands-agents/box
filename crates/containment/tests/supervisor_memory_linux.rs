@@ -17,6 +17,21 @@ fn workload_cannot_write_namespace_supervisor_memory() {
         println!("skipping: root supervisor memory proof requires verified Yama ptrace_scope=0");
         return;
     }
+    run_memory_probe(
+        "--attempt-supervisor-memory-write",
+        "SUPERVISOR_MEMORY_DENIED",
+    );
+}
+
+#[test]
+fn proc_mem_cannot_write_executable_memory() {
+    run_memory_probe(
+        "--attempt-executable-memory-write",
+        "EXECUTABLE_MEMORY_DENIED",
+    );
+}
+
+fn run_memory_probe(mode: &str, marker: &str) {
     if !the_host_can_build_a_view() {
         println!("skipping: this host cannot build a namespace mount view");
         return;
@@ -55,8 +70,9 @@ fn workload_cannot_write_namespace_supervisor_memory() {
         .arg("{}")
         .arg("--")
         .arg(probe)
-        .arg("--attempt-supervisor-memory-write")
-        .arg(launcher_uid.to_string())
+        .arg(mode)
+        // SAFETY: capture the host identity before the trampoline enters its user namespace.
+        .arg(unsafe { libc::getuid() }.to_string())
         .output()
         .expect("launch the real containment trampoline");
 
@@ -65,11 +81,11 @@ fn workload_cannot_write_namespace_supervisor_memory() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "supervisor memory proof failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "{mode} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("SUPERVISOR_MEMORY_DENIED"),
-        "the probe did not verify supervisor memory isolation:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stdout.contains(marker),
+        "{mode} did not report {marker}:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 

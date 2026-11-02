@@ -174,6 +174,12 @@ The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
 list for every platform. The other floors depend on the run.
 
+A library caller asks about one path through `check_read_grant`. It judges the path through the
+same function that judges a `read` entry in `box.toml`: it refuses an absent path, a link, a
+spelling that is not canonical, and a path under a floor, and it reports a path in a credential
+store as one that Box grants only when a grant names it. The caller gets the decision, not the
+list, because each row carries a rule (`exact` or `overlap`) and a class.
+
 ### How you check a box's reach
 
 A filesystem grant is reach that no policy decision covers, and no record of each access exists

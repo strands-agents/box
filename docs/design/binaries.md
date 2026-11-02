@@ -28,7 +28,9 @@ runs inside the box, so the workload can't access it; the workload can only send
 [the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
 
 It expects `strands-box-contain-trampoline` and `strands-box-sock-alias` to sit next to it. If one
-is missing when it's needed, `strands-box` stops.
+is missing when it's needed, `strands-box` stops. On macOS, Box asks the operating system where
+the running executable lives. Starting through a symlink and then switching that link to another
+release does not change where that process finds its helpers.
 
 ### Trampoline - `strands-box-contain-trampoline`
 
@@ -65,7 +67,8 @@ only Box program inside the box, and it has no power of its own: it can't open t
 can't serve requests.
 
 `strands-box` puts the alias in the box directory's `bin/` under the names `zsh`, `bash`, `sh`,
-`python3`, and `python`, plus the program name of each MCP server the box declares. `bin/`
+`python3`, and `python` (`INTERPRETER_ALIASES` in the library), plus the program name of each MCP
+server the box declares, so no MCP server can take one of those five names. `bin/`
 comes first on the agent's `PATH`, so when the harness runs `zsh`, it gets the alias. The sandbox for a
 tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter or MCP server the
 request is for. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the

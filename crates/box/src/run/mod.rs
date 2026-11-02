@@ -19,6 +19,7 @@ pub(crate) mod contain;
 pub(crate) mod credential;
 pub(crate) mod hardening;
 pub(crate) mod hosted;
+mod installation;
 pub(crate) mod lock;
 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
 pub(crate) mod macos_enforcement;
