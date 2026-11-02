@@ -109,6 +109,12 @@ is running.
 
 ### The fixture API (`b: &BoxFixture`)
 
+The workspace and its `out/` directory stay writable. Configured tool commands use separate
+copies in the sibling `tools/` directory, outside every process's write grants. Native probes
+stay in `out/`; a case grants that directory execution with `with_exec_tree()`. Use
+`install_tool()` before declaring a compiled probe as a tool. For a native control, keep the
+original probe path so the control runs with the agent's grants.
+
 Two routes lead into the box, and a case must pick the one its enforcement point lives on:
 
 - **Native.** `[agent] command = ["bash"]` resolves on the declared search path to the HOST

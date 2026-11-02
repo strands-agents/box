@@ -330,9 +330,13 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 
 | Condition | Refusal text | Next action |
 |---|---|---|
+| A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
 | A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
 | The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+
+Box also refuses legitimate system executables that have multiple hard links. File ownership and
+permissions do not waive the requirement for exactly one hard link.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. Reads still require the applicable policy permission.

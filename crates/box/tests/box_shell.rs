@@ -3281,6 +3281,79 @@ fn a_configured_command_cannot_be_replaced_through_the_hosted_shell() {
     configured_command_mutation_is_refused("mv");
 }
 
+#[test]
+fn monty_cannot_change_a_configured_command() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "monty-command-integrity",
+        "permit(principal, action, resource);",
+        r#"
+[tool.protected]
+command = ["{workspace}/configured-command"]
+"#,
+    )
+    .without_agent_home();
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the configured command workspace");
+    let command = workspace.join("configured-command");
+    compile_command_integrity_probe(&command, "fn main() { println!(\"CONFIGURED_TOOL_OK\"); }");
+    let original = std::fs::read(&command).expect("the configured command bytes");
+    let control = workspace.join("ordinary-output");
+    let moved = workspace.join("moved-output");
+    let other = workspace.join("other-output");
+    let quoted = |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let box_ = request.expect();
+
+    for operation in [
+        "command.write_text('CHANGED')",
+        "command.unlink()",
+        "command.rename(other)",
+        "other.rename(command)",
+    ] {
+        let script = format!(
+            r#"from pathlib import Path
+command = Path({command})
+control = Path({control})
+moved = Path({moved})
+other = Path({other})
+control.write_text('CONTROL')
+control.rename(moved)
+assert moved.read_text() == 'CONTROL'
+moved.unlink()
+other.write_text('OTHER')
+print('MONTY_CONTROL_OK')
+try:
+    {operation}
+    print('MUTATION_LANDED')
+except PermissionError as error:
+    print('MUTATION_REFUSED:' + str(error))
+"#,
+            command = quoted(&command),
+            control = quoted(&control),
+            moved = quoted(&moved),
+            other = quoted(&other),
+        );
+        let output = box_.bash(&format!("python3 -c '{}'", script.replace('\'', "'\\''")));
+        let seen = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(output.status.success(), "{operation}: {output:?}");
+        assert!(seen.contains("MONTY_CONTROL_OK"), "{operation}: {output:?}");
+        assert!(
+            seen.contains("MUTATION_REFUSED:") && seen.contains("configured"),
+            "{operation} must meet the configured-command refusal: {output:?}"
+        );
+        assert!(!seen.contains("MUTATION_LANDED"), "{operation}: {output:?}");
+        assert_eq!(std::fs::read(&command).unwrap(), original, "{operation}");
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            "OTHER",
+            "{operation}"
+        );
+        assert!(!control.exists() && !moved.exists(), "{operation}");
+    }
+}
+
 const COMMAND_INTEGRITY_TOOL: &str = r#"
 [tool.protected]
 command = ["{workspace}/configured-command"]
@@ -3434,6 +3507,9 @@ fn a_configured_linked_script_keeps_its_invocation_path() {
         r#"
 [tool.script]
 command = ["{workspace}/linked-script"]
+
+[tool.script.filesystem]
+read_file = ["{workspace}/script-target"]
 "#,
     )
     .without_agent_home();

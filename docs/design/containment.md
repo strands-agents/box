@@ -314,7 +314,8 @@ sandbox, which ends when the program does
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
 execution. Box refuses command files with multiple hard links because another name could expose
-the same contents to writes.
+the same contents to writes. This conservative rule also refuses legitimate system executables
+with multiple hard links, regardless of their owner or file permissions.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity.
 Direct writable-grant refusals and the broker's mutation checks protect the program's contents.
