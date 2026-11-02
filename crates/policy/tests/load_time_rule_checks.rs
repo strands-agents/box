@@ -411,3 +411,55 @@ when { context.input has host };"#;
         }
     }
 }
+
+/// A `net:connect` no longer carries `ip`, so a rule that names it is refused rather than loaded
+/// and left to match nothing.
+///
+/// `context.input has ip` is statically false, so strict validation never typechecks the
+/// comparison behind it: without this check the rule loads and silently enforces nothing.
+#[test]
+fn a_rule_naming_the_removed_ip_attribute_refuses_validate_and_open() {
+    let source = r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);
+@id("metadata_addresses")
+forbid(principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip && context.input.ip like "169.254.*" };"#;
+    for (path, result) in [
+        ("validate", validate(source)),
+        ("open", open(source).map(|_| ())),
+    ] {
+        match result {
+            Err(PolicyError::Schema(reason)) => {
+                assert!(
+                    reason.contains(
+                        "rule @id(\"metadata_addresses\") reads context.input.ip, which no action \
+                         carries"
+                    ),
+                    "{path}: {reason}"
+                );
+                assert!(
+                    reason.contains(
+                        "context.input.ip4 for the IPv4 address it is or carries, and as \
+                         context.input.ip6 for the IPv6 wire form"
+                    ),
+                    "{path}: {reason}"
+                );
+            }
+            Err(other) => panic!("{path}: expected a schema refusal, got {other}"),
+            Ok(()) => panic!("{path}: a rule naming ip must refuse the load"),
+        }
+    }
+}
+
+/// The replacement of that rule loads, so the refusal above names a rule an operator can write.
+#[test]
+fn a_clause_per_address_family_loads() {
+    let source = r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);
+@id("metadata_addresses")
+forbid(principal, action == Box::Action::"net:connect", resource)
+when {
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && context.input.ip6 like "fe8*")
+};"#;
+    validate(source).expect("a clause per family validates");
+    open(source).expect("a clause per family opens");
+}
