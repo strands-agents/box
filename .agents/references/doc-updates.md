@@ -16,11 +16,11 @@ so a change to one is never exempt from the table below.
 And the valve covers prose alone: a committed artifact that must still work, such as a policy under
 `examples/`, is not prose and no change may leave it broken.
 
-**Seven places hold committed prose that a code change can make wrong, and there is no eighth.**
+**Eight places hold committed prose that a code change can make wrong, and there is no ninth.**
 Each has one reader and one test for what belongs there. The `docs-writer`, `docs-reviewer`,
 `docs-audit`, and `docs-planner` skills apply
 [the voice guide](voice-guide.md) to the two guides, and
-`docs-sync` finds which of the seven a change makes wrong.
+`docs-sync` finds which of the eight a change makes wrong.
 
 | Place | Reader | Answers | Belongs here when |
 |---|---|---|---|
@@ -28,6 +28,7 @@ Each has one reader and one test for what belongs there. The `docs-writer`, `doc
 | `docs/design/<topic>.md` | A security evaluator or a contributor | How does it work, and why trust it? | A reader must trust the mechanism, or a new contributor loses an hour to rediscover it. |
 | `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides a choice through `/kd`. The page is a dated record and it ages, so a code change adds no entry here. |
 | `docs/dev/` | A contributor | How do I work on this repository? | A build, test, or debug step needs more than the command. |
+| `docs/site-manifest.json` | An external documentation publisher | Which user pages publish, and at which routes and navigation positions? | A publishable page is added, removed, or moved, or its H1, purpose, route, or navigation changes. |
 | `docs/conventions.md` | A contributor who adds a crate or public surface | What does house style require? | The rule is mechanical, so a reviewer or a gate can check it. |
 | `README.md`, here and in each crate | Someone who builds Box, and a consumer of that crate | What is this, and what is its surface? | The purpose, the `pub use` facade, or a gate changes. `crates/box/README.md` also holds the CLI verbs, the four box inputs, and the config keys, and two tests pin it. |
 | `AGENTS.md`, here and in each crate | A coding agent | What must I not break here? | A frozen surface, a premise, or a gate moves. |
@@ -36,7 +37,7 @@ Each has one reader and one test for what belongs there. The `docs-writer`, `doc
 never committed. Add no doc a reader did not ask for.
 
 `team/designs/` holds the design documents that a human writes before a feature is built. A
-design document is a snapshot that is not kept in step with the code, so it is not one of the seven.
+design document is a snapshot that is not kept in step with the code, so it is not one of the eight.
 An agent does not write, audit, or update one.
 
 ## What a change updates
@@ -48,6 +49,8 @@ it.
 | When a change ... | Update |
 |---|---|
 | Adds, removes, or renames a CLI verb or a flag | `crates/box/README.md`, which `documented_commands.rs` pins, and each `docs/user/` page that spells that verb. |
+| Adds, removes, or moves a publishable `docs/user/` page, or changes its H1, purpose, or external navigation | `docs/site-manifest.json`. Keep an existing page's `id` and `slug`; make `title` match the H1; update `description` and `nav` when the page's purpose or placement changes. |
+| Changes the site manifest shape, required fields, allowed values, or field meanings | `docs/dev/site-manifest.md`, and bump `schemaVersion` before an existing consumer must change. |
 | Adds, removes, renames, or retypes a `box.toml` key, or a field in `[agent]` or `[tool.<name>]` | `docs/user/config.md`, and `crates/box/README.md`, which `documented_inputs.rs` pins. Also the key's own page when it has one: `egress.md`, `mcp.md`, `telemetry.md`, or `native-filesystem-policy.md`. |
 | Changes what a filesystem list grants, or adds or removes a list | `docs/user/config.md`, in the `[agent.filesystem]` section and in what is refused, and `docs/design/containment.md`. |
 | Adds, renames, or removes a policy action, an attribute a rule reads, or what `when temporal` observes | `docs/user/policy/actions.md`. Also `docs/user/policy.md` when the count of actions or a common rule moves, and `docs/design/policy.md` when a history rule sees something else. |

@@ -23,6 +23,11 @@ inputs (policy, credentials, name, workload); stored records; the broker protoco
 socket derivation; policy actions, attributes, and temporal observations; each mechanism crate's
 `pub use` set; and the composed environment, including `reserved_workload_environment`.
 Read [the box contract](crates/box/AGENTS.md#the-box-contract) before changing any of these.
+
+`docs/site-manifest.json` is a separate frozen external publication surface. Its schema, field
+meanings, stable page identities and routes, and compatibility rules are in
+[the site manifest contract](docs/dev/site-manifest.md).
+
 After approval, bump `RECORD_VERSION`, `LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes.
 An approved interface change carries its reference page in the same commit; apply
 [What a change updates](#what-a-change-updates).
