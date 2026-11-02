@@ -65,6 +65,9 @@ bytes = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
+# Parses a telemetry destination into the host and port its credential is bound to. Already in the
+# lockfile via `telemetry`.
+url = "2"
 
 # Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS
 # listener for the recording upstream the credential end-to-end tests run against.

@@ -12,6 +12,7 @@ mod credsd;
 mod env;
 mod file;
 mod op;
+mod secrets_manager;
 
 pub(crate) use aws::{
     AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
@@ -21,6 +22,7 @@ pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
 pub(crate) use env::EnvSource;
 pub(crate) use file::FileSource;
 pub(crate) use op::OnePasswordSource;
+pub(crate) use secrets_manager::{SCHEME as SECRETS_MANAGER_SCHEME, SecretsManagerSource};
 
 /// Return the raw URI-form reference string (`scheme://body`) for a URI-form locator.
 pub(crate) fn uri_reference<'a>(loc: &'a Locator, scheme: &str) -> Result<&'a str> {
@@ -43,6 +45,12 @@ pub(crate) trait SecretSource: Send + Sync {
     /// Parse+validate the locator and fetch the secret as a [`Secret`]
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
     fn fetch(&self, loc: &Locator) -> Result<Secret>;
+
+    /// [`fetch`](Self::fetch), plus what the operator should be told about how the secret was
+    /// acquired. Most sources have nothing to tell.
+    fn fetch_disclosed(&self, loc: &Locator) -> Result<(Secret, Option<String>)> {
+        self.fetch(loc).map(|secret| (secret, None))
+    }
 }
 
 /// A scheme→source registry: routes a reference to the source whose [`scheme`](SecretSource::scheme)
@@ -78,10 +86,16 @@ impl SourceRegistry {
     }
 
     /// Route `loc` to the source whose scheme matches [`Locator::scheme`], and fetch.
+    #[cfg(test)]
     pub(crate) fn fetch(&self, loc: &Locator) -> Result<Secret> {
+        self.fetch_disclosed(loc).map(|(secret, _)| secret)
+    }
+
+    /// Route `loc` to its source and fetch, with the source's note for the operator.
+    pub(crate) fn fetch_disclosed(&self, loc: &Locator) -> Result<(Secret, Option<String>)> {
         let scheme = loc.scheme();
         match self.sources.get(scheme) {
-            Some(source) => source.fetch(loc),
+            Some(source) => source.fetch_disclosed(loc),
             None => Err(CredentialError::Credential(format!(
                 "no credential source registered for scheme {scheme:?}"
             ))),

@@ -2,7 +2,9 @@
 
 use zeroize::Zeroizing;
 
-use crate::sources::{EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry};
+use crate::sources::{
+    EnvSource, FileSource, OnePasswordSource, SecretSource, SecretsManagerSource, SourceRegistry,
+};
 use crate::{CredentialError, Locator, Result, Secret};
 
 /// The structured-config routing tag the AWS source owns. A locator carrying it resolves to
@@ -26,7 +28,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// The local source set: `env://`, `file://`, and `op://`.
+    /// The local source set: `env://`, `file://`, `op://`, and `aws-secretsmanager://`.
     #[must_use]
     pub fn local() -> Self {
         let mut registry = SourceRegistry::new();
@@ -34,6 +36,7 @@ impl Backend {
             Box::new(EnvSource::new()) as Box<dyn SecretSource>,
             Box::new(FileSource::new()),
             Box::new(OnePasswordSource::new()),
+            Box::new(SecretsManagerSource::new()),
         ] {
             registry
                 .register(source)
@@ -75,6 +78,11 @@ impl Backend {
     /// The same dereference, keeping the [`Secret`] wrapper — the vault's own load path
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
     pub(crate) fn resolve_secret(&self, locator: &Locator) -> Result<Secret> {
+        self.resolve_disclosed(locator).map(|(secret, _)| secret)
+    }
+
+    /// [`resolve_secret`](Self::resolve_secret), plus the source's note for the operator.
+    pub(crate) fn resolve_disclosed(&self, locator: &Locator) -> Result<(Secret, Option<String>)> {
         if locator.scheme() == AWS_SCHEME {
             return Err(CredentialError::Credential(
                 "an aws:// reference resolves to structured session credentials for SigV4 signing, \
@@ -84,7 +92,7 @@ impl Backend {
         }
 
         match &self.profile {
-            Profile::Local { registry } => registry.fetch(locator),
+            Profile::Local { registry } => registry.fetch_disclosed(locator),
         }
     }
 }

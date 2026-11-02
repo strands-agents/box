@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
-use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
+use crate::sources::{
+    AmbientFallbackPolicy, CREDSD_SCHEME, SECRETS_MANAGER_SCHEME, resolve_credsd_socket,
+};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
     Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, Result, RouteSpec, Secret,
@@ -167,8 +169,23 @@ impl Vault {
                 ),
             };
 
+            // The source signs with the ambient AWS chain, so a vault that requires a scoped identity
+            // refuses it rather than signing as an identity nobody declared.
+            if route.credential_ref().scheme() == SECRETS_MANAGER_SCHEME
+                && vault.ambient_policy == AmbientFallbackPolicy::Deny
+            {
+                return Err(CredentialError::Credential(format!(
+                    "{} signs with the ambient AWS credential chain, and this vault requires a \
+                     scoped AWS profile",
+                    crate::redact_credential_ref(&route.reference_display())
+                )));
+            }
+
             match vault.resolve_secret(route) {
-                Ok(secret) => {
+                Ok((secret, disclosure)) => {
+                    if let Some(disclosure) = disclosure {
+                        vault.warn(&disclosure);
+                    }
                     // Mint a unique phantom for the resolved secret. Generation failure or a
                     // vault-wide collision fails closed — never a weak or duplicated value.
                     let phantom = PhantomToken::generate(&phantom_prefix)?;
@@ -243,7 +260,7 @@ impl Vault {
     }
 
     /// Resolve one opaque route's secret through the backend, auditing the attempt.
-    fn resolve_secret(&self, route: &RouteSpec) -> Result<Secret> {
+    fn resolve_secret(&self, route: &RouteSpec) -> Result<(Secret, Option<String>)> {
         let locator = route.credential_ref();
         let request_id = RequestId::new(LOAD_CORRELATION);
         crate::audit_resolve(
@@ -252,7 +269,7 @@ impl Vault {
             locator.scheme(),
             &route.reference_display(),
             &request_id,
-            || self.backend.resolve_secret(locator),
+            || self.backend.resolve_disclosed(locator),
         )
     }
 
@@ -604,6 +621,26 @@ mod tests {
         // The reference is redacted at construction; the secret never enters the record.
         assert!(records[0].credential_ref.contains("[REDACTED]"));
         assert!(!records[0].credential_ref.contains("token"));
+    }
+
+    /// **A vault that requires a scoped AWS identity refuses `aws-secretsmanager://`**, because that
+    /// source signs with the ambient chain. The refusal comes before any fetch.
+    #[test]
+    fn a_secrets_manager_route_is_refused_when_a_scoped_profile_is_required() {
+        let route = RouteSpec::opaque(
+            DestinationPattern::parse("us.cloud.langfuse.com").unwrap(),
+            Locator::parse_uri("aws-secretsmanager://strands-box/telemetry#LANGFUSE_AUTH").unwrap(),
+            header_mode(),
+        );
+        let error = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .route(route)
+                .require_scoped_aws_profile(),
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(error.contains("requires a scoped AWS profile"), "{error}");
+        assert!(!error.contains("strands-box/telemetry"), "{error}");
     }
 
     /// A *failed* resolve is audited too — failing to acquire a credential is itself
