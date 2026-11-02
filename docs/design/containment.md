@@ -217,7 +217,7 @@ The writable directory must contain no nested mounts.
 A shared mount uses the same ownership rules for the source and any alias.
 Different mounts qualify only when neither remaps ownership and both use recognized local filesystems.
 This check recognizes ext2, ext3, ext4, XFS, Btrfs, tmpfs, and ramfs across mount boundaries.
-Other filesystem types, inconsistent device information, and unknown permission or mount information remain restricted.
+Other filesystem types and unknown permission or mount information remain restricted.
 This can require execution authority even when every current link is outside the writable directories.
 A read-only file owned by the workload remains restricted because its owner can change its permissions.
 These exceptions affect execution admission only; the conservative dependency-read checks above remain unchanged.
