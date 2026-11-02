@@ -908,7 +908,7 @@ fn attempt_supervisor_memory_write(launcher_uid: libc::uid_t) -> ExitCode {
     };
     // SAFETY: `getuid` has no failure mode.
     let workload_uid = unsafe { libc::getuid() };
-    // Root ownership can remain unchanged for a root launcher. Read denial below is decisive.
+    // Root ownership can remain unchanged. Root read denial proves this guard only with Yama 0.
     if launcher_uid != 0 && owner == workload_uid {
         eprintln!("probe FAILED: /proc/1/mem retained the non-root workload owner");
         return ExitCode::from(1);

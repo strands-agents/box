@@ -850,6 +850,8 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
   refuses reads with `EACCES`. Its owner changes for a non-root launcher; root ownership can
   remain unchanged. Writes fail with `EACCES` or `EROFS` on read-only procfs.
+  Root proof requires a verified host `kernel.yama.ptrace_scope=0`; the guard prints a skip
+  otherwise, because Yama alone can refuse the open without supervisor memory protection.
   Guard: `supervisor_memory_linux::workload_cannot_write_namespace_supervisor_memory`.
   Namespace PID 1 forwards `SIGTERM` and `SIGINT`, stores the workload pid *before* installing the
   handlers, and reaps in a loop.

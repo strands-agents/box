@@ -10,6 +10,13 @@ use sha2::{Digest as _, Sha256};
 
 #[test]
 fn workload_cannot_write_namespace_supervisor_memory() {
+    // SAFETY: capture the host identity before entering a user namespace.
+    let launcher_uid = unsafe { libc::getuid() };
+    let ptrace_scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok();
+    if !supervisor_memory_guard_is_conclusive(launcher_uid, ptrace_scope.as_deref()) {
+        println!("skipping: root supervisor memory proof requires verified Yama ptrace_scope=0");
+        return;
+    }
     if !the_host_can_build_a_view() {
         println!("skipping: this host cannot build a namespace mount view");
         return;
@@ -49,8 +56,7 @@ fn workload_cannot_write_namespace_supervisor_memory() {
         .arg("--")
         .arg(probe)
         .arg("--attempt-supervisor-memory-write")
-        // SAFETY: capture the host identity before the trampoline enters its user namespace.
-        .arg(unsafe { libc::getuid() }.to_string())
+        .arg(launcher_uid.to_string())
         .output()
         .expect("launch the real containment trampoline");
 
@@ -65,6 +71,33 @@ fn workload_cannot_write_namespace_supervisor_memory() {
         stdout.contains("SUPERVISOR_MEMORY_DENIED"),
         "the probe did not verify supervisor memory isolation:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+fn supervisor_memory_guard_is_conclusive(
+    launcher_uid: libc::uid_t,
+    ptrace_scope: Option<&str>,
+) -> bool {
+    launcher_uid != 0 || ptrace_scope.is_some_and(|scope| scope.trim() == "0")
+}
+
+#[test]
+fn root_memory_proof_requires_a_verified_permissive_host() {
+    for scope in [
+        Some("0"),
+        Some("0\n"),
+        Some("1"),
+        Some("2"),
+        Some("3"),
+        Some(""),
+        None,
+    ] {
+        assert!(supervisor_memory_guard_is_conclusive(1000, scope));
+        assert_eq!(
+            supervisor_memory_guard_is_conclusive(0, scope),
+            matches!(scope, Some("0" | "0\n")),
+            "root prerequisite for {scope:?}"
+        );
+    }
 }
 
 fn the_host_can_build_a_view() -> bool {
