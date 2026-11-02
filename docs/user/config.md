@@ -139,8 +139,8 @@ The box adds the runtime minimum to every process; see
 The program is an absolute path, or a bare name. A bare name resolves on `env.PATH`,
 then on the operator's own `PATH`, then on `/usr/bin:/bin`. A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
-path, or a bare name that `env.PATH` resolves```. When `command` is a script, add the interpreter
-its first line names to `exec`. The example's `command` runs
+path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
+[interpreter grants](#script-commands-on-linux). The example's `command` runs
 Homebrew's `node`, which loads the preload file and then the CLI's script; the arguments after the
 script are the CLI's own.
 
@@ -182,6 +182,64 @@ egress route and starts no tool or MCP server of its own. All of them share one 
 the box is the credential boundary: a process that must not hold a credential goes in another box.
 Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 [the sandboxes for tools and local MCP servers](../design/containment.md#the-agents-box-and-leaf-boxes)).
+
+### Script commands on Linux
+
+On Linux, a script in `command[0]` requires existing filesystem grants for every program in its
+`#!` interpreter chain. Missing coverage prevents the process from starting.
+
+| Declared process | Required interpreter coverage in its own `filesystem` table |
+|---|---|
+| `[agent]` | `exec`, naming each interpreter file or a directory that covers it. |
+| `[tool.<name>]` or local `[mcp.<name>]` | `read` or `read_file`. Existing writable grants also count where they permit execution and satisfy the [Linux read-write requirement](#direct-access-by-operating-system). |
+
+Tool and local-server tables do not accept an `exec` list. System paths have no exemption.
+`#!/usr/bin/env python3` requires coverage for both `env` and the selected `python3`.
+If either program is itself a script, its interpreter also requires coverage. Denials and protected paths still restrict access.
+
+These fragments assume `/opt/check/check.sh` starts with `#!/usr/bin/dash`, and `/usr/bin/dash` is
+an executable regular file. Use the canonical path when the interpreter is a symbolic link.
+An agent script uses:
+
+```toml
+[agent]
+command = ["/opt/check/check.sh"]
+
+[agent.filesystem]
+exec = ["/usr/bin/dash"]
+```
+
+A declared tool script uses:
+
+```toml
+[tool.check]
+command = ["/opt/check/check.sh"]
+
+[tool.check.filesystem]
+read_file = ["/usr/bin/dash"]
+```
+
+Apply the same interpreter grants under `[mcp.<name>.filesystem]` for a local server.
+A tool interpreter granted through `read` or `read_file` can still need separate read grants for
+non-system libraries. Interpreter discovery does not automatically grant those libraries.
+
+Alternatively, put the native interpreter in `command[0]` and grant read access to the script:
+
+```toml
+[agent]
+command = ["/usr/bin/dash", "/opt/check/check.sh"]
+
+[agent.filesystem]
+read_file = ["/opt/check/check.sh"]
+```
+
+The command has an implicit executable grant. The script is an argument that the interpreter reads.
+Other files the program needs still require their own coverage.
+
+Box checks the original grants before preserving any additional path spelling needed to start the script.
+Preserving a spelling adds no authority over a different file.
+On macOS, Box grants a declared command's interpreter chain automatically.
+A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 

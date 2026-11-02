@@ -584,16 +584,12 @@ while True:
                 server.name,
             ));
             if cfg!(target_os = "linux") {
-                let mut files = Vec::new();
+                let mut files = vec![fixture_python()];
                 if matches!(
                     server.behavior,
                     DiscoveryBehavior::FailAfterRelease | DiscoveryBehavior::Hang
                 ) {
                     files.push(fixture_sleep());
-                }
-                if server.executable != server.program {
-                    // An env launcher does not discover its script's interpreter.
-                    files.push(fixture_python());
                 }
                 if server.contain_egress == Some(false) {
                     files.extend(

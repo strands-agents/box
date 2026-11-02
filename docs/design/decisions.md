@@ -452,11 +452,22 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
 read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
-pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
-first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
-script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
-that runs a helper needs that helper's directory in its own `exec` list. Two residual risks are
-stated. Write and exec on one path is a warning and not a refusal, so a workload that can write a
+pins. On macOS, Box grants the interpreter chain of the one program it was told to run: it reads
+the program's first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter
+is itself a script, and grants exec at file scope on each hop.
+
+On Linux, every interpreter in a declared script's chain needs coverage from the process's original
+filesystem grants. An agent needs `exec` coverage. A declared tool or local server can use its own
+read or writable grants where those grants permit execution. System paths have no exemption.
+Discovery follows `env` and its selected command, and checks every nested script's interpreter.
+Script contents select the programs to check; they grant no authority to those programs.
+Box preserves required path spellings only for files already authorized, without adding a new source
+for library dependency discovery. A tool's readable interpreter can still need separate grants for non-system libraries.
+
+A workload-selected program without a declared tool table needs existing `exec` coverage for its
+interpreter chain on either platform. Box derives no wider exec closure, so a program that runs a
+helper needs that helper's directory in its own `exec` list. Two residual risks are stated.
+Write and exec on one path is a warning and not a refusal, so a workload that can write a
 path it can also run can run code it wrote there. And a granted shell can interpret workload-authored
 input inside its parent's boundary, because native descendants raise no new decision.
 

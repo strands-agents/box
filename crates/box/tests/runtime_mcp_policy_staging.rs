@@ -810,7 +810,18 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     let git = Server::new("git", "git-mcp", "status", DiscoveryBehavior::Ready);
     box_.install_server(&git);
     box_.install_program("git", "#!/bin/bash\nprintf 'GIT_BINARY_RAN\\n'\n");
-    box_.declare_tool("git", "[tool.git]\ncommand = [\"git\"]\n");
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("Bash interpreter");
+        format!("[tool.git.filesystem]\nread_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    box_.declare_tool(
+        "git",
+        &format!("[tool.git]\ncommand = [\"git\"]\n{interpreter_grant}"),
+    );
     let policy = format!(
         "@id(\"no_git_binary\")\n\
          forbid (principal, action == Box::Action::\"shell:spawn\", resource)\n\
