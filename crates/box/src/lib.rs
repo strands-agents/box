@@ -17,13 +17,13 @@ mod run;
 mod test_support;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use command::cli::{Cli, Command, PolicyCommand};
 
-pub use policy::{Finding, Location, PolicyCheck, RuleRef};
+pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -51,6 +51,30 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
     )
 }
 
+/// Replace the running box's authored policies with the supplied text.
+pub fn reload(sources: &[Policy]) -> Result<(), ReloadRefused> {
+    run::hosted::reload(sources).map_err(ReloadRefused)
+}
+
+/// A reload that the box refused, or that found no box open in this process.
+#[derive(Debug)]
+pub struct ReloadRefused(error::BoxError);
+
+impl ReloadRefused {
+    /// Whether no box is open for reload in this process.
+    pub fn is_not_running(&self) -> bool {
+        self.0.is_not_running()
+    }
+}
+
+impl std::fmt::Display for ReloadRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ReloadRefused {}
+
 /// Check the policy that a Box configuration selects, as a box checks it when it opens.
 pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
     let (source, complete) = record::config::read_checked_policy(&config).map_err(CheckFailed)?;
@@ -73,6 +97,39 @@ impl std::fmt::Display for CheckFailed {
 }
 
 impl std::error::Error for CheckFailed {}
+
+/// The program names the box keeps for its own shell and Python runtime, which no MCP server takes.
+pub const INTERPRETER_ALIASES: [&str; 5] = [
+    run::broker::protocol::SHELL_ALIAS_NAMES[0],
+    run::broker::protocol::SHELL_ALIAS_NAMES[1],
+    run::broker::protocol::SHELL_ALIAS_NAMES[2],
+    run::broker::protocol::PYTHON_ALIAS_NAMES[0],
+    run::broker::protocol::PYTHON_ALIAS_NAMES[1],
+];
+
+const _: () = assert!(
+    run::broker::protocol::SHELL_ALIAS_NAMES.len()
+        + run::broker::protocol::PYTHON_ALIAS_NAMES.len()
+        == INTERPRETER_ALIASES.len()
+);
+
+/// Check a read grant on the absolute `path` as a box checks a `read` entry, and return whether it
+/// lies in a credential store, which a box grants only when a grant names it, and announces.
+pub fn check_read_grant(path: &Path) -> Result<bool, GrantRefused> {
+    record::config::filesystem::judge_read_grant(path).map_err(GrantRefused)
+}
+
+/// A read grant that a box refuses, with the reason.
+#[derive(Debug)]
+pub struct GrantRefused(error::BoxError);
+
+impl std::fmt::Display for GrantRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GrantRefused {}
 
 /// Generate policy action and event schemas from a Box configuration.
 pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode {

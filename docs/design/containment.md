@@ -28,7 +28,7 @@ Box restricts the agent in two ways, and they cover different paths to a resourc
 | When it's decided | Once, before the process starts. | On every request. |
 
 **How the agent sends a request to Box.** The agent's sandbox holds a few **aliases**: programs named
-`zsh`, `bash`, `sh`, `python3`, `python`, and one per declared MCP server. When the agent runs one,
+`zsh`, `bash`, `sh`, `python3`, `python`, and one per program that a declared MCP server starts from. When the agent runs one,
 the alias forwards the request over a local socket to the **broker** in Box's trusted process. The
 broker hands it to Strands Shell (Box's shell interpreter), Monty (Box's Python interpreter), or the
 MCP server. The alias itself authorizes nothing. Outbound network traffic takes its own route,
@@ -173,6 +173,12 @@ include:
 The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
 list for every platform. The other floors depend on the run.
+
+A library caller asks about one path through `check_read_grant`. It judges the path through the
+same function that judges a `read` entry in `box.toml`: it refuses an absent path, a link, a
+spelling that is not canonical, and a path under a floor, and it reports a path in a credential
+store as one that Box grants only when a grant names it. The caller gets the decision, not the
+list, because each row carries a rule (`exact` or `overlap`) and a class.
 
 ### How you check a box's reach
 

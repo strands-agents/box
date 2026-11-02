@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
     CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
@@ -46,6 +46,31 @@ use crate::run::contain::boundary::{
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
 use crate::run::telemetry;
+
+type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+
+static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
+
+pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
+    let running = RUNNING_POLICY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let result = policy.reload(sources).map_err(BoxError::from);
+    let subject = telemetry::policy_subject(sources);
+    collector.control(match &result {
+        Ok(()) => telemetry::ControlRecord::completed(
+            telemetry::ControlOperation::PolicyInstalled,
+            &subject,
+        ),
+        Err(error) => telemetry::ControlRecord::refused(
+            telemetry::ControlOperation::PolicyRefused,
+            &subject,
+            &error.to_string(),
+        ),
+    });
+    result
+}
 
 /// What the workload's boundary needs from the box hosting it.
 #[derive(Debug, Clone)]
@@ -402,6 +427,16 @@ impl McpLeafLauncher {
             .unwrap_or_default()
     }
 
+    /// `server`'s fixed arguments as its leaf starts them, or `None` when they do not expand.
+    pub(crate) fn launched_arguments(&self, server: &str) -> Option<Vec<String>> {
+        let contained = self.record.contained_mcp.get(server)?;
+        crate::run::contain::boundary::environment::expanded_arguments(
+            &contained.spec,
+            &self.attachment,
+        )
+        .ok()
+    }
+
     /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
     pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
         let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
@@ -583,11 +618,13 @@ impl HostedBox {
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
-        let mut capabilities = CapabilitySet::builder();
-        for (destination, store) in projection.capabilities {
-            capabilities =
-                capabilities.add_credential(CredentialCapability::new(destination, store));
-        }
+        let capabilities = CapabilitySet::new(
+            projection
+                .capabilities
+                .into_iter()
+                .map(|(destination, store)| CredentialCapability::new(destination, store))
+                .collect(),
+        );
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -631,21 +668,20 @@ impl HostedBox {
                 Arc::new(move || coordinator.report_finished(DiscoveryDoor::Egress))
             },
         );
-        let proxy = MitmInterceptor::start_with_emitter_and_opened_ca(
+        let proxy = MitmInterceptor::start_with(
             MitmConfig {
                 intercept_ca_dir: Some(trust.clone()),
-                credential_env: projection.phantom_environment,
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
                 ..MitmConfig::default()
             },
-            capabilities.build(),
+            capabilities,
             // The box every request is judged as, taken from the root this process opened.
             telemetry::EgressDecisionInterceptor::over(egress_policy),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),
-            &trust_certificate,
+            Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
         let proxy_port = proxy
@@ -693,6 +729,16 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
+            match record.contained_mcp.get(&server.name) {
+                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                    &contained.spec,
+                    &attachment,
+                )
+                .ok(),
+                None => Some(server.arguments().to_vec()),
+            }
+        })?;
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
         let broker_listener = BrokerHost::bind(root)?;
@@ -752,6 +798,9 @@ impl HostedBox {
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -826,6 +875,9 @@ impl HostedBox {
 
 impl Drop for HostedBox {
     fn drop(&mut self) {
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if let Some(discovery) = &self.discovery {
             discovery.close();
         }
@@ -1105,6 +1157,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     async fn initialized_mcp_client(
         root: &BoxRoot,
         program: &str,
+        arguments: &[String],
     ) -> (
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
@@ -1118,6 +1171,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             crate::run::broker::protocol::Body::Open {
                 mode: crate::run::broker::protocol::Interpreter::Mcp {
                     server: program.to_string(),
+                    arguments: arguments.to_vec(),
                 },
             },
         )
@@ -1279,9 +1333,11 @@ wait"#;
             .as_ref()
             .expect("the discovery host exists")
             .registry();
-        let (mut leader_reader, mut leader_writer) = initialized_mcp_client(&root, "/bin/sh").await;
+        let arguments = record.mcp[0].arguments().to_vec();
+        let (mut leader_reader, mut leader_writer) =
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh").await;
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");

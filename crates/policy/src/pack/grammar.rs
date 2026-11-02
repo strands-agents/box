@@ -25,6 +25,16 @@ pub(crate) enum FieldValue {
     Set(Vec<String>),
 }
 
+/// The `context.input` attributes that the schema gives every action of a pack.
+pub(crate) const BASE_FIELDS: [&str; 6] = [
+    "program",
+    "program_path",
+    "cwd",
+    "args",
+    "effects",
+    "credential_reads",
+];
+
 /// Every shell action of one pack, compiled from its usage lines.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
@@ -86,7 +96,7 @@ pub(super) struct Field {
 
 /// The type of one field value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FieldKind {
+pub(crate) enum FieldKind {
     Bool,
     String,
     Set,
@@ -130,6 +140,22 @@ impl ShellGrammar {
             globals: OptionTable::of(global_options, |_| true),
             toolchain: compiled.iter().any(|action| action.toolchain.is_some()),
             actions: compiled,
+        })
+    }
+
+    /// The name of each action, and the name and type of each of its fields.
+    pub(crate) fn action_fields(
+        &self,
+    ) -> impl Iterator<Item = (&ActionName, Vec<(&str, FieldKind)>)> {
+        self.actions.iter().map(|action| {
+            (
+                &action.name,
+                action
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.as_str(), field.kind))
+                    .collect(),
+            )
         })
     }
 }
@@ -226,6 +252,21 @@ impl ActionGrammar {
                 name: toolchain.clone(),
                 kind: FieldKind::String,
                 source: FieldSource::Toolchain,
+            });
+        }
+        if let Some(field) = fields
+            .iter()
+            .find(|field| BASE_FIELDS.contains(&field.name.as_str()))
+        {
+            return Err(PackRefusal::ReservedField {
+                place,
+                field: field.name.clone(),
+            });
+        }
+        if let Some(field) = fields.iter().find(|field| field.name.starts_with("__")) {
+            return Err(PackRefusal::CedarReservedField {
+                place,
+                field: field.name.clone(),
             });
         }
         let mut names = BTreeSet::new();

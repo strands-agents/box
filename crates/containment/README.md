@@ -328,8 +328,11 @@ forks into it instead.
 On Linux, `apply` returns in a different process than the one that called it.
 The launcher unshares a PID namespace and forks twice: the caller waits, a
 reaper becomes namespace PID 1, and the workload is namespace PID 2, where
-`apply` returns `Ok`. No post-apply code may depend on `getpid()` being stable
-across the call. The exit status propagates outward unchanged.
+`apply` returns `Ok`. Before it forks the workload, PID 1 sets
+`PR_SET_DUMPABLE` to `0`, so the workload cannot open PID 1 memory through
+procfs. If that setup step fails, PID 1 reports an apply failure before it exits.
+No post-apply code may depend on `getpid()` being stable across the call. The
+exit status propagates outward unchanged.
 
 Run the macOS enforcement proof on a macOS host:
 

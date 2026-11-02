@@ -53,7 +53,7 @@ caller's trace context, which joins it to the agent's own work. The workload sup
 box bounds it, validates it, and never treats it as evidence of authority ([correlation context is a
 hint](decisions.md#correlation-context-is-a-hint-and-never-authority)).
 
-There are six control-plane records, because a box's authority settles as it starts: a policy installed
+There are six control-plane records: a policy installed
 or refused, a tool vocabulary installed, discovery complete, and the box started or stopped. They answer
 which authority was in force at a given moment, which is why they share a file with the decisions.
 

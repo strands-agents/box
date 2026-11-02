@@ -265,10 +265,11 @@ fn attach_descriptor(
 
 /// Find `strands-box-contain-trampoline` beside the box's own executable, and nowhere else.
 fn locate() -> Result<PathBuf, BoxError> {
-    let current = std::env::current_exe().map_err(|source| TrampolineError::Missing {
-        path: PathBuf::from(HELPER_NAME),
-        source,
-    })?;
+    let current =
+        crate::run::installation::executable().map_err(|source| TrampolineError::Missing {
+            path: PathBuf::from(HELPER_NAME),
+            source,
+        })?;
     let helper = current
         .parent()
         .map(|directory| directory.join(HELPER_NAME))

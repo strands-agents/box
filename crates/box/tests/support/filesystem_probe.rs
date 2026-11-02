@@ -56,6 +56,7 @@ fn main() {
         }
         "server-client" => {
             let mut child = Command::new("mode-server")
+                .args(["server", &args[1], &args[2], &args[3]])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()

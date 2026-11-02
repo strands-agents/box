@@ -117,7 +117,7 @@ async fn hosted(
     signals: Option<crate::run::contain::supervise::Signals>,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
-    let subject = policy_subject(&sources);
+    let subject = telemetry::policy_subject(&sources);
     let operator = crate::record::config::policy_operator()?;
     let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources) {
         Ok(engine) => {
@@ -300,23 +300,6 @@ fn acquire_run_lock(root: &BoxRoot) -> Result<Lock, BoxError> {
         }
         .into()
     })
-}
-
-/// Which policy a control record names, by file name rather than by path.
-fn policy_subject(sources: &[Policy]) -> String {
-    if sources.is_empty() {
-        return "<no authored policy>".to_string();
-    }
-    sources
-        .iter()
-        .map(|source| {
-            source.origin.file_name().map_or_else(
-                || source.origin.to_string_lossy().into_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn project_matches_record(request: &ConfigureRequest, root: &BoxRoot) -> Result<bool, BoxError> {
