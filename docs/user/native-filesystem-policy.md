@@ -88,14 +88,15 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-When `limits.shell.timeout` is omitted, `file-attributes` is `false`, and MCP argument wildcards
-are disabled, configurations without process overrides retain version 21 when disabled and
-version 22 when enabled.
+When `limits.shell.timeout` is omitted, `file-attributes` is `false`, MCP argument wildcards
+are disabled, and the agent declares no `[[agent.ingress]]`, configurations without process overrides
+retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
 Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requires version 26.
 An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
+A box whose agent declares `[[agent.ingress]]` requires record version 28.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

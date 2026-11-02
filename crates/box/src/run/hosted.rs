@@ -1036,6 +1036,7 @@ mod tests {
                 filesystem: Default::default(),
                 network: None,
                 grammar: None,
+                ingress: Vec::new(),
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -1139,6 +1140,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             },
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -2019,6 +2021,7 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let agent = spec(&["/bin/sh"]);
         Record {
@@ -2501,6 +2504,7 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 

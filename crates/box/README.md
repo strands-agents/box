@@ -104,6 +104,7 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
 | `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
+| `ingress` | `[agent]` only, as `[[agent.ingress]]`: up to five listeners, each an address the box listens on for callers and the agent's port it relays them to |
 
 `tool_grammars.rs` pins the `tool-grammars` switch, the startup warning for each grammar, and the
 startup refusals.

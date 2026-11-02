@@ -225,6 +225,7 @@ Both tables hold one process, in one shape:
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
+| `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
@@ -348,6 +349,55 @@ Box checks the original grants before preserving any additional path spelling ne
 Preserving a spelling adds no authority over a different file.
 On macOS, Box grants a declared command's interpreter chain automatically.
 A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
+
+## `[[agent.ingress]]`
+
+Each entry is one listener: the box listens on `listen` and relays each caller's TCP connection to
+the port the agent's server listens on. Add an entry for each port the agent serves, such as one for
+HTTP and one for MCP. An agent may declare up to five entries. The agent's code does not change,
+and the agent gains no reach.
+
+```toml
+[[agent.ingress]]
+listen        = "0.0.0.0:8080"
+workload_port = 8081
+
+[[agent.ingress]]
+listen        = "0.0.0.0:8000"
+workload_port = 8001
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `listen` | string | The IP address and port the box binds for callers, such as `"0.0.0.0:8080"`. Required in each entry. |
+| `workload_port` | integer | The port the agent's server listens on in its sandbox. Required in each entry. |
+
+The agent listens on `workload_port` on `127.0.0.1` or `0.0.0.0`, because the relay connects to
+`127.0.0.1` only. An agent that listens on `::1` alone gets no callers, and the box logs that nothing
+accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an agent that binds
+`::1` fails to start.
+
+- The box binds every `listen` before the agent starts, so a port in use refuses the run.
+- Each entry needs its own `listen` port and its own `workload_port`.
+- On macOS, no `listen` port may equal any entry's `workload_port`, and the box refuses to start
+  when another process already listens on a `workload_port`.
+- On macOS, the agent may listen only on its `workload_port`s, on any address of the Mac. A local
+  process can also connect to those ports directly, and the network can when the agent listens on
+  `0.0.0.0`.
+- No policy decision covers a caller. `listen` decides who can reach the agent.
+- `ingress` is refused on a `[tool.<name>]` and on an `[mcp.<name>]`.
+
+At startup the box prints each listener:
+
+```text
+strands-box: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
+strands-box: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
+```
+
+The box raises its own open-file limit as far as the system allows, and holds at most an eighth of
+it in callers at once, split evenly across the listeners; a further caller waits until one closes. The agent and every tool start with
+the open-file limit the box started with. When nothing accepts on `workload_port`, the box closes each caller and prints
+one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
@@ -807,14 +857,19 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
-and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, more than
+five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
+port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
+equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, and a `[tool.<name>] command` that names a missing file. The
+does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
+`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
+process already listens on. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

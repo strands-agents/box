@@ -482,6 +482,7 @@ impl RunningMcpServer {
             use std::os::fd::AsRawFd as _;
             use std::os::unix::process::CommandExt as _;
             command.as_std_mut().process_group(0);
+            crate::run::descriptor_limit::restore_in_child(&mut command);
             if let Some(cwd_handle) = cwd_handle {
                 let cwd = cwd_handle.as_raw_fd();
                 // SAFETY: the closure calls only async-signal-safe `fchdir` before `exec`.
