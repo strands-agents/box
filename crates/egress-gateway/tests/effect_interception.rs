@@ -241,7 +241,7 @@ fn proxy_port(handle: &egress_gateway::MitmHandle) -> u16 {
 
 /// A capability set that injects nothing — the transport-only composition.
 fn no_injection() -> CapabilitySet {
-    CapabilitySet::builder().build()
+    CapabilitySet::new(vec![])
 }
 
 fn event_names(events: &[Event]) -> Vec<&'static str> {
@@ -304,12 +304,10 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
     ))
     .unwrap();
     let phantom = opened.phantoms()[0].token().to_string();
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            destination(host, port),
-            Arc::new(opened.into_vault()),
-        ))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(host, port),
+        Arc::new(opened.into_vault()),
+    )]);
     let handle = MitmInterceptor::start(
         config_for(host, &upstream),
         controls,
@@ -491,12 +489,10 @@ fn scrubbed_cross_host_redirect_crosses_response_release() {
     ))
     .unwrap();
     let phantom = opened.phantoms()[0].token().to_string();
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            destination(host, port),
-            Arc::new(opened.into_vault()),
-        ))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(host, port),
+        Arc::new(opened.into_vault()),
+    )]);
     let events = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
         config_for(host, &upstream),
@@ -1014,20 +1010,19 @@ fn attempts_carry_the_pre_mutation_path_for_a_path_spliced_credential() {
     ))
     .unwrap();
     let phantom = opened.phantoms()[0].token().to_string();
-    let controls = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            destination(host, port),
-            Arc::new(opened.into_vault()),
-        ))
-        .build();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(host, port),
+        Arc::new(opened.into_vault()),
+    )]);
     // A real emitter, so the durable record is observable — `start` installs a private stub whose
     // contents nothing can read, which is why sink 3 had no coverage.
     let emitter = Arc::new(StubEmitter::new());
-    let handle = MitmInterceptor::start_with_emitter(
+    let handle = MitmInterceptor::start_with(
         config_for(host, &upstream),
         controls,
         Arc::new(RecordingInterceptor::allowing(events.clone())),
         Box::new(SharedEmitter(emitter.clone())),
+        None,
     )
     .unwrap();
 

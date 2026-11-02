@@ -581,9 +581,9 @@ On every mediated path (the interpreters and egress), exactly one component deci
 the policy engine, reached through the `EffectInterceptor` seam. Every other mechanism on those paths
 is either a deny-only floor that policy cannot widen, which runs before policy on the network path
 and after it on the interpreter path, or a mutator that carries no vote. Any code path
-that could return "allowed" without asking the engine is deleted, and the types carry the rule:
-`CapabilityOutcome` holds `Applied` and `Unavailable`, with no `Allow` and no `Deny`, so a capability
-cannot authorize. `egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
+that could return "allowed" without asking the engine is deleted, and the types carry the rule: a
+capability returns its edits or a refusal (`Result<Vec<Mutation>, String>`) and never an allow.
+`egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
 path, and do not give a mechanism its own verdict to save a round trip.
 
 <a id="no-connection-is-opaque-to-the-boundary"></a>
@@ -599,12 +599,13 @@ cost is direct. A plaintext or non-HTTP upstream over `CONNECT` is not reachable
 
 Core compiles no metadata or link-local deny list and holds no opinion on which destinations to
 refuse. A metadata address is refused by an ordinary `forbid` on `net:connect`'s
-`context.input.ip`, which the gateway decides on each resolved, pinned address before its socket
-opens, so the address decided is the address dialed and a DNS name cannot route around the rule.
-Every range the former floor held is
-expressible exactly as a rule: `169.254.0.0/16` as `like "169.254.*"`, `fe80::/10` as the four
-prefixes `fe8`, `fe9`, `fea` and `feb` (its first group runs `fe80` to `febf`), and EC2's IPv6
-endpoint as the one address `fd00:ec2::254`, not the unique-local range around it.
+`context.input.ip4` or `context.input.ip6`, which the gateway decides on each resolved, pinned
+address before its socket opens, so the address decided is the address dialed and a DNS name cannot
+route around the rule. Every range the former floor held is
+expressible exactly as a rule, one clause per address family: `169.254.0.0/16` as
+`ip4 like "169.254.*"`, `fe80::/10` as the four `ip6` prefixes `fe8`, `fe9`, `fea` and `feb` (its
+first group runs `fe80` to `febf`), and EC2's IPv6 endpoint as the one `ip6` address
+`fd00:ec2::254`, not the unique-local range around it.
 
 The cost is direct. A box carries the protection only if its policy carries the forbids, so a policy
 without them can reach metadata. A new metadata endpoint is a policy change, not a Core release, and
@@ -997,6 +998,63 @@ it: Box bumps it when it adds or changes keys in a way an older Box cannot read.
 version of the pack's content, and the pack author owns it. Box refuses a file with no `format`, or with
 a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
 file must state `format = 1`.
+
+<a id="a-pack-action-names-no-enforcement-point"></a>
+### A tool pack action doesn't name where Box enforces it
+
+A tool pack action names what the tool does, not where Box sees it happen. To deny a git force push,
+you forbid `Tool::git::Action::"push"` when
+`context.input.effects.contains(Tool::git::Effect::"force_push")`, and the rule doesn't say whether
+the push arrives as a shell command or as an HTTP request. That's the point of a semantic policy: you
+state the rule in the tool's own words, and Box works out how and where to enforce it. An action per
+enforcement point, such as a separate shell push and HTTP push, was rejected, because you'd have to
+write each rule once for each enforcement point, and a rule written for one would silently miss the
+others. The cost is that the action name can't tell two enforcement points apart, so every grammar in a
+tool pack must read a request into the same fields and effects, or one rule means different things at
+each enforcement point.
+
+<a id="an-unmodeled-command-is-denied-by-default"></a>
+### A request the grammar can't read is the `unmodeled` action, and it's denied by default
+
+When a tool pack's grammar can't read a request, Box raises `Tool::<pack>::Action::"unmodeled"`, and
+your policy decides it like any other action. With no rule that permits it, it's denied. `unmodeled`
+sits outside the tool pack's `"*"` group, so a permit on `action in Tool::git::Action::"*"` never
+allows a command the grammar can't read. To allow one, a rule must name
+`Tool::git::Action::"unmodeled"` itself. Putting `unmodeled` inside `"*"` was rejected, because then a
+permit over the whole tool would also allow every command the grammar can't read, including one spelled
+to slip past it, such as `git push --dele origin main`. The cost is that a forbid over `"*"` also skips
+`unmodeled`. Under a policy that permits everything, a rule that denies all of git must name both:
+
+```dw
+forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
+```
+
+<a id="a-tool-pack-binds-on-the-program-file-and-the-called-name"></a>
+### A tool pack binds on the program file's identity and the name it was called by
+
+Box binds a tool pack to a pair: the identity of the resolved program file, and the name the program
+was called by. The identity is the file's device and inode on the host, so a hard link or a symbolic
+link to a bound file is that same file, and a link can't route around the binding. A command is
+parsed with a pack's grammar only when both halves match one binding. The file identity alone isn't
+enough, because several programs can share one binary. mise runs every tool it manages through one shim
+binary, so `git`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can be links
+to one binary. The name alone isn't enough, because the caller picks the name, so any file called `git`
+would claim the git pack. Binding on the file identity alone was rejected: it's one lookup, but it
+would read `npm install` through the mise shim binary as a git command.
+
+A file identity binds to at most one pack, and Box refuses a second pack on a bound file, whatever path
+names it. When a bound file is called by a name that no `[tool]` declares, the spawn raises that pack's
+`unmodeled` action, which is denied unless a rule permits it. So a new name or a new link for a bound
+binary can't fall back to a `shell:spawn` rule that permits more. A name that a `[tool]` declares with
+no pack stays a `shell:spawn`, because the operator named it and chose no pack for it.
+
+The cost has three parts. An operator must declare each name that runs a bound file, or that name meets
+`unmodeled`. Two packs can't share one shim binary, so on mise only one managed tool can have a pack. And
+a pack covers a file identity, not a program: a file that no pack binds stays a `shell:spawn` under
+every name. So a copy of a bound binary, or the same program reached through an unbound shim binary, is
+decided by the `shell:spawn` rules and not by its pack. That includes a file that replaces a bound file
+at the same path, for example after an update: the new file has a new identity, so the binding no
+longer covers it.
 
 ## Containment
 

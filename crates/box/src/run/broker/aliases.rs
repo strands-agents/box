@@ -157,7 +157,7 @@ fn image_digest(installed: &Path) -> io::Result<String> {
 
 /// Find the shim beside the box's own executable, and nowhere else.
 fn installed_image() -> Result<PathBuf, BoxError> {
-    let current = std::env::current_exe().map_err(|source| ShellError::Missing {
+    let current = crate::run::installation::executable().map_err(|source| ShellError::Missing {
         path: PathBuf::from(ALIAS_IMAGE_NAME),
         source,
     })?;

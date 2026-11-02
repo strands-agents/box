@@ -1,5 +1,5 @@
-//! A `net:connect` outcome records the destination address a rule reads, in the spelling the
-//! request leg records.
+//! A `net:connect` outcome records each destination address attribute a rule reads, in the
+//! spellings the request leg records.
 
 mod support;
 
@@ -11,38 +11,32 @@ use policy::{GovernedBox, Outcome, Policy, PolicyEngine, Principal, Request};
 /// The host every leg of these tests names.
 const HOST: &str = "api.example.test";
 
-/// The address each probe rule names, as a rule spells it.
+/// The IPv4 address each probe rule names, as a rule spells it.
 const ADDRESS: &str = "203.0.113.7";
 
-/// The probe port whose `forbid` fires once history holds a `net:connect::request` on `ADDRESS`.
-const AFTER_REQUEST: u16 = 9001;
+/// The NAT64 wire form that carries `ADDRESS`, as a rule spells it.
+const WIRE: &str = "64:ff9b::cb00:7107";
 
-/// The probe port whose `forbid` fires once history holds a `net:connect::response` on `ADDRESS`.
-const AFTER_RESPONSE: u16 = 9002;
+/// The IPv4-mapped spelling of `ADDRESS` — the one IPv6 form a synthesising implementation would
+/// invent for a plain IPv4 destination. Nothing records it.
+const MAPPED: &str = "::ffff:203.0.113.7";
 
-/// The probe port whose `forbid` fires once history holds a `net:connect::error` on `ADDRESS`.
-const AFTER_ERROR: u16 = 9003;
-
-/// One probe per event kind. A probe connect pins no address, so it writes no `ip` of its own
-/// and only the recorded attempt can satisfy a predicate.
+/// One probe per event kind and per address attribute. A probe connect pins no address, so it
+/// writes no `ip4` and no `ip6` of its own and only the recorded attempt can satisfy a predicate.
 fn probed_policy() -> PolicyEngine {
     let mut source = String::from(
         r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);
 "#,
     );
-    for (kind, port) in [
-        ("request", AFTER_REQUEST),
-        ("response", AFTER_RESPONSE),
-        ("error", AFTER_ERROR),
-    ] {
+    for (label, kind, attribute, literal, port) in probes() {
         source.push_str(&format!(
             r#"
-@id("after-{kind}")
+@id("after-{label}")
 forbid(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource)
 when {{ context.input.port == {port} }}
 when temporal {{
     formerly within 3600s (
-        Box::Action::"net:connect"::{kind}{{ input.ip: "{ADDRESS}" }}
+        Box::Action::"net:connect"::{kind}{{ input.{attribute}: "{literal}" }}
     )
 }};
 "#
@@ -53,6 +47,31 @@ when temporal {{
         text: source,
     }])
     .expect("the probes load")
+}
+
+/// Each probe: its label, the event kind it watches, the attribute it reads, the spelling it
+/// names, and the port that carries it. Both outcome legs are probed on both attributes, because
+/// a rule on one family must not see only the request leg. `mapped-response` names the one value a
+/// synthesised IPv6 form would take, so it stays permitted only while nothing synthesises one.
+fn probes() -> [(&'static str, &'static str, &'static str, &'static str, u16); 7] {
+    [
+        ("request-ip4", "request", "ip4", ADDRESS, 9001),
+        ("request-ip6", "request", "ip6", WIRE, 9002),
+        ("response-ip4", "response", "ip4", ADDRESS, 9003),
+        ("response-ip6", "response", "ip6", WIRE, 9004),
+        ("error-ip4", "error", "ip4", ADDRESS, 9005),
+        ("error-ip6", "error", "ip6", WIRE, 9006),
+        ("mapped-response", "response", "ip6", MAPPED, 9007),
+    ]
+}
+
+/// The port of the probe `label` names.
+fn port_of(label: &str) -> u16 {
+    probes()
+        .into_iter()
+        .find(|(probe_label, ..)| *probe_label == label)
+        .map(|(.., port)| port)
+        .expect("a probe with that label")
 }
 
 /// Whether the probe on `port` is still permitted.
@@ -85,45 +104,75 @@ fn record(policy: &PolicyEngine, address: IpAddr, connected: bool) {
         .expect("the outcome records");
 }
 
-fn address() -> IpAddr {
-    ADDRESS.parse().expect("an address")
+fn wire() -> IpAddr {
+    WIRE.parse().expect("an address")
 }
 
+/// A plain IPv4 destination carries `ip4` alone, on every leg.
 #[test]
-fn a_connect_that_opened_records_the_address_a_rule_reads() {
+fn a_plain_ipv4_outcome_records_the_ipv4_attribute_and_no_ipv6_form() {
     let policy = probed_policy();
+    let address: IpAddr = ADDRESS.parse().expect("an address");
 
+    assert!(probe(&policy, port_of("response-ip4")));
+    assert!(probe(&policy, port_of("mapped-response")));
+    record(&policy, address, true);
     assert!(
-        probe(&policy, AFTER_RESPONSE),
-        "nothing is in history yet, so the probe is permitted"
+        !probe(&policy, port_of("response-ip4")),
+        "a rule keyed on `input.ip4` must see the address the response leg records"
     );
-    record(&policy, address(), true);
     assert!(
-        !probe(&policy, AFTER_RESPONSE),
-        "a rule keyed on `input.ip` must see the address the response leg records"
-    );
-}
-
-#[test]
-fn a_connect_that_did_not_open_records_the_address_on_its_error_leg() {
-    let policy = probed_policy();
-
-    assert!(probe(&policy, AFTER_ERROR), "nothing is in history yet");
-    record(&policy, address(), false);
-    assert!(
-        !probe(&policy, AFTER_ERROR),
-        "a rule keyed on `input.ip` must see the address the error leg records"
+        probe(&policy, port_of("mapped-response")),
+        "an IPv4 destination has no IPv6 wire form, so the leg records no `input.ip6` — not even \
+         the IPv4-mapped spelling of the same address"
     );
 }
 
+/// The response leg carries both attributes of a wrapped address, as the request leg does.
 #[test]
-fn the_request_and_the_outcome_record_one_spelling_of_one_address() {
-    // Both legs fold an address to one spelling, so one rule literal reads an IPv6 encoding of
-    // an IPv4 address on either leg.
+fn a_connect_that_opened_records_both_address_attributes() {
     let policy = probed_policy();
-    let encoded: IpAddr = "::ffff:203.0.113.7".parse().expect("an address");
 
-    assert!(probe(&policy, AFTER_REQUEST), "nothing is in history yet");
+    assert!(probe(&policy, port_of("response-ip4")));
+    assert!(probe(&policy, port_of("response-ip6")));
+    record(&policy, wire(), true);
+    assert!(
+        !probe(&policy, port_of("response-ip4")),
+        "a rule keyed on `input.ip4` must see the carried address the response leg records"
+    );
+    assert!(
+        !probe(&policy, port_of("response-ip6")),
+        "a rule keyed on `input.ip6` must see the wire form the response leg records"
+    );
+}
+
+/// The error leg carries both attributes too, so a failed connect is not a blind spot.
+#[test]
+fn a_connect_that_did_not_open_records_both_address_attributes_on_its_error_leg() {
+    let policy = probed_policy();
+
+    assert!(probe(&policy, port_of("error-ip4")));
+    assert!(probe(&policy, port_of("error-ip6")));
+    record(&policy, wire(), false);
+    assert!(
+        !probe(&policy, port_of("error-ip4")),
+        "a rule keyed on `input.ip4` must see the carried address the error leg records"
+    );
+    assert!(
+        !probe(&policy, port_of("error-ip6")),
+        "a rule keyed on `input.ip6` must see the wire form the error leg records"
+    );
+}
+
+/// One wrapped address reaches both attributes on the request leg and on the outcome leg, so a
+/// rule of either family reads the same destination on both.
+#[test]
+fn the_request_and_the_outcome_record_one_set_of_attributes() {
+    let policy = probed_policy();
+
+    for attribute in ["ip4", "ip6"] {
+        assert!(probe(&policy, port_of(&format!("request-{attribute}"))));
+    }
     assert!(
         policy
             .decide(
@@ -131,25 +180,28 @@ fn the_request_and_the_outcome_record_one_spelling_of_one_address() {
                 &Principal::agent(),
                 &Request::Connect {
                     host: HOST,
-                    ip: Some(encoded),
+                    ip: Some(wire()),
                     port: 443,
                 },
             )
             .is_allow(),
         "the permit grants the attempt"
     );
-    assert!(
-        !probe(&policy, AFTER_REQUEST),
-        "the request leg records the folded spelling"
-    );
+    for attribute in ["ip4", "ip6"] {
+        assert!(
+            !probe(&policy, port_of(&format!("request-{attribute}"))),
+            "the request leg records `input.{attribute}`"
+        );
+    }
 
-    assert!(
-        probe(&policy, AFTER_RESPONSE),
-        "no outcome is in history yet"
-    );
-    record(&policy, encoded, true);
-    assert!(
-        !probe(&policy, AFTER_RESPONSE),
-        "and the outcome leg records the same spelling of the same address"
-    );
+    for attribute in ["ip4", "ip6"] {
+        assert!(probe(&policy, port_of(&format!("response-{attribute}"))));
+    }
+    record(&policy, wire(), true);
+    for attribute in ["ip4", "ip6"] {
+        assert!(
+            !probe(&policy, port_of(&format!("response-{attribute}"))),
+            "and the outcome leg records the same `input.{attribute}`"
+        );
+    }
 }

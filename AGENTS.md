@@ -185,9 +185,9 @@ The macOS minimum for an agent invoking Shell as a child:
 workload, and it carries an open defect that hangs a box on exit.
 
 `egress-gateway` is the outbound boundary and holds no allow/deny authority. Two things there
-are deliberately not authorization: the SSRF floor, which is deny-only, and `CapabilityOutcome`,
-which has no `Allow` variant. `policy` exposes one facade: `PolicyEngine::open`, `decide`, `record`,
-`effective`.
+are deliberately not authorization: the SSRF floor, which is deny-only, and a credential
+capability, which returns its edits or a refusal and never an allow. `policy` exposes one facade:
+`PolicyEngine::open`, `decide`, `record`, `effective`.
 
 `policy` embeds the durable Dogwood engine through the published `dogwood-language` and
 `dogwood-local-engine` crates. Its commit, recovery, policy-change, and time contract is owned by

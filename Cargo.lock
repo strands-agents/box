@@ -4101,9 +4101,11 @@ dependencies = [
 name = "strands-box-egress-gateway"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
  "fluent-uri",
+ "http-body-util",
  "httparse",
+ "hyper",
+ "hyper-util",
  "rcgen",
  "ring",
  "rustls",
@@ -4112,6 +4114,8 @@ dependencies = [
  "serde_json",
  "strands-box-credentials",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
  "webpki-roots",
  "zeroize",
 ]
