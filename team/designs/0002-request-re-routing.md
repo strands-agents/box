@@ -76,9 +76,9 @@ Today policies get applied on requests that agents make. Now, we're introducing 
 
 **Option 1:** Policy authorizes the original destination only.
 
-**Rationale:** The policy we have today, authorizes only the agent/workload's action. Box re-routing the request to another backend is a "Box action". Today, we don't have policies on "Box action". We have some precedence of not creating policy on box actions e.g. fetching credentials for credential injection. 
+**Rationale:** The policy we have today, authorizes only the agent/workload's action (a.k.a "Agent Action"). Box re-routing the request to another backend is a "Box action". Today, we don't have policies on "Box action". We have some precedence of not creating policy on box actions e.g. fetching credentials for credential injection. 
 
-If the Box Developer does not want the agent to reach the backend directly, no action should be required (given the default-deny nature of Box). If the Box developer has a wild-card policy in place, then they can add an explicit deny on the backend URL.  
+If the Box operator does not want the agent to reach the backend directly, no action should be required (given the default-deny nature of Box). If the Box operator has a wild-card policy in place, then they can add an explicit deny on the backend URL.  
 
 
 **Option 2:** Policy authorizes on original destination + backend with a new action type
@@ -108,3 +108,14 @@ Other alternatives like (1) authorizing only the backend (2) authorizing on orig
 
 **Recommendation:** The recommendation is to go with Option 1. We can introduce policies on Box Actions in the future, if the need arises.
 
+### KD 4: Address-Level Check of the Backend Connection
+**Background:** Box decides `net:connect` two times for a direct request. (1) It decides on the host first, before DNS. If this denies, Box does not resolve the host. (2) It decides on each resolved address next, after DNS and before it opens the socket. The address check does two jobs. It pins the result, so Box dials only the address that it
+decided. It is also the only check for metadata addresses and private addresses, because the rule reads `context.input.ip`, and the IP is known only at this step.
+
+**Decision:** For a destination that has a backend, Box runs the host check on the original destination, and Box skips the IP check i.e. Box does not run `net:connect` on the backend IP address. Neither does Box try to connect to the original destination.
+
+**Rationale:** The connection to the backend is a Box action, not an agent action. KD 3 states that policy does not apply on Box actions. So the backend address needs no permission, and the address check does not apply to it. The host check still covers the agent's intent, because it runs on the original destination.
+
+This decision keeps the premise "Validate once, then act on the identity you approved". In this case, we validate the agent's intent to connect to a destination, and then Box deterministically re-routes the call to a pre-approved destination, because it's defined in `box.toml` and not derived from the agent's request. The redirect is not a second identity that needs validation.
+
+**Residual risk:** No rule fires on the backend address. If the backend resolves to a metadata address or a private address, no `forbid` stops the connection. This is okay because (1) the backend is trusted by the Box operator (2) The backend cannot be overridden by the agent/workload.
