@@ -92,7 +92,11 @@ It also follows the dependencies of discovered system libraries.
 System libraries are libraries within the recognized loader directories listed above.
 
 This discovery does not inspect script interpreter lines.
-Box handles the declared command's script interpreter chain separately.
+For a declared script command, Box checks each interpreter against that process's original filesystem grants.
+An agent needs `exec` coverage; a tool or local MCP server can reuse its readable grants.
+An earlier interpreter cannot authorize a later interpreter, and system paths have no exemption.
+See [script commands on Linux](../user/config.md#script-commands-on-linux) for the required grants.
+
 An additional script reached through an execution grant can need explicit interpreter and library access.
 A directory `exec` grant does not enumerate every program's dependencies.
 Libraries loaded later can need additional grants.
