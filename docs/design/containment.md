@@ -10,8 +10,8 @@ sandbox for a tool or a local MCP server, and what sits outside operating system
 Box runs on macOS today, where Seatbelt enforces each sandbox. Where a property comes from the macOS
 backend, this page says so. [macOS enforcement](macos-enforcement.md) explains how Seatbelt does it.
 
-> **Platform scope.** This page describes operating system enforcement on macOS.
-> The [execution directories section](#execution-directories) also describes the corresponding Linux launch checks.
+> **Platform scope.** Unless a section explicitly states Linux behavior, this page describes operating
+> system enforcement and guarantees on macOS.
 
 ## Two kinds of enforcement
 
