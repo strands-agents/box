@@ -107,7 +107,9 @@ impl MountView {
             source: None,
             target: PathBuf::from("/proc"),
             kind: MountKind::Fresh { fstype: "proc" },
-            writable: true,
+            // Keep process inspection available, but do not allow `/proc/*/mem` to write through
+            // the executable-memory syscall restrictions.
+            writable: false,
             executable: false,
             origin: MountOrigin::Scaffold,
         });
@@ -626,8 +628,8 @@ impl MountView {
                     libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC
                 };
                 // **`writable` was ignored here until 2026-08-19, and every fresh mount was
-                // writable.** That was harmless while the only fresh mounts were ones meant to be
-                // writable — the root while the launcher builds it, `/proc`, and `/tmp`.
+                // writable.** That was harmless while the only fresh mounts were `/proc`, `/tmp`,
+                // and the root while the launcher builds it.
                 if !entry.writable {
                     fresh_flags |= libc::MS_RDONLY;
                 }

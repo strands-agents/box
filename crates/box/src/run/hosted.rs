@@ -583,11 +583,13 @@ impl HostedBox {
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
-        let mut capabilities = CapabilitySet::builder();
-        for (destination, store) in projection.capabilities {
-            capabilities =
-                capabilities.add_credential(CredentialCapability::new(destination, store));
-        }
+        let capabilities = CapabilitySet::new(
+            projection
+                .capabilities
+                .into_iter()
+                .map(|(destination, store)| CredentialCapability::new(destination, store))
+                .collect(),
+        );
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -631,21 +633,20 @@ impl HostedBox {
                 Arc::new(move || coordinator.report_finished(DiscoveryDoor::Egress))
             },
         );
-        let proxy = MitmInterceptor::start_with_emitter_and_opened_ca(
+        let proxy = MitmInterceptor::start_with(
             MitmConfig {
                 intercept_ca_dir: Some(trust.clone()),
-                credential_env: projection.phantom_environment,
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
                 ..MitmConfig::default()
             },
-            capabilities.build(),
+            capabilities,
             // The box every request is judged as, taken from the root this process opened.
             telemetry::EgressDecisionInterceptor::over(egress_policy),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),
-            &trust_certificate,
+            Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
         let proxy_port = proxy
