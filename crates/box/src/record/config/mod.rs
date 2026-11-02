@@ -447,13 +447,14 @@ impl RunContract {
         }
         Ok(ConfigureRequest {
             record: Record {
-                version: process_record_version(
+                version: record_version(
                     &self.file.experimental_features,
                     self.file
                         .agent
                         .iter()
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
+                    &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 box_id: root.box_id().to_string(),
@@ -576,6 +577,8 @@ pub(crate) const RECORD_VERSION: u32 = 21;
 /// Version 22 prevents older builds from resuming a box without its selected enforcement.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
+/// The record version of a record with two stdio MCP servers on one program.
+const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -610,6 +613,19 @@ impl ExperimentalFeatures {
             });
         }
         Ok(())
+    }
+}
+
+/// The record version for what a record holds.
+fn record_version<'a>(
+    features: &ExperimentalFeatures,
+    specs: impl Iterator<Item = &'a ProcessSpec>,
+    mcp: &[crate::record::config::mcp::McpServer],
+) -> u32 {
+    if crate::record::config::mcp::shares_a_program(mcp) {
+        SHARED_PROGRAM_RECORD_VERSION
+    } else {
+        process_record_version(features, specs)
     }
 }
 
@@ -853,6 +869,7 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -866,13 +883,14 @@ impl Record {
             path: path.to_path_buf(),
             source,
         })?;
-        let expected = process_record_version(
+        let expected = record_version(
             &record.experimental_features,
             record
                 .agent
                 .iter()
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
+            &record.mcp,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1913,7 +1931,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, PROCESS_POLICY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2594,6 +2612,106 @@ env = {}
                 .into_request(&root)
                 .map(|request| request.record)
         })
+    }
+
+    /// Two stdio servers on distinct programs, as `box.toml` tables.
+    const DISTINCT_PROGRAMS: &str = "[mcp.fetch]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]\n\
+         [mcp.aws]\ntype = \"stdio\"\n\
+         command = [\"uvx\", \"mcp-proxy-for-aws@latest\", \"https://aws-mcp.us-east-1.api.aws/mcp\"]\n";
+
+    /// The stored record of `body`, with a pinned identity.
+    fn pinned_record(body: &str) -> Record {
+        let mut record = record_from_config(body).expect("the configuration loads");
+        record.box_id = "box-0123456789abcdef".to_string();
+        record.box_dir = PathBuf::from("/var/lib/boxes/codex");
+        record.policy = Some(PathBuf::from("/etc/boxes/policy.dw"));
+        record
+    }
+
+    /// Servers on distinct programs store the record an earlier build stored.
+    #[test]
+    fn servers_on_distinct_programs_store_a_byte_identical_record() {
+        let stored = pinned_record(DISTINCT_PROGRAMS).to_toml().unwrap();
+        assert_eq!(
+            stored,
+            r#"version = 21
+box_id = "box-0123456789abcdef"
+box_dir = "/var/lib/boxes/codex"
+name = "codex"
+policy = "/etc/boxes/policy.dw"
+
+[[mcp]]
+name = "aws"
+command = [
+    "uvx",
+    "mcp-proxy-for-aws@latest",
+    "https://aws-mcp.us-east-1.api.aws/mcp",
+]
+
+[[mcp]]
+name = "fetch"
+command = ["mcp-server-fetch"]
+
+[contained_mcp.aws.spec]
+command = [
+    "uvx",
+    "mcp-proxy-for-aws@latest",
+    "https://aws-mcp.us-east-1.api.aws/mcp",
+]
+
+[contained_mcp.fetch.spec]
+command = ["mcp-server-fetch"]
+"#
+        );
+    }
+
+    /// Two stdio servers on one launcher, as `box.toml` tables.
+    const SHARED_PROGRAM: &str = "[mcp.playwright]\ntype = \"stdio\"\n\
+         command = [\"npx\", \"-y\", \"@playwright/mcp\"]\n\
+         [mcp.github]\ntype = \"stdio\"\n\
+         command = [\"npx\", \"-y\", \"@modelcontextprotocol/server-github\"]\n";
+
+    /// Servers that share a program store the shared-program record version.
+    #[test]
+    fn servers_sharing_a_program_store_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(SHARED_PROGRAM);
+        assert_eq!(stored.version, SHARED_PROGRAM_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// A record whose version differs from what it holds is refused.
+    #[test]
+    fn the_shared_program_version_states_what_the_record_holds() {
+        let mut shared = pinned_record(SHARED_PROGRAM);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+        ] {
+            shared.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&shared.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: SHARED_PROGRAM_RECORD_VERSION })
+                        if found == version
+                ),
+                "a shared program may not hide under version {version}"
+            );
+        }
+        let mut distinct = pinned_record(DISTINCT_PROGRAMS);
+        distinct.version = SHARED_PROGRAM_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&distinct.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: SHARED_PROGRAM_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
     }
 
     /// A name shared between `[egress.foo]` and `[mcp.foo] type = "http"` is not a collision: the two

@@ -34,17 +34,58 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `type` | string | required | `"stdio"`. |
-| `command` | string array | required | Element 0 is the program, and the rest are its arguments. The box places an alias named for the program in its `bin/`, on the agent's `PATH`. |
+| `command` | string array | required | Element 0 is the program, and the rest are its arguments. The box places an alias named for the program in its `bin/`, on the agent's `PATH`. The harness runs this command, word for word, to reach the server. |
 | `workspace` | path | the agent's workspace | The server's initial working directory. |
 | `env` | table | empty | Variables the server receives. The server also receives `PATH` and `HOME` from the host OS's shell that runs `box run`, unless `env` sets them, and a placeholder for each `env://` credential. |
 | `filesystem` | table | empty | The paths the server's own system calls reach. See [Filesystem](#filesystem). |
 | `network.contain_egress` | bool | `true` | How the server reaches the network. See [Network](#network). |
 
-The box starts the server when the agent's harness runs its program, and only when policy permits
-`shell:spawn` for it. The box runs the `command` and arguments from `box.toml`.
+The box starts the server when the agent's harness runs the server's full `command`, and only
+when policy permits `shell:spawn` for it. The box runs the `command` and arguments from `box.toml`.
+
+The harness's command for the server must be the same words, in the same order, as `command`.
+The harness runs the alias with its arguments, and the box starts the server whose `command`
+matches. A harness entry that sets only the program reaches only a server whose `command` is the
+program alone. For a server whose `command` has arguments, set the same arguments in the harness.
+[Connect the harness](./mcp-policy.md#step-2-connect-the-harness) shows the settings.
 
 The program and the server name hold only letters, digits, `.`, `_`, and `-`. Each server has its
-own name and its own program. A program cannot be `zsh`, `bash`, `sh`, `python3`, or `python`.
+own name and its own full `command`. A program cannot be `zsh`, `bash`, `sh`, `python3`, or
+`python`.
+
+### Share a launcher
+
+Two or more servers can start through one program, such as `npx` or `uvx`, when their full
+commands differ:
+
+```toml
+[mcp.playwright]
+type    = "stdio"
+command = ["npx", "-y", "@playwright/mcp"]
+
+[mcp.github]
+type    = "stdio"
+command = ["npx", "-y", "@modelcontextprotocol/server-github"]
+```
+
+The box places one alias, `bin/npx`, for both servers. The arguments the harness passes select the
+server:
+
+| The harness runs | The box starts |
+|---|---|
+| `npx -y @playwright/mcp` | `playwright` |
+| `npx -y @modelcontextprotocol/server-github` | `github` |
+| `npx -y some-other-server` | Nothing. The launch is refused. |
+
+Words that mean the same thing to the server are still different words. `--port=3000` and
+`--port 3000` don't match, and neither do `~/data` and `/Users/me/data`. Write each argument the same
+way in `box.toml` and in the harness. An argument that holds `${OTEL_EXPORTER_OTLP_ENDPOINT}`,
+`${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}`, or `${OTEL_EXPORTER_OTLP_PROTOCOL}` matches both the name as
+written and the value the box puts in its place. The endpoint values hold a port that is new on each
+run, so a harness with a fixed configuration passes the name, as written in `box.toml`.
+
+A box whose servers share a program stores a newer record than earlier `box` builds read. An
+earlier build refuses that box directory.
 
 ### Filesystem
 
@@ -137,8 +178,16 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 | Message | Cause |
 |---|---|
 | A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. |
-| `no MCP server declares the program "<program>" in box.toml` | The harness ran a program that no `[mcp.<name>]` table names. |
+| `` `[mcp.<a>]` and `[mcp.<b>]` declare the same command "<command>" `` | Two tables have the same full `command`. Remove one, or change its arguments. |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
+
+The harness gets these errors when it starts a server, and the box keeps running:
+
+| Message | Cause |
+|---|---|
+| `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no `command` on that program. Set the harness's command and arguments to the `command` of one of the listed servers in `box.toml`. |
+| `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
+| ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 
