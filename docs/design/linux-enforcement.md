@@ -30,13 +30,13 @@ The process namespace gives the workload its own process identifiers and a fresh
 Separate namespaces also isolate system identity and interprocess communication.
 The [network exception](#network-access) changes only the network namespace choice.
 
-Inside the process namespace, process ID 1 is the supervisor that collects child exit statuses.
+Inside the process namespace, process ID 1 is the namespace reaper, which collects child exit statuses.
 Before creating the workload, it sets `PR_SET_DUMPABLE=0` to restrict workload access to its memory through `/proc/1/mem`.
 If that operation fails, it reports setup failure and terminates the namespace before the workload starts.
 
 This guard restricts memory access independently of whether `/proc` permits writes.
-A read-only `/proc` does not itself establish that supervisor-memory reads are refused.
-Box installs its seccomp filters only in the workload after creating it; the supervisor remains outside those filters.
+A read-only `/proc` does not itself establish that reads of the reaper’s memory are refused.
+Box installs its seccomp filters only in the workload after creating it; the reaper remains outside those filters.
 
 Strands Shell, Monty, and the policy engine run in the box's trusted process, outside these sandboxes.
 Policy decides requests that reach those components.
