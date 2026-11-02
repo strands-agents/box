@@ -9,13 +9,10 @@ Use it to prepare and check a deployment. It supplies configuration guidance, no
 Install Box for the architecture reported by `uname -m`.
 Install `box`, `strands-box-contain-trampoline`, and `strands-box-sock-alias` from the same build in one directory.
 Both helpers must be regular executable files. Box refuses helper symlinks and files without executable permissions.
-Follow [getting started](./getting-started.md) and the [configuration reference](./config.md) for the build you deploy.
+Follow [getting started](./getting-started.md) for installation and Linux startup requirements.
+Use the [configuration reference](./config.md) to configure Box.
 
-For builds that require Linux startup consent, set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the environment that starts Box.
-This startup consent is separate from the native filesystem policy setting in `box.toml`.
-[Experimental native filesystem policy](./native-filesystem-policy.md) adds policy checks to native file operations and needs its own deployment tests.
-Leave that experiment disabled when checking ordinary Linux enforcement and policy checks through Box's built-in tools.
-A successful namespace check or a normal agent run does not qualify that separate mechanism.
+[Native filesystem policy](./native-filesystem-policy.md) is macOS-only. A Linux build refuses a `box.toml` that enables it.
 
 <a id="shared-requirements"></a>
 ## Shared requirements
