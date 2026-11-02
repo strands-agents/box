@@ -124,10 +124,13 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
-In the Shell, a metadata read is an operation that happened once the workload has its answer, so a
-`test -e`, `test -L`, or `test -r` of a missing path is a `::response`, not a `::error`. A Shell check that Box
-itself refuses, at the reach floor or because the filesystem changed between the decision and the
-check, stays a `::error`, so it can't satisfy a precondition keyed on `::response`. A cap on
+A metadata read is an operation that happened once the workload has its answer, so a Shell
+`test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file is
+a `::response`, not a `::error`, and so is one the host refuses for permission. A check that Box
+itself refuses stays a `::error`, so it can't satisfy a precondition keyed on `::response`: the
+reach floor refuses it, or a guard refuses it because a path changed between the decision and the
+check (in the Shell, any change to the namespace; in Python, a symbolic link swapped into the
+path). The reach floor also refuses a Python path whose parent folder doesn't exist. A cap on
 attempts counts `::request` instead, because that counts denied attempts too.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as

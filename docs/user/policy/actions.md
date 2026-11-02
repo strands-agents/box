@@ -229,7 +229,7 @@ What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends. A Shell `test -e`, `test -L`, or `test -r` that got an answer is a response even when the answer is "no", such as one of a missing path. A Shell check that Box itself refuses, at the reach floor or because the filesystem changed during the check, is an error. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder, or a folder the host won't let it search. A check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. The reach floor also refuses a Python path whose parent folder doesn't exist. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |

@@ -810,12 +810,15 @@ enforced against recorded history, so do not claim tamper resistance for them. A
 is satisfied by a denied attempt, because the request event carries no verdict, so a step-up rule keyed
 on `::request` is defeated by asking and being refused. Key a precondition on `::response` instead;
 `a_denied_attempt_satisfies_a_request_keyed_precondition` pins the failure mode, which is known and
-open. A missing outcome event also makes a counting rule undercount and fail open. A Shell metadata
-read that got an answer records `::response` even when the answer is "no", so a `read_metadata`
-budget counts a probe of an absent path, which `a_read_metadata_budget_counts_probes_of_absent_paths`
-pins, and a read that the reach floor or the admission-window guard refuses stays `::error`, which
-`a_metadata_read_the_floor_refuses_meets_no_response_precondition` and
-`a_probe_the_admission_window_refuses_reports_a_failure` pin; the cost is that no event kind
+open. A missing outcome event also makes a counting rule undercount and fail open. A metadata read
+that got an answer, in the Shell or in Python, records `::response` even when the answer is "no",
+so a `read_metadata` budget counts a probe of an absent path, which
+`a_read_metadata_budget_counts_probes_of_absent_paths` and
+`a_read_metadata_budget_counts_stats_of_missing_paths` pin, and a read that the reach floor or a
+guard against a changed path refuses stays `::error`, which
+`a_metadata_read_the_floor_refuses_meets_no_response_precondition`,
+`a_probe_the_admission_window_refuses_reports_a_failure`, and
+`a_predicate_refused_by_an_ancestor_swap_records_failed` pin; the cost is that no event kind
 separates a "yes" from a "no". History is pruned to
 the deepest authored window and the workload itself fills that window, so treat window depth as an
 availability bound and not as a strength claim. A counting rule also evaluates against recorded
