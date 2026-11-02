@@ -187,6 +187,7 @@ Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 
 On Linux, a script in `command[0]` requires existing filesystem grants for every program in its
 `#!` interpreter chain. Missing coverage prevents the process from starting.
+The refusal identifies the canonical interpreter path to grant. This path can differ from the spelling in the script.
 
 | Declared process | Required interpreter coverage in its own `filesystem` table |
 |---|---|
@@ -304,6 +305,16 @@ workload starts, under `strands-box: [agent] runs <program> with no policy decis
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
 `~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
 a tool granted the operator's SSH directory.
+
+On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
+
+```text
+strands-box: [tool.check] interpreter aliases for configured access:
+  alias       /bin/sh -> /usr/bin/dash  (interpreter spelling)
+```
+
+The arrow maps the script's spelling to the file its configured grants already authorize.
+The section appears only when Box preserves an interpreter spelling.
 
 With no `filesystem` table, the process reaches its `command` and the runtime minimum. The
 command's own exec grant is implicit: a process may always run its `command`, and the startup

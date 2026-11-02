@@ -446,6 +446,10 @@ impl Boundary {
             .map(|hop| hop.canonicalize().unwrap_or_else(|_| hop.clone()))
             .collect();
         let mut interpreters: Vec<PathBuf> = Vec::new();
+        #[cfg(target_os = "linux")]
+        let mut interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        #[cfg(not(target_os = "linux"))]
+        let interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut interpreter_identities: Vec<&Path> = Vec::new();
         #[cfg(target_os = "linux")]
         let mut interpreter_exec_files: Vec<PathBuf> = Vec::new();
@@ -470,8 +474,8 @@ impl Boundary {
                     if operation == Operation::Exec {
                         interpreter_exec_files.push(resolved.to_path_buf());
                     }
+                    interpreter_aliases.push((spelled.clone(), resolved.to_path_buf()));
                     containment = containment.allow_prepared(prepared, operation, Scope::File)?;
-                    interpreters.push(spelled.clone());
                 }
                 continue;
             }
@@ -672,6 +676,7 @@ impl Boundary {
             grants: &reach.grants,
             minimum: &minimum,
             interpreters: &interpreters,
+            interpreter_aliases: &interpreter_aliases,
             enterable_workspace: enterable_workspace.as_deref(),
             home: &home,
             path: composed.get("PATH").map(String::as_str).unwrap_or_default(),
@@ -803,6 +808,7 @@ struct DisclosureInputs<'a> {
     grants: &'a [DirectGrant],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
+    interpreter_aliases: &'a [(PathBuf, PathBuf)],
     enterable_workspace: Option<&'a Path>,
     home: &'a Path,
     path: &'a str,
@@ -836,6 +842,18 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             "  exec        {}  (command, implicit)",
             inputs.program.display()
         ));
+    }
+    if !inputs.interpreter_aliases.is_empty() {
+        lines.push(format!(
+            "strands-box: {table} interpreter aliases for configured access:"
+        ));
+        for (spelled, resolved) in inputs.interpreter_aliases {
+            lines.push(format!(
+                "  alias       {} -> {}  (interpreter spelling)",
+                spelled.display(),
+                resolved.display()
+            ));
+        }
     }
     lines.push(format!(
         "strands-box: {table} runtime minimum, added by Core:"
@@ -1005,7 +1023,7 @@ fn stated_interpreter_operation(
         table: launch.table.to_string(),
         reason: format!(
             "{} names the interpreter {}, which no {} entry of {} authorizes; \
-             declare every script interpreter in that table",
+             add {} to {} in that table",
             program.display(),
             spelled.display(),
             if launch.runtime_reach == RuntimeReach::Agent {
@@ -1014,6 +1032,12 @@ fn stated_interpreter_operation(
                 "`read`, `read_file`, `write`, or `write_file`"
             },
             launch.table,
+            identity.display(),
+            if launch.runtime_reach == RuntimeReach::Agent {
+                "`exec`"
+            } else {
+                "`read_file`"
+            },
         ),
     }
     .into())
@@ -4486,27 +4510,72 @@ write = ["/Users/example/box-demo/aws-tmp"]
     }
 
     #[cfg(target_os = "linux")]
+    fn assert_interpreter_alias_disclosure(boundary: &Boundary, spelling: &Path, identity: &Path) {
+        let disclosure = boundary.disclosure();
+        if spelling == identity {
+            assert!(!disclosure.contains("interpreter aliases"), "{disclosure}");
+            return;
+        }
+        let alias = format!(
+            "  alias       {} -> {}  (interpreter spelling)",
+            spelling.display(),
+            identity.display()
+        );
+        let aliases = disclosure
+            .find("interpreter aliases for configured access:")
+            .expect("existing interpreter access has its own alias section");
+        let minimum = disclosure
+            .find("runtime minimum, added by Core:")
+            .expect("the runtime minimum is disclosed separately");
+        let entry = disclosure.find(&alias).expect("the alias names both paths");
+        assert!(aliases < entry && entry < minimum, "{disclosure}");
+        assert!(
+            !disclosure.contains(&format!(
+                "  exec        {}  (interpreter)",
+                spelling.display()
+            )),
+            "an alias is not disclosed as newly added execution authority: {disclosure}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn declared_scripts_refuse_unlisted_interpreter_files_regardless_of_mode() {
         for mode in [0o644, 0o755] {
-            for (table, reach) in [
-                ("[agent]", RuntimeReach::Agent),
-                ("[tool.t]", RuntimeReach::Leaf),
-            ] {
-                let fixture = Fixture::new();
-                let interpreter =
-                    interpreter_fixture_file(&fixture, "unlisted/interpreter", b"inert", mode);
-                let spec = interpreter_script_spec(&fixture, &interpreter);
-                let refusal = fixture
-                    .try_translate_full(&spec, table, reach, EgressMode::Gateway)
-                    .err()
-                    .expect("an unlisted interpreter is refused")
-                    .to_string();
-                assert!(refusal.contains(table), "{refusal}");
-                assert!(
-                    refusal.contains(interpreter.to_str().expect("fixture path")),
-                    "{refusal}"
-                );
+            for linked in [false, true] {
+                for (table, reach, entry) in [
+                    ("[agent]", RuntimeReach::Agent, "exec"),
+                    ("[tool.t]", RuntimeReach::Leaf, "read_file"),
+                ] {
+                    let fixture = Fixture::new();
+                    let interpreter =
+                        interpreter_fixture_file(&fixture, "unlisted/interpreter", b"inert", mode);
+                    let spelling = if linked {
+                        let link = fixture.path("bin/interpreter-link");
+                        std::os::unix::fs::symlink(&interpreter, &link).expect("interpreter link");
+                        link
+                    } else {
+                        interpreter.clone()
+                    };
+                    let spec = interpreter_script_spec(&fixture, &spelling);
+                    let refusal = fixture
+                        .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                        .err()
+                        .expect("an unlisted interpreter is refused")
+                        .to_string();
+                    assert!(refusal.contains(table), "{refusal}");
+                    assert!(
+                        refusal.contains(spelling.to_str().expect("fixture spelling")),
+                        "{refusal}"
+                    );
+                    assert!(
+                        refusal.contains(&format!(
+                            "add {} to `{entry}` in that table",
+                            interpreter.display()
+                        )),
+                        "the refusal must recommend a canonical grant: {refusal}"
+                    );
+                }
             }
         }
     }
@@ -4594,6 +4663,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
                 .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
                 .expect("the tool already has access to the interpreter target");
             assert_interpreter_route(&boundary, &spelling, &interpreter);
+            assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
             assert_no_interpreter_exec_seed(&boundary, &interpreter);
         }
     }
@@ -4623,6 +4693,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
                 Scope::File
             )));
             assert_interpreter_route(&boundary, &spelling, &interpreter);
+            assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
         }
     }
 
@@ -4652,6 +4723,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
             )));
             if linked {
                 assert_interpreter_route(&boundary, &spelling, &interpreter);
+                assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
             }
             assert_no_interpreter_exec_seed(&boundary, &interpreter);
         }
