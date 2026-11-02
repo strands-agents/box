@@ -1510,7 +1510,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let operator = tempfile::tempdir().expect("an operator home");
+            Self::from_operator(tempfile::tempdir().expect("an operator home"))
+        }
+
+        fn from_operator(operator: tempfile::TempDir) -> Self {
             let home = operator.path().canonicalize().expect("a canonical home");
             for relative in [
                 "project/src",
@@ -4452,6 +4455,191 @@ write = ["/Users/example/box-demo/aws-tmp"]
             after_cells, before_cells,
             "an added MCP server adds its alias and nothing else"
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    mod live_script_mutation {
+        use super::*;
+        use crate::run::contain::supervise::{CapturedLeaf, LeafBox};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn fixture() -> Fixture {
+            Fixture::from_operator(
+                tempfile::Builder::new()
+                    .prefix("bi")
+                    .tempdir_in("/var/tmp")
+                    .expect("a short fixture outside the sandbox's temporary mount"),
+            )
+        }
+
+        fn script_spec(fixture: &Fixture, reach: RuntimeReach) -> ProcessSpec {
+            let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+            let mut spec = interpreter_script_spec(fixture, &shell);
+            match reach {
+                RuntimeReach::Agent => spec.filesystem.exec.push(shell),
+                RuntimeReach::Leaf => spec.filesystem.read_file.push(shell),
+            }
+            spec
+        }
+
+        fn write_script(path: &Path, text: &str, replace: bool) {
+            if replace {
+                let replacement = path.with_extension("replacement");
+                std::fs::write(&replacement, text).expect("replacement script");
+                std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755))
+                    .expect("replacement executable mode");
+                std::fs::rename(replacement, path).expect("replace the script");
+            } else {
+                std::fs::write(path, text).expect("overwrite the script");
+            }
+        }
+
+        fn translate(fixture: &Fixture, spec: &ProcessSpec, reach: RuntimeReach) -> Boundary {
+            let table = match reach {
+                RuntimeReach::Agent => "[agent]",
+                RuntimeReach::Leaf => "[tool.t]",
+            };
+            fixture.translate_full(spec, table, reach, EgressMode::Gateway)
+        }
+
+        async fn run(fixture: &Fixture, boundary: Boundary) -> Result<CapturedLeaf, BoxError> {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                LeafBox::run(boundary, &fixture.root),
+            )
+            .await
+            .expect("the contained script finishes")
+        }
+
+        fn assert_output(output: CapturedLeaf, expected: &[u8]) {
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, expected);
+        }
+
+        #[tokio::test]
+        async fn replacing_a_script_after_translation_cannot_add_an_interpreter() {
+            for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
+                for replace in [false, true] {
+                    let fixture = fixture();
+                    let mut spec = script_spec(&fixture, reach);
+                    let script = Path::new(spec.program());
+                    let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+                    let original = format!("#!{}\nprintf 'original\\n'\n", shell.display());
+                    write_script(script, &original, false);
+                    assert_output(
+                        run(&fixture, translate(&fixture, &spec, reach))
+                            .await
+                            .unwrap(),
+                        b"original\n",
+                    );
+                    let outside = interpreter_fixture_file(
+                        &fixture,
+                        "unlisted/interpreter",
+                        format!("#!{}\nprintf 'outside-interpreter\\n'\n", shell.display())
+                            .as_bytes(),
+                        0o755,
+                    );
+                    let boundary = translate(&fixture, &spec, reach);
+                    let changed = format!("#!{}\n", outside.display());
+                    write_script(script, &changed, replace);
+                    match run(&fixture, boundary).await {
+                        Ok(output) if output.status == 0 => {
+                            assert!(
+                                replace,
+                                "overwritten bytes must not start an unlisted interpreter"
+                            );
+                            assert_output(output, b"original\n");
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: retained original script"
+                            );
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            assert!(
+                                output.stdout.is_empty(),
+                                "unlisted interpreter output: {:?}",
+                                output.stdout
+                            );
+                            assert!(
+                                stderr.contains("No such file or directory")
+                                    || stderr.contains("Permission denied"),
+                                "{stderr}"
+                            );
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: status={}, {stderr}",
+                                output.status
+                            );
+                        }
+                        Err(error) => {
+                            assert!(
+                                error
+                                    .to_string()
+                                    .starts_with("containment setup failed during"),
+                                "{error}"
+                            );
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: {error}"
+                            );
+                        }
+                    }
+                    match reach {
+                        RuntimeReach::Agent => spec.filesystem.exec.push(outside),
+                        RuntimeReach::Leaf => spec.filesystem.read_file.push(outside),
+                    }
+                    assert_output(
+                        run(&fixture, translate(&fixture, &spec, reach))
+                            .await
+                            .unwrap(),
+                        b"outside-interpreter\n",
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn changed_script_bytes_cannot_read_an_ungranted_file_after_translation() {
+            for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
+                let fixture = fixture();
+                let mut spec = script_spec(&fixture, reach);
+                let script = Path::new(spec.program());
+                let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+                write_script(
+                    script,
+                    &format!("#!{}\nprintf 'original\\n'\n", shell.display()),
+                    false,
+                );
+                let outside = interpreter_fixture_file(
+                    &fixture,
+                    "unlisted/marker",
+                    b"synthetic-outside-marker\n",
+                    0o600,
+                );
+                let boundary = translate(&fixture, &spec, reach);
+                write_script(
+                    script,
+                    &format!(
+                        "#!{}\nif IFS= read -r value < '{}'; then printf '%s\\n' \"$value\"; else printf 'read-refused\\n'; fi\n",
+                        shell.display(),
+                        outside.display()
+                    ),
+                    false,
+                );
+                assert_output(run(&fixture, boundary).await.unwrap(), b"read-refused\n");
+                spec.filesystem.read_file.push(outside);
+                assert_output(
+                    run(&fixture, translate(&fixture, &spec, reach))
+                        .await
+                        .unwrap(),
+                    b"synthetic-outside-marker\n",
+                );
+                println!("late script body: {reach:?}: refused without grant, readable with grant");
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
