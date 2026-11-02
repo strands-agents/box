@@ -29,11 +29,16 @@ impl Backend {
     /// The local source set: `env://`, `file://`, and `op://`.
     #[must_use]
     pub fn local() -> Self {
+        Self::local_with(OnePasswordSource::new())
+    }
+
+    /// The local source set, with `op` the given source.
+    pub(crate) fn local_with(op: OnePasswordSource) -> Self {
         let mut registry = SourceRegistry::new();
         for source in [
             Box::new(EnvSource::new()) as Box<dyn SecretSource>,
             Box::new(FileSource::new()),
-            Box::new(OnePasswordSource::new()),
+            Box::new(op),
         ] {
             registry
                 .register(source)

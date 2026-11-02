@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::env::checked_provisioned_name;
+use super::env::{checked_provisioned_name, checked_variable_name};
 use super::{
     AWS_SCHEME, BASIC_AUTH_PLACEMENT, BEARER_PREFIX, CREDSD_SCHEME, DEFAULT_HEADER,
-    HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, QUERY_PARAM_PLACEMENT, URL_PATH_PLACEMENT,
+    HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, OP_SCHEME, QUERY_PARAM_PLACEMENT,
+    URL_PATH_PLACEMENT,
 };
 use crate::error::{BoxError, ConfigError};
 
@@ -378,13 +379,16 @@ enum SecretScheme {
     /// `credsd://environment`: a credsd credential. It signs in the boundary; the daemon's
     /// `material.type` picks the signer per request, and the entry names no credential type.
     Credsd,
+    /// `op://vault/item/field`: a 1Password secret the workload presents as a phantom under
+    /// `secret.variable`.
+    OnePassword,
 }
 
 /// Which secret an entry attaches, and where it lands on the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EgressSecret {
-    /// The secret to attach, as a URI: `env://NAME` or `aws://profile`.
+    /// The secret to attach, as a URI: `env://NAME`, `op://vault/item/field`, or `aws://profile`.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -416,6 +420,11 @@ pub(crate) struct EgressSecret {
     /// accepts the injected phantom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phantom_prefix: Option<String>,
+
+    /// The workload variable the phantom is provisioned under. Required by and only valid for an
+    /// `op://` route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) variable: Option<String>,
 }
 
 impl EgressSecret {
@@ -427,9 +436,18 @@ impl EgressSecret {
             "env" => SecretScheme::Env,
             AWS_SCHEME => SecretScheme::Aws,
             CREDSD_SCHEME => SecretScheme::Credsd,
+            OP_SCHEME => SecretScheme::OnePassword,
             _ => return None,
         };
         Some((scheme, value))
+    }
+
+    /// Whether this secret mints a phantom the workload presents.
+    fn mints_phantom(&self) -> bool {
+        matches!(
+            self.deliverable(),
+            Some((SecretScheme::Env | SecretScheme::OnePassword, _))
+        )
     }
 
     /// The placeholder-check mode this secret selects. `validate` already refused every spelling but
@@ -501,12 +519,16 @@ impl EgressEntry {
             })?;
         let mut bindings = Vec::with_capacity(self.destinations.len());
         for destination in &self.destinations {
-            // Only an `env://` secret has a name to provision a phantom under. Every other scheme
-            // resolves host-side, with nothing placed in the workload's environment.
+            // An `env://` or `op://` secret has a name to provision a phantom under. Every other
+            // scheme resolves host-side, with nothing placed in the workload's environment.
             let provisioned_name = match secret.deliverable() {
                 Some((SecretScheme::Env, name)) => {
                     Some(checked_provisioned_name(destination, name)?)
                 }
+                Some((SecretScheme::OnePassword, _)) => Some(checked_variable_name(
+                    destination,
+                    secret.variable.as_deref().unwrap_or_default(),
+                )?),
                 _ => None,
             };
             bindings.push(EgressRoute {
@@ -604,17 +626,38 @@ impl EgressEntry {
             );
         }
         let Some((scheme, _)) = secret.reference.split_once("://") else {
-            return refuse("secret must be a URI such as env://NAME or aws://profile");
+            return refuse(
+                "secret must be a URI such as env://NAME, op://vault/item/field, or aws://profile",
+            );
         };
 
         // Only a scheme the box can actually deliver. `env://` names a variable to seed the phantom
-        // into, and `aws://` needs none, because the signer places the signature. Every other
+        // into, `op://` takes one from `secret.variable`, and `aws://` needs none, because the
+        // signer places the signature. Every other
         if secret.deliverable().is_none() {
             return refuse(&format!(
-                "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
-                 credential the workload presents as a placeholder, aws://profile for one signed \
-                 in the boundary, or credsd://<environment> for a credsd-vended credential"
+                "secret scheme {scheme:?} is not one the box can deliver: use env://NAME or \
+                 op://vault/item/field for a credential the workload presents as a placeholder, \
+                 aws://profile for one signed in the boundary, or credsd://<environment> for a \
+                 credsd-vended credential"
             ));
+        }
+
+        // An `op://` reference names no variable, so the operator names the one its phantom goes
+        // under, and no other scheme takes one.
+        let is_op = matches!(secret.deliverable(), Some((SecretScheme::OnePassword, _)));
+        if is_op && secret.variable.is_none() {
+            return refuse(
+                "an op:// reference names no variable, so it needs secret.variable to name the \
+                 one the workload presents its placeholder in",
+            );
+        }
+        if !is_op && secret.variable.is_some() {
+            return refuse(
+                "secret.variable names the placeholder variable of an op:// reference, so it \
+                 belongs only with an op:// reference; env://NAME already names its variable, \
+                 and a signed route (aws:// or credsd://) mints no placeholder",
+            );
         }
 
         // A `credsd://` source names a daemon environment and no credential type: the box infers the
@@ -642,12 +685,11 @@ impl EgressEntry {
             );
         }
 
-        // The injection mode tunes the phantom swap, which only an `env://` route performs. A
-        // signed route mints no phantom, so the key has no meaning there.
-        if secret.inject.is_some() && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
-        {
+        // The injection mode tunes the phantom swap. A signed route mints no phantom, so the key
+        // has no meaning there.
+        if secret.inject.is_some() && !secret.mints_phantom() {
             return refuse(
-                "inject tunes the env:// phantom swap, so it belongs only with an env:// \
+                "inject tunes the phantom swap, so it belongs only with an env:// or op:// \
                  reference; a signed route (aws:// or credsd://) mints no phantom to check",
             );
         }
@@ -660,14 +702,12 @@ impl EgressEntry {
             ));
         }
 
-        // The phantom prefix shapes the minted placeholder, which only an `env://` route mints. A
-        // signed route mints none, so the key has no meaning there.
-        if secret.phantom_prefix.is_some()
-            && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
-        {
+        // The phantom prefix shapes the minted placeholder. A signed route mints none, so the key
+        // has no meaning there.
+        if secret.phantom_prefix.is_some() && !secret.mints_phantom() {
             return refuse(
                 "phantom_prefix sets the minted phantom's prefix, so it belongs only with an \
-                 env:// reference; a signed route (aws:// or credsd://) mints no phantom",
+                 env:// or op:// reference; a signed route (aws:// or credsd://) mints no phantom",
             );
         }
         if let Some(prefix) = &secret.phantom_prefix {
@@ -1486,7 +1526,7 @@ mod tests {
     fn an_undeliverable_credential_scheme_is_refused() {
         for locator in [
             "file:///etc/tokens/gh",
-            "op://Private/GitHub/token",
+            "oauth2://issuer/client",
             "cmd://mint-a-token",
             "vault://kv/box/key",
         ] {
@@ -1881,6 +1921,118 @@ mod tests {
             assert!(
                 error.to_string().contains("signed"),
                 "the refusal says it signs in-boundary: {error}"
+            );
+        }
+    }
+
+    // --- op:// source: a phantom under the operator's `secret.variable` ---
+
+    /// A variable no test sets, so an `op://` route proves it needs no host value.
+    const OP_VARIABLE: &str = "STRANDS_BOX_OP_VARIABLE_UNSET_ON_HOST";
+
+    fn op_entry(extra: &str) -> String {
+        format!(
+            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"op://Private/GitHub/token\"\n{extra}"
+        )
+    }
+
+    #[test]
+    fn an_op_reference_provisions_its_phantom_under_the_named_variable() {
+        assert!(
+            std::env::var_os(OP_VARIABLE).is_none(),
+            "the fixture variable must be unset on the host"
+        );
+        let entries = load(&op_entry(&format!("secret.variable = \"{OP_VARIABLE}\"")))
+            .expect("an op:// reference with a variable loads");
+        let routes = routes_for(&entries).expect("bindings build without a host value");
+        assert_eq!(routes[0].provisioned_name(), Some(OP_VARIABLE));
+        assert_eq!(routes[0].phantom(), PhantomCheck::Strict);
+    }
+
+    #[test]
+    fn an_op_reference_without_a_variable_is_refused() {
+        let error = load(&op_entry("")).expect_err("an op:// reference names no variable");
+        assert!(
+            error.to_string().contains("secret.variable"),
+            "the refusal names the missing key: {error}"
+        );
+    }
+
+    #[test]
+    fn a_variable_is_refused_beside_every_other_scheme() {
+        for reference in [
+            format!("env://{}", present_variable()),
+            "aws://prod".to_string(),
+            "credsd://prod".to_string(),
+        ] {
+            let error = load(&format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {reference:?}\nsecret.variable = \"{OP_VARIABLE}\""
+            ))
+            .expect_err(&format!("{reference} must refuse secret.variable"));
+            assert!(
+                error.to_string().contains("only with an op://"),
+                "the refusal says which scheme takes it: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_op_variable_may_not_be_reserved_or_malformed() {
+        for (name, expected) in [
+            ("", "empty"),
+            ("PATH", "reserved"),
+            ("HOME", "reserved"),
+            ("HTTPS_PROXY", "reserved"),
+            ("LD_PRELOAD", "reserved"),
+            ("1TOKEN", "invalid"),
+            ("A-B", "invalid"),
+        ] {
+            let entries = load(&op_entry(&format!("secret.variable = {name:?}")))
+                .expect("the file itself is valid");
+            let error = match routes_for(&entries) {
+                Ok(_) => panic!("{name:?} must be refused as a phantom target"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "error for {name:?} must mention {expected:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_phantom_keys_apply_to_an_op_route() {
+        let variable = format!("secret.variable = \"{OP_VARIABLE}\"");
+
+        let entries = load(&op_entry(&format!(
+            "{variable}\nsecret.inject = \"always\"\nsecret.phantom_prefix = \"ghp_\""
+        )))
+        .expect("inject and phantom_prefix apply to op://");
+        let routes = routes_for(&entries).expect("bindings build");
+        assert_eq!(routes[0].phantom(), PhantomCheck::Advisory);
+        assert_eq!(routes[0].phantom_prefix(), Some("ghp_"));
+
+        for (keys, expected) in [
+            (
+                "secret.header = \"x-api-key\"\nsecret.prefix = \"token \"",
+                Placement::Header {
+                    name: "x-api-key".to_string(),
+                    prefix: "token ".to_string(),
+                },
+            ),
+            ("secret.placement = \"basic_auth\"", Placement::BasicAuth),
+            (
+                "secret.placement = \"query_param\"\nsecret.param = \"key\"",
+                Placement::QueryParam {
+                    name: "key".to_string(),
+                },
+            ),
+        ] {
+            let entries = load(&op_entry(&format!("{variable}\n{keys}")))
+                .unwrap_or_else(|error| panic!("{keys} applies to op://: {error}"));
+            assert_eq!(
+                EgressEntry::placement(entries["a"].secret.as_ref().expect("secret")),
+                expected
             );
         }
     }

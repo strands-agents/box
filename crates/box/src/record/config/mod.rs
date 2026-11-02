@@ -63,6 +63,9 @@ pub(super) const AWS_SCHEME: &str = "aws";
 /// The locator scheme naming a credsd credential source, whose type the daemon reports per request.
 pub(super) const CREDSD_SCHEME: &str = "credsd";
 
+/// The locator scheme naming a 1Password secret, read with the `op` CLI.
+pub(super) const OP_SCHEME: &str = "op";
+
 /// The locator scheme that provisions a phantom into the workload's environment.
 pub(super) const ENV_SCHEME: &str = "env://";
 
@@ -455,6 +458,7 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
+                    egress.values().chain(remote_mcp.values()),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 box_id: root.box_id().to_string(),
@@ -579,6 +583,8 @@ const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// Version 25 adds `secret.variable`, so an older build refuses a record that holds an `op://` route.
+const SECRET_VARIABLE_RECORD_VERSION: u32 = 25;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,8 +627,16 @@ fn record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
+    mut secrets: impl Iterator<Item = &'a EgressEntry>,
 ) -> u32 {
-    if crate::record::config::mcp::shares_a_program(mcp) {
+    if secrets.any(|entry| {
+        entry
+            .secret
+            .as_ref()
+            .is_some_and(|secret| secret.variable.is_some())
+    }) {
+        SECRET_VARIABLE_RECORD_VERSION
+    } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
         process_record_version(features, specs)
@@ -870,6 +884,7 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            SECRET_VARIABLE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -891,6 +906,7 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
+            record.egress.values().chain(record.remote_mcp.values()),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1354,6 +1370,23 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_variable_requires_a_new_record() {
+        let entry: EgressEntry = toml::from_str(
+            "destinations = [\"api.github.com\"]\nsecret.ref = \"op://Private/GitHub/token\"\nsecret.variable = \"GITHUB_TOKEN\"\n",
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::from([("github".to_string(), entry)]));
+        let legacy = toml::to_string(&stored).unwrap();
+        assert!(Record::parse(&legacy, Path::new("record.toml")).is_err());
+        stored.version = SECRET_VARIABLE_RECORD_VERSION;
+        let text = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
     fn remote_mcp_cannot_select_local_filesystem_interception() {
         let text = r#"name = "codex"
 box_dir = "/var/lib/box"
@@ -1728,6 +1761,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        variable: None,
                     }),
                 },
             )]),
@@ -1931,7 +1965,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SECRET_VARIABLE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2152,6 +2186,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            variable: None,
                         }),
                     },
                 ),
@@ -2168,6 +2203,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            variable: None,
                         }),
                     },
                 ),
@@ -2199,6 +2235,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        variable: None,
                     }),
                 },
             )]),
@@ -2253,6 +2290,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    variable: None,
                 }),
             },
         );

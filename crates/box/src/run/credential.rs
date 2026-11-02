@@ -97,7 +97,8 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
                 }
             }
             // A minted phantom this crate cannot deliver. Unreachable today — `validate` admits
-            // only `env://` (which names a variable) and `aws://` (which mints none), so the two
+            // only `env://` and `op://` (which name a variable) and signed schemes (which mint
+            // none), so the two
             (None, phantoms) => {
                 return Err(Internal::CredentialProjection(format!(
                     "credential for {} minted {} phantom binding(s) the box cannot place: a \
