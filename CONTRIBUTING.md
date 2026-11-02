@@ -50,10 +50,11 @@ Three notes on the test suites:
   success. `just test` passes the flag.
 - **A test that cannot run on your host skips instead of failing.** Watch the output for
   `skipping:`, because a skipped test has proved nothing.
-- **On Linux, some containment tests need capabilities an ordinary host refuses.**
-  Continuous integration skips that set by name, which
-  `.github/workflows/rust-test-lint.yml` lists. A failure in one of those on your own
-  machine is the host, not your change.
+- **Linux continuous integration runs on Ubuntu ARM64 with namespace support.**
+  It runs the workspace tests without the former namespace exclusions and rejects unexpected
+  prerequisite skips. The accepted alias-read limitation and missing credential-daemon
+  fixture remain explicit reported gaps.
+  Local machines without the required architecture or permissions can still skip tests.
 
 ## Writing code
 

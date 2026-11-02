@@ -30,6 +30,10 @@ The process namespace gives the workload its own process identifiers and a fresh
 Separate namespaces also isolate system identity and interprocess communication.
 The [network exception](#network-access) changes only the network namespace choice.
 
+The workload's `/proc` is read-only to prevent writes through process-memory files to executable pages.
+Process inspection remains available.
+The filters permit creation of nested user namespaces, but read-only `/proc` prevents writes to their user and group identity maps.
+
 Strands Shell, Monty, and the policy engine run in the box's trusted process, outside these sandboxes.
 Policy decides requests that reach those components.
 The workload's own file operations use its filesystem grants and produce no individual policy decision.
@@ -116,6 +120,28 @@ The filter refuses `mprotect` requests whose permissions include executable acce
 It refuses every `pkey_mprotect` request.
 A runtime that compiles code during execution can fail under these restrictions.
 Tool execution from writable files does not remove these memory restrictions.
+
+## Terminal controls
+
+The filter refuses `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` requests through `ioctl`.
+These requests can inject terminal input, paste console selections, or replace the terminal's line discipline.
+The line discipline controls how the kernel processes terminal input.
+The filter compares the low 32 bits of each request, as the kernel does.
+Nonzero upper bits do not bypass the restriction.
+Console request numbers follow the Linux user API headers
+[`kd.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/kd.h)
+and [`vt.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/vt.h).
+The filter defines missing constants privately; it needs no unreleased library definitions.
+
+Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
+The filter also refuses virtual-console keyboard modes, display modes, switching, deallocation, and console-wide resizing.
+It refuses keyboard lock flags, indicator lights, accent-table changes, fonts, color palettes, and screen and Unicode map changes.
+Programs that manage these console features receive a permission error.
+Read-only console queries remain permitted when they have a separate request number.
+`KDFONTOP` combines font queries and changes behind a pointer, so the filter refuses both.
+Ordinary terminal resizing through `TIOCSWINSZ` remains permitted.
+Kernel capability checks still restrict keymap and function-key replacement.
+This restriction does not isolate every terminal operation or restore arbitrary terminal settings after workload exit.
 
 ## Network access
 

@@ -393,6 +393,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             path: "/v1/items",
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
+            intercepted: true,
         },
     )
 }
@@ -401,7 +402,7 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
@@ -475,12 +476,12 @@ Rules written against history:
 | `Parse` | Parsing or source composition failed. |
 | `Schema` | A policy value, attribute, or entity type violates the schema. A deleted resource entity lands here. |
 | `UnknownAction` | A policy names an action outside the schema. |
-| `UnsupportedClause` | Reserved for API compatibility. |
+| `UnsupportedClause` | A temporal predicate names an action group. |
 | `Evaluation` | The durable engine could not open or recover the database, install sources, or submit an event. |
 
 `open` returns `Parse`, `Schema`, `UnknownAction`, or `Evaluation`. `record` returns
 `Evaluation` if durable submission fails after the effect.
-No current method constructs `UnsupportedClause`.
+The schema that `open` composes has no action group, so no current method returns `UnsupportedClause`.
 
 An information-provider invocation aborts startup with `Parse`.
 

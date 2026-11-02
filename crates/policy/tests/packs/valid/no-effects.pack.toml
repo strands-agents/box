@@ -1,0 +1,10 @@
+# A tool pack that declares no effect.
+
+pack    = "fmt"
+program = "fmt"
+format  = 1
+version = 1
+
+[shell.check]
+usage = "fmt check [options] [<path>...]"
+options.quiet = { flag = ["-q", "--quiet"] }

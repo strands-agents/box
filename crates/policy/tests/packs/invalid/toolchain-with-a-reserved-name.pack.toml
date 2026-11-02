@@ -1,0 +1,11 @@
+# expect: tool pack <file>: `[shell.test]`: field "args" has a name that the schema gives every action
+# A tool pack for cargo whose toolchain selector takes a name the schema gives every action.
+
+pack    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[shell.test]
+usage = "cargo [+<args>] test [options]"
+options.release = { flag = ["-r", "--release"] }

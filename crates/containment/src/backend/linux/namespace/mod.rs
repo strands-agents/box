@@ -532,6 +532,8 @@ fn apply_failure(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod terminal;
+
     use super::*;
 
     /// The most `/proc` entries a fresh PID namespace shows before host processes count as visible.
@@ -1279,139 +1281,33 @@ mod tests {
         );
     }
 
-    /// Run `probe` in a forked child with `filter` installed, and answer its exit code.
+    /// Run `probe` in a forked child with `filters` installed, and answer its exit code.
     fn in_filtered_child(filters: &syscall::SyscallFilters, probe: impl FnOnce() -> i32) -> i32 {
-        // SAFETY: the child installs a filter, runs the probe, and `_exit`s; it never
-        // returns into test-harness code.
+        in_child(|| {
+            if install_syscall_filters(filters).is_err() {
+                return 40;
+            }
+            probe()
+        })
+    }
+
+    fn in_child(probe: impl FnOnce() -> i32) -> i32 {
+        // SAFETY: the child runs the probe and exits without returning to the test harness.
         let child = unsafe { libc::fork() };
         assert_ne!(child, -1, "fork failed");
-
         if child == 0 {
-            if install_syscall_filters(filters).is_err() {
-                // SAFETY: terminating the child.
-                unsafe { libc::_exit(40) };
-            }
             let code = probe();
             // SAFETY: terminating the child with the verdict.
             unsafe { libc::_exit(code) };
         }
-
         let mut status = 0;
         // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
         assert!(
             libc::WIFEXITED(status),
-            "the probe child must exit normally rather than be signalled"
+            "the probe child must exit normally rather than be signalled: {status}"
         );
         libc::WEXITSTATUS(status)
-    }
-
-    #[test]
-    fn terminal_input_injection_is_refused_before_descriptor_lookup() {
-        // An invalid descriptor cannot inject input, even if the filter regresses.
-        // The unfiltered control proves that the kernel would return EBADF.
-        let request = u64::from(libc::TIOCSTI as u32);
-        let requests = [
-            request,
-            (1_u64 << 32) | request,
-            0xffff_ffff_0000_0000 | request,
-        ];
-        for request in requests {
-            // SAFETY: descriptor -1 is invalid, and no pointer can be dereferenced.
-            let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
-            assert_eq!(result, -1);
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::EBADF),
-                "the unfiltered control must reach descriptor lookup"
-            );
-        }
-
-        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
-            .compile()
-            .expect("the filters compile");
-        let outcome = in_filtered_child(&filters, || {
-            for request in requests {
-                // SAFETY: descriptor -1 stays invalid if the filter fails to refuse.
-                let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
-                if result != -1
-                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
-                {
-                    return 10;
-                }
-            }
-            0
-        });
-        assert_eq!(
-            outcome, 0,
-            "10 = TIOCSTI reached descriptor lookup, 40 = installing the filters failed"
-        );
-    }
-
-    #[test]
-    fn terminal_queries_still_work_under_the_filters() {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-        let mut master = -1;
-        let mut slave = -1;
-        let size = libc::winsize {
-            ws_row: 37,
-            ws_col: 101,
-            ws_xpixel: 808,
-            ws_ypixel: 592,
-        };
-        // SAFETY: all output pointers are valid. This creates a private terminal
-        // pair without making it the caller's controlling terminal.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
-                )
-            },
-            0,
-            "the private terminal pair must open"
-        );
-        // SAFETY: openpty returned two newly owned descriptors.
-        let (_master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
-            .compile()
-            .expect("the filters compile");
-        let outcome = in_filtered_child(&filters, || {
-            let mut observed = std::mem::MaybeUninit::<libc::winsize>::uninit();
-            // SAFETY: the descriptor is open and the output has the required size.
-            if unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, observed.as_mut_ptr()) }
-                != 0
-            {
-                return 10;
-            }
-            // SAFETY: the successful ioctl initialized the output.
-            let observed = unsafe { observed.assume_init() };
-            if (
-                observed.ws_row,
-                observed.ws_col,
-                observed.ws_xpixel,
-                observed.ws_ypixel,
-            ) != (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
-            {
-                return 11;
-            }
-            let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
-            // SAFETY: the descriptor is open and the output has the required size.
-            if unsafe { libc::tcgetattr(slave.as_raw_fd(), settings.as_mut_ptr()) } != 0 {
-                return 12;
-            }
-            0
-        });
-        assert_eq!(
-            outcome, 0,
-            "10 = window query refused, 11 = wrong window size, 12 = terminal settings query \
-             refused, 40 = installing the filters failed"
-        );
     }
 
     #[test]
@@ -1897,6 +1793,167 @@ mod tests {
             outcome, 0,
             "a read-execute mapping must remain permitted, or the dynamic loader cannot \
              map a shared library and no workload starts"
+        );
+    }
+
+    fn write_executable_page_through_proc_mem(path: &std::ffi::CStr) -> i32 {
+        // SAFETY: this creates one private page in the child process.
+        let executable = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if executable == libc::MAP_FAILED {
+            return 60;
+        }
+        // SAFETY: path is NUL-terminated, and the returned descriptor is closed below.
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return 0;
+        }
+        let byte: [u8; 1] = [0x7f];
+        // SAFETY: the descriptor and buffer are valid. The offset is the mapped page address.
+        let written = unsafe {
+            libc::pwrite(
+                fd,
+                byte.as_ptr().cast(),
+                byte.len(),
+                executable as usize as libc::off_t,
+            )
+        };
+        // SAFETY: fd was returned by open in this process.
+        unsafe { libc::close(fd) };
+        if written == byte.len() as isize {
+            61
+        } else {
+            0
+        }
+    }
+
+    fn route_to_c_string(route: &str) -> std::ffi::CString {
+        std::ffi::CString::new(route).expect("proc route contains no NUL")
+    }
+
+    fn proc_mem_route_status(route: &str) -> i32 {
+        let path = route_to_c_string(route);
+        write_executable_page_through_proc_mem(&path)
+    }
+
+    fn proc_mem_child_route_status() -> i32 {
+        // SAFETY: the child tests only its own memory and exits immediately.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return 70;
+        }
+        if child == 0 {
+            let code = proc_mem_route_status("/proc/self/mem");
+            // SAFETY: terminating the child process.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            71
+        }
+    }
+
+    fn proc_mem_fd_route_status() -> i32 {
+        let mem = route_to_c_string("/proc/self/mem");
+        // SAFETY: path is NUL-terminated, and the descriptor is closed below when opened.
+        let fd = unsafe { libc::open(mem.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return 64;
+        }
+        let route = route_to_c_string(&format!("/proc/self/fd/{fd}"));
+        let status = write_executable_page_through_proc_mem(&route);
+        // SAFETY: fd was returned by open in this process.
+        unsafe { libc::close(fd) };
+        status
+    }
+
+    /// `/proc/*/mem` must not bypass the executable-memory syscall rules.
+    #[test]
+    fn proc_mem_cannot_write_executable_memory() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+
+        // SAFETY: the child applies containment and exits. It does not return into test code.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+
+        if child == 0 {
+            let backend = NamespaceBackend::with_probe_result(true);
+            if backend.apply(&acceptable(), None, None, None).is_err() {
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(50) };
+            }
+
+            let mut code = 0;
+            for route in [
+                "/proc/self/mem",
+                "/proc/thread-self/mem",
+                "/proc/self/root/proc/self/mem",
+            ] {
+                code = code.max(proc_mem_route_status(route));
+            }
+            let pid_route = format!("/proc/{}/mem", std::process::id());
+            code = code.max(proc_mem_route_status(&pid_route));
+            let task_route = format!(
+                "/proc/self/task/{}/mem",
+                // SAFETY: gettid takes no arguments and returns this thread's id.
+                unsafe { libc::syscall(libc::SYS_gettid) }
+            );
+            code = code.max(proc_mem_route_status(&task_route));
+            code = code.max(proc_mem_fd_route_status());
+            code = code.max(proc_mem_child_route_status());
+
+            let mut direct: i32 = 7;
+            let before = direct;
+            direct = 42;
+            if before != 7 || direct != 42 {
+                code = code.max(62);
+            }
+            // SAFETY: this creates one plain writable page in the child process.
+            let writable = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if writable == libc::MAP_FAILED {
+                code = code.max(63);
+            }
+
+            // SAFETY: terminating the workload with the verdict.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(
+            libc::WIFEXITED(status),
+            "contained child did not exit cleanly"
+        );
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "50 = apply failed, 60 = read-execute mapping failed, 61 = proc mem wrote an executable page, 62 = direct memory write failed, 63 = writable memory failed, 64 = read-only proc mem descriptor failed, 70/71 = child route did not run"
         );
     }
 

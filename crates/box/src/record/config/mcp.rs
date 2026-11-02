@@ -253,9 +253,7 @@ fn unrepresentable(server: &McpServer) -> Option<String> {
     }
     // The alias image picks the interpreter from `argv[0]`, so a program called `zsh` gets
     // `bin/zsh` routed to the Shell.
-    if crate::run::broker::protocol::SHELL_ALIAS_NAMES.contains(&server.program())
-        || crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(&server.program())
-    {
+    if crate::INTERPRETER_ALIASES.contains(&server.program()) {
         return reason(
             "`program` is one of the box's own interpreter aliases; the alias image selects the \
              interpreter from its own name, so this server would be routed to the shell or the \
@@ -398,7 +396,11 @@ mod tests {
     /// A program the alias image would route to an interpreter is refused.
     #[test]
     fn a_program_that_collides_with_an_interpreter_alias_is_refused() {
-        for taken in ["zsh", "bash", "sh", "python3", "python"] {
+        assert_eq!(
+            crate::INTERPRETER_ALIASES,
+            ["zsh", "bash", "sh", "python3", "python"]
+        );
+        for taken in crate::INTERPRETER_ALIASES {
             let error = parse(&format!(
                 "[[server]]\nname = \"issues-mcp\"\ncommand = [{taken:?}]"
             ))
@@ -411,7 +413,7 @@ mod tests {
 
         // A `name` is free to be any of them, because a name places no alias. Asserted so the check
         // is known to have moved rather than to have been copied to both fields.
-        for free in ["zsh", "bash", "sh", "python3", "python"] {
+        for free in crate::INTERPRETER_ALIASES {
             parse(&format!(
                 "[[server]]\nname = {free:?}\ncommand = [\"issues-mcp\"]"
             ))

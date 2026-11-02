@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use containment::{Operation, Scope};
 
-use crate::error::ConfigError;
+use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
@@ -334,6 +334,22 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
         scope,
         judged: metadata.as_ref().map(FileIdentity::of),
     })
+}
+
+/// Judge a read grant on `path` as a box judges a `read` entry, and return whether it lies in a
+/// credential store.
+pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, BoxError> {
+    let home = crate::record::layout::canonical(&crate::record::layout::operator_home_directory()?);
+    let context = FilesystemContext {
+        table: "check_read_grant",
+        operator_home: &home,
+        policy: None,
+        authority_directories: Vec::new(),
+        program_search_directories: Vec::new(),
+    };
+    entry_grant(Grant::Read, path, &context)
+        .map(|grant| grant.credential_store)
+        .map_err(BoxError::from)
 }
 
 /// One authorizing entry as a grant, refused by name for each class it falls in.
