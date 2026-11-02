@@ -2176,22 +2176,22 @@ fn trusted_launch_path_falls_back_when_the_run_path_is_absent() {
     let mut run = box_.spawn_without_trusted_path();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let client = box_.open_client("env");
-    run.wait_for_through_alias(box_.server_started("env"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("fallback-mcp"), STARTUP);
 
     assert_eq!(
-        box_.trace("env", "path"),
+        box_.trace("fallback-mcp", "path"),
         "/usr/bin:/bin",
         "an absent trusted PATH must use the fixed MCP fallback, with no box bin"
     );
     let environment: serde_json::Map<String, Value> =
-        serde_json::from_str(&box_.trace("env", "environment"))
+        serde_json::from_str(&box_.trace("fallback-mcp", "environment"))
             .expect("parse the fallback child environment");
     assert_eq!(
         environment.get("PATH").and_then(Value::as_str),
         Some("/usr/bin:/bin")
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&box_.trace("env", "argv"))
+        serde_json::from_str::<Value>(&box_.trace("fallback-mcp", "argv"))
             .expect("parse the fallback command arguments"),
         json!(["--declared", "trace"]),
         "the PATH fallback must still start the declared command"
@@ -2333,9 +2333,14 @@ fn one_locked_run_keeps_its_record_policy_and_mcp_snapshot() {
 
     let beta = Server::new("beta", "beta-mcp", "write", DiscoveryBehavior::Ready);
     box_.install_server(&beta);
+    let renamed = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through(
+            "alpha-mcp",
+            vec!["--declared".to_string(), "alpha-second".to_string()],
+        );
     box_.write_workspace(
         &policy_for("beta", "write"),
-        &[beta],
+        &[beta, renamed],
         r#"
 set -eu
 : > "$HOME/second-workload.started"
