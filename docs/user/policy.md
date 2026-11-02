@@ -125,9 +125,9 @@ discovers. [The action vocabulary](policy/actions.md) lists the fields of each o
 
 ## Common rules
 
-Six rules an operator writes often. Each one is a working rule. Copy it beside the permits from
+Seven rules an operator writes often. Each one is a working rule. Copy it beside the permits from
 [your first policy](tutorials/first-policy.md), replace `~/project` with your project directory, and
-run the box. Two of them say what else `box.toml` needs. The first five are `forbid` rules. The last
+run the box. Two of them say what else `box.toml` needs. The first six are `forbid` rules. The last
 is a pair of `permit` rules that replace two from the tutorial.
 
 ### A budget over time
@@ -294,6 +294,71 @@ strands-shell: effect denied: policy denied this operation on '/usr/bin/git' [po
   with the exit status as `output.status`. A `::request` event exists for a refused attempt too, so
   a rule keyed on it would pass after a refused `cargo test`.
 
+<a id="forbid-one-url-path-on-a-host"></a>
+
+### Forbid one URL path on a host
+
+Every request under `/v1/` on `api.example.com` is permitted, except the endpoints under
+`/v1/admin`.
+
+`context.input.path` is the exact path the gateway forwards. The gateway puts the path in canonical
+form first: it decodes the percent-escapes of unreserved characters, keeps `%2F` encoded with
+uppercase hex digits, and removes `.` and `..` segments. `/v1/./admin`, `/v1/%61dmin`, and
+`/v1/users/../admin` all reach policy as `/v1/admin`, and `/v1/admin%2fexport` reaches it as
+`/v1/admin%2Fexport`.
+
+The gateway keeps repeated slashes and `%2F`, and the server receives them. Servers disagree about
+such a path: some serve `/v1//admin` as `/v1/admin`, and others, such as S3, treat `a//b` and `a/b`
+as two different keys. A `forbid` on `/v1/admin` beside a permit on `/v1/*` therefore leaves
+`/v1//admin` and `/v1/admin%2Fexport` permitted. Add a second `forbid` that refuses both forms
+on that host:
+
+```text
+@id("api_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "api.example.com" };
+
+@id("api_v1")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "api.example.com" && context.input.path like "/v1/*" };
+
+@id("no_admin")
+forbid (principal, action == Box::Action::"http:request", resource)
+when {
+  context.input.host == "api.example.com" &&
+  (context.input.path == "/v1/admin" || context.input.path like "/v1/admin/*")
+};
+
+@id("no_ambiguous_slash")
+forbid (principal, action == Box::Action::"http:request", resource)
+when {
+  context.input.host == "api.example.com" &&
+  (context.input.path like "*//*" || context.input.path like "*%2F*")
+};
+```
+
+| Request | Decision | Rule |
+|---|---|---|
+| `/v1/users` | Permitted | `api_v1` |
+| `/v1/administrator` | Permitted | `api_v1` |
+| `/v1/users?next=//login` | Permitted | `api_v1` |
+| `/v1/admin`, `/v1/./admin`, `/v1/%61dmin`, `/v1/users/../admin` | Refused | `no_admin` |
+| `/v1/admin/export` | Refused | `no_admin` |
+| `/v1//admin`, `/v1///admin/export` | Refused | `no_ambiguous_slash` |
+| `/v1/users//42`, `/v1/admin%2Fexport`, `/v1/admin%2fexport` | Refused | `no_ambiguous_slash` |
+
+`context.input.path` holds no query, so the `//` in `?next=//login` is outside the path.
+
+```text
+http:request gate: policy denied this operation on 'api.example.com:443/v1//admin' [policy: no_ambiguous_slash].
+```
+
+- `no_ambiguous_slash` refuses every path on the host that holds `//` or `%2F`, including paths the
+  server treats as distinct resources. Scope it to the hosts whose paths your rules forbid.
+- Write the forbid on the path and its children, as `no_admin` does. A pattern on the end of the
+  path, such as `context.input.path like "*/admin"`, refuses `/v1//admin` and also
+  `/v1/users/admin`, and it permits `/v1/admin/` and `/v1/admin/export`.
+
 ### Bind a credential to one host and one method
 
 A `POST` to the Bedrock host on port 443 goes out with the key the box holds. Every other method on
@@ -357,7 +422,9 @@ strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will no
 Each refusal below is the text after `will not load: `. Two numberings appear. `rule N` counts from
 `1` in file order. `policy_N` is the engine's own name and counts from `0`, so `policy_0` is rule
 1. A rule with no `@id` is named by its effect and position, as
-`the permit rule with no @id (rule 1)`.
+`the permit rule with no @id (rule 1)`. When the engine can point at the text, the refusal ends
+with the line and column in the file, and often a hint in parentheses, such as
+``(did you mean `path`?)``.
 
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
@@ -374,7 +441,7 @@ permit (principal, action == Box::Action::"fs:read", resource)
 ```
 
 ```text
-failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition
+failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition at line 2, column 1
 ```
 
 A rule reads the request's own fields and the recorded history. This one calls out to an external
@@ -399,7 +466,7 @@ permit (principal, action == Box::Action::"fs:raed", resource);
 ```
 
 ```text
-policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"`; for policy `policy_0`, unable to find an applicable action given the policy scope constraints
+policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"` at line 1, column 30 (did you mean `Box::Action::"fs:read"`?); for policy `policy_0`, unable to find an applicable action given the policy scope constraints
 ```
 
 A field name is one the action carries, and [the action vocabulary](policy/actions.md) lists them.
@@ -411,7 +478,7 @@ when { context.input.paht like "~/project/*" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found
+policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found at line 2, column 8 (did you mean `path`?)
 ```
 
 An `operation` value is one of the fixed set its action has. The value for a listing is
@@ -423,7 +490,7 @@ when { context.input.operation == Box::FsReadOperation::"list" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid
+policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid at line 1, column 1 (valid entity eids: "read_content", "read_metadata", "enumerate", "read_link", "change_dir", "exec")
 ```
 
 ### An optional field read without a guard
@@ -438,7 +505,7 @@ when { context.input.program == "rm" && context.input.arg1 == "-rf" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec"
+policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec" at line 2, column 41 (try testing for the attribute's presence with `context.input has arg1 && ..`)
 ```
 
 ### A temporal clause the engine cannot evaluate
@@ -454,7 +521,7 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`)
+policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`) at line 3, column 3 (check the action name and event kind; event kinds are typically `request` or `response` and derive from the schema)
 ```
 
 The longest window is `24h`. The refusal offers to raise `max_window`, but that schema ships inside
@@ -468,7 +535,7 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema
+policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema at line 3, column 3 (every temporal `within` window is capped by the event schema's `max_window` (default 24h); either shorten this window or raise the cap with a `max_window = <interval>` directive at the top of the event schema)
 ```
 
 ### A literal that nothing can match
@@ -496,6 +563,25 @@ when { context.input.path like "~/project/" };
 policy compares an inert literal: rule @id("project_read") compares context.input.path with the pattern "~/project/", and a directory is spelled without a trailing slash; write "~/project"
 ```
 
+A host reaches policy in lowercase and without a trailing dot:
+
+```text
+@id("block_host")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "API.Example.com" };
+```
+
+```text
+policy compares an inert literal: rule @id("block_host") compares context.input.host with "API.Example.com", and a host is spelled in lowercase and without a trailing dot; write "api.example.com"
+```
+
+Two other host spellings each get their own refusal:
+
+- **A host that carries a port**, such as `api.example.com:443`. Write the name alone, and compare
+  `context.input.port` for the port.
+- **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
+  write `xn--bcher-kva.example`.
+
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
 path is in `program_path`:
@@ -520,6 +606,48 @@ when { context.input.path like "*/Users/dev/project/*" };
 
 ```text
 rule @id("later_home") compares context.input.path with the pattern "*/Users/dev/project/*", which names the operator home after a wildcard; a path under the operator home is spelled ~/…, so the pattern may match nothing
+```
+
+### A rule that checks `context.input` for two kinds of action
+
+The same field name can mean different things on different actions. On `fs:read`, `path` is a
+file. On `http:request`, `path` is the path part of a URL. So a rule that checks `context.input`
+covers one kind of action, and the error calls that kind a family. This rule checks `path` for a
+file read and for an HTTP request, and it refuses to load:
+
+```text
+@id("no_secrets")
+forbid (principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+```text
+policy reads the input without one action family: rule @id("no_secrets") reads context.input.path under actions of more than one family, and an input attribute means what the action makes it mean; write one rule for each family: [Box::Action::"fs:read"] and [Box::Action::"http:request"]
+```
+
+To fix it, write one rule for each family:
+
+```text
+@id("no_secrets_file")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/secrets.env" };
+
+@id("no_secrets_url")
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+Actions are in the same family when their names start the same way before the `:`. So
+`fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
+can't. Each MCP tool action is a family of its own.
+
+A rule that checks `context.input` and names no action gets the same error. Name the action the
+rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
+`action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
+
+```text
+forbid(principal, action, resource)
+when { action == Box::Action::"fs:read" && context.input.path like "*/secrets.env" };
 ```
 
 ### One `@id` on two rules

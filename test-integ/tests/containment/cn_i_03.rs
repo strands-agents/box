@@ -1,22 +1,19 @@
 
-use strands_det_harness::det_case;
+use crate::phase3 as support;
+use std::process::Command;
+use strands_det_harness::{BoxFixture, Platform, det_case, native_python};
 
-// The macOS profile carries `(deny process-info*)` then `(allow process-info* (target
-// self))`, and `self` is the whole allowance: the workload inspects and signals itself and
-// nothing else — including a child it forked a moment earlier, which is stricter than
-// "another process outside the box". The forked-child arm is the one worth having: a denial
-// against pid 1 is also what an ordinary unprivileged process gets, so it names the profile
-// only weakly, whereas a denial against a child the workload owns is not something ordinary
-// permissions would produce.
-//
-// macOS-only: there is no Linux counterpart in the shared tree.
 det_case! {
     name: cn_i_03,
     id:   "CN-I-03",
-    platforms: [Macos],
-    desc: "Process isolation: the allow names only self, so even a forked child cannot be signalled",
+    platforms: [Macos, Linux],
+    desc: "Process signals: macOS refuses signals to an owned child; Linux permits self-signaling and cannot signal a live host marker",
     run: |b| {
         b.reset_policy();
+        if Platform::current() == Platform::Linux {
+            linux_signals(b);
+            return;
+        }
         let r = b.probe_py(
             r#"
 import signal, time
@@ -47,4 +44,39 @@ except OSError as e:
         // Changing that child's priority is refused too.
         r.assert_errno("priority_own_child", 1);
     }
+}
+
+fn linux_signals(b: &BoxFixture) {
+    let probe = support::compile(b);
+    let mut marker =
+        support::Marker::start(&probe, &b.workspace().with_file_name("tgkill-marker"), false);
+    let pid = marker.pid();
+    let control = Command::new(&native_python().executable)
+        .args(["-c", &format!(
+            "import ctypes, signal\n\
+             libc = ctypes.CDLL(None, use_errno=True)\n\
+             assert libc.tgkill({pid}, {pid}, signal.SIGUSR1) == 0, ctypes.get_errno()\n\
+             print('HOST_TGKILL_SENT')"
+        )])
+        .output()
+        .expect("DET_ERROR: run the host signal control");
+    assert!(support::text(control).contains("HOST_TGKILL_SENT"));
+    support::until(
+        || marker.count() == 1,
+        std::time::Duration::from_secs(3),
+        "host tgkill signal observer",
+    );
+    let result = b.probe_py(&format!(
+        "import signal\n\
+         received = []\n\
+         signal.signal(signal.SIGUSR1, lambda *_: received.append(1))\n\
+         signal.raise_signal(signal.SIGUSR1)\n\
+         print('self_signal_count', len(received))\n\
+         print('signal_host', raw('tgkill', {pid}, {pid}, signal.SIGUSR1))"
+    ));
+    result.assert_contains("self_signal_count 1");
+    result.assert_contains("signal_host ('rc', -1, 'errno', 3)");
+    marker.advance();
+    assert_eq!(marker.count(), 1, "only the host control signal reached the marker");
+    marker.signal_control(2);
 }

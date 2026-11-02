@@ -375,6 +375,73 @@ fn the_boxs_own_private_tree_is_unreachable_from_inside() {
     );
 }
 
+/// The box's own private tree is unwritable from inside, the helper images included.
+#[test]
+fn the_boxs_own_private_tree_is_unwritable_from_inside() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_permitting_everything("private-write");
+    let private = box_.root().join("private");
+    let mut existing = vec![private.join("policy.dw")];
+    if let Ok(images) = std::fs::read_dir(private.join("trampoline")) {
+        existing.extend(images.flatten().map(|image| image.path()));
+    }
+    #[cfg(target_os = "macos")]
+    assert!(
+        existing.len() > 1,
+        "the helper image must exist for its protection to mean anything: {existing:?}"
+    );
+    let before: Vec<Vec<u8>> = existing
+        .iter()
+        .map(|path| std::fs::read(path).expect("the private file reads"))
+        .collect();
+    let planted = [
+        private.join("planted"),
+        private.join("trampoline").join("planted.bin"),
+    ];
+
+    let mut script = String::new();
+    for path in &existing {
+        let quoted = shell_quote(path);
+        script.push_str(&format!(
+            "printf tampered >> {quoted}; printf tampered >| {quoted}; "
+        ));
+    }
+    for path in &planted {
+        script.push_str(&format!("printf planted > {}; ", shell_quote(path)));
+    }
+    script.push_str("printf done");
+    let output = probe(&box_, &script);
+
+    assert_ran(&output);
+    assert!(stdout(&output).ends_with("done"), "{output:?}");
+    for (path, bytes) in existing.iter().zip(&before) {
+        assert!(
+            std::fs::read(path).as_ref().ok() == Some(bytes),
+            "{} must be unchanged: {output:?}",
+            path.display()
+        );
+    }
+    for path in &planted {
+        assert!(
+            std::fs::symlink_metadata(path).is_err(),
+            "{} must not be created: {output:?}",
+            path.display()
+        );
+    }
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        raw_stderr(&output)
+            .lines()
+            .filter(|line| line.contains(&private.display().to_string())
+                && line.ends_with("Operation not permitted"))
+            .count(),
+        2 * existing.len() + planted.len(),
+        "the kernel refuses each attempt: {output:?}"
+    );
+}
+
 #[test]
 fn state_written_in_one_run_is_readable_by_the_next() {
     if !fixture::namespace_launcher_is_usable() {

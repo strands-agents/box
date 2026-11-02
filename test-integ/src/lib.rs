@@ -1569,6 +1569,8 @@ pub struct NativePython {
     /// the probe's agent. Deduplicated to the outermost; nothing above them is granted, and a path
     /// that is not there is never granted (the box refuses a grant on a nonexistent path at load).
     pub runtime_reads: Vec<PathBuf>,
+    /// Verified Linux Python extension directories that must load native code.
+    pub runtime_execs: Vec<PathBuf>,
     /// Compile-time hints the interpreter reported that do not exist on this host, each with why
     /// it was dropped (e.g. `sysconfig`'s `LIBDIR` naming the build machine's Xcode). Reported, not
     /// granted, not fabricated.
@@ -1586,6 +1588,7 @@ pub struct PyIdentity {
     /// Build-configuration hints: `sys.prefix` and `sysconfig`'s `LIBDIR`. These can name the
     /// machine the interpreter was built on rather than this host; each is used only if it exists.
     pub hints: Vec<PathBuf>,
+    pub extensions: Vec<PathBuf>,
 }
 
 /// The query run on the host against a candidate: prints one JSON object with the implementation
@@ -1606,10 +1609,23 @@ def image():
     except Exception:
         pass
     return sys.executable
-roots = [sys.base_prefix, sysconfig.get_paths().get("stdlib", "")]
-hints = [sys.prefix, sysconfig.get_config_var("LIBDIR") or ""]
+roots = [sysconfig.get_paths().get("stdlib", "")]
+hints = [sysconfig.get_config_var("LIBDIR") or ""]
+if sys.platform != "linux":
+    roots.append(sys.base_prefix)
+    hints.append(sys.prefix)
+extensions = []
+if sys.platform == "linux":
+    try:
+        import _ctypes
+        extension = getattr(_ctypes, "__file__", None)
+        if extension:
+            extensions.append(os.path.dirname(os.path.realpath(extension)))
+    except ImportError:
+        pass
 print(json.dumps({"implementation": sys.implementation.name, "image": image(),
-                  "roots": [d for d in roots if d], "hints": [d for d in hints if d]}))
+                  "roots": [d for d in roots if d], "hints": [d for d in hints if d],
+                  "extensions": extensions}))
 "#;
 
 /// Whether `path` is Apple's launcher shim (or any `/usr/bin` interpreter, which on macOS is one):
@@ -1640,10 +1656,27 @@ where
     I: IntoIterator<Item = PathBuf>,
     Q: Fn(&Path) -> Result<PyIdentity, String>,
 {
+    let host = if cfg!(target_os = "macos") {
+        Platform::Macos
+    } else {
+        Platform::Linux
+    };
+    select_native_python_on(host, candidates, query)
+}
+
+fn select_native_python_on<I, Q>(
+    platform: Platform,
+    candidates: I,
+    query: Q,
+) -> Result<NativePython, String>
+where
+    I: IntoIterator<Item = PathBuf>,
+    Q: Fn(&Path) -> Result<PyIdentity, String>,
+{
     let mut rejected = Vec::new();
     for candidate in candidates {
         let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
-        if is_apple_shim(&candidate) || is_apple_shim(&canonical) {
+        if platform == Platform::Macos && (is_apple_shim(&candidate) || is_apple_shim(&canonical)) {
             rejected.push(format!(
                 "{}: Apple launcher shim under /usr/bin",
                 candidate.display()
@@ -1685,7 +1718,7 @@ where
                 continue;
             }
         };
-        if is_apple_shim(&image) {
+        if platform == Platform::Macos && is_apple_shim(&image) {
             rejected.push(format!(
                 "{}: executes as a /usr/bin image",
                 candidate.display()
@@ -1747,9 +1780,39 @@ where
             .cloned()
             .collect();
         outer.sort();
+        let runtime_execs = if platform == Platform::Linux {
+            match identity
+                .extensions
+                .iter()
+                .map(|path| existing_directory(path))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(paths) => paths,
+                Err(why) => {
+                    rejected.push(format!(
+                        "{}: extension directory {why}",
+                        candidate.display()
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if runtime_execs
+            .iter()
+            .any(|path| !outer.iter().any(|root| path.starts_with(root)))
+        {
+            rejected.push(format!(
+                "{}: extension directory is outside its runtime reads",
+                candidate.display()
+            ));
+            continue;
+        }
         return Ok(NativePython {
             executable: image,
             runtime_reads: outer,
+            runtime_execs,
             rejected_hints,
         });
     }
@@ -1812,6 +1875,7 @@ pub fn query_python_identity(candidate: &Path) -> Result<PyIdentity, String> {
         image: PathBuf::from(value["image"].as_str().unwrap_or_default()),
         roots: paths("roots"),
         hints: paths("hints"),
+        extensions: paths("extensions"),
     })
 }
 
@@ -1880,9 +1944,7 @@ pub fn macos_developer_tool(name: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// The probe's agent configuration: the interpreter's image as the command (implicitly executable),
-/// its runtime directories as `read` grants beside the workspace, HOME in the workspace, and the
-/// declared search path. Nothing else is widened.
+/// The probe grants the verified Python runtime, including native extension execution on Linux.
 pub fn native_probe_config(template: &str, workspace: &Path, python: &NativePython) -> String {
     let quoted = |p: &Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
     let command = serde_json::to_string(&[python.executable.to_string_lossy()]).unwrap();
@@ -1890,6 +1952,19 @@ pub fn native_probe_config(template: &str, workspace: &Path, python: &NativePyth
     let mut config = template.replacen("{command}", &command, 1);
     if !extra.is_empty() {
         config = config.replacen("read = [", &format!("read = [{}, ", extra.join(", ")), 1);
+    }
+    if !python.runtime_execs.is_empty() {
+        let entries = python
+            .runtime_execs
+            .iter()
+            .map(|path| quoted(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        config = config.replacen(
+            "[agent.filesystem]",
+            &format!("[agent.filesystem]\nexec = [{entries}]"),
+            1,
+        );
     }
     // The CLT interpreter needs an entropy source during hash initialization.
     // This is one read-only device in this probe's fixture, not a wider Core minimum.
@@ -2141,6 +2216,16 @@ pub fn run_case<F: FnOnce(&BoxFixture)>(id: &str, desc: &str, body: F) {
 /// note and runs nothing; the reducer accepts that SKIP only because the compiled
 /// manifest carries the same declaration.
 pub fn run_case_on<F: FnOnce(&BoxFixture)>(id: &str, platforms: &[Platform], desc: &str, body: F) {
+    run_case_on_with_quarantine(id, platforms, desc, body, quarantine::TEMPORARY_QUARANTINE);
+}
+
+fn run_case_on_with_quarantine<F: FnOnce(&BoxFixture)>(
+    id: &str,
+    platforms: &[Platform],
+    desc: &str,
+    body: F,
+    quarantines: &[quarantine::Quarantine],
+) {
     let current = Platform::current();
     if !platforms.is_empty() && !platforms.contains(&current) {
         let dir = verdict::results_dir();
@@ -2159,7 +2244,10 @@ pub fn run_case_on<F: FnOnce(&BoxFixture)>(id: &str, platforms: &[Platform], des
     // TEMPORARY QUARANTINE (test-integ/QUARANTINE.md): an authorized (case, platform) cell records
     // an explicit SKIP with the one authorized note and runs nothing. The platform still applies to
     // the case; the reducer accepts this SKIP only because it reads the same compiled list.
-    if let Some(q) = quarantine::lookup(id, current.as_str()) {
+    if let Some(q) = quarantines
+        .iter()
+        .find(|q| q.id == id && q.platform == current.as_str())
+    {
         let dir = verdict::results_dir();
         let _ = std::fs::create_dir_all(&dir);
         let note = quarantine::note(q);
@@ -2781,6 +2869,14 @@ mod tests {
     /// Run `run_case_on` for `id` as if on `platform`, capturing the row it writes. The body panics
     /// with a DET_ERROR sentinel so a body that RAN is visible as an ERROR row carrying the sentinel.
     fn quarantine_probe(id: &str, platform: &str) -> verdict::Row {
+        quarantine_probe_with(id, platform, quarantine::TEMPORARY_QUARANTINE)
+    }
+
+    fn quarantine_probe_with(
+        id: &str,
+        platform: &str,
+        quarantines: &[quarantine::Quarantine],
+    ) -> verdict::Row {
         let dir = tempfile::tempdir().expect("tempdir");
         let base = user_home().join(".det-harness-boxes");
         std::fs::create_dir_all(&base).expect("create the box base");
@@ -2796,9 +2892,13 @@ mod tests {
             std::env::set_var("PLATFORM", platform);
         }
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            run_case_on(id, &[], "probe", |_fixture| {
-                panic!("DET_ERROR: BODY_RAN {id}")
-            });
+            run_case_on_with_quarantine(
+                id,
+                &[],
+                "probe",
+                |_fixture| panic!("DET_ERROR: BODY_RAN {id}"),
+                quarantines,
+            );
         }));
         unsafe {
             std::env::remove_var("PLATFORM");
@@ -2818,13 +2918,11 @@ mod tests {
 
     #[test]
     fn a_quarantined_cell_records_the_authorized_skip_and_never_runs_its_body() {
-        for id in ["CN-W-05", "CN-W-06"] {
-            let row = quarantine_probe(id, "linux");
+        for entry in quarantine::TEST_QUARANTINE {
+            let id = entry.id;
+            let row = quarantine_probe_with(id, "linux", quarantine::TEST_QUARANTINE);
             assert_eq!(row.result, "SKIP", "{id}: {}", row.note);
-            assert_eq!(
-                row.note,
-                quarantine::note(quarantine::lookup(id, "linux").unwrap())
-            );
+            assert_eq!(row.note, quarantine::note(entry));
             assert!(
                 !row.note.contains("BODY_RAN"),
                 "the body must not run: {}",
@@ -2848,6 +2946,14 @@ mod tests {
             "{id}: neither the body's sentinel nor the fixture's launch attempt: {}",
             row.note
         );
+    }
+
+    #[test]
+    fn the_restored_workloads_run_on_linux() {
+        for id in ["CN-W-05", "CN-W-06"] {
+            let row = quarantine_probe(id, "linux");
+            assert_run_was_attempted(id, &row);
+        }
     }
 
     #[test]
@@ -2876,9 +2982,13 @@ mod tests {
             std::env::set_var("DET_RESULTS_DIR", dir.path());
             std::env::set_var("PLATFORM", "linux");
         }
-        run_case_on("CN-W-05", &[Platform::Macos], "probe", |_fixture| {
-            panic!("DET_ERROR: BODY_RAN")
-        });
+        run_case_on_with_quarantine(
+            "CN-Q-01",
+            &[Platform::Macos],
+            "probe",
+            |_fixture| panic!("DET_ERROR: BODY_RAN"),
+            quarantine::TEST_QUARANTINE,
+        );
         unsafe {
             std::env::remove_var("PLATFORM");
             std::env::remove_var("DET_RESULTS_DIR");
@@ -2904,6 +3014,7 @@ mod tests {
             image: image.to_path_buf(),
             roots: roots.to_vec(),
             hints: hints.to_vec(),
+            extensions: Vec::new(),
         }
     }
 
@@ -2933,7 +3044,7 @@ mod tests {
     fn the_apple_launcher_shim_is_never_selected_even_when_first() {
         let (_tmp, version_root, image, stdlib) = real_framework_runtime();
         let candidates = vec![PathBuf::from("/usr/bin/python3"), image.clone()];
-        let chosen = select_native_python_from(candidates, |path| {
+        let chosen = select_native_python_on(Platform::Macos, candidates, |path| {
             assert_ne!(
                 path,
                 Path::new("/usr/bin/python3"),
@@ -2951,6 +3062,86 @@ mod tests {
         // Nested runtime directories collapse to the framework version root: one grant, nothing above it.
         assert_eq!(chosen.runtime_reads, vec![version_root]);
         assert!(chosen.rejected_hints.is_empty());
+    }
+
+    #[test]
+    fn linux_selects_a_usr_bin_image_after_verifying_its_identity() {
+        let (_tmp, version_root, _image, _stdlib) = real_framework_runtime();
+        let image = PathBuf::from("/usr/bin/env").canonicalize().unwrap();
+        let chosen = select_native_python_on(Platform::Linux, vec![image.clone()], |path| {
+            assert_eq!(path, image);
+            Ok(identity(
+                "cpython",
+                &image,
+                std::slice::from_ref(&version_root),
+                &[],
+            ))
+        })
+        .expect("Linux system images are not Apple launchers");
+        assert_eq!(chosen.executable, image);
+        assert_eq!(chosen.runtime_reads, vec![version_root]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_python_discovery_grants_runtime_libraries_without_the_usr_prefix() {
+        let chosen = select_native_python_from(native_python_candidates(), query_python_identity)
+            .expect("the Linux test host needs CPython");
+        assert!(!chosen.runtime_reads.is_empty());
+        assert!(!chosen.runtime_reads.contains(&PathBuf::from("/usr")));
+        assert!(!chosen.runtime_reads.contains(&PathBuf::from("/")));
+        assert!(!chosen.runtime_execs.is_empty());
+        assert!(chosen.runtime_execs.iter().all(|path| {
+            path.is_dir()
+                && chosen
+                    .runtime_reads
+                    .iter()
+                    .any(|root| path.starts_with(root))
+        }));
+    }
+
+    #[test]
+    fn linux_extension_exec_is_verified_and_stays_inside_the_runtime_reads() {
+        let (_tmp, root, image, stdlib) = real_framework_runtime();
+        let extension = stdlib.join("lib-dynload");
+        std::fs::create_dir(&extension).unwrap();
+        let query = |path: PathBuf| {
+            let mut value = identity("cpython", &image, std::slice::from_ref(&root), &[]);
+            value.extensions = vec![path];
+            value
+        };
+        let selected = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(extension.clone()))
+        })
+        .unwrap();
+        assert_eq!(selected.runtime_reads, vec![root.clone()]);
+        assert_eq!(selected.runtime_execs, vec![extension.clone()]);
+        let config = native_probe_config(
+            "[agent]\ncommand = {command}\n[agent.filesystem]\nread = [\"/workspace\"]\nwrite = [\"/workspace\"]\n",
+            Path::new("/workspace"),
+            &selected,
+        );
+        let exec_line = config
+            .lines()
+            .find(|line| line.starts_with("exec = "))
+            .unwrap();
+        assert_eq!(
+            exec_line,
+            format!("exec = [{:?}]", extension.to_string_lossy())
+        );
+        let missing = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(stdlib.join("absent")))
+        })
+        .unwrap_err();
+        assert!(
+            missing.contains("extension directory") && missing.contains("not there"),
+            "{missing}"
+        );
+        let outside = select_native_python_on(Platform::Linux, vec![image.clone()], |_| {
+            Ok(query(root.parent().unwrap().to_path_buf()))
+        })
+        .unwrap_err();
+        assert!(outside.contains("outside its runtime reads"), "{outside}");
     }
 
     #[test]
@@ -3088,7 +3279,8 @@ mod tests {
     #[test]
     fn a_candidate_that_executes_as_a_usr_bin_image_or_is_not_cpython_is_rejected() {
         let (_tmp, version_root, image, _stdlib) = real_framework_runtime();
-        let err = select_native_python_from(
+        let err = select_native_python_on(
+            Platform::Macos,
             vec![
                 PathBuf::from("/opt/a/python3"),
                 PathBuf::from("/opt/b/python3"),
@@ -3131,6 +3323,7 @@ mod tests {
                 "/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9",
             )],
             rejected_hints: vec![],
+            runtime_execs: Vec::new(),
         };
         let config = native_probe_config(template, Path::new("/b/ws"), &python);
         assert!(config.contains("command = [\"/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python\"]"), "{config}");
@@ -3377,7 +3570,12 @@ mod tests {
         let id = query_python_identity(&py).expect("this host's python answers the identity query");
         assert_eq!(id.implementation, "cpython");
         assert!(id.image.exists(), "{:?}", id.image);
-        assert_eq!(id.roots.len(), 2, "base_prefix and stdlib: {:?}", id.roots);
+        assert_eq!(
+            id.roots.len(),
+            if cfg!(target_os = "linux") { 1 } else { 2 },
+            "the host's runtime roots: {:?}",
+            id.roots
+        );
         assert!(
             id.roots.iter().all(|r| r.is_dir()),
             "a running interpreter's roots exist: {:?}",

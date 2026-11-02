@@ -1,7 +1,7 @@
 
 use strands_det_harness::det_case;
 
-// Another process cannot replace or impersonate an endpoint. macOS only.
+// Another process cannot replace or impersonate an endpoint.
 //
 // An alias derives its socket from its own path and takes no socket argument. That rule
 // is what stops the workload pointing an alias at a socket of its choosing, so the
@@ -11,7 +11,7 @@ use strands_det_harness::det_case;
 det_case! {
     name: cn_c_07,
     id:   "CN-C-07",
-    platforms: [Macos],
+    platforms: [Macos, Linux],
     desc: "Alias argument: an alias derives its socket and refuses a socket argument with exit 125",
     run: |b| {
         b.apply_policy(

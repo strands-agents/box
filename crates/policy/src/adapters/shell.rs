@@ -918,6 +918,45 @@ mod tests {
         );
     }
 
+    /// **A failed metadata read records an error**, so it charges no `::response` rule.
+    #[tokio::test]
+    async fn a_failed_metadata_read_records_an_error() {
+        let interceptor = interceptor(
+            r#"permit(principal, action == Box::Action::"fs:read", resource);
+               @id("after_a_metadata_answer")
+               forbid(principal, action == Box::Action::"fs:read", resource)
+               when { context.input.path == "/work/gated" }
+               when temporal {
+                   formerly within 60s
+                   Box::Action::"fs:read"::response{ input.path: "/work/refused" }
+               };"#,
+        );
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied] {
+            interceptor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: "/work/refused",
+                    operation: KernelFsOperation::ReadMetadata {
+                        follow_symlinks: true,
+                    },
+                })
+                .await
+                .expect("the metadata read is admitted")
+                .record_outcome(EffectOutcome::Kernel(EffectResult::Failed(kind)))
+                .await
+                .expect("outcome reporting is best effort");
+        }
+        assert!(
+            interceptor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: "/work/gated",
+                    operation: KernelFsOperation::ReadContent,
+                })
+                .await
+                .is_ok(),
+            "a failed metadata read is not a response"
+        );
+    }
+
     /// **A relative symlink target is judged on the path it resolves to from the link's
     /// directory**, lexically: `.` and `..` close, surplus `..` stops at the root, a nested link
     /// resolves from its own directory, and an empty target, an absolute target, or a rename source

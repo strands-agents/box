@@ -82,6 +82,11 @@ A host is matched in lowercase. A path is matched case-sensitively, against the 
 gateway's canonical form. Two routes, or two entries in one route, can't match the same
 destination, and an http MCP server's host can't appear in a route.
 
+The canonical form keeps repeated slashes, and a path prefix matches by whole segment. So
+`api.example.com/v1` covers `/v1//chat`, and `api.example.com/v1/chat` doesn't cover `/v1//chat`.
+[Forbid one URL path on a host](policy.md#forbid-one-url-path-on-a-host) shows rules for these
+paths in policy.
+
 ## Credential sources
 
 | `secret.ref` | Read from | When |

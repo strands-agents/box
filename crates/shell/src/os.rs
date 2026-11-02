@@ -18,6 +18,17 @@ use tokio::sync::mpsc;
 /// Monotonic counter for virtual PIDs.
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 
+#[derive(Default)]
+pub(crate) struct Tasks(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Metadata about a directory entry.
 pub struct DirEntry {
     pub name: String,
@@ -212,6 +223,7 @@ pub struct Process {
     pub last_bg_pid: Option<u32>,
     /// Background job handles.
     pub bg_jobs: Vec<tokio::task::JoinHandle<(i32, String, String)>>,
+    background_tasks: Tasks,
     /// Stack of local variable scopes (for shell functions).
     /// Each entry maps variable names to their previous value (None = was unset).
     local_scopes: Vec<HashMap<String, Option<String>>>,
@@ -298,6 +310,15 @@ impl Default for ProcessLimits {
 }
 
 impl Process {
+    pub(crate) fn add_background_job(
+        &mut self,
+        job: tokio::task::JoinHandle<(i32, String, String)>,
+    ) {
+        self.background_tasks.0.retain(|task| !task.is_finished());
+        self.background_tasks.0.push(job.abort_handle());
+        self.bg_jobs.push(job);
+    }
+
     /// Extract the configured resource limits from this process.
     pub fn limits(&self) -> ProcessLimits {
         ProcessLimits {
@@ -356,6 +377,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,
@@ -398,6 +420,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,
@@ -450,6 +473,7 @@ impl Process {
             nounset_error: false,
             last_bg_pid: None,
             bg_jobs: Vec::new(),
+            background_tasks: Tasks::default(),
             local_scopes: Vec::new(),
             fds: HashMap::new(),
             next_fd: 3,
@@ -868,6 +892,18 @@ pub(crate) fn append_limited(target: &mut String, value: &str, limit: usize) -> 
     false
 }
 
+/// Return the largest char boundary in `s` at or below `index`.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Read from an async reader into a String, enforcing an optional size limit.
 /// Returns Err if the limit is exceeded.
 pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
@@ -1237,6 +1273,7 @@ pub(crate) enum HostIdentity {
     Present {
         path: PathBuf,
         parent: PathBuf,
+        root: PathBuf,
         #[cfg(unix)]
         device: u64,
         #[cfg(unix)]
@@ -1249,6 +1286,7 @@ pub(crate) enum HostIdentity {
     Missing {
         path: PathBuf,
         parent: PathBuf,
+        root: PathBuf,
         #[cfg(unix)]
         parent_device: u64,
         #[cfg(unix)]
@@ -1349,6 +1387,12 @@ pub trait Kernel: Send + Sync {
     async fn lstat(&self, proc: &Process, path: Resolved) -> FileStat;
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: Resolved, mode: i32) -> bool;
+    /// Stat a file (follows symlinks), and report a refusal as an error.
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Stat a file (does not follow symlinks), and report a refusal as an error.
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Check access permissions, and report a refusal as an error.
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool>;
     /// Canonicalize a path (resolve symlinks).
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf>;
     /// Check if a path is an executable file.

@@ -16,8 +16,15 @@ impl Containment {
         config: &ContainmentConfig,
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
+        native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
-        apply_backend(Self::detect_backend, config, egress_handoff, confirm_fd)
+        apply_backend(
+            Self::detect_backend,
+            config,
+            egress_handoff,
+            confirm_fd,
+            native_filesystem_handoff,
+        )
     }
 
     fn detect_backend() -> Result<Box<dyn ContainmentBackend>, ContainmentError> {
@@ -145,11 +152,23 @@ pub(crate) fn apply_backend<B: std::ops::Deref<Target = dyn ContainmentBackend>>
     config: &ContainmentConfig,
     egress_handoff: Option<&std::os::unix::net::UnixStream>,
     confirm_fd: Option<std::os::fd::RawFd>,
+    native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
 ) -> Result<(), ContainmentError> {
+    if native_filesystem_handoff.is_some() {
+        return Err(ContainmentError::UnsupportedCapability {
+            capability: "native filesystem notification handoff".to_string(),
+            backend: "this containment build".to_string(),
+        });
+    }
     crate::floors::require_all(config)?;
     let backend = select_backend()?;
     backend.validate_config(config)?;
-    backend.apply(config, egress_handoff, confirm_fd)
+    backend.apply(
+        config,
+        egress_handoff,
+        confirm_fd,
+        native_filesystem_handoff,
+    )
 }
 
 #[cfg(test)]
@@ -267,6 +286,7 @@ mod tests {
             &config,
             None,
             None,
+            None,
         )
         .expect_err("the credential floor must refuse the request");
 
@@ -292,6 +312,7 @@ mod tests {
             &ContainmentConfig::new(),
             None,
             None,
+            None,
         )
         .expect_err("backend selection must still refuse unsupported hosts");
 
@@ -306,5 +327,28 @@ mod tests {
             } if reason == "synthetic unavailable backend"),
             "{error}"
         );
+    }
+    #[test]
+    fn an_unavailable_native_handoff_refuses_before_backend_selection() {
+        let (handoff, _) = std::os::unix::net::UnixStream::pair().unwrap();
+        let selected = std::cell::Cell::new(false);
+        let result = apply_backend(
+            || -> Result<Box<dyn ContainmentBackend>, ContainmentError> {
+                selected.set(true);
+                Err(ContainmentError::PlatformUnsupported {
+                    platform: Platform::Linux,
+                    reason: "synthetic unavailable backend".to_string(),
+                })
+            },
+            &ContainmentConfig::new(),
+            None,
+            None,
+            Some(&handoff),
+        );
+        assert!(matches!(
+            result,
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+        assert!(!selected.get());
     }
 }

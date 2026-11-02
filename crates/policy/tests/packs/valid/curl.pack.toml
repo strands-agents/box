@@ -1,0 +1,20 @@
+# A tool pack for curl: get. Its flags use characters that a command word does not: a period,
+# an underscore, an uppercase letter, and `#`.
+
+pack    = "curl"
+program = "curl"
+format  = 1
+version = 1
+
+[effects]
+network = "Contacts a remote server"
+upload  = "Sends local data to a remote server"
+
+[shell.get]
+usage = "curl get [options] <url>"
+adds  = ["network"]
+options.http1_1    = { flag = ["--http1.1"] }
+options.short_form = { flag = ["--short_form"] }
+options.short      = { flag = ["--Short"] }
+options.progress   = { flag = ["-#", "--progress-bar"] }
+options.data       = { flag = ["-d", "--data"], value = "required", adds = ["upload"] }

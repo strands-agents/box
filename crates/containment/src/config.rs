@@ -44,8 +44,7 @@ pub struct ContainmentConfig {
     /// beneath one (the CA trust bundle) still applies. Empty for the agent box.
     #[serde(default, deserialize_with = "deserialize_canonical_paths")]
     discovery_denies: Vec<PathBuf>,
-    /// Whether the leaf renders `(allow process-exec*)` in addition to its exec literals, and a
-    /// `file-map-executable` allow over its writable grants. False for the agent box.
+    /// Whether a leaf executes code from its readable and writable grants.
     #[serde(default)]
     broad_exec: bool,
     /// Whether the process may reach the host services a bundled JS/Node runtime touches at startup:
@@ -132,9 +131,7 @@ impl ContainmentConfig {
         self
     }
 
-    /// Let a leaf `exec` any reachable binary (`process-exec*`, in addition to its exec literals) and
-    /// load what it compiles in its writable grants. Leaf-only and macOS-only; the agent box never
-    /// calls this.
+    /// Let a leaf execute reachable binaries and load code from its readable and writable grants.
     #[must_use]
     pub fn allow_broad_exec(mut self) -> Self {
         self.broad_exec = true;
@@ -610,7 +607,15 @@ impl ContainmentConfig {
                 )));
             }
         }
-        Ok(())
+        // Exact read pairing keeps coverage within credential consent, while the backend checks ordinary grants.
+        crate::validate_grants(
+            &self
+                .paths
+                .iter()
+                .filter(|grant| self.credential_store_exception_covers(grant))
+                .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -1142,6 +1147,30 @@ mod tests {
                 .contains("must have a read grant on Linux"),
             "the refusal names the missing operation: {error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credential_write_coverage_requires_contents_not_directory_entries() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let cache = home.path().join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).expect("a credential cache");
+        for (read_scope, accepted) in [(Scope::Dir, false), (Scope::Root, true)] {
+            let config = ContainmentConfig::new()
+                .anchored_at(home.path())
+                .allow_credential_store(&cache, Operation::Write, Scope::Root)
+                .expect("a write grant")
+                .allow_credential_store(&cache, Operation::Read, read_scope)
+                .expect("a read grant");
+            let result = ContainmentConfig::from_json(&config.to_json().expect("serialize"));
+            assert_eq!(result.is_ok(), accepted, "{read_scope:?}: {result:?}");
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(ContainmentError::WriteOnlyUnsupported { .. })
+                ));
+            }
+        }
     }
 
     #[test]

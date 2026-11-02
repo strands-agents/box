@@ -1,5 +1,5 @@
 use crate::phase3 as support;
-use strands_det_harness::det_case;
+use strands_det_harness::{Platform, det_case};
 
 det_case! {
     name: cn_t_01,
@@ -22,8 +22,11 @@ det_case! {
                 &format!("read_file = [{}, ", quoted(&agent)), 1
             );
             format!("{text}\n[tool.phase3]\ncommand = [{}]\nworkspace = {}\n\
-                [tool.phase3.filesystem]\nread_file = [{}]\nwrite = [{}]\n",
-                quoted(&probe), quoted(&tool_work), quoted(&tool), quoted(&tool_work))
+                [tool.phase3.filesystem]\nread_file = [{}]\nwrite = [{}]\n{}",
+                quoted(&probe), quoted(&tool_work), quoted(&tool), quoted(&tool_work),
+                if Platform::current() == Platform::Linux {
+                    format!("read = [{}]\n", quoted(&tool_work))
+                } else { String::new() })
         };
         let control = b.run_sh_with_config(edit, &format!(
             "IFS= read -r data < {}; printf 'AGENT_CONTROL %s\\n' \"$data\"", support::q(&agent)));

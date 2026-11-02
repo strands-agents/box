@@ -6,12 +6,15 @@ mod adapters;
 mod address;
 mod cap;
 mod catalog;
+mod check;
 mod decision;
 mod dogwood;
 mod error;
 mod mcp_schema;
 mod observe;
 mod outcome;
+#[expect(dead_code, reason = "no caller loads a tool pack yet")]
+mod pack;
 mod path;
 mod policy;
 mod request;
@@ -32,6 +35,7 @@ pub use catalog::{
     CatalogRefusal, CatalogStage, CompleteCatalog, DiscoveryFailure, ListPage, MAXIMUM_LIST_BYTES,
     MAXIMUM_LIST_PAGES, McpServerKind, ServerDiscovery, ToolCatalogs,
 };
+pub use check::{Finding, Location, PolicyCheck, RuleRef};
 pub use decision::{Decision, DenyReason, PolicyAttribution, RuleId};
 pub use dogwood::event_schema_source;
 pub use error::{PolicyDiagnostic, PolicyError, PolicyStagingError};

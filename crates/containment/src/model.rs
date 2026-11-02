@@ -93,6 +93,10 @@ pub struct PreparedFilesystemPath {
     original: PathBuf,
     resolved: PathBuf,
     is_file: bool,
+    #[cfg(target_os = "linux")]
+    identity: ObjectIdentity,
+    #[cfg(target_os = "linux")]
+    pin: ObjectPin,
 }
 
 impl PreparedFilesystemPath {
@@ -100,11 +104,20 @@ impl PreparedFilesystemPath {
         let path = path.as_ref();
         let original = absolute_path(path)?;
         let resolved = canonicalize_existing(&original)?;
+        #[cfg(target_os = "linux")]
+        let pin = ObjectPin::open(&resolved)?;
+        #[cfg(target_os = "linux")]
+        let is_file = pin.0.identity.kind != libc::S_IFDIR;
+        #[cfg(not(target_os = "linux"))]
         let is_file = !resolved.is_dir();
         Ok(Self {
             original,
             resolved,
             is_file,
+            #[cfg(target_os = "linux")]
+            identity: pin.0.identity,
+            #[cfg(target_os = "linux")]
+            pin,
         })
     }
 
@@ -118,6 +131,82 @@ impl PreparedFilesystemPath {
     #[must_use]
     pub fn is_directory(&self) -> bool {
         !self.is_file
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectIdentity {
+    device: u64,
+    inode: u64,
+    kind: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl ObjectIdentity {
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            kind: metadata.mode() & libc::S_IFMT,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectPin(std::sync::Arc<PinnedObject>);
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PinnedObject {
+    identity: ObjectIdentity,
+    file: std::sync::Mutex<Option<File>>,
+}
+
+#[cfg(target_os = "linux")]
+impl PartialEq for ObjectPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity == other.0.identity
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for ObjectPin {}
+
+#[cfg(target_os = "linux")]
+impl ObjectPin {
+    fn open(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let open = || -> std::io::Result<_> {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                .open(path)?;
+            let identity = ObjectIdentity::from_metadata(&file.metadata()?);
+            Ok(Self(std::sync::Arc::new(PinnedObject {
+                identity,
+                file: std::sync::Mutex::new(Some(file)),
+            })))
+        };
+        open().map_err(|source| ContainmentError::PathCanonicalization {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub(crate) fn release(&self) -> Result<()> {
+        self.0
+            .file
+            .lock()
+            .map_err(|_| {
+                ContainmentError::ConfigValidation("grant object pin lock is poisoned".to_string())
+            })?
+            .take();
+        Ok(())
     }
 }
 
@@ -366,6 +455,12 @@ pub(crate) struct PathGrant {
     /// Every node a lookup of this grant traverses, resolved once when the grant is built.
     #[serde(skip)]
     nodes: Vec<PathBuf>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    pub(crate) identity: Option<ObjectIdentity>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    pub(crate) pin: Option<ObjectPin>,
 }
 
 impl PathGrant {
@@ -412,6 +507,10 @@ impl PathGrant {
             operation: Operation::Deny,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: None,
+            #[cfg(target_os = "linux")]
+            pin: None,
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -452,6 +551,10 @@ impl PathGrant {
             operation,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: Some(path.identity),
+            #[cfg(target_os = "linux")]
+            pin: Some(path.pin),
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -531,6 +634,13 @@ impl PathGrant {
             return Ok(());
         }
         let live = PreparedFilesystemPath::new(&self.original)?;
+        #[cfg(target_os = "linux")]
+        if self.identity != Some(live.identity) {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "filesystem grant object changed before apply: {}",
+                self.original.display(),
+            )));
+        }
         if live.resolved != self.resolved || live.is_directory() != self.is_directory() {
             return Err(ContainmentError::ConfigValidation(format!(
                 "filesystem grant changed before apply: original={}, recorded resolved={}, \

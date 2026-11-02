@@ -879,18 +879,21 @@ Do not treat any of these as settled by the code existing.
   native-egress control. What no end-to-end test covers is a **filesystem** refusal from inside a
   stdio server's leaf: `a_grantless_stdio_entry_is_still_contained` pins that translation, not the
   kernel.
-- **The Shell floor discards the path it approved. This is the sharpest one.**
-  `ReachFloor::approve_one` ends `.map(|_approved| ())`, so the canonical identity `Reach::approve`
-  resolved is thrown away and the vendored `VfsKernel::resolve_host` re-resolves the caller's
-  **string** and acts on that — the exact shape this file forbids twice. The race is winnable, not
-  theoretical: the workload holds blanket `file-write*` over its home, can run concurrently with a
-  broker call, and can retry, so swapping a directory for a symlink between approval and the effect
-  makes a process that is **not** OS-contained write outside the box. Fix by threading the approved
-  identity to the effect, or better by opening once under the root (`openat2` with
-  `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`) and acting on the descriptor. **Do not** "simplify"
-  `approve_one` into a bare `approve` call: `PathRefusal::Unreachable` and the outside-the-set case
-  share one message, so a path whose spelling is inside a root but whose identity is not would
-  silently become a pass.
+- **The Shell floor does not keep the path it approved.** `ReachFloor::approve_one` ends
+  `.map(|_approved| ())`. The vendored kernel judges a path on its host identity, refuses an effect
+  whose identity moved after that, and reaches the parent from the bind root with no symlink at any
+  component. So open, create, `mkdir`, `rm`, `rmdir`, rename, symlink, and `chmod` stay on what the
+  floor approved, which `a_pin_whose_host_identity_is_not_the_spelling_is_unavailable` and
+  `a_symlinked_ancestor_is_neither_pinned_nor_opened` pin. Two gaps remain. `list_dir`, `stat`,
+  `lstat`, `access`, `change_dir`, `read_link`, `canonicalize`, and `is_executable` act on the path
+  again after the check and hold no descriptor, and `glob` has no `Resolved`, so a directory swapped
+  in that window can show names and metadata outside the set. And the descriptor walk refuses
+  symlinks, not a swap of two real directories (`RENAME_SWAP`, `RENAME_EXCHANGE`), by the workload or
+  by a permitted `fs:move`. That effect stays inside the bind, and reaches only what those renames
+  followed by a permitted Shell effect already reach. It is not limited to native write reach: on
+  Linux a `deny` overmount moves with a renamed ancestor. **Do not** "simplify" `approve_one` into a bare `approve` call:
+  `PathRefusal::Unreachable` and the outside-the-set case share one message, so a path whose
+  spelling is inside a root but whose identity is not would silently become a pass.
 - **The alias image is readable by the workload on Linux, and execute-only breaks the launcher.**
   `read -r leaked < "$ALIAS"` returns `\x7fELF`. On macOS the profile carries the property by itself
   (`process-exec` plus `file-read-metadata`, never `file-read*`); on Linux a bind mount cannot

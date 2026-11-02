@@ -30,7 +30,7 @@ use strands_det_harness::det_case;
 det_case! {
     name: cn_f_04,
     id: "CN-F-04",
-    platforms: [Macos],
+    platforms: [Macos, Linux],
     desc: "Recorded gap: unlink-then-create and mkdir carry a mode no rule refuses, so a file's mode launders inside a write root",
     run: |b| {
         b.reset_policy();

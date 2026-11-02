@@ -1,5 +1,6 @@
 //! Backend trait and platform-specific implementations.
 
+mod dependencies;
 pub(crate) mod macos;
 
 #[cfg(target_os = "linux")]
@@ -24,6 +25,7 @@ pub(crate) trait ContainmentBackend: Send + Sync + std::fmt::Debug {
         config: &ContainmentConfig,
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
+        native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError>;
 
     /// Report this backend's enforcement capability on the current host.

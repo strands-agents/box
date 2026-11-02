@@ -1,33 +1,26 @@
-use strands_det_harness::{NOT_IDENTITY_REFUSAL, det_case, user_home};
+use strands_det_harness::{det_case, user_home};
 
 // Containment CN-V (a symlink cannot lend its grant to its target)
 //
-// What this case proves, from the mediated path-admission contract in the box source
-// (`run/broker/reach.rs`, pinned there by
-// `a_symlink_whose_spelling_is_not_its_identity_is_refused`): the resolver beneath policy admits a
-// path only as its own canonical identity. A spelling that resolves elsewhere — every symlink,
-// "however reachable both ends are" — is refused with "resolves to a different path, so it is not
-// the identity policy judged", before any bytes are read and after policy permitted the spelling.
-// So a link the agent can place inside its writable workspace cannot lend the workspace's grant
-// to the file it points at: the escape is refused at the resolver, and the journal records that
-// refusal as the reach floor on the link's own path.
+// What this case proves: the hosted Shell judges a path below a bind on its host identity, so a
+// read through a symlink is decided on the file the link names, never on the link's spelling. A
+// link the agent can place inside its writable workspace therefore cannot lend the workspace's grant
+// to the file it points at: policy refuses the target, and the journal records that `fs:read` deny
+// on the target's own path.
 //
 // Evidence, all test-owned and portable (no /etc/hostname):
 //   - a canonical direct read of the workspace's `readable.txt` — the positive control that the
-//     mediated reader works on this route (it says nothing about symlink support);
+//     mediated reader works on this route;
 //   - a secret file under the operator home, outside every grant, with unique bytes, and a
 //     host-prepared link to it inside the workspace, proven on the host to be a symlink that
 //     resolves and reads those bytes — so the refusal that follows is of a real, readable escape;
-//   - the refusal's own words at the resolver, the journaled `fs:read` deny on the link spelling
-//     from the reach floor, and the secret bytes absent from everything the workload printed.
-// An in-workspace link to `readable.txt` is probed too and is expected to be refused with the
-// same words: that is the resolver as written, not a claim about symlink support, and a change there
-// would be a contract change worth seeing. The second native run showed both links
-// refused exactly so; the earlier form wrongly required the in-workspace link to read.
+//   - the journaled `fs:read` deny on the secret's path from policy, and the secret bytes absent
+//     from everything the workload printed.
+// An in-workspace link to `readable.txt` reads through, because its target is in the grant.
 det_case! {
     name: cn_v_01,
     id:   "CN-V-01",
-    desc: "Symlink escape: a workspace symlink to a secret outside every grant is refused by the resolver as not its own identity; the secret never leaks; a canonical direct read works",
+    desc: "Symlink escape: a workspace symlink to a secret outside every grant is judged on the secret and refused by policy; the secret never leaks; an in-grant link and a canonical direct read work",
     run: |b| {
         b.reset_policy();
         let home = user_home().canonicalize().expect("DET_ERROR: resolve operator home");
@@ -64,16 +57,14 @@ det_case! {
         // Positive control: the mediated reader reads a canonical workspace path.
         r.assert_contains("LISTED_CONTENT");
         r.assert_contains("DIRECT_OK");
-        // The boundary: the escape spelling is refused as not its identity, journaled as the reach
-        // floor on the link's own path, and the secret bytes never appear.
-        r.assert_contains(&format!("{}: {NOT_IDENTITY_REFUSAL}", escape.display()));
-        let rule = r.assert_mediated_denied("fs:read", "escape-link");
-        assert!(rule.contains("reach-floor"), "the escape must be refused beneath policy, at the reach floor: {rule}");
+        // The boundary: the escape is judged on the secret's own path and refused by policy, and
+        // the secret bytes never appear.
+        let rule = r.assert_mediated_denied("fs:read", &format!(".det-cnv01-secret-{pid}"));
+        assert!(!rule.contains("reach-floor"), "the escape must be refused by policy on the target: {rule}");
         r.assert_absent("ESCAPE_OK");
         r.assert_absent_secret(&secret, "CN-V-01 home secret marker");
-        // The resolver as written: a link inside the workspace is not its identity either.
-        r.assert_contains(&format!("{}: {NOT_IDENTITY_REFUSAL}", inside.display()));
-        r.assert_absent("INSIDE_OK");
+        // A link inside the workspace whose target is in the grant reads through.
+        r.assert_contains("INSIDE_OK");
         r.assert_contains("done");
         if strands_det_harness::Platform::current() == strands_det_harness::Platform::Macos {
             // Preserve the mainline native macOS alternate-view cells as a separate route.

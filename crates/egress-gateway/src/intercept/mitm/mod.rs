@@ -1,16 +1,16 @@
-//! The v1 MITM proxy adapter — the localhost MITM `Interceptor` impl.
+//! The v1 MITM proxy adapter.
 
-mod ca;
-mod connect;
+pub(crate) mod ca;
+pub(crate) mod connect;
 mod diagnostic;
 mod handle;
-mod http1;
-mod l7;
-mod listener;
+pub(crate) mod http1;
+pub(crate) mod l7;
+pub(crate) mod listener;
 mod request_leg;
 mod resolve;
 mod response_leg;
-mod tls;
+pub(crate) mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,12 +21,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustls::ClientConfig;
 
 use self::ca::EphemeralCa;
-use self::handle::{BoundTransport, CredentialEnv};
+use self::handle::BoundTransport;
 use crate::audit::SharedAuditLog;
 use crate::capability::CapabilitySet;
 use crate::effect::EffectInterceptor;
 use crate::error::{ProxyError, Result};
-use crate::intercept::Interceptor;
 use crate::seams::{Emitter, StubEmitter};
 
 pub use handle::MitmHandle;
@@ -60,17 +59,13 @@ pub struct MitmConfig {
     /// today's TCP-only behavior unchanged. The socket file is created
     /// mode `0600`; `bind_ports`/DNS-rebind concerns do not apply to a filesystem-scoped socket.
     pub unix_socket_path: Option<PathBuf>,
-    /// An optional upstream proxy to forward through (chained egress); `None` connects directly.
-    pub external_proxy: Option<SocketAddr>,
     /// Where to write the public ephemeral CA cert; `None` keeps it in memory only.
     pub intercept_ca_dir: Option<PathBuf>,
-    /// Whether to offer HTTP/2 on intercepted TLS (h1 + h2 share one evaluate path).
-    pub enable_h2: bool,
     /// Response size/content limits.
     pub response_limits: ResponseLimits,
     /// An optional expected proxy session token (best-effort CONNECT check).
     pub expected_token: Option<String>,
-    /// Credential env pairs (`*_BASE_URL` / phantom) the supervisor seeds the workload with.
+    /// Not read by the gateway.
     pub credential_env: Vec<(String, String)>,
     /// Extra CA certificates (PEM) added to the **additive** upstream trust bundle — a
     /// deployment's private CA, or a corporate root the box must trust for the upstream leg. Added on
@@ -81,11 +76,11 @@ pub struct MitmConfig {
     /// mapped IP with no DNS lookup; the DNS-rebind pin still holds since the connect uses only
     /// the pinned address.
     pub dns_overrides: Vec<(String, std::net::IpAddr)>,
-    /// The longest one exchange waits on its upstream socket, per read or write and in total;
+    /// The longest one exchange waits on its upstream socket in total;
     /// defaults to 300 seconds.
     pub upstream_read_deadline: std::time::Duration,
     /// The maximum number of connections handled concurrently. The adapter is thread-per-connection
-    /// (this crate pulls in no async runtime), so this bounds the thread count: excess connections wait
+    /// (each with its own small runtime), so this bounds the thread count: excess connections wait
     /// for a slot rather than spawning unbounded OS threads. The workload is contained but *untrusted*
     /// (it is the very thing this crate exists to contain), so the cap is a hard backpressure limit,
     /// not an optimization. Defaults to 256.
@@ -104,9 +99,7 @@ impl Default for MitmConfig {
         Self {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             unix_socket_path: None,
-            external_proxy: None,
             intercept_ca_dir: None,
-            enable_h2: false,
             response_limits: ResponseLimits::default(),
             expected_token: None,
             credential_env: Vec::new(),
@@ -124,11 +117,11 @@ pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
     controls: CapabilitySet,
     /// The adapter config.
-    config: MitmConfig,
-    /// The ephemeral session CA; `None` only if TLS interception is disabled at runtime.
-    ca: Option<EphemeralCa>,
+    pub(crate) config: MitmConfig,
+    /// The ephemeral session CA.
+    pub(crate) ca: EphemeralCa,
     /// The upstream (client) TLS config with the additive trust bundle.
-    upstream_config: Arc<ClientConfig>,
+    pub(crate) upstream_config: Arc<ClientConfig>,
     /// The fast in-memory audit log.
     audit: SharedAuditLog,
     /// The final outbound decision emitter.
@@ -136,7 +129,7 @@ pub(crate) struct SharedState {
     /// The authorization authority for every outbound effect.
     effect_interceptor: Arc<dyn EffectInterceptor>,
     /// The best-effort proxy session token.
-    expected_token: Option<String>,
+    pub(crate) expected_token: Option<String>,
 }
 
 impl SharedState {
@@ -173,10 +166,8 @@ impl SharedState {
     }
 }
 
-/// The v1 MITM proxy adapter. Constructed via [`start`](Self::start).
-pub struct MitmInterceptor {
-    state: Arc<SharedState>,
-}
+/// The v1 MITM proxy adapter. Started with [`start`](Self::start).
+pub struct MitmInterceptor;
 
 impl MitmInterceptor {
     /// Start the adapter: validate the credential injection against the adapter's max visibility,
@@ -237,27 +228,18 @@ impl MitmInterceptor {
         // Ephemeral CA. Its public cert path (if a dir was configured) is the SSL_CERT_FILE.
         let ca = EphemeralCa::generate(config.intercept_ca_dir.as_deref(), ca_file)?;
         let ca_path = ca.ca_path().map(|p| p.to_path_buf());
-        let ssl_cert_file = ca_path.clone();
 
         // Upstream additive trust bundle: system roots + any configured extra CA PEMs
         // (a deployment's private CA / corporate root).
         let upstream_config = Arc::new(tls::upstream_client_config(&config.upstream_ca_pems)?);
 
         let audit = SharedAuditLog::new();
-        let credential_env: Vec<CredentialEnv> = config
-            .credential_env
-            .iter()
-            .map(|(name, value)| CredentialEnv {
-                name: name.clone(),
-                value: value.clone(),
-            })
-            .collect();
         let expected_token = config.expected_token.clone();
 
         let state = Arc::new(SharedState {
             controls,
             config: config.clone(),
-            ca: Some(ca),
+            ca,
             upstream_config,
             audit: audit.clone(),
             emitter,
@@ -319,17 +301,9 @@ impl MitmInterceptor {
         Ok(MitmHandle::new(
             transport,
             ca_path,
-            ssl_cert_file,
-            credential_env,
             audit,
             stop,
             accept_thread,
         ))
-    }
-}
-
-impl Interceptor for MitmInterceptor {
-    fn credential_injection(&self) -> &CapabilitySet {
-        &self.state.controls
     }
 }

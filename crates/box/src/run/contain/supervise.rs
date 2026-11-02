@@ -20,6 +20,7 @@ async fn spawn_registered(
     boundary: &Boundary,
     layout: &BoxRoot,
     configure_streams: impl FnOnce(&mut Command),
+    own_terminal: bool,
     #[cfg(target_os = "linux")] relay_control: Option<&std::os::unix::net::UnixStream>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         crate::run::macos_enforcement::Registration,
@@ -73,7 +74,7 @@ async fn spawn_registered(
         not(all(target_os = "macos", feature = "native-filesystem-policy")),
         allow(unused_mut)
     )]
-    let mut group = ProcessGroup::spawn(command).await?;
+    let mut group = ProcessGroup::spawn_with_terminal(command, own_terminal).await?;
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if let (Some(gate), Some(registration)) = (gate, registration) {
         let pid = match group.leader_pid() {
@@ -110,9 +111,31 @@ pub(crate) struct ProcessGroup {
 
 impl ProcessGroup {
     /// Spawn `command` as the leader of a new process group.
-    pub(crate) async fn spawn(mut command: Command) -> Result<Self, BoxError> {
+    #[cfg(test)]
+    pub(crate) async fn spawn(command: Command) -> Result<Self, BoxError> {
+        Self::spawn_with_terminal(command, false).await
+    }
+
+    async fn spawn_with_terminal(
+        mut command: Command,
+        own_terminal: bool,
+    ) -> Result<Self, BoxError> {
         command.kill_on_drop(true);
-        isolate(&mut command);
+        if own_terminal {
+            #[cfg(target_os = "linux")]
+            die_with_parent(&mut command);
+            // SAFETY: stdio is set before this syscall-only hook; setsid precedes claiming fd 0 as the controlling terminal.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        } else {
+            isolate(&mut command);
+        }
         let mut child = command
             .spawn()
             .map_err(|source| SuperviseError::Spawn { source })?;
@@ -194,14 +217,14 @@ impl ProcessGroup {
 
     /// Wait for the leader and collect its piped stdout and stderr.
     async fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
-        Self::output_of(&mut self.child).await
-    }
-
-    async fn output_of(child: &mut tokio::process::Child) -> std::io::Result<std::process::Output> {
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (status, stdout, stderr) =
-            tokio::try_join!(child.wait(), drain(stdout), drain(stderr))?;
+        let stdout = self.child.stdout.take();
+        let stderr = self.child.stderr.take();
+        let stopped = async {
+            let status = self.child.wait().await?;
+            self.release().await.map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(status)
+        };
+        let (status, stdout, stderr) = tokio::try_join!(stopped, drain(stdout), drain(stderr))?;
         Ok(std::process::Output {
             status,
             stdout,
@@ -328,6 +351,27 @@ impl Drop for ProcessGroup {
 #[cfg(unix)]
 pub(crate) fn isolate(command: &mut Command) {
     command.process_group(0);
+    #[cfg(target_os = "linux")]
+    die_with_parent(command);
+}
+
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command) {
+    // Linux ties the signal to the spawning thread, which must outlive the supervised child.
+    // SAFETY: getpid reads this process's identifier.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: the callback uses only process-control syscalls before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
 }
 
 #[cfg(not(unix))]
@@ -367,8 +411,19 @@ impl Contained {
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
+        terminal: Option<std::fs::File>,
+        signals: Option<Signals>,
     ) -> Result<Self, BoxError> {
-        Self::spawn_with(boundary, layout, hosted, Stdio::inherit, true).await
+        Self::spawn_with(
+            boundary,
+            layout,
+            hosted,
+            Stdio::inherit,
+            true,
+            terminal,
+            signals,
+        )
+        .await
     }
 
     /// Spawn an isolated workload without applying containment.
@@ -408,6 +463,8 @@ impl Contained {
         hosted: crate::run::hosted::HostedBox,
         stdio: fn() -> Stdio,
         claim_terminal: bool,
+        terminal: Option<std::fs::File>,
+        signals: Option<Signals>,
     ) -> Result<Self, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned,
         // because the trampoline sends its listening descriptor over it during
@@ -415,23 +472,40 @@ impl Contained {
         let (relay_box_side, relay_child_side) =
             crate::run::netns_relay::NetnsRelay::control_pair()?;
 
-        let signals = Signals::listen()?;
+        let own_terminal = terminal.is_some();
+        let mut signals = match signals {
+            Some(signals) => signals,
+            None => Signals::listen()?,
+        };
+        if own_terminal {
+            signals.restore_default = false;
+        }
+        let (stdin, stdout, stderr) = match terminal {
+            Some(file) => {
+                let input = file
+                    .try_clone()
+                    .map_err(|source| SuperviseError::Spawn { source })?;
+                let output = file
+                    .try_clone()
+                    .map_err(|source| SuperviseError::Spawn { source })?;
+                (Stdio::from(input), Stdio::from(output), Stdio::from(file))
+            }
+            None => (stdio(), stdio(), Stdio::inherit()),
+        };
         let (mut group, trampoline) = spawn_registered(
             &boundary,
             layout,
             |command| {
-                command
-                    .stdin(stdio())
-                    .stdout(stdio())
-                    .stderr(Stdio::inherit());
+                command.stdin(stdin).stdout(stdout).stderr(stderr);
             },
+            own_terminal,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             hosted.native_registration(),
         )
         .await?;
-        let terminal = if claim_terminal {
+        let terminal = if claim_terminal && !own_terminal {
             match group.leader_pid().and_then(ForegroundTerminal::claim) {
                 Ok(terminal) => Some(terminal),
                 Err(error) => {
@@ -589,6 +663,7 @@ impl LeafBox {
             |command| {
                 command.stdin(stdin).stdout(stdout).stderr(stderr);
             },
+            false,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -834,23 +909,26 @@ impl StreamingLeaf {
     }
 }
 
-/// The trampoline's own last line on a captured stderr, without its prefix.
+/// The trampoline's setup diagnostic, including continuation lines.
 fn trampoline_message(stderr: &[u8]) -> Option<String> {
     const PREFIX: &str = "strands-box-contain-trampoline: ";
-    const MAXIMUM_BYTES: usize = 2048;
+    // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
+    const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let line = lines
-        .iter()
-        .rev()
-        .find(|line| line.starts_with(PREFIX))
-        .map(|line| &line[PREFIX.len()..])
-        .or_else(|| lines.last().copied())?;
-    Some(line.chars().take(MAXIMUM_BYTES).collect())
+    let start = text
+        .match_indices(PREFIX)
+        .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
+        .last()
+        .map(|(offset, _)| offset + PREFIX.len());
+    let message = match start {
+        Some(start) => text[start..].trim(),
+        None => text
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())?
+            .trim(),
+    };
+    Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
 }
 
 /// A process's exit code, or `128 + signal` when it died from one.
@@ -869,7 +947,8 @@ fn captured_status(status: ExitStatus) -> i32 {
 }
 
 /// The signals the box answers for its workload, listened for before the workload exists.
-struct Signals {
+pub(crate) struct Signals {
+    restore_default: bool,
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
     #[cfg(unix)]
@@ -880,7 +959,7 @@ struct Signals {
 }
 
 impl Signals {
-    fn listen() -> Result<Self, BoxError> {
+    pub(crate) fn listen() -> Result<Self, BoxError> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -893,6 +972,7 @@ impl Signals {
                 Some(listen(SignalKind::hangup())?)
             };
             Ok(Self {
+                restore_default: true,
                 interrupt: listen(SignalKind::interrupt())?,
                 terminate: listen(SignalKind::terminate())?,
                 hangup,
@@ -925,9 +1005,9 @@ impl Signals {
                         group.signal(libc::SIGINT)?;
                     }
                     received = self.terminate.recv() => {
-                        return ended_by(received, libc::SIGTERM, group).await;
+                        return ended_by(received, libc::SIGTERM, self.restore_default, group).await;
                     }
-                    received = hangup => return ended_by(received, libc::SIGHUP, group).await,
+                    received = hangup => return ended_by(received, libc::SIGHUP, self.restore_default, group).await,
                 }
             }
         }
@@ -956,6 +1036,7 @@ fn is_ignored(signal: libc::c_int) -> bool {
 async fn ended_by(
     received: Option<()>,
     signal: libc::c_int,
+    restore_default: bool,
     group: &mut ProcessGroup,
 ) -> Result<ExitStatus, BoxError> {
     if received.is_none() {
@@ -963,8 +1044,10 @@ async fn ended_by(
     }
     let status = group.stop().await;
     // SAFETY: restoring the default disposition of a signal this process listened for.
-    unsafe {
-        libc::signal(signal, libc::SIG_DFL);
+    if restore_default {
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+        }
     }
     status
 }
@@ -1020,6 +1103,40 @@ mod tests {
             "the failure names the library and the binary: {text}"
         );
         assert!(trampoline_message(b"").is_none());
+    }
+
+    #[test]
+    fn a_startup_failure_preserves_grouped_reads_and_additive_guidance() {
+        let stderr = b"earlier log\nstrands-box-contain-trampoline: containment apply failed: 2 dependencies lack read access\nDependency: /vendor/codec\nDependency: /vendor/storage\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.\n";
+        let detail = trampoline_message(stderr).unwrap();
+        for required in [
+            "/vendor/codec",
+            "/vendor/storage",
+            "Keep existing",
+            "read_file",
+            "No configuration files changed.",
+        ] {
+            assert!(detail.contains(required), "{detail}");
+        }
+        assert!(!detail.contains("earlier log"));
+    }
+
+    #[test]
+    fn a_maximum_missing_read_reason_keeps_its_final_guidance() {
+        // This fixture reaches MissingReads::require_complete's 6000-byte reason limit.
+        let mut reason = "2 dependencies lack read access\nDependency: /vendor/界\nDependency: /vendor/storage\nRequested by: /project/".to_owned();
+        let guidance = "\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.";
+        reason.push_str(&"x".repeat(6000 - reason.len() - guidance.len()));
+        reason.push_str(guidance);
+        let error = containment::ContainmentError::ApplyFailed {
+            backend: "seatbelt".to_owned(),
+            reason,
+        };
+        let expected = format!("containment apply failed: {error}");
+        let stderr = format!("earlier log\nstrands-box-contain-trampoline: {expected}\n");
+        let detail = trampoline_message(stderr.as_bytes()).unwrap();
+        assert_eq!(detail, expected);
+        assert!(detail.ends_with("No configuration files changed."));
     }
 
     #[test]
@@ -1140,6 +1257,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_supplied_terminal_becomes_the_workloads_controlling_terminal() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty writes two descriptors; null options select the defaults.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two owned descriptors.
+        let (master, slave) = unsafe {
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        };
+        for descriptor in [&master, &slave] {
+            // SAFETY: fcntl changes flags on these owned, open descriptors.
+            assert_ne!(
+                unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1
+            );
+        }
+        let mut command = Command::new("/bin/sleep");
+        command
+            .env_clear()
+            .arg("60")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        let mut group = ProcessGroup::spawn_with_terminal(command, true)
+            .await
+            .unwrap();
+        let leader = group.leader_pid().unwrap();
+        // SAFETY: the child is alive and the owned PTY master stays open.
+        unsafe {
+            assert_eq!(libc::getsid(leader), leader);
+            assert_eq!(libc::tcgetpgrp(master.as_raw_fd()), leader);
+        }
+        let status = tokio::time::timeout(Duration::from_secs(5), group.stop())
+            .await
+            .expect("terminal workload stops")
+            .unwrap();
+        assert!(!status.success(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn terminal_shutdown_preserves_the_hosts_signal_handlers() {
+        let _signals = SIGNALS.lock().await;
+        let _listening = Signals::listen().unwrap();
+        for signal in [libc::SIGTERM, libc::SIGHUP] {
+            // SAFETY: initialized sigaction storage and a null action only read the disposition.
+            let mut before: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sigaction(signal, std::ptr::null(), &mut before) },
+                0
+            );
+            let mut command = Command::new("/bin/sleep");
+            command.arg("60");
+            let mut group = ProcessGroup::spawn(command).await.unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                ended_by(Some(()), signal, false, &mut group),
+            )
+            .await;
+            // SAFETY: read the resulting disposition, then restore the saved action before assertions.
+            let mut after: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe {
+                assert_eq!(libc::sigaction(signal, std::ptr::null(), &mut after), 0);
+                assert_eq!(libc::sigaction(signal, &before, std::ptr::null_mut()), 0);
+            }
+            assert!(!result.expect("shutdown is bounded").unwrap().success());
+            assert_eq!(after.sa_sigaction, before.sa_sigaction);
+        }
+    }
+
     /// `stop` ends a group that ignores `SIGTERM`: the bounded wait runs out and `SIGKILL` follows,
     /// so the leader and its descendant are both gone when it returns.
     #[tokio::test]
@@ -1177,5 +1379,59 @@ mod tests {
             processes_exit(&pids).await,
             "leader and descendant must be gone: {pids:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn captured_exit_stops_descendants_that_hold_the_output_open() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let path = directory.path().join("pids");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#"trap '' TERM; sleep 3600 & printf '%s %s' "$$" "$!" > "$1"; printf 'done'; exit 7"#,
+                "group",
+            ])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut group = ProcessGroup::spawn(command).await.expect("spawn");
+        let pids = wait_for_pids(&path, 2).await.expect("both pids");
+        let result = tokio::time::timeout(Duration::from_secs(4), group.wait_with_output()).await;
+        drop(group);
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
+        let output = result
+            .expect("capture finishes after the leader exits")
+            .expect("output");
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"done");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_captured_wait_ends_every_member() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            started.send(()).expect("waiting receiver");
+            group.wait_with_output().await
+        });
+        waiting.await.expect("capture starts");
+        task.abort();
+        assert!(task.await.expect_err("cancelled task").is_cancelled());
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
+    }
+
+    #[tokio::test]
+    async fn a_captured_wait_timeout_ends_every_member() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let (mut group, pids) = group_ignoring_sigterm(&directory.path().join("pids")).await;
+        let result = tokio::time::timeout(Duration::from_millis(20), async move {
+            group.wait_with_output().await
+        })
+        .await;
+        assert!(result.is_err(), "the workload outlives the timeout");
+        assert!(processes_exit(&pids).await, "all children stop: {pids:?}");
     }
 }

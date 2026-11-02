@@ -141,9 +141,17 @@ and the decision log records that refusal as the check's.
 
 **The Shell acts on the file it checked.** The resolved path carries the identity of the file it
 named. Just before the operation, the Shell checks that identity again and refuses on a mismatch,
-so a symbolic link swapped in after the decision can't divert the operation. A write keeps the file
-it opened ([a resolved token binds the object it
+so a symbolic link swapped in after the decision can't divert the operation. The Shell reaches the
+file's directory from the top of the bound directory one level at a time and refuses a symbolic link
+at any level, so a link swapped into a higher directory can't divert it either. A write keeps the
+file it opened ([a resolved token binds the object it
 names](decisions.md#a-resolved-token-binds-the-object-it-names)).
+
+**Listing and metadata are the exception.** Listing a directory, `stat`, `cd`, reading a link, and
+checking whether a file can run look the path up again after the check, and `glob` holds no checked
+identity at all. A directory swapped in that window can show file names and metadata from outside
+the grant. It can't show file contents and can't write. A swap of two real directories, with no
+symbolic link, isn't refused either, but the operation stays inside the bound directory.
 
 **The reachable paths check doesn't protect credentials.** The Shell can name anything under the operator's
 home, so an `fs:read` permit with no path condition reads `~/.ssh` and `~/.aws`. Scope every

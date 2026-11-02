@@ -6,7 +6,6 @@ mod decider;
 mod set;
 mod traits;
 
-#[cfg(feature = "tls-intercept")]
 mod host;
 
 pub use builder::CapabilitySetBuilder;
@@ -16,5 +15,4 @@ pub use set::CapabilitySet;
 pub(crate) use traits::EgressCapability;
 pub use traits::{CapabilityContext, CapabilityFault, CapabilityOutcome};
 
-#[cfg(feature = "tls-intercept")]
-pub(crate) use host::normalize_host;
+pub use host::{is_bindable_host, normalize_host};

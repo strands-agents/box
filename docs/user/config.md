@@ -109,7 +109,7 @@ loses a name during its security assessment.
 
 ## `[experimental-features]`
 
-Native filesystem policy checks require both a custom build and explicit selection:
+Native filesystem policy checks require a compatible, signed build and explicit selection:
 
 ```toml
 [experimental-features]
@@ -117,7 +117,8 @@ native-filesystem-policy = true
 ```
 
 The default is `false`. Unknown feature names are errors.
-The standard release excludes this experiment. An unsupported build refuses `true` before the workload starts.
+Signed macOS releases include the adapter, but leave it disabled until you select it.
+An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
 ## `[agent]` and `[tool.<name>]`
@@ -192,19 +193,44 @@ their place.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. `write` grants write only; add the path to `read` to read it. |
+| `write` | Write the path. On macOS, add `read` to permit reads. Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
-| `write_file` | Write one exact file. The entry names a file. |
-| `list` | List the directory, and read nothing in it. The entry names a directory. |
-| `metadata` | Stat everything below the directory, and read nothing. The entry names a directory. **`[agent.filesystem]` only.** |
+| `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
+| `list` | List the directory without content access on macOS. Linux refuses this list. |
+| `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
-| `deny` | Refuse the path, even when another list grants it. |
+| `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
+
+### Direct access by operating system
+
+The read and write lists state separate permissions. These rules also apply to local servers
+under `[mcp.<name>.filesystem]`.
+
+| Requested access | Settings | macOS | Linux |
+|---|---|---|---|
+| Read-only | `read` or `read_file` | Supported | Supported |
+| Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
+| Read-write | Explicit read and write grants | Supported | Supported |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
+| Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
+
+Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
+entire write grant. An exact-file read covers only that file. A directory read covers that
+directory and its descendants. Execute grants do not satisfy this requirement.
+
+For Linux read-write access, put a directory in both `read` and `write`. For one file, use
+`read_file` and `write_file`. To retain read-only access, remove the write grant.
+
+Startup output states `read-only`, `write-only`, or `read-write` for each content-access grant.
+For partial overlaps, the parent entry also identifies the overlapping grants that allow both.
+Denials and protected paths still restrict access. Duplicate or nested grants of the same
+operation still cause startup refusal.
 
 The example uses four lists. `read` covers the CLI's install tree and `strands-home`, `read_file`
 names the preload file and Homebrew's OpenSSL settings, `write` covers `strands-home`, and `list`
-names the project. `strands-home` is in both `read` and `write`, because `write` grants write only.
-The project is in `list` alone, so the CLI sees the names in it and the policy decides each file
-its shell opens.
+names the project. `strands-home` is in both `read` and `write` to request read-write access explicitly.
+On macOS, the project is in `list` alone, so the CLI sees its names while policy decides each file its shell opens.
+Linux refuses this example's `list` entry. See the [platform comparison](../design/platform-differences.md).
 
 Each entry is absolute, or is `~` or starts with `~/`. An entry carries no pattern, no control
 character, and no `..` component. A directory entry that encloses this box's `box.toml` and
@@ -242,7 +268,7 @@ happen after the box directory is created and before the workload starts.
 | A `..` component | ``` `filesystem.read` path "<entry>" carries `..`; name the path it means``` |
 | The same path twice in one list | ``` `filesystem.read` path <path> is duplicated``` |
 | A path that does not exist | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
-| A symbolic link | `<path> is a symbolic link. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name what it points at` |
+| A symbolic link | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
 | A spelling the kernel resolves elsewhere | `<path> is not the path the kernel checks, which is <path>. A grant carries the identity it acts on, so name that path instead` |
 | A directory in `read_file` or `write_file` | ``<path> is a directory; `read_file` names one file, and a tree belongs in `read` `` |
 | A file in `list` | ``<path> is a file, and `list` enumerates a directory tree`` |

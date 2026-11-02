@@ -3,6 +3,42 @@
 /// The exit status a caller should use when the workload was signalled.
 const SIGNAL_EXIT_BASE: i32 = 128;
 
+/// Arm termination with the launcher before acknowledging readiness.
+pub(super) fn arm_parent_death(control: &std::os::unix::net::UnixStream) -> bool {
+    // SAFETY: prctl takes scalar arguments for the parent-death signal.
+    let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) == 0 };
+    armed && transfer_byte(control, true) && transfer_byte(control, false)
+}
+
+/// Confirm that the reaper armed termination while this launcher is alive.
+pub(super) fn confirm_parent_death(control: &std::os::unix::net::UnixStream) -> bool {
+    transfer_byte(control, false) && transfer_byte(control, true)
+}
+
+fn transfer_byte(control: &std::os::unix::net::UnixStream, sending: bool) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut byte = 1_u8;
+    loop {
+        // SAFETY: the socket and one-byte buffer remain valid for each syscall.
+        let result = unsafe {
+            if sending {
+                libc::send(
+                    control.as_raw_fd(),
+                    (&byte as *const u8).cast(),
+                    1,
+                    libc::MSG_NOSIGNAL,
+                )
+            } else {
+                libc::read(control.as_raw_fd(), (&mut byte as *mut u8).cast(), 1)
+            }
+        };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return result == 1 && byte == 1;
+    }
+}
+
 /// Run as the namespace's PID 1: forward signals, reap orphans, and return the
 /// workload's exit status.
 pub(crate) fn supervise(workload: libc::pid_t) -> i32 {
@@ -76,6 +112,66 @@ fn install_forwarding_handlers() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termination_signals_reach_the_workload_and_determine_its_status() {
+        super::super::failure_tests::in_fresh_process(|| {
+            for signal in [libc::SIGTERM, libc::SIGINT] {
+                let mut child = std::process::Command::new("/bin/sleep")
+                    .arg("3")
+                    .spawn()
+                    .unwrap();
+                let pid = child.id() as libc::pid_t;
+                WORKLOAD_PID.store(pid, std::sync::atomic::Ordering::Relaxed);
+                install_forwarding_handlers();
+                // SAFETY: raise invokes the installed handler in this isolated test process.
+                assert_eq!(unsafe { libc::raise(signal) }, 0);
+                assert_eq!(supervise(pid), SIGNAL_EXIT_BASE + signal);
+                assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
+            }
+            WORKLOAD_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            // With no workload, forwarding must not signal the process group.
+            forward(libc::SIGTERM);
+        });
+    }
+
+    #[test]
+    fn an_invalid_lifetime_acknowledgment_is_refused() {
+        use std::io::Write as _;
+        let (parent, mut child) = std::os::unix::net::UnixStream::pair().unwrap();
+        child.write_all(&[0]).unwrap();
+        assert!(!confirm_parent_death(&parent));
+    }
+
+    #[test]
+    fn a_closed_lifetime_channel_refuses_confirmation() {
+        let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
+        drop(child);
+        assert!(!confirm_parent_death(&parent));
+    }
+
+    #[test]
+    fn a_reaper_cannot_start_after_its_lifetime_channel_closes() {
+        let (parent, child) = std::os::unix::net::UnixStream::pair().expect("lifetime channel");
+        drop(parent);
+        // SAFETY: the child uses syscalls and exits without returning into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert_ne!(pid, -1, "fork");
+        if pid == 0 {
+            let accepted = arm_parent_death(&child);
+            // SAFETY: exit without running the parent's destructors.
+            unsafe { libc::_exit(i32::from(accepted)) };
+        }
+        let mut status = 0;
+        // SAFETY: wait for this test's child and store its status.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "the closed channel must refuse"
+        );
+    }
 
     /// Runs `supervise` in a real PID namespace and returns its exit status.
     fn in_pid_namespace(body: impl FnOnce() -> i32) -> Option<i32> {
@@ -194,6 +290,80 @@ mod tests {
             observed, 7,
             "the orphan's status (99) must not become the run's result; the reaper \
              reports the workload's status and reaps everything else"
+        );
+    }
+
+    #[test]
+    fn an_adopted_child_is_reaped_before_the_workload_exits() {
+        let Some(observed) = in_pid_namespace(|| {
+            // The workload cannot exit successfully until PID 1 reaps the adopted child.
+            // Everything after these forks uses scalar syscalls and _exit.
+            let workload = unsafe { libc::fork() };
+            if workload < 0 {
+                return 90;
+            }
+            if workload == 0 {
+                unsafe {
+                    let mut channel = [0; 2];
+                    if libc::pipe(channel.as_mut_ptr()) != 0 {
+                        libc::_exit(91);
+                    }
+                    let intermediate = libc::fork();
+                    if intermediate < 0 {
+                        libc::_exit(92);
+                    }
+                    if intermediate == 0 {
+                        let adopted = libc::fork();
+                        if adopted < 0 {
+                            libc::_exit(93);
+                        }
+                        if adopted == 0 {
+                            libc::_exit(99);
+                        }
+                        let sent = libc::write(
+                            channel[1],
+                            (&adopted as *const libc::pid_t).cast(),
+                            std::mem::size_of::<libc::pid_t>(),
+                        );
+                        libc::_exit(if sent == std::mem::size_of::<libc::pid_t>() as isize {
+                            0
+                        } else {
+                            94
+                        });
+                    }
+                    libc::close(channel[1]);
+                    let mut adopted: libc::pid_t = 0;
+                    let received = libc::read(
+                        channel[0],
+                        (&mut adopted as *mut libc::pid_t).cast(),
+                        std::mem::size_of::<libc::pid_t>(),
+                    );
+                    libc::close(channel[0]);
+                    if received != std::mem::size_of::<libc::pid_t>() as isize || adopted <= 0 {
+                        libc::_exit(95);
+                    }
+                    let mut status = 0;
+                    if libc::waitpid(intermediate, &mut status, 0) != intermediate {
+                        libc::_exit(96);
+                    }
+                    for _ in 0..300 {
+                        if libc::kill(adopted, 0) == -1 && *libc::__errno_location() == libc::ESRCH
+                        {
+                            libc::_exit(7);
+                        }
+                        libc::usleep(10_000);
+                    }
+                    libc::_exit(97);
+                }
+            }
+            supervise(workload)
+        }) else {
+            println!("skipping: this host forbids user namespaces");
+            return;
+        };
+        assert_eq!(
+            observed, 7,
+            "PID 1 must reap the adopted child while the workload remains alive"
         );
     }
 

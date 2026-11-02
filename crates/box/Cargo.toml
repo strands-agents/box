@@ -89,6 +89,11 @@ native-filesystem-policy = []
 test-support = ["dep:rcgen", "dep:rustls", "dep:rustls-pemfile"]
 
 [[bin]]
+name = "box-filesystem-probe"
+path = "tests/support/filesystem_probe.rs"
+required-features = ["test-support"]
+
+[[bin]]
 name = "box-egress-probe"
 path = "tests/support/egress_probe.rs"
 required-features = ["test-support"]

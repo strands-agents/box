@@ -7,6 +7,12 @@ pub(crate) mod reaper;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
+#[cfg(test)]
+mod grant_identity_tests;
+
+#[cfg(test)]
+mod failure_tests;
+
 use crate::ContainmentConfig;
 use crate::backend::{ContainmentBackend, SupportInfo};
 use crate::error::ContainmentError;
@@ -124,6 +130,14 @@ impl ContainmentBackend for NamespaceBackend {
 
         require_no_configured_devices(config)?;
 
+        crate::grants::require_read_for_writes(
+            &config
+                .authorizations()
+                .iter()
+                .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+                .collect::<Vec<_>>(),
+        )?;
+
         // Refuse a plan that cannot be built before any irreversible step runs.
         view::MountView::plan(config)?;
 
@@ -139,6 +153,7 @@ impl ContainmentBackend for NamespaceBackend {
         config: &ContainmentConfig,
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
@@ -289,26 +304,46 @@ fn unenforceable(capability: &str) -> ContainmentError {
 fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     // Read the credentials BEFORE the unshare.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    enter_namespaces_using(
+        join_host_network,
+        uid,
+        gid,
+        |flags| {
+            // SAFETY: one syscall with scalar flags. Irreversible for this process.
+            if unsafe { libc::unshare(flags) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        },
+        |path, value| std::fs::write(path, value),
+    )
+}
 
-    // SAFETY: a single syscall with a constant argument. Irreversible for this
-    // process, which is the intent.
-    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+/// Keep setup ordering and refusal reporting testable without changing the caller's namespaces.
+fn enter_namespaces_using(
+    join_host_network: bool,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    mut unshare: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    mut write: impl FnMut(&str, &str) -> std::io::Result<()>,
+) -> Result<(), ContainmentError> {
+    if let Err(error) = unshare(libc::CLONE_NEWUSER) {
         return Err(apply_failure(format!(
-            "creating a user namespace: {}; this backend reported support, so a \
-             failure here means the host's policy changed since the probe",
-            std::io::Error::last_os_error()
+            "creating a user namespace: {error}; this backend reported support, so a \
+             failure here means the host's policy changed since the probe"
         )));
     }
 
-    std::fs::write("/proc/self/setgroups", "deny").map_err(|source| {
+    write("/proc/self/setgroups", "deny").map_err(|source| {
         apply_failure(format!(
             "denying setgroups: {source}; supplementary-group expansion must be \
              refused before the GID map is written"
         ))
     })?;
-    std::fs::write("/proc/self/uid_map", format!("0 {uid} 1"))
+    write("/proc/self/uid_map", &format!("0 {uid} 1"))
         .map_err(|source| apply_failure(format!("writing the UID map: {source}")))?;
-    std::fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
+    write("/proc/self/gid_map", &format!("0 {gid} 1"))
         .map_err(|source| apply_failure(format!("writing the GID map: {source}")))?;
 
     // One `unshare` for the rest: the kernel applies them atomically, so a partial
@@ -320,16 +355,14 @@ fn enter_namespaces(join_host_network: bool) -> Result<(), ContainmentError> {
     if !join_host_network {
         remaining |= libc::CLONE_NEWNET;
     }
-    // SAFETY: a single syscall with a constant argument.
-    if unsafe { libc::unshare(remaining) } != 0 {
+    if let Err(error) = unshare(remaining) {
         return Err(apply_failure(format!(
-            "creating the mount, IPC, UTS{} namespaces: {}",
+            "creating the mount, IPC, UTS{} namespaces: {error}",
             if join_host_network {
                 ""
             } else {
                 ", and network"
-            },
-            std::io::Error::last_os_error()
+            }
         )));
     }
 
@@ -361,11 +394,30 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
     }
 }
 
+/// Retry interrupted waits and propagate only a normal reaper exit.
+fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()>) -> libc::c_int {
+    let mut status = 0;
+    loop {
+        match wait(&mut status) {
+            Ok(()) => break,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            Err(_) => return 125,
+        }
+    }
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        125
+    }
+}
+
 fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
 ) -> Result<(), ContainmentError> {
+    let (parent_control, reaper_control) = std::os::unix::net::UnixStream::pair()
+        .map_err(|source| apply_failure(format!("creating reaper lifetime channel: {source}")))?;
     // SAFETY: a single syscall with a constant argument. Affects children only.
     if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
         return Err(apply_failure(format!(
@@ -385,20 +437,32 @@ fn establish_pid_namespace_and_reaper(
     }
 
     if reaper > 0 {
+        drop(reaper_control);
+        if !reaper::confirm_parent_death(&parent_control) {
+            // SAFETY: the identifier names this process's unreaped child.
+            unsafe { libc::kill(reaper, libc::SIGKILL) };
+        }
+        drop(parent_control);
         // The original caller.
-        let mut status: libc::c_int = 0;
-        // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(reaper, &mut status, 0) };
-        let code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else {
-            125
-        };
+        let code = reaper_exit_code(|status| {
+            // SAFETY: waiting on this process's own child.
+            if unsafe { libc::waitpid(reaper, status, 0) } != -1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
 
     // Namespace PID 1.
+    drop(parent_control);
+    if !reaper::arm_parent_death(&reaper_control) {
+        // SAFETY: no workload can start without a live launcher.
+        unsafe { libc::_exit(127) };
+    }
+    drop(reaper_control);
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
@@ -515,6 +579,49 @@ mod tests {
         backend
             .validate_config(&acceptable())
             .expect("the default all-isolated request must validate");
+    }
+
+    #[test]
+    fn direct_and_decoded_writes_require_full_read_coverage() {
+        let backend = NamespaceBackend::with_probe_result(true);
+        let directory = tempfile::tempdir().expect("a project");
+        let project = directory
+            .path()
+            .canonicalize()
+            .expect("the project resolves");
+        let file = project.join("output");
+        std::fs::write(&file, "contents").expect("an output file");
+        for (write, scope) in [(&project, Scope::Root), (&file, Scope::File)] {
+            let config = acceptable()
+                .allow_prepared(
+                    ContainmentConfig::prepare_filesystem_path(write).expect("a prepared path"),
+                    Operation::Write,
+                    scope,
+                )
+                .expect("a write grant can precede a read grant");
+            let decoded = ContainmentConfig::from_json(&config.to_json().expect("serialize"))
+                .expect("a structurally valid configuration");
+            for candidate in [config, decoded] {
+                assert!(matches!(
+                    backend.validate_config(&candidate),
+                    Err(ContainmentError::WriteOnlyUnsupported { path, .. }) if path == *write
+                ));
+                let listed = candidate
+                    .clone()
+                    .allow(&project, Operation::Read, Scope::Dir)
+                    .expect("directory entries");
+                assert!(matches!(
+                    backend.validate_config(&listed),
+                    Err(ContainmentError::WriteOnlyUnsupported { .. })
+                ));
+                let readable = candidate
+                    .allow(&project, Operation::Read, Scope::Root)
+                    .expect("explicit content reads");
+                backend
+                    .validate_config(&readable)
+                    .expect("read-write access");
+            }
+        }
     }
 
     /// Each unrestricted reach mode is refused rather than over-enforced.
@@ -683,6 +790,27 @@ mod tests {
     }
 
     #[test]
+    fn a_fixed_device_exception_does_not_extend_to_a_symlink_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("null-alias");
+        std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&alias, Operation::Read, Scope::File)
+            .unwrap();
+        let error = NamespaceBackend::with_probe_result(true)
+            .validate_config(&config)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ContainmentError::UnsupportedCapability { .. }
+        ));
+        assert!(
+            error.to_string().contains("configured device grant"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn other_configured_character_device_grants_are_refused() {
         let device = std::path::Path::new("/dev/full");
         if !device.exists() {
@@ -809,62 +937,65 @@ mod tests {
     /// **A read tree confers no exec and an exec tree does**, at the kernel.
     #[test]
     fn a_read_tree_confers_no_exec_and_an_exec_tree_does() {
-        use std::os::unix::fs::PermissionsExt as _;
+        super::failure_tests::in_fresh_process(|| {
+            use std::os::unix::fs::PermissionsExt as _;
 
-        if !the_host_can_build_a_view() {
-            println!("skipping: this host cannot build a namespace mount view");
-            return;
-        }
-        let directory = tempfile::tempdir().expect("tempdir");
-        let read_tree = directory.path().join("read");
-        let exec_tree = directory.path().join("exec");
-        for tree in [&read_tree, &exec_tree] {
-            std::fs::create_dir(tree).expect("a tree");
-            let program = tree.join("prog");
-            std::fs::write(&program, "not a program").expect("a file that is not a program");
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-                .expect("the execute bits, so only the mount can refuse");
-        }
-        let config = ContainmentConfig::new()
-            .allow(&read_tree, Operation::Read, Scope::Root)
-            .expect("a read tree")
-            .allow(&exec_tree, Operation::Exec, Scope::Root)
-            .expect("an exec tree");
-        let read_program = read_tree.join("prog");
-        let exec_program = exec_tree.join("prog");
-
-        // SAFETY: the child applies containment and exits; it never returns into test-harness code.
-        let child = unsafe { libc::fork() };
-        assert_ne!(child, -1, "fork failed");
-        if child == 0 {
-            let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
-                eprintln!("apply failed: {error}");
-                // SAFETY: terminating the child.
-                unsafe { libc::_exit(20) };
+            if !the_host_can_build_a_view() {
+                println!("skipping: this host cannot build a namespace mount view");
+                return;
             }
-            let read_answer = execve_errno(&read_program);
-            let exec_answer = execve_errno(&exec_program);
-            let code = if read_answer != libc::EACCES {
-                21
-            } else if exec_answer != libc::ENOEXEC {
-                22
-            } else {
-                0
-            };
-            // SAFETY: terminating the workload with the verdict.
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(child, &mut status, 0) };
-        assert!(libc::WIFEXITED(status), "the child must exit normally");
-        assert_eq!(
-            libc::WEXITSTATUS(status),
-            0,
-            "20 = apply failed, 21 = A FILE UNDER A READ TREE WAS NOT REFUSED WITH EACCES, \
-             22 = a file under an exec tree was not reached (ENOEXEC expected)"
-        );
+            let directory = tempfile::tempdir().expect("tempdir");
+            let read_tree = directory.path().join("read");
+            let exec_tree = directory.path().join("exec");
+            for tree in [&read_tree, &exec_tree] {
+                std::fs::create_dir(tree).expect("a tree");
+                let program = tree.join("prog");
+                std::fs::write(&program, "not a program").expect("a file that is not a program");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                    .expect("the execute bits, so only the mount can refuse");
+            }
+            let config = ContainmentConfig::new()
+                .allow(&read_tree, Operation::Read, Scope::Root)
+                .expect("a read tree")
+                .allow(&exec_tree, Operation::Exec, Scope::Root)
+                .expect("an exec tree");
+            let read_program = read_tree.join("prog");
+            let exec_program = exec_tree.join("prog");
+
+            // SAFETY: the child applies containment and exits; it never returns into test-harness code.
+            let child = unsafe { libc::fork() };
+            assert_ne!(child, -1, "fork failed");
+            if child == 0 {
+                let backend = NamespaceBackend::with_probe_result(true);
+                if let Err(error) = backend.apply(&config, None, None, None) {
+                    eprintln!("apply failed: {error}");
+                    // SAFETY: terminating the child.
+                    unsafe { libc::_exit(20) };
+                }
+                let read_answer = execve_errno(&read_program);
+                let exec_answer = execve_errno(&exec_program);
+                eprintln!("read-tree errno={read_answer}; exec-tree errno={exec_answer}");
+                let code = if read_answer != libc::EACCES {
+                    21
+                } else if exec_answer != libc::ENOEXEC {
+                    22
+                } else {
+                    0
+                };
+                // SAFETY: terminating the workload with the verdict.
+                unsafe { libc::_exit(code) };
+            }
+            let mut status = 0;
+            // SAFETY: waiting on this process's own child.
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            assert!(libc::WIFEXITED(status), "the child must exit normally");
+            assert_eq!(
+                libc::WEXITSTATUS(status),
+                0,
+                "20 = apply failed, 21 = A FILE UNDER A READ TREE WAS NOT REFUSED WITH EACCES, \
+                 22 = a file under an exec tree was not reached (ENOEXEC expected)"
+            );
+        });
     }
 
     /// **A workload marks its own output executable inside the box, and the mount decides whether it
@@ -909,7 +1040,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1041,7 +1172,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1109,7 +1240,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1797,7 +1928,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(30) };
             }
@@ -1874,7 +2005,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
@@ -1973,7 +2104,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
             }
@@ -2061,7 +2192,7 @@ mod tests {
             let backend = NamespaceBackend::with_probe_result(true);
             // No handoff: this test asserts the filesystem, process, and authority properties, and
             // the request below is `Blocked` by default so no egress endpoint is created.
-            if let Err(error) = backend.apply(&config, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 // Printed rather than swallowed: exit code 20 says "apply failed" and this says
                 // why, which is the difference between a five-minute diagnosis and an afternoon of
                 // bisecting namespaces.
@@ -2158,7 +2289,170 @@ mod tests {
         );
     }
 
-    /// The four macOS-only leaf fields validate on Linux and change neither the view nor the filters.
+    /// Refused files and trees leave their metadata-only ancestor empty and read-only.
+    #[test]
+    fn a_refusal_beneath_a_metadata_only_directory_establishes() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+        let directory = tempfile::Builder::new()
+            .prefix("metadata-refusal-")
+            .tempdir_in("/tmp")
+            .expect("tempdir under the writable sandbox scaffold");
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).expect("project directory");
+        let project = project.canonicalize().expect("the project resolves");
+        let refused = project.join("box/private");
+        std::fs::create_dir_all(&refused).expect("the refused tree");
+        let secret = refused.join("record");
+        std::fs::write(&secret, b"record").expect("write the refused file");
+        let refused_file = project.join("files/record");
+        let refused_root_file = project.join("files/nested/record");
+        std::fs::create_dir_all(refused_root_file.parent().unwrap()).expect("refused file parents");
+        std::fs::write(&refused_file, b"file record").expect("refused file");
+        std::fs::write(&refused_root_file, b"root file record").expect("root-scoped refused file");
+        let opened = std::fs::File::open(&refused_file).expect("open protected refusal");
+        let opened_root =
+            std::fs::File::open(&refused_root_file).expect("open protected root refusal");
+        std::fs::write(project.join("unlisted"), b"unlisted").expect("unlisted host file");
+        let outside_refused = directory.path().join("outside-denied");
+        let outside_protected = directory.path().join("outside-protected");
+        std::fs::write(&outside_refused, b"outside denied").expect("outside refusal");
+        std::fs::write(&outside_protected, b"outside protected").expect("outside protection");
+        let outside_opened =
+            std::fs::File::open(&outside_protected).expect("open outside protection");
+        let sibling = project.join("planted");
+        let nested_sibling = project.join("box/planted");
+        let scratch = std::path::Path::new("/tmp").join(format!(
+            "{}-scratch",
+            directory.path().file_name().unwrap().to_string_lossy()
+        ));
+        let config = ContainmentConfig::new()
+            .allow(&project, Operation::Metadata, Scope::Dir)
+            .expect("metadata grant")
+            .protect_write(&refused_file, &opened)
+            .expect("write protection also covered by the refusal")
+            .protect_write(&refused_root_file, &opened_root)
+            .expect("write protection with a single refusal")
+            .allow(&outside_protected, Operation::Read, Scope::File)
+            .expect("read the outside protected control")
+            .protect_write(&outside_protected, &outside_opened)
+            .expect("write protection outside the empty directory")
+            .refuse(&refused, Scope::Root)
+            .expect("the refused tree")
+            .refuse(&secret, Scope::File)
+            .expect("the covered refusal")
+            .refuse(&refused_file, Scope::File)
+            .expect("the refused file")
+            .refuse(&refused_file, Scope::File)
+            .expect("the repeated file refusal")
+            .refuse(&refused_root_file, Scope::Root)
+            .expect("the root-scoped refused file")
+            .refuse(&outside_refused, Scope::File)
+            .expect("refusal outside the empty directory");
+
+        for outer_read_write in [false, true] {
+            let config = if outer_read_write {
+                config
+                    .clone()
+                    .allow(directory.path(), Operation::Read, Scope::Root)
+                    .expect("read the outer directory")
+                    .allow(directory.path(), Operation::Write, Scope::Root)
+                    .expect("write the outer directory")
+            } else {
+                config.clone()
+            };
+            // SAFETY: the child applies containment and exits; it never returns into
+            // test-harness code.
+            let child = unsafe { libc::fork() };
+            assert_ne!(child, -1, "fork failed");
+            if child == 0 {
+                let backend = NamespaceBackend::with_probe_result(true);
+                if let Err(error) = backend.apply(&config, None, None, None) {
+                    eprintln!("apply failed: {error}");
+                    // SAFETY: terminating the child.
+                    unsafe { libc::_exit(20) };
+                }
+                let code = if !std::fs::read_dir(&project)
+                    .is_ok_and(|mut entries| entries.next().is_none())
+                {
+                    28
+                } else if std::fs::metadata(&project).is_err()
+                    || std::env::set_current_dir(&project).is_err()
+                {
+                    29
+                } else if std::fs::read(&secret).is_ok() {
+                    22
+                } else if std::fs::write(refused.join("planted"), b"planted").is_ok() {
+                    23
+                } else if !std::fs::write(&sibling, b"planted")
+                    .is_err_and(|error| error.raw_os_error() == Some(libc::EROFS))
+                {
+                    24
+                } else if !std::fs::write(&nested_sibling, b"planted")
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    25
+                } else if std::fs::write(&scratch, b"scratch").is_err()
+                    || std::fs::read(&scratch).ok().as_deref() != Some(b"scratch")
+                {
+                    26
+                } else if [&refused_file, &refused_root_file].iter().any(|path| {
+                    !std::fs::read(path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                        || !std::fs::write(path, b"changed")
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                }) {
+                    27
+                } else if std::fs::read(&outside_refused).ok().as_deref() != Some(b"")
+                    || std::fs::read(&outside_protected).ok().as_deref()
+                        != Some(b"outside protected")
+                    || [&outside_refused, &outside_protected].iter().any(|path| {
+                        !std::fs::write(path, b"changed")
+                            .is_err_and(|error| error.raw_os_error() == Some(libc::EROFS))
+                    })
+                {
+                    30
+                } else {
+                    0
+                };
+                // SAFETY: terminating the workload with the verdict.
+                unsafe { libc::_exit(code) };
+            }
+
+            let mut status = 0;
+            // SAFETY: waiting on this process's own child.
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            assert!(libc::WIFEXITED(status), "the child must exit normally");
+            assert_eq!(
+                libc::WEXITSTATUS(status),
+                0,
+                "outer_read_write={outer_read_write}; 20=apply failed, 22=REFUSED FILE READABLE, 23=REFUSED TREE WRITABLE, \
+                 24=metadata parent not read-only, 25=denied parent not absent, \
+                 26=unrelated sandbox scratch unavailable, 27=refused file not absent, \
+                 28=metadata parent exposes names, 29=metadata parent cannot be entered or stated, \
+                 30=outside refusal or protection changed"
+            );
+        }
+        assert!(!refused.join("planted").exists());
+        assert!(!sibling.exists());
+        assert!(!nested_sibling.exists());
+        assert!(!scratch.exists());
+        assert_eq!(std::fs::read(&secret).unwrap(), b"record");
+        assert_eq!(std::fs::read(&refused_file).unwrap(), b"file record");
+        assert_eq!(
+            std::fs::read(&refused_root_file).unwrap(),
+            b"root file record"
+        );
+        assert_eq!(std::fs::read(&outside_refused).unwrap(), b"outside denied");
+        assert_eq!(
+            std::fs::read(&outside_protected).unwrap(),
+            b"outside protected"
+        );
+    }
+
+    /// The macOS discovery and runtime-service fields leave Linux mounts and filters unchanged.
     #[test]
     fn linux_validate_states_its_handling_of_macos_only_leaf_fields() {
         let home = tempfile::tempdir().expect("home");
@@ -2167,13 +2461,14 @@ mod tests {
         std::fs::create_dir_all(&state).expect("box state");
         let agent_shaped = ContainmentConfig::new()
             .anchored_at(home.path())
+            .allow(&workspace, Operation::Read, Scope::Root)
+            .expect("read grant")
             .allow(&workspace, Operation::Write, Scope::Root)
             .expect("write grant");
         let leaf = agent_shaped
             .clone()
             .allow_discovery(home.path())
             .deny_discovery(&state)
-            .allow_broad_exec()
             .allow_runtime_services();
 
         NamespaceBackend::with_probe_result(true)
@@ -2193,7 +2488,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.writable && entry.origin == view::MountOrigin::Grant)
                 .all(|entry| !entry.executable),
-            "broad exec made a writable grant executable on Linux"
+            "discovery or runtime-service fields made a writable grant executable"
         );
         syscall::SyscallPolicy::for_config(leaf.network())
             .compile()
@@ -2251,7 +2546,7 @@ mod tests {
                 // SAFETY: closing the child's copy of the read end.
                 unsafe { libc::close(reader) };
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(config, None, Some(writer)) {
+                if let Err(error) = backend.apply(config, None, Some(writer), None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };

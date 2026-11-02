@@ -91,10 +91,13 @@ impl Program {
         ))
     }
 
+    pub(crate) fn prepare_call(&mut self) {
+        self.cancel.store(false, Ordering::SeqCst);
+    }
+
     /// Run one Call and return its status. Its bytes reach [`ProgramOutput`] while this future is
     /// pending, so a caller must poll both concurrently.
     pub(crate) async fn call(&mut self, command: &str) -> CallOutcome {
-        self.cancel.store(false, Ordering::SeqCst);
         let output = self.shell.run(command).await;
         CallOutcome {
             status: output.status,

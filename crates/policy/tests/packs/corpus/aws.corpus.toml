@@ -1,0 +1,307 @@
+# aws pack corpus
+#
+# Each case is one argv, and what the shell grammar of `../valid/aws.pack.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+# Cases marked "verified" were checked against aws-cli 2.36.
+
+[[case]]
+argv = ["aws", "sts", "get-caller-identity"]
+action = "sts_get_caller_identity"
+effects = ["read_only"]
+
+[[case]]
+argv = ["aws", "--profile", "prod", "sts", "get-caller-identity"]
+action = "sts_get_caller_identity"
+fields = { profile = "prod" }
+effects = ["read_only"]
+
+# Global options after the operation
+[[case]]
+argv = ["aws", "sts", "get-caller-identity", "--profile=prod", "--region", "us-east-1", "--output", "json"]
+action = "sts_get_caller_identity"
+fields = { output = "json", profile = "prod", region = "us-east-1" }
+effects = ["read_only"]
+
+[[case]]
+argv = ["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"]
+action = "sts_get_caller_identity"
+fields = { output = "text", query = "Account" }
+effects = ["read_only"]
+
+# A global between the two command words (verified)
+[[case]]
+argv = ["aws", "s3", "--region", "us-west-2", "ls"]
+action = "s3_ls"
+fields = { region = "us-west-2" }
+effects = ["read_only"]
+
+[[case]]
+argv = ["aws", "s3", "rm", "s3://logs/2026/app.log"]
+action = "s3_rm"
+fields = { path = "s3://logs/2026/app.log" }
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "s3", "rm", "s3://logs/", "--recursive", "--dryrun"]
+action = "s3_rm"
+fields = { dryrun = true, path = "s3://logs/", recursive = true }
+
+# Aws reads `--dry` as `--dryrun` (verified); no prefix matching
+[[case]]
+argv = ["aws", "s3", "rm", "s3://logs/", "--recursive", "--dry"]
+action = "unmodeled"
+
+[[case]]
+argv = ["aws", "s3", "rm", "--profile=prod", "s3://logs/k"]
+action = "s3_rm"
+fields = { path = "s3://logs/k", profile = "prod" }
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "s3", "rm", "--exclude", "*", "--include", "*.log", "--recursive", "s3://logs/"]
+action = "s3_rm"
+fields = { exclude = ["*"], include = ["*.log"], path = "s3://logs/", recursive = true }
+effects = ["delete_data"]
+
+# Required operand `<path>` missing
+[[case]]
+argv = ["aws", "s3", "rm"]
+action = "unmodeled"
+
+# Aws prints help instead; over-restriction, harmless
+[[case]]
+argv = ["aws", "s3", "rm", "help"]
+action = "s3_rm"
+fields = { path = "help" }
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "s3", "cp", "./site", "s3://www/", "--recursive", "--acl", "public-read"]
+action = "s3_cp"
+fields = { acl = "public-read", destination = "s3://www/", recursive = true, source = "./site" }
+effects = ["make_public", "write_data"]
+
+[[case]]
+argv = ["aws", "s3", "cp", "s3://data/dump.sql", "."]
+action = "s3_cp"
+fields = { destination = ".", source = "s3://data/dump.sql" }
+effects = ["read_data"]
+
+[[case]]
+argv = ["aws", "s3", "cp", "s3://a/x", "s3://b/x"]
+action = "s3_cp"
+fields = { destination = "s3://b/x", source = "s3://a/x" }
+effects = ["read_data", "write_data"]
+
+# Standard input: a lone `-` is an operand
+[[case]]
+argv = ["aws", "s3", "cp", "-", "s3://b/k"]
+action = "s3_cp"
+fields = { destination = "s3://b/k", source = "-" }
+effects = ["write_data"]
+
+# A `many` value, and `like` on an option
+[[case]]
+argv = ["aws", "s3", "cp", "a", "s3://b/", "--grants", "read=uri=http://acs.amazonaws.com/groups/global/AllUsers"]
+action = "s3_cp"
+fields = { destination = "s3://b/", grants = ["read=uri=http://acs.amazonaws.com/groups/global/AllUsers"], source = "a" }
+effects = ["make_public", "write_data"]
+
+# The pack leaves out `--sse`, because its optional value takes the next word in aws
+[[case]]
+argv = ["aws", "s3", "cp", "--sse", "AES256", "a", "s3://b/"]
+action = "unmodeled"
+
+[[case]]
+argv = ["aws", "s3", "mv", "s3://a/x", "./x"]
+action = "s3_mv"
+fields = { destination = "./x", source = "s3://a/x" }
+effects = ["delete_data", "read_data"]
+
+[[case]]
+argv = ["aws", "s3", "mv", "./x", "s3://a/x"]
+action = "s3_mv"
+fields = { destination = "s3://a/x", source = "./x" }
+effects = ["delete_data", "write_data"]
+
+[[case]]
+argv = ["aws", "s3", "sync", ".", "s3://site", "--delete"]
+action = "s3_sync"
+fields = { delete = true, destination = "s3://site", source = "." }
+effects = ["delete_data", "write_data"]
+
+[[case]]
+argv = ["aws", "s3", "sync", "s3://site", "./local", "--delete", "--dryrun"]
+action = "s3_sync"
+fields = { delete = true, destination = "./local", dryrun = true, source = "s3://site" }
+
+[[case]]
+argv = ["aws", "s3", "rb", "s3://old", "--force"]
+action = "s3_rb"
+fields = { force = true, path = "s3://old" }
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "s3api", "delete-bucket", "--bucket", "prod-logs"]
+action = "s3api_delete_bucket"
+fields = { bucket = "prod-logs" }
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "s3api", "delete-bucket", "--bucket=prod-logs", "--region", "eu-west-1"]
+action = "s3api_delete_bucket"
+fields = { bucket = "prod-logs", region = "eu-west-1" }
+effects = ["delete_data"]
+
+# Aws reads the value from the file, and the parser sees only the name (L1)
+[[case]]
+argv = ["aws", "s3api", "delete-bucket", "--bucket", "file://name.txt"]
+action = "s3api_delete_bucket"
+fields = { bucket = "file://name.txt" }
+effects = ["delete_data"]
+
+# `--cli-input-json` not declared
+[[case]]
+argv = ["aws", "s3api", "delete-bucket", "--cli-input-json", "file://in.json"]
+action = "unmodeled"
+
+# Non-repeated option given twice (argparse: last wins)
+[[case]]
+argv = ["aws", "s3api", "delete-bucket", "--bucket", "a", "--bucket", "b"]
+action = "unmodeled"
+
+# Aws refuses the line; required options are not checked
+[[case]]
+argv = ["aws", "s3api", "delete-bucket"]
+action = "s3api_delete_bucket"
+effects = ["delete_data"]
+
+[[case]]
+argv = ["aws", "ec2", "terminate-instances", "--instance-ids", "i-1", "i-2", "--dry-run"]
+action = "ec2_terminate_instances"
+fields = { dry_run = true, instance_ids = ["i-1", "i-2"] }
+
+[[case]]
+argv = ["aws", "ec2", "terminate-instances", "--instance-ids", "i-1", "i-2"]
+action = "ec2_terminate_instances"
+fields = { instance_ids = ["i-1", "i-2"] }
+effects = ["terminate_compute"]
+
+# `=` gives `many` exactly one value; `i-2` is then a stray operand
+[[case]]
+argv = ["aws", "ec2", "terminate-instances", "--instance-ids=i-1", "i-2"]
+action = "unmodeled"
+
+# Negation not declared (aws: last wins, so it would terminate)
+[[case]]
+argv = ["aws", "ec2", "terminate-instances", "--instance-ids", "i-1", "--dry-run", "--no-dry-run"]
+action = "unmodeled"
+
+[[case]]
+argv = ["aws", "ec2", "describe-instances", "--filters", "Name=tag:env,Values=prod", "--max-items", "10"]
+action = "ec2_describe_instances"
+fields = { filters = ["Name=tag:env,Values=prod"], max_items = "10" }
+effects = ["read_only"]
+
+# A string: the parser does not check that the value is a number
+[[case]]
+argv = ["aws", "ec2", "describe-instances", "--max-items", "ten"]
+action = "ec2_describe_instances"
+fields = { max_items = "ten" }
+effects = ["read_only"]
+
+[[case]]
+argv = ["aws", "sts", "assume-role", "--role-arn", "arn:aws:iam::1:role/admin", "--role-session-name", "s", "--duration-seconds", "3600"]
+action = "sts_assume_role"
+fields = { duration_seconds = "3600", role_arn = "arn:aws:iam::1:role/admin", role_session_name = "s" }
+effects = ["assume_role"]
+
+[[case]]
+argv = ["aws", "iam", "list-roles", "--path-prefix", "/service/"]
+action = "iam_list_roles"
+fields = { path_prefix = "/service/" }
+effects = ["read_only"]
+
+[[case]]
+argv = ["aws", "iam", "create-access-key", "--user-name", "ci-bot"]
+action = "iam_create_access_key"
+fields = { user_name = "ci-bot" }
+effects = ["create_credentials", "modify_iam"]
+
+[[case]]
+argv = ["aws", "iam", "attach-role-policy", "--role-name", "app", "--policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess"]
+action = "iam_attach_role_policy"
+fields = { policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess", role_name = "app" }
+effects = ["modify_iam"]
+
+# The parser sees the file name only
+[[case]]
+argv = ["aws", "iam", "put-role-policy", "--role-name", "app", "--policy-name", "inline", "--policy-document", "file://p.json"]
+action = "iam_put_role_policy"
+fields = { policy_document = "file://p.json", policy_name = "inline", role_name = "app" }
+effects = ["modify_iam"]
+
+[[case]]
+argv = ["aws", "cloudformation", "delete-stack", "--stack-name", "prod-api", "--retain-resources", "DataBucket", "Logs"]
+action = "cloudformation_delete_stack"
+fields = { retain_resources = ["DataBucket", "Logs"], stack_name = "prod-api" }
+effects = ["delete_data", "delete_infrastructure"]
+
+[[case]]
+argv = ["aws", "lambda", "invoke", "--function-name", "fn", "--payload", "file://e.json", "out.json"]
+action = "lambda_invoke"
+fields = { function_name = "fn", outfile = "out.json", payload = "file://e.json" }
+effects = ["invoke_function"]
+
+[[case]]
+argv = ["aws", "lambda", "invoke", "--function-name", "fn", "--invocation-type", "DryRun", "out.json"]
+action = "lambda_invoke"
+fields = { function_name = "fn", invocation_type = "DryRun", outfile = "out.json" }
+
+# Required operand `<outfile>` missing
+[[case]]
+argv = ["aws", "lambda", "invoke", "--function-name", "fn"]
+action = "unmodeled"
+
+[[case]]
+argv = ["aws", "--endpoint-url", "https://collector.example", "s3", "ls"]
+action = "s3_ls"
+fields = { endpoint_url = "https://collector.example" }
+effects = ["custom_endpoint", "read_only"]
+
+[[case]]
+argv = ["aws", "s3", "ls", "--no-verify-ssl"]
+action = "s3_ls"
+fields = { no_verify_ssl = true }
+effects = ["insecure_tls", "read_only"]
+
+# Interactive edit before run; not declared
+[[case]]
+argv = ["aws", "--cli-auto-prompt", "s3", "rm", "s3://b/k"]
+action = "unmodeled"
+
+# Command words are case-sensitive (aws: "invalid choice")
+[[case]]
+argv = ["aws", "S3", "ls"]
+action = "unmodeled"
+
+# The pack does not declare this operation
+[[case]]
+argv = ["aws", "dynamodb", "delete-table", "--table-name", "t"]
+action = "unmodeled"
+
+# The pack does not declare this operation
+[[case]]
+argv = ["aws", "configure", "set", "region", "us-east-1"]
+action = "unmodeled"
+
+# The value is missing
+[[case]]
+argv = ["aws", "s3", "rm", "s3://b/k", "--profile"]
+action = "unmodeled"
+
+# A `many` value with no words
+[[case]]
+argv = ["aws", "s3", "cp", "a", "s3://b/", "--grants"]
+action = "unmodeled"

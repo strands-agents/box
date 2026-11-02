@@ -134,27 +134,29 @@ fn utf8(value: &OsStr, description: &'static str) -> Result<String, ExecutableEr
 
 /// The longest shebang line the kernel honours; a longer first line is not a shebang launch.
 const SHEBANG_LINE_MAX: usize = 512;
-/// A shebang chain is short in practice; the bound stops a cycle or a pathological file looping.
+/// The maximum number of shebang transitions along one interpreter branch.
 const SHEBANG_CHAIN_MAX: usize = 8;
 
-/// The interpreter chain a script launches through its shebang: each existing hop as the kernel or
-/// `env` spells it, one per identity, in chain order, following `#!/usr/bin/env <interp>` on
-/// `search_path`. Empty for a native binary.
+/// The script's interpreter branches, including `env` and its selected command, once per identity.
 pub(crate) fn shebang_interpreter_chain(target: &Path, search_path: &OsStr) -> Vec<PathBuf> {
     let mut chain = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let mut current = target.to_path_buf();
-    for _ in 0..SHEBANG_CHAIN_MAX {
+    let mut pending = std::collections::VecDeque::from([(target.to_path_buf(), 0)]);
+    while let Some((current, depth)) = pending.pop_front() {
+        if depth >= SHEBANG_CHAIN_MAX {
+            continue;
+        }
         let Some((interp, args)) = read_shebang(&current) else {
-            break;
+            continue;
         };
         // The kernel execs `env` itself before `env` finds the interpreter, so an `env` shebang
         // needs both: `env` as the shebang spells it, then the interpreter it resolves to.
         let via_env = env_shebang_target(&interp, &args, Some(search_path));
         if via_env.is_some() {
             let env = interp.canonicalize().unwrap_or_else(|_| interp.clone());
-            if env.is_file() && seen.insert(env) {
+            if env.is_file() && seen.insert(env.clone()) {
                 chain.push(interp.clone());
+                pending.push_back((env, depth + 1));
             }
         }
         // A hop is granted under the name that is looked up, because a view built from names must
@@ -162,7 +164,7 @@ pub(crate) fn shebang_interpreter_chain(target: &Path, search_path: &OsStr) -> V
         let spelled = via_env.unwrap_or(interp);
         let canonical = spelled.canonicalize().unwrap_or_else(|_| spelled.clone());
         if !canonical.is_file() || !seen.insert(canonical.clone()) {
-            break;
+            continue;
         }
         chain.push(spelled);
         // macOS's `/bin/sh` is a selector that execs the variant `/var/select/sh` names, so that
@@ -173,7 +175,7 @@ pub(crate) fn shebang_interpreter_chain(target: &Path, search_path: &OsStr) -> V
         {
             chain.push(variant);
         }
-        current = canonical;
+        pending.push_back((canonical, depth + 1));
     }
     chain
 }
@@ -575,6 +577,111 @@ mod tests {
                 .any(|hop| hop.canonicalize().ok().as_deref() == Some(sh.as_path())),
             "that spelling resolves to the shell: {chain:?}"
         );
+    }
+
+    #[test]
+    fn an_env_shebang_includes_envs_own_interpreter() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let script = root.join("tool");
+        let env = root.join("env");
+        let launcher = root.join("coreutils");
+        let shell = root.join("sh");
+        std::fs::write(&script, format!("#!{} sh\n", env.display())).unwrap();
+        std::fs::write(
+            &env,
+            format!("#!{} --coreutils-prog-shebang=env\n", launcher.display()),
+        )
+        .unwrap();
+        executable_at(&shell);
+        std::fs::write(&shell, b"native interpreter fixture").unwrap();
+        std::fs::write(&launcher, b"native launcher fixture").unwrap();
+
+        let chain = shebang_interpreter_chain(&script, root.as_os_str());
+
+        for expected in [&env, &launcher, &shell] {
+            assert!(
+                chain.contains(expected),
+                "the launch requires {}: {chain:?}",
+                expected.display()
+            );
+        }
+        assert_eq!(chain.len(), 3, "each required interpreter appears once");
+    }
+
+    #[test]
+    fn a_short_interpreter_branch_survives_a_shared_long_branch() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let script = root.join("tool");
+        let env = root.join("env");
+        let launcher = root.join("launcher");
+        let native = root.join("native");
+        let native_env = root.join("bin").join("env");
+        std::fs::create_dir(root.join("bin")).unwrap();
+        std::fs::write(&native_env, b"native env fixture").unwrap();
+        std::fs::write(&script, format!("#!{} node1\n", env.display())).unwrap();
+        std::fs::write(&env, format!("#!{}\n", launcher.display())).unwrap();
+        std::fs::write(&native, b"native interpreter fixture").unwrap();
+        for number in 1..SHEBANG_CHAIN_MAX {
+            let node = root.join(format!("node{number}"));
+            let next = if number == SHEBANG_CHAIN_MAX - 1 {
+                launcher.clone()
+            } else {
+                root.join(format!("node{}", number + 1))
+            };
+            executable_at(&node);
+            std::fs::write(
+                &node,
+                format!("#!{} {}\n", native_env.display(), next.display()),
+            )
+            .unwrap();
+        }
+        executable_at(&launcher);
+        std::fs::write(&launcher, format!("#!{}\n", native.display())).unwrap();
+
+        let chain = shebang_interpreter_chain(&script, root.as_os_str());
+
+        assert!(
+            chain.contains(&native),
+            "the short env branch must reach its native interpreter: {chain:?}"
+        );
+        assert_eq!(
+            chain.iter().filter(|path| *path == &launcher).count(),
+            1,
+            "the shared interpreter appears once"
+        );
+    }
+
+    #[test]
+    fn an_env_interpreter_cycle_keeps_the_selected_interpreter() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let script = root.join("tool");
+        let env = root.join("env");
+        let launcher = root.join("launcher");
+        let shell = root.join("sh");
+        std::fs::write(&script, format!("#!{} sh\n", env.display())).unwrap();
+        std::fs::write(&env, format!("#!{}\n", launcher.display())).unwrap();
+        std::fs::write(&launcher, format!("#!{}\n", env.display())).unwrap();
+        executable_at(&shell);
+        std::fs::write(&shell, b"native interpreter fixture").unwrap();
+
+        let chain = shebang_interpreter_chain(&script, root.as_os_str());
+
+        for expected in [&env, &launcher, &shell] {
+            assert!(chain.contains(expected), "{chain:?}");
+        }
+        assert_eq!(chain.len(), 3, "the interpreter cycle must terminate");
     }
 
     /// **A `#!/bin/sh` script on macOS grants the variant `/bin/sh` selects**, because that shim

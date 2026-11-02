@@ -1,25 +1,16 @@
-// Do not directly execute writable files.
-//
-// macOS only. Bytes the workload writes cannot become a new executable: the write root
-// carries `(deny file-map-executable (subpath ...))`, so no file the workload can rewrite
-// loads as code. The strong arm copies the workload's OWN signed interpreter — bytes known
-// to be runnable and correctly signed — and the copy still cannot exec, which distinguishes
-// the profile from code signing.
-//
-// Two things this case is written around:
-//   * os.access(path, X_OK) answers False here, because the query itself consults the
-//     profile's exec permission. The STORED mode is the control for "the write worked".
-//   * No fork. execv is refused, so it returns and the process survives to run the next arm;
-//     if it ever succeeded the marker would print, which the last arm catches.
-use strands_det_harness::det_case;
+use strands_det_harness::{Platform, det_case};
 
 det_case! {
     name: cn_x_01,
     id:   "CN-X-01",
-    platforms: [Macos],
-    desc: "Write-xor-exec: a written script and a copy of the signed interpreter both refuse to exec; the marker never prints",
+    platforms: [Macos, Linux],
+    desc: "Write-xor-exec: a written script and a copy of the running interpreter both refuse to exec; the marker never prints",
     run: |b| {
         b.reset_policy();
+        let denied = match Platform::current() {
+            Platform::Macos => 1,
+            Platform::Linux => 13,
+        };
         let r = b.probe_py(
             r##"
 import shutil
@@ -40,13 +31,12 @@ os.unlink(S); os.unlink(D)
         );
         // Positive control: the written script stored mode 0755, so the write half worked.
         r.assert_contains("script_stored_mode 0o755");
-        // Executing a script the workload wrote is refused with errno 1.
-        r.assert_errno("exec_written_script", 1);
+        // The written script cannot execute.
+        r.assert_errno("exec_written_script", denied);
         // Positive control: the interpreter copy is byte-complete inside the write root.
         r.assert_contains("copy_same_size True");
-        // A copy of the interpreter's own signed bytes still cannot exec — the profile
-        // refuses it, not code signing.
-        r.assert_errno("exec_written_binary", 1);
+        // The copied interpreter cannot execute from the write root.
+        r.assert_errno("exec_written_binary", denied);
         // The escape marker never reaches stdout by either route.
         r.assert_absent("ESCAPED_MARKER");
     }

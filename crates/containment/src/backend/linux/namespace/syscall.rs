@@ -1154,6 +1154,55 @@ mod tests {
     }
 
     #[test]
+    fn installer_syscall_cannot_also_be_a_workload_permit() {
+        let entries = [PermittedSyscall {
+            name: "seccomp",
+            number: libc::SYS_seccomp,
+        }];
+        let error = build_permit_rules(&entries, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("installer-only seccomp duplicates")
+        );
+        assert!(build_permit_rules(&entries, false).is_ok());
+    }
+
+    #[test]
+    fn identity_rules_cannot_override_unrestricted_workload_permits() {
+        for (name, number) in [
+            ("setresuid", libc::SYS_setresuid),
+            ("setresgid", libc::SYS_setresgid),
+        ] {
+            let entries = [PermittedSyscall { name, number }];
+            let error = build_permit_rules(&entries, false).unwrap_err();
+            assert!(error.to_string().contains("duplicate permitted syscall"));
+            assert!(error.to_string().contains(name));
+        }
+    }
+
+    #[test]
+    fn an_empty_permitted_argument_rule_is_refused_without_insertion() {
+        let mut rules = BTreeMap::new();
+        let error =
+            insert_permitted_scoped(&mut rules, "setresuid", libc::SYS_setresuid, Vec::new())
+                .unwrap_err();
+        assert!(error.to_string().contains("has no argument rule"));
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn an_empty_scoped_rule_does_not_replace_an_existing_restriction() {
+        let mut rules = BTreeMap::new();
+        insert_scoped(&mut rules, libc::SYS_setpgid, setpgid_rules().unwrap());
+        let before = format!("{rules:?}");
+        insert_scoped(&mut rules, libc::SYS_setpgid, Vec::new());
+        assert_eq!(format!("{rules:?}"), before);
+        insert_scoped(&mut rules, libc::SYS_getpid, Vec::new());
+        assert!(!rules.contains_key(&libc::SYS_getpid));
+    }
+
+    #[test]
     fn every_mediated_syscall_states_its_reason() {
         for entry in MEDIATED {
             assert!(

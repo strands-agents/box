@@ -1,13 +1,6 @@
 use strands_det_harness::{det_case, sh_quote};
 
-// macOS only: a leaf runs its whole toolchain and loads what it builds
-// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds). A tool with
-// `write = [work]` copies a compiled program and a compiled dynamic library into `work`, then runs
-// the program and loads the library, both by its own syscalls: broad exec and the one
-// `file-map-executable` allow over its writable grant. `write` does not imply `read`, and `dlopen`
-// opens the file for reading, so the tool also reads `work`. The agent box keeps full W^X: its
-// own exec of the same written program is refused, and its load of the same written library is
-// refused by the sandbox, while the original program under its `exec` entry runs (CN-X-01, CN-X-03).
+// docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds
 const PROBE: &str = include_str!("../probes/leaf_probe.rs");
 
 const LIBRARY: &str = "#[no_mangle]\npub extern \"C\" fn det_leaf_value() -> i32 {\n    4204\n}\n";
@@ -15,13 +8,13 @@ const LIBRARY: &str = "#[no_mangle]\npub extern \"C\" fn det_leaf_value() -> i32
 det_case! {
     name: cn_x_04,
     id:   "CN-X-04",
-    platforms: [Macos],
+    platforms: [Macos, Linux],
     desc: "Leaf build output: a tool with write=[work] (and read of it) execs a program and dlopens a library it copied into work; the agent's own exec and load of the same written files are refused",
     run: |b| {
         let probe = b.compile_probe("leafprobe-x04", PROBE);
         let out = b.exec_tree();
         let source = out.join("detx04.rs");
-        let library = out.join("libdetx04.dylib");
+        let library = out.join(format!("libdetx04.{}", std::env::consts::DLL_EXTENSION));
         std::fs::write(&source, LIBRARY).expect("DET_ERROR: write the library source");
         let compiled = std::process::Command::new("rustc")
             .args(["--edition", "2021", "--crate-type", "cdylib", "-O", "-o"])
@@ -34,7 +27,7 @@ det_case! {
         let work = b.workspace().join("x04-work");
         std::fs::create_dir(&work).expect("DET_ERROR: the tool's work directory");
         let program = work.join("hello-copy");
-        let loaded = work.join("libcopy.dylib");
+        let loaded = work.join(format!("libcopy.{}", std::env::consts::DLL_EXTENSION));
 
         let quoted = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
         let exec_tree = b.with_exec_tree();
@@ -72,6 +65,9 @@ det_case! {
         agent.assert_kernel_marker();
         agent.assert_absent("DLOPEN_OK");
         agent.assert_contains(&line("DLOPEN_REFUSED", &loaded));
+        #[cfg(target_os = "macos")]
         agent.assert_contains("file system sandbox blocked mmap()");
+        #[cfg(target_os = "linux")]
+        agent.assert_contains("failed to map segment from shared object");
     }
 }

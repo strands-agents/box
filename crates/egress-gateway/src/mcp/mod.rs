@@ -5,15 +5,19 @@
 //! | [`McpTarget`] | the decided method and the item it names, or `None` for a frame that asks nothing |
 //! | [`mcp_denial_response`] | the JSON-RPC error a refused request receives |
 //! | [`canonicalize_mcp_frame`] | the `resources/read` frame the server receives, with its canonical URI |
+//! | [`refuse_duplicate_mcp_keys`] | the refusal of a frame that repeats a key inside one object |
 
+mod duplicate;
 mod uri;
 
 use std::io;
 
 use serde_json::Value;
 
+#[cfg(all(test, feature = "tls-intercept"))]
+pub(crate) use uri::generated_spellings;
 #[cfg(feature = "tls-intercept")]
-pub(crate) use uri::{decode_unreserved, remove_dot_segments};
+pub(crate) use uri::normalize_path;
 
 /// The methods a stdio server receives undecided, because its connection cannot start without them.
 const STDIO_UNDECIDED_METHODS: [&str; 4] = [
@@ -63,6 +67,7 @@ impl McpTarget {
         if frame.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);
         }
+        refuse_duplicate_mcp_keys(frame)?;
         let refuse = |reason: String| io::Error::new(io::ErrorKind::InvalidData, reason);
 
         let parsed: Value = serde_json::from_slice(frame).map_err(|error| {
@@ -118,9 +123,9 @@ impl McpTarget {
         let identity = match method {
             "tools/call" => McpTargetIdentity::Tool(named("name")?),
             "prompts/get" => McpTargetIdentity::Prompt(named("name")?),
-            "resources/read" => {
-                McpTargetIdentity::Resource(uri::canonicalize_resource_uri(&named("uri")?))
-            }
+            "resources/read" => McpTargetIdentity::Resource(
+                uri::canonicalize_resource_uri(&named("uri")?).map_err(refuse)?,
+            ),
             other => McpTargetIdentity::Method(other.to_string()),
         };
         Ok(Some(Self {
@@ -192,6 +197,11 @@ pub fn mcp_denial_response(frame: &[u8], message: &str) -> Option<String> {
         })
         .to_string(),
     )
+}
+
+/// Refuse a frame in which one object repeats a key, at any depth.
+pub fn refuse_duplicate_mcp_keys(frame: &[u8]) -> io::Result<()> {
+    duplicate::refuse_duplicate_keys(frame)
 }
 
 /// The frame with its `resources/read` URI canonicalized, or `None` when nothing changes.

@@ -417,6 +417,37 @@ fn the_alias_image_is_execute_only() {
     }
 }
 
+/// Run explicitly to measure the known Linux read-protection gap.
+/// The existing alias test still checks writes on every supported backend.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "https://github.com/strands-agents/box/issues/48: an executable alias remains readable; run explicitly to measure read protection"]
+fn linux_alias_read_protection_requirement() {
+    assert!(
+        fixture::namespace_launcher_is_usable(),
+        "the read-protection measurement requires a working Linux backend"
+    );
+    let box_ = box_under(PERMISSIVE_POLICY, "alias-read-requirement");
+    let output = box_.bash(&format!(
+        r#"{DERIVE_PATHS}
+           printf 'CONTROL\n' > "$BOX_HOME/control.txt"
+           IFS= read -r -N 1 control < "$BOX_HOME/control.txt" && echo "control=$control"
+           IFS= read -r -N 1 leaked < "$ALIAS" && echo "LEAKED=$leaked"
+           printf 'READ_CHECK_COMPLETE\n'"#
+    ));
+    let seen = stdout(&output);
+    assert!(
+        output.status.success()
+            && seen.contains("control=C\n")
+            && seen.contains("READ_CHECK_COMPLETE"),
+        "the workload and positive read control must complete: {output:?}"
+    );
+    assert!(
+        !seen.contains("LEAKED="),
+        "the alias contents must not be readable: {output:?}"
+    );
+}
+
 /// Every host shell *other than the workload itself* is denied by the kernel, so
 /// the alias is the only interpreter the workload can reach.
 ///
@@ -532,6 +563,17 @@ fn the_shims_policy_and_image_are_unreachable() {
         return;
     }
     let box_ = box_under(PERMISSIVE_POLICY, "shell-private-tree");
+    let private = box_.root().join("private");
+    let policy = private.join("policy.dw");
+    let authority = std::fs::read(&policy).expect("the stored policy exists on the host");
+    assert!(
+        !authority.is_empty(),
+        "the policy read must target real content"
+    );
+    let probe = private.join("workload-write-probe");
+    std::fs::write(&probe, b"host control").expect("the host can create a private sibling");
+    assert_eq!(std::fs::read(&probe).unwrap(), b"host control");
+    std::fs::remove_file(&probe).expect("remove the host control before the contained probe");
 
     // Builtins and the kernel's own refusal, for the same reason as above. The
     // earlier version of this test also probed `$PRIVATE/strands-box-sock-alias`, which
@@ -540,8 +582,16 @@ fn the_shims_policy_and_image_are_unreachable() {
     // installed image is what must be unreachable, so that is what is probed.
     let output = box_.bash(&format!(
         r#"{DERIVE_PATHS}
-           read -r leaked < "$PRIVATE/policy.dw" && echo "POLICY_LEAKED=$leaked"
-           printf x > "$PRIVATE/policy.dw"
+           if read -r leaked < "$PRIVATE/policy.dw"; then
+             echo "POLICY_LEAKED=$leaked"
+           else echo POLICY_READ_DENIED; fi
+           if printf x > "$PRIVATE/policy.dw"; then echo POLICY_OVERWRITTEN
+           else echo POLICY_WRITE_DENIED; fi
+           if printf x > "$PRIVATE/workload-write-probe"; then echo PRIVATE_CREATED
+           else echo PRIVATE_CREATE_DENIED; fi
+           printf 'permitted control' > "$HOME/permitted-write"
+           read -r control < "$HOME/permitted-write"
+           printf 'PERMITTED=%s\n' "$control"
            # The private directory itself must not be listable either: enumerating it
            # would disclose the shim's filenames even without reading them.
            for entry in "$PRIVATE"/*; do echo "ENUMERATED=$entry"; done"#
@@ -565,14 +615,31 @@ fn the_shims_policy_and_image_are_unreachable() {
             "the private directory must not be enumerable, and {name} is in it: {output:?}"
         );
     }
-    // Reading the policy and writing it: two kernel refusals, in whichever words this
-    // platform's backend uses. See `kernel_refusals` — on Linux both are `ENOENT`, because the
-    // private tree is not in the workload's mount view at all.
+    assert!(
+        output.status.success(),
+        "the workload must finish: {output:?}"
+    );
+    for marker in [
+        "POLICY_READ_DENIED",
+        "POLICY_WRITE_DENIED",
+        "PRIVATE_CREATE_DENIED",
+        "PERMITTED=permitted control",
+    ] {
+        assert!(seen.contains(marker), "missing {marker}: {output:?}");
+    }
+    assert!(
+        !seen.contains("POLICY_OVERWRITTEN") && !seen.contains("PRIVATE_CREATED"),
+        "the workload must not write private state: {output:?}"
+    );
     assert_eq!(
-        kernel_refusals(&stderr(&output)),
-        2,
-        "reading and writing the shim's policy must both be denied by the kernel: \
-         {output:?}"
+        std::fs::read(&policy).unwrap(),
+        authority,
+        "the stored authority must remain unchanged"
+    );
+    assert!(!probe.exists(), "the private sibling must not be created");
+    assert_eq!(
+        std::fs::read(box_.box_home().join("permitted-write")).unwrap(),
+        b"permitted control"
     );
 }
 
@@ -2614,6 +2681,16 @@ fn a_signalled_host_binary_records_128_plus_the_signal_in_history() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    use std::os::unix::process::ExitStatusExt as _;
+    let control = std::process::Command::new(env!("CARGO_BIN_EXE_box-exit-probe"))
+        .args(["signal", &libc::SIGKILL.to_string()])
+        .output()
+        .expect("run the signal probe outside containment");
+    assert_eq!(
+        control.status.signal(),
+        Some(libc::SIGKILL),
+        "the probe must actually die by signal, not return a matching exit code: {control:?}"
+    );
     let killed = 128 + libc::SIGKILL;
     let box_ = exit_probe_box(
         "spawn-signal-status",
@@ -2839,6 +2916,8 @@ fn nested_authority_parents_are_protected_through_each_writable_spelling() {
             let config = ContainmentConfig::new()
                 .allow(probe, Operation::Exec, Scope::File)
                 .expect("probe grant")
+                .allow(&alias, Operation::Read, Scope::Root)
+                .expect("readable root through alias")
                 .allow(&alias, Operation::Write, Scope::Root)
                 .expect("writable root through alias")
                 .protect_write(&authority, &opened)

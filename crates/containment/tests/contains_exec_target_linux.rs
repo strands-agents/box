@@ -151,6 +151,30 @@ fn a_granted_target_runs_contained() {
     assert_eq!(code, 0, "the target's own exit status must propagate");
 }
 
+#[test]
+fn write_only_is_refused_before_the_target_runs() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work_dir = tempfile::tempdir().expect("work directory");
+    let config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Read, Scope::File)
+        .expect("read the shell")
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .expect("execute the shell")
+        .allow(work_dir.path(), Operation::Write, Scope::Root)
+        .expect("a structurally valid write grant");
+    let (code, stdout, stderr) = run_contained(
+        &config,
+        work_dir.path(),
+        &["/bin/sh", "-c", "echo TARGET_RAN"],
+    );
+    assert_eq!(code, 3, "containment must refuse the request: {stderr}");
+    assert!(stderr.contains("cannot enforce write-only"), "{stderr}");
+    assert!(!stdout.contains("TARGET_RAN"), "{stdout}");
+}
+
 /// An UNGRANTED target is not reachable, and the failure is an exec failure rather
 /// than a workload run.
 ///
@@ -185,6 +209,117 @@ fn an_ungranted_target_cannot_be_reached() {
         "an ungranted target must fail at exec *after* containment (exit 4), which \
          is the trampoline reporting the boundary held; stderr:\n{stderr}"
     );
+}
+
+#[test]
+fn a_leaf_runs_written_helpers_but_denied_paths_and_private_tmp_stay_non_executable() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("leaf-exec-")
+        .tempdir_in("/var/tmp")
+        .expect("fixture outside the private tmp mount");
+    let work = root.path().join("work");
+    let helpers = root.path().join("helpers");
+    let denied = work.join("denied");
+    std::fs::create_dir_all(&denied).unwrap();
+    std::fs::create_dir(&helpers).unwrap();
+    let helper = helpers.join("helper");
+    let written = work.join("written");
+    let refused = denied.join("helper");
+    let outside = root.path().join("ungranted");
+    let protected = work.join("protected");
+    for path in [&helper, &refused, &outside, &protected] {
+        std::fs::copy("/bin/sh", path).unwrap();
+        // A sibling namespace probe can inherit the copy's writer until its child exits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match Command::new(path).args(["-c", "exit 0"]).status() {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => break result,
+            }
+        };
+        assert!(
+            status
+                .expect("the uncontained helper must execute")
+                .success(),
+            "the uncontained helper must exit successfully"
+        );
+    }
+    let opened = std::fs::File::open(&protected).unwrap();
+    let mut config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .unwrap()
+        .allow("/bin/cp", Operation::Read, Scope::File)
+        .unwrap()
+        .allow(&helpers, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&work, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&work, Operation::Write, Scope::Root)
+        .unwrap()
+        .refuse(&denied, Scope::Root)
+        .unwrap()
+        .protect_write(&protected, &opened)
+        .unwrap();
+    if Path::new("/usr/bin/coreutils").is_file() {
+        config = config
+            .allow("/usr/bin/coreutils", Operation::Read, Scope::File)
+            .unwrap();
+    }
+    for directory in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
+        if Path::new(directory).is_dir() {
+            config = config
+                .allow(directory, Operation::Read, Scope::Root)
+                .unwrap();
+        }
+    }
+    let leaf_script = format!(
+        "set -eu; {helper} -c 'echo READ_HELPER'; \
+         /bin/cp {helper} {written}; {written} -c 'echo WRITTEN_HELPER'; \
+         /bin/cp {helper} /tmp/helper; \
+         for denied in /tmp/helper {refused} {outside} {protected}; do \
+           if \"$denied\" -c 'echo ESCAPED'; then exit 71; fi; \
+         done; echo LEAF_COMPLETE",
+        helper = helper.display(),
+        written = written.display(),
+        refused = refused.display(),
+        outside = outside.display(),
+        protected = protected.display(),
+    );
+    let (code, stdout, stderr) = run_contained(
+        &config.clone().allow_broad_exec(),
+        &work,
+        &["/bin/sh", "-c", &leaf_script],
+    );
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    for marker in ["READ_HELPER", "WRITTEN_HELPER", "LEAF_COMPLETE"] {
+        assert!(stdout.contains(marker), "{stdout}\n{stderr}");
+    }
+    assert!(!stdout.contains("ESCAPED"), "{stdout}\n{stderr}");
+    assert_eq!(
+        std::fs::read(&written).unwrap(),
+        std::fs::read(&helper).unwrap()
+    );
+
+    let agent_script = format!(
+        "set -eu; for program in {helper} {written}; do \
+           if \"$program\" -c 'echo AGENT_ESCAPED'; then exit 72; fi; \
+         done; echo AGENT_COMPLETE",
+        helper = helper.display(),
+        written = written.display(),
+    );
+    let (code, stdout, stderr) = run_contained(&config, &work, &["/bin/sh", "-c", &agent_script]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(stdout.contains("AGENT_COMPLETE"), "{stdout}\n{stderr}");
+    assert!(!stdout.contains("AGENT_ESCAPED"), "{stdout}\n{stderr}");
 }
 
 /// Whether this host lets the launcher build a mount view at all.

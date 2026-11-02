@@ -16,12 +16,9 @@ name: "Containment: Deterministic"
 
 on:
   workflow_call:
-    inputs:
-      ref:
-        required: true
-        type: string
 
 env:
+  EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
   CARGO_TERM_COLOR: always
   # Same disk-pressure guard as rust-test-lint.yml: hosted runners give ~14 GB
   # free and full DWARF on the dev profile has overflowed it.
@@ -38,40 +35,7 @@ jobs:
     # than running to the 6-hour default -- CN-* cases spawn real subprocesses
     # under a cage, and a wedged one would otherwise burn the whole budget.
     timeout-minutes: 45
-    # The two legs differ: macOS BLOCKS, Linux is advisory. See
-    # test-integ/README.md.
-    #
-    #   macos-latest — BLOCKING. No case is quarantined on macOS. This is
-    #     the platform the suite was written against and the only one that binds
-    #     `file-graft`, so a regression here is a real defect and must stop the
-    #     merge.
-    #
-    #   ubuntu-24.04-arm — ADVISORY, and it MUST be an arm64 runner. Linux
-    #     containment is aarch64-only by construction: facade.rs maps
-    #     `Platform::Linux if architecture == "aarch64"` to the namespace
-    #     mechanism and refuses everything else, so on x86_64 the trampoline
-    #     exits with "Linux containment supports ARM64 (aarch64), not x86_64"
-    #     and every case errors out at the harness's positive control. A first CI
-    #     run on `ubuntu-latest` (x86_64) confirmed this: 57 errors, 0 passes.
-    #     Advisory because no arm64 run has gone green yet, not because the
-    #     platform is expected to fail. Flip it by deleting the expression below
-    #     once it has a green baseline.
-    #
-    #     Note the AppArmor question is settled and was NOT the blocker: the
-    #     sysctl step below demonstrably works (the run logged `before: 1` ->
-    #     `after: 0` and `unshare(CLONE_NEWUSER): OK`). It stays because Ubuntu
-    #     24.04 restricts unprivileged user namespaces on arm64 too, and the
-    #     cage needs that primitive either way.
-    #
-    # NOTE: a leg being advisory is not the same as a leg being watched. Neither
-    # a red advisory leg nor a red blocking leg notifies anyone; the blocking one
-    # at least fails CI Gate. Adding CI Gate as a required status check on the
-    # `block-main` ruleset is a separate, admin-only step.
-    #
-    # The Linux-only conditions below match on the runner FAMILY rather than the
-    # exact label, so changing the Ubuntu image again cannot silently strand a
-    # step behind a stale `== 'ubuntu-latest'`.
-    continue-on-error: ${{ startsWith(matrix.os, 'ubuntu') }}
+    # Both platforms affect CI Gate. Linux needs ARM64 to execute the namespace backend.
     strategy:
       # Report every OS's outcome even if one fails. A Linux failure is not a
       # reason to hide the macOS one.
@@ -82,7 +46,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # Same reclaim rust-test-lint.yml does before its Rust build: the Linux
@@ -132,23 +96,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: containment-deterministic
-          # Restore on every run, but only WRITE a cache entry on a push to the
-          # default branch. Steps after this one execute code from `inputs.ref`,
-          # so if they could also write a cache entry, a run in the default
-          # branch's context could poison a cache that later trusted builds
-          # restore (CodeQL `actions/cache-poisoning/poisonable-step`, which
-          # names the `workflow_dispatch` path specifically -- a dispatch runs
-          # privileged, whereas a `pull_request` run is already confined to the
-          # PR branch's scope). Restoring is safe and is what makes a PR fast, so
-          # gating the write costs nothing a reviewer would notice.
-          #
-          # Note CodeQL evaluates the workflow statically and cannot see through
-          # this expression, so the three alerts on the steps below persist. They
-          # are the same shape as the ones already open against
-          # rust-test-lint.yml and deploy-box-artifact.yml: a test workflow
-          # exists to build and run the proposed code, so "do not execute
-          # untrusted code" is not available to it. What IS available is denying
-          # that code any way to write the cache, which is what this does.
+          # This condition controls the action's upload, not the job's cache permissions.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           workspaces: |
             .
@@ -159,6 +107,9 @@ jobs:
       # and `box-egress-probe`.
       - name: Build strands-box and the containment trampoline
         run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Test filesystem modes on a supported backend
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
 
       # On Linux the MCP cases install their fixture server into /usr/bin, because a leaf's filesystem
       # table cannot grant exec there. The runner is not root, so create each file
@@ -183,6 +134,19 @@ jobs:
           command -v strands-box
           bash test-integ/run.sh
 
+      - name: Test the portable Linux evidence runner
+        if: always() && startsWith(matrix.os, 'ubuntu')
+        run: python3 -m unittest discover -s test-integ/tools -p test_target_validation.py -v
+
+      - name: Check the installed Linux package
+        if: always() && startsWith(matrix.os, 'ubuntu')
+        run: |
+          rustc --edition=2024 -O test-integ/tests/phase3/probe.rs -o target/release/target-lifecycle-probe
+          python3 test-integ/tools/target_validation.py run \
+            --box "$GITHUB_WORKSPACE/target/release/strands-box" \
+            --probe "$GITHUB_WORKSPACE/target/release/target-lifecycle-probe" \
+            --revision "$(git rev-parse HEAD)" --root "$RUNNER_TEMP/box-target-validation"
+
       # Always: a RED verdict is the case this reporting exists for.
       - name: Summarize the verdict
         if: always()
@@ -197,5 +161,8 @@ jobs:
             det-results/verdict.json
             det-results/cargo-test.log
             det-results/*.jsonl
+            ${{ runner.temp }}/box-target-validation/**/*.json
+            ${{ runner.temp }}/box-target-validation/**/stdout
+            ${{ runner.temp }}/box-target-validation/**/stderr
           if-no-files-found: warn
           retention-days: 14

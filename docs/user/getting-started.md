@@ -65,8 +65,10 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ```
 
 The script downloads the latest release, checks it, and unpacks it into `./box-core`. You run
-`box` by its path. Keep the other files in `./box-core` next to it, because `box` needs them
-beside it.
+`box` by its path. Keep the entire directory together. The signed macOS package contains
+`Box.app`, with a `box` launcher and helper links into that bundle. Moving only an executable
+out of the bundle loses its provisioning profile. The package is also notarized, so macOS runs
+a copy that you download in a browser.
 
 ### Build from source
 

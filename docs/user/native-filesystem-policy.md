@@ -7,7 +7,8 @@ Endpoint Security is the macOS interface that lets a client decide selected oper
 
 ## Enable the experiment
 
-Build the product and its helpers:
+Signed macOS releases include the Cargo feature. The experiment still requires the compatible
+system described above and the runtime opt-in below. For a source build, build the product and its helpers:
 
 ```sh
 cargo build --release --locked -p strands-box -p strands-box-containment --features native-filesystem-policy
@@ -24,7 +25,7 @@ native-filesystem-policy = true
 Run the signed product with `run --config /absolute/path/box.toml`.
 An absent table or `false` leaves native interception disabled, including in an `--all-features` build.
 A selected but unavailable mechanism refuses startup. Box never silently disables the selected checks.
-Standard release artifacts exclude the experiment.
+Signed macOS release artifacts include the experiment's code; unsigned build artifacts do not establish its signing requirements.
 
 ## Select workloads
 
@@ -63,9 +64,13 @@ Kernel event delivery and trusted launcher setup can still add overhead.
 
 ## Coverage and limits
 
-The adapter checks open, create, unlink, rename, and truncate requests from selected descendants of the box's trusted process.
+The adapter checks open, create, unlink, rename, truncate, and permission-change requests from selected descendants of the box's trusted process.
 It uses the box's existing durable Dogwood history. Filesystem grants still restrict each process through Seatbelt, the macOS process sandbox.
 A policy permit cannot expand those grants.
+
+Permission-change events (`AUTH_SETMODE`) for regular files and directories require `fs:write` with the existing `set_permissions` operation.
+These events cover `chmod` and `fchmod`, including permission changes through an open file descriptor.
+Other target types are refused. The policy input identifies the path and operation, but does not include the requested permission bits.
 
 For mediated workloads, the adapter disables authorization caching and requests kernel denial for missed deadlines or dropped authorization messages.
 Accepted authorization replies produce `indeterminate` outcomes. These records confirm authorization, not successful filesystem effects.
@@ -111,7 +116,7 @@ Both restrictions apply. A policy permit cannot expand containment grants.
 ### Can I enable this through TOML alone?
 
 Only if you already have the compatible, signed build described in [Enable the experiment](#enable-the-experiment).
-Standard release artifacts exclude the experiment.
+Signed macOS releases include the adapter, but leave it disabled until you select it.
 The Cargo feature includes the adapter in a build.
 The TOML setting activates it for a box.
 

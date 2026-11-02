@@ -2337,7 +2337,7 @@ async fn run_capturing_status(
             output.push_str(&out);
             if proc.max_output > 0 && output.len() > proc.max_output {
                 proc.err_msg("strands-shell: output size limit exceeded");
-                output.truncate(proc.max_output);
+                output.truncate(os::floor_char_boundary(&output, proc.max_output));
                 proc.last_exit = 1;
                 last_exit = 1;
                 break;
@@ -2436,7 +2436,7 @@ async fn execute_command_line_inner(
                     let stderr = std::mem::take(&mut sub.captured_stderr);
                     (code, stdout, stderr)
                 });
-                proc.bg_jobs.push(handle);
+                proc.add_background_job(handle);
                 last_exit = 0;
                 proc.last_exit = 0;
                 continue;
@@ -3879,6 +3879,13 @@ async fn run_pipeline(
         }
     }
 
+    let mut tasks = os::Tasks(
+        handles
+            .iter()
+            .map(|(_, task)| task.abort_handle())
+            .collect(),
+    );
+
     // Drain last stage stdout
     let max_output = shell_proc.max_output;
     let stdout_drain = if capture {
@@ -3935,6 +3942,12 @@ async fn run_pipeline(
         });
         Some(handle)
     };
+    tasks
+        .0
+        .extend(stdout_drain.iter().map(|task| task.abort_handle()));
+    tasks
+        .0
+        .extend(stderr_drain.iter().map(|task| task.abort_handle()));
 
     // Wait for all command tasks, reporting each stage against its own permit.
     //
@@ -3942,8 +3955,31 @@ async fn run_pipeline(
     // zip against `permits` would misalign every later stage — reporting one command's
     // status against another command's permit.
     let mut last_exit = 0;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut expired = false;
     for (index, handle) in handles {
-        let exit = match handle.await {
+        #[cfg(not(target_arch = "wasm32"))]
+        let joined = {
+            let mut handle = handle;
+            if let Some(deadline) = shell_proc.deadline {
+                match tokio::time::timeout_at(deadline, &mut handle).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        expired = true;
+                        // Discard incomplete capture so the deadline cannot wait on output drains.
+                        for task in &tasks.0 {
+                            task.abort();
+                        }
+                        handle.await
+                    }
+                }
+            } else {
+                handle.await
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let joined = handle.await;
+        let exit = match joined {
             Ok(exit) => exit,
             // A task that did not join has ended with no status. Leave the permit to
             // submit `Indeterminate` from its `Drop`: a rule counting attempts must still
@@ -3952,6 +3988,11 @@ async fn run_pipeline(
         };
         let permit = permits.get_mut(index).and_then(Option::take);
         last_exit = report_stage(permit, shell_proc, exit).await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if expired {
+        shell_proc.err_msg("strands-shell: execution timeout exceeded");
+        last_exit = 1;
     }
 
     let stdout_str = if let Some(h) = stdout_drain {

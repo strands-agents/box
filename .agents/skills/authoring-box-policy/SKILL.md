@@ -98,8 +98,9 @@ The actions are a closed set. A policy names one; it cannot add one. The last co
   (host, after TLS).
 - Guard an optional field with `has` (`arg1`, `arg2`, `tool`, `prompt`, `uri`, `ip`); an unguarded
   read is a load error.
-- `path` is a filesystem path on `fs:*` and a URL path on `http:request`; only `fs:*` carries
-  `operation`, so guard a filesystem rule with `context.input has operation`.
+- `path` is a filesystem path on `fs:*` and a URL path on `http:request`. A rule that reads
+  `context.input` names actions of one family (`fs:`, `shell:`, `net:`, `http:`, `mcp:`, or one
+  tool action); any other refuses to load, so write one rule per family.
 - Write a shell rule on `program` (what the first word resolved to), not `command`. Do not read `ip`
   in a temporal predicate — it faults.
 - `tool:invoke`, `model:invoke`, `agent:invoke`, and `cred:inject` are removed — naming one is an
@@ -152,7 +153,9 @@ Match the provider to the box's configured endpoint. See the three agent example
    temporal sublanguage (Step 2b).
 4. **Path and host scope.** For a filesystem rule, get the exact path and whether it is one file or a
    subtree — a subtree needs two clauses (the directory and its contents; see Common shapes). Prefer
-   `~`-relative paths so the file is portable. For a host, get the exact hostname and port.
+   `~`-relative paths so the file is portable. For a host, get the exact hostname and port. Spell
+   the hostname in lowercase, without a trailing dot, and in punycode for an internationalized
+   domain, because the load refuses every other spelling.
 5. **Temporal specifics** (if history is involved) — the highest-value disambiguations:
    - **"happened at least once recently"** → `formerly within W`.
    - **"the immediately preceding event"** → `previous within W`.

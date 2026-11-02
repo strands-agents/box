@@ -448,6 +448,7 @@ pub(crate) fn render_profile_with_streams(
 
     let mut cells: BTreeMap<&str, String> = BTreeMap::new();
     let mut loaded_images: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut missing = crate::backend::dependencies::MissingReads::default();
 
     for granted in config.authorizations() {
         let path = escaped(&granted.resolved)?;
@@ -462,18 +463,8 @@ pub(crate) fn render_profile_with_streams(
                 cells.entry(EXEC_FILE).or_default().push_str(&rules);
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
-                for image in super::macho::dylib_closure(&granted.resolved)? {
-                    let loaded = PathGrant::new(&image, Operation::Read, Scope::File)?;
-                    require_bounded_grant(&loaded, config.operator_home(), false).map_err(
-                        |error| ContainmentError::ApplyFailed {
-                            backend: MECHANISM.to_string(),
-                            reason: format!(
-                                "'{}' loads '{}', which the floor refuses: {error}",
-                                granted.resolved.display(),
-                                image.display()
-                            ),
-                        },
-                    )?;
+                for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
+                    let image = &loaded.original;
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
@@ -481,7 +472,7 @@ pub(crate) fn render_profile_with_streams(
                         "(allow file-read* (literal \"{}\"))\n{}{}",
                         escaped(&loaded.resolved)?,
                         other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(&image)?
+                        linked_directory_metadata(image)?
                     ));
                 }
             }
@@ -583,6 +574,7 @@ pub(crate) fn render_profile_with_streams(
         }
     }
 
+    missing.require_complete(MECHANISM)?;
     let write_roots = config.grants_in(Operation::Write, Scope::Root);
     let mut fixed_ancestors = BTreeSet::new();
     for protected in config.write_protections() {
@@ -763,15 +755,24 @@ pub(crate) fn render_profile_with_streams(
         }
     }
 
-    // Each refused tree or file keeps both spellings closed to content reads, writes, and
-    // execution, whether or not the path exists.
+    // Each refused tree or file keeps every spelling, its data-volume twin included, closed to
+    // content reads, writes, and execution, whether or not the path exists.
     for refused in config.refusals() {
         let filter = if refused.scope == Scope::File {
             "literal"
         } else {
             "subpath"
         };
-        for spelling in refused.reachable_paths() {
+        let mut spellings: Vec<std::path::PathBuf> = Vec::new();
+        for path in refused.reachable_paths() {
+            let twin = data_volume_spelling(&path);
+            for spelling in std::iter::once(path).chain(twin) {
+                if !spellings.contains(&spelling) {
+                    spellings.push(spelling);
+                }
+            }
+        }
+        for spelling in spellings {
             let path = escaped(&spelling)?;
             cells.entry(DENY_REFUSED).or_default().push_str(&format!(
                 "(deny file-read* ({filter} \"{path}\"))\n\
@@ -991,6 +992,7 @@ impl ContainmentBackend for SeatbeltBackend {
         // Seatbelt execs in place, so a successful `exec` closes the status pipe (EOF); there is no
         // reaper to write a byte, and none is needed.
         _confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<()> {
         apply_validated_profile(config, apply_current_process)
     }
@@ -2268,6 +2270,32 @@ mod tests {
             .refuse(&secret, Scope::File)
             .expect("the file refusal");
         (temp, root, config)
+    }
+
+    /// **A refusal renders its data-volume spelling beside its own, after every allow.**
+    #[test]
+    fn a_refusal_renders_its_data_volume_spelling_after_every_allow() {
+        let (_temp, _root, config) = refusal_fixture();
+        let profile = render_profile(&config).expect("profile");
+        let last_allow = profile.rfind("(allow ").expect("an allow renders");
+        for refused in config.refusals() {
+            let filter = if refused.scope == Scope::File {
+                "literal"
+            } else {
+                "subpath"
+            };
+            let twin = data_volume_spelling(&refused.resolved).expect("the fixture has a twin");
+            for spelling in [&refused.resolved, &twin] {
+                let path = escaped(spelling).expect("the spelling escapes");
+                for operation in ["file-read*", "file-write*", "process-exec"] {
+                    let rule = format!("(deny {operation} ({filter} \"{path}\"))");
+                    assert!(
+                        profile.find(&rule).is_some_and(|at| at > last_allow),
+                        "{rule} renders after every allow: {profile}"
+                    );
+                }
+            }
+        }
     }
 
     /// **A refusal strictly inside a write root fixes every directory between the two**, with the

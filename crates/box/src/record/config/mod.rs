@@ -976,6 +976,25 @@ fn valid_box_identity(identity: &str) -> bool {
     })
 }
 
+/// The policy that the configuration at `path` selects, read as `run` reads it, and whether `run`
+/// validates it completely.
+pub(crate) fn read_checked_policy(path: &Path) -> Result<(Option<Policy>, bool), BoxError> {
+    let (source, text) = AuthoritySource::read(path, "configuration")?;
+    let file = ConfigFile::parse(&text, source.path())?;
+    let (mcp_servers, _) = crate::record::config::mcp::partition(&file.mcp)?;
+    let policy = match file.policy_path(source.path()) {
+        Some(policy_path) => {
+            let (identity, text) = AuthoritySource::read(&policy_path, "policy")?;
+            Some(Policy {
+                origin: identity.path().to_path_buf(),
+                text,
+            })
+        }
+        None => None,
+    };
+    Ok((policy, mcp_servers.is_empty()))
+}
+
 /// The operator a policy loads for, anchored at the operator's own home.
 pub(crate) fn policy_operator() -> Result<policy::Operator, BoxError> {
     let home = crate::record::layout::operator_home_directory()?;
@@ -2411,6 +2430,29 @@ env = {}
                 .into_request(&root)
                 .expect("MCP configuration defers complete action-schema validation");
 
+            std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
+            );
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == Box::Action::"shell:exec", resource)
+               when { context.input.not_in_the_canonical_schema == "value" };"#,
+            )
+            .expect("restore policy");
             std::fs::write(
                 &config_path,
                 format!(

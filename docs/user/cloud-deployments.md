@@ -3,15 +3,33 @@
 Cloud deployment profiles record the environment around Box for three Amazon Linux 2023 ARM64 deployment targets.
 A deployment profile describes the service configuration. It does not change the Box policy or sandbox grants.
 
-> **Status.** Qualification configurations as of October 21, 2026. Runtime and Lambda qualification failed. Lambda cancellation and timeout left task processes running. Deployment scripts remain pending.
+These profiles are reference configurations from one qualification campaign, not runnable deployment examples.
+The recorded candidate failed qualification on all three targets. Lambda cancellation and timeout left task processes running.
 
 These measurements apply to Box revision `913f5367f57424b3bda65dc4a05278a5664f635d`.
 The candidate archive is `box-v0.1.0-aarch64-unknown-linux-gnu.tar.gz`.
 Its SHA-256 checksum is `89e8547d009731cd3f4a671e15b0f3485a254cc0085e201484bd25e1b3047271`.
 This checksum identifies the tested candidate, not a published download.
 
-Use these configurations to plan qualification in your environment.
+Use the recorded settings and failures to plan qualification in your environment.
 Repeat qualification after changes to Box, the service runtime, the image, or the workload.
+The recorded results do not establish the behavior of a later build.
+
+The tests cover Linux namespaces, filesystem grants, and policy checks through Box's built-in tools.
+They do not validate [experimental native filesystem policy](./native-filesystem-policy.md), which adds policy checks to native file operations.
+A successful namespace check or a normal agent run does not qualify that separate mechanism.
+
+<a id="another-build"></a>
+## Using another build
+
+Install the product and its helpers from the same build, and follow that build's [configuration reference](./config.md).
+For builds that require Linux startup consent, set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the environment that starts Box.
+This startup consent is separate from the native filesystem policy setting in `box.toml`.
+Leave that separate experiment disabled when checking the behavior covered by these profiles.
+
+Keep results for each candidate separate.
+Record startup, permitted operations, required refusals, normal completion, cancellation, timeout, and forced termination individually.
+For restoration tests, also check process identity, continued tool operations, and cleanup after the restored task ends.
 
 <a id="shared-requirements"></a>
 ## Shared requirements
@@ -119,7 +137,7 @@ Adding the interpreter exposed a missing `libpcre2-8.so.0` dependency.
 Successful direct coreutils execution does not qualify that script case.
 
 <a id="qualification-results"></a>
-## Qualification results
+## Recorded qualification results
 
 Both Runtime profiles passed startup and the recorded namespace and workload restriction checks.
 The contained workload reported empty capability sets, `NoNewPrivs=1`, and `Seccomp=2`.
@@ -152,7 +170,8 @@ Removing the task directories afterward did not establish successful process cle
 These failures concern stopping task processes, rather than deleting cloud resources.
 The observations describe the test checkpoint, not permanent process survival.
 The successful normal-completion cases do not qualify cancellation or timeout cleanup.
-The candidate remains unqualified on all three deployment profiles.
+The recorded candidate failed qualification on all three deployment profiles.
+Later implementation changes require their own target results; they do not turn these failed runs into passes.
 
 Keep each profile's results attached to its exact candidate and service configuration.
 For Box configuration, read the [configuration reference](./config.md).

@@ -3,7 +3,8 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS tarball and its SHA256SUMS.txt to a GitHub Release.
+# the macOS tarball and SHA256SUMS.txt to a stable GitHub Release. Linux preview
+# versions also publish the ARM64 Linux tarball, on a prerelease only.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -11,32 +12,27 @@ name: Release Box
 #   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
 #
 # Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
-# aarch64. Only the macOS tarball is released. The Linux tarballs build so the
-# Linux backend can be brought up, and stay run artifacts that are never
-# published. musl and native distro packages (deb/rpm) are not built here.
+# aarch64. The x86_64 Linux tarball stays a run artifact. ARM64 Linux builds
+# against Amazon Linux 2023. musl and native distro packages are not built here.
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
 # release): scan -> test-lint / build -> inspect -> approve ->
 #           tag + release -> verify.
 #
-# Dry-Run (the default) runs scan/build/inspect so you can review the
-# bundle on the run page, and skips approve/tag/release/verify. Everything runs
-# on a fork too, and a fork run publishes to the fork's own releases, so a
-# fork release goes end-to-end.
+# Dry runs build and inspect without credentials by default. An upstream main
+# dry run can opt into signing, notarization, and native tests. Protected premerge tests use a separate environment.
 #
-# One-time setup before the first non-dry run: a GitHub environment named
-# `release-gate` with the reviewers who approve a release. A fork has no
-# reviewer config there, so approve just passes on a fork.
+# Configure macos-signing and release-gate before a signed run.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Explicit version, e.g. 0.1.0 (bare semver, no leading v). The tag is v<version>.'
+        description: 'Stable: 0.1.1. Experimental Linux preview: 0.1.1-linux-preview.1. No leading v.'
         required: true
         type: string
       sha:
-        description: 'Optional commit SHA to release (must be an ancestor of origin/main). Defaults to current origin/main.'
+        description: 'Optional source SHA. Releases require main history. Dry runs also accept the dispatched commit and default to it.'
         required: false
         default: ''
         type: string
@@ -44,6 +40,16 @@ on:
         description: 'Dry-Run: build/inspect still run so you can review the bundle on the run page; skip approve + tag + release + verify.'
         required: true
         default: true
+        type: boolean
+      sign_macos:
+        description: 'Also sign, notarize, and test macOS in a dry run. Requires the protected signing environment. Real releases always sign.'
+        required: true
+        default: false
+        type: boolean
+      premerge_signing_test:
+        description: 'Protected PR signing test only. Requires dry_run=true, sign_macos=true, and macos-signing-test approval.'
+        required: true
+        default: false
         type: boolean
       skip_tests:
         description: 'Fork testing only: skip the test + lint job entirely so the release pipeline runs without waiting on it. Inert on the upstream repo.'
@@ -69,6 +75,7 @@ jobs:
       release_sha: ${{ steps.scan.outputs.release_sha }}
       prev_tag: ${{ steps.scan.outputs.prev_tag }}
       new_tag: ${{ steps.scan.outputs.new_tag }}
+      linux_preview: ${{ steps.scan.outputs.linux_preview }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -82,33 +89,44 @@ jobs:
         env:
           NEW_VERSION: ${{ inputs.version }}
           SHA_INPUT: ${{ inputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          # 1. Validate the typed version (bare semver, no prefix).
-          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::version '$NEW_VERSION' is not bare semver (expected MAJOR.MINOR.PATCH, no 'v')."
+          # 1. Derive the release channel from a strict version format.
+          if ! [[ "$NEW_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-linux-preview\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::expected MAJOR.MINOR.PATCH, optionally followed by -linux-preview.N with N greater than zero."
             exit 1
           fi
+          BASE_VERSION="${NEW_VERSION%%-linux-preview.*}"
+          LINUX_PREVIEW=false
+          if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
+            LINUX_PREVIEW=true
+          fi
 
-          # 2. Resolve the SHA. Default to origin/main; a typed sha is accepted
-          #    only if it is an ancestor of origin/main.
+          # 2. Dry runs can validate the dispatched commit before merge.
           if [ -n "$SHA_INPUT" ]; then
             RELEASE_SHA=$(git rev-parse --verify "$SHA_INPUT^{commit}" 2>/dev/null) || {
               echo "::error::sha '$SHA_INPUT' is not a valid commit."
               exit 1
             }
-            if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
-              echo "::error::sha $RELEASE_SHA is not an ancestor of origin/main -- release only from main history."
-              exit 1
-            fi
+          elif [ "$DRY_RUN" = "true" ]; then
+            RELEASE_SHA=$(git rev-parse --verify "$DISPATCH_SHA^{commit}")
           else
             RELEASE_SHA=$(git rev-parse origin/main)
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            if [ "$DRY_RUN" != "true" ] || [ "$RELEASE_SHA" != "$DISPATCH_SHA" ]; then
+              echo "::error::source must belong to main history, or match the dispatched commit for a dry run."
+              exit 1
+            fi
           fi
 
           # 3. Resolve the previous tag. A baseline is required.
           TAG_PREFIX="v"
-          PREV_TAG=$(git tag --list "${TAG_PREFIX}*" --sort=-v:refname | head -n1)
+          PREV_TAG=$(git tag --list "${TAG_PREFIX}*" --sort=-v:refname |
+            awk '/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && !found {print; found=1}')
           if [ -z "$PREV_TAG" ]; then
             echo "::error::No prior tag matching ${TAG_PREFIX}* -- refusing to release without a baseline. (Fork-testing? Push a baseline tag first, e.g. \`git tag ${TAG_PREFIX}0.0.1 <sha> && git push origin ${TAG_PREFIX}0.0.1\`.)"
             exit 1
@@ -119,12 +137,12 @@ jobs:
           # 4. Reject duplicate / non-monotonic / pre-existing tags, and require a
           #    single-step increment (major, minor, or patch) so a typo like
           #    0.1.0 -> 0.10.0 fails here instead of relying on the approver.
-          if [ "$NEW_VERSION" = "$PREV_VERSION" ]; then
+          if [ "$BASE_VERSION" = "$PREV_VERSION" ]; then
             echo "::error::version $NEW_VERSION matches existing tag $PREV_TAG."
             exit 1
           fi
-          HIGHER=$(printf '%s\n%s\n' "$PREV_VERSION" "$NEW_VERSION" | sort -V | tail -n1)
-          if [ "$HIGHER" != "$NEW_VERSION" ]; then
+          HIGHER=$(printf '%s\n%s\n' "$PREV_VERSION" "$BASE_VERSION" | sort -V | tail -n1)
+          if [ "$HIGHER" != "$BASE_VERSION" ]; then
             echo "::error::version $NEW_VERSION is not greater than previous $PREV_VERSION."
             exit 1
           fi
@@ -137,7 +155,7 @@ jobs:
           IFS=. read -r P_MAJ P_MIN P_PAT <<< "$PREV_VERSION"
           VALID="$((P_MAJ+1)).0.0 ${P_MAJ}.$((P_MIN+1)).0 ${P_MAJ}.${P_MIN}.$((P_PAT+1))"
           case " $VALID " in
-            *" $NEW_VERSION "*) ;;
+            *" $BASE_VERSION "*) ;;
             *)
               echo "::error::version $NEW_VERSION is not a single increment of $PREV_VERSION (expected one of: $VALID)."
               exit 1;;
@@ -158,6 +176,7 @@ jobs:
             echo "release_sha=$RELEASE_SHA"
             echo "prev_tag=$PREV_TAG"
             echo "new_tag=$NEW_TAG"
+            echo "linux_preview=$LINUX_PREVIEW"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -167,9 +186,32 @@ jobs:
             echo "|---|---|"
             echo "| Previous tag | \`$PREV_TAG\` |"
             echo "| Proposed tag | \`$NEW_TAG\` |"
+            echo "| Experimental Linux prerelease | $LINUX_PREVIEW |"
             echo "| Pinned SHA | \`$RELEASE_SHA\` |"
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate signing mode and source
+        env:
+          PREMERGE_TEST: ${{ inputs.premerge_signing_test }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+          WORKFLOW_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$PREMERGE_TEST" = true ]; then
+            test "$DRY_RUN" = true
+            test "$SIGN_MACOS" = true
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-notarization
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          elif [ "$DRY_RUN" != true ] || [ "$SIGN_MACOS" = true ]; then
+            test "$REPOSITORY" = strands-agents/box
+            test "$WORKFLOW_REF" = refs/heads/main
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          fi
 
   # ── Build + lint + unit-test gate ──────────────────────────────────────
   test:
@@ -195,14 +237,13 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # Ubuntu 22.04 for a lower baseline glibc. The Linux targets build
-          # for bring-up and are not released; inspect publishes macOS only.
+          # x86_64 Linux remains a build artifact until its separate qualification.
           - triple: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
           - triple: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
-            runner: macos-latest
+            runner: xcode-27
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -210,19 +251,21 @@ jobs:
           ref: ${{ needs.scan.outputs.release_sha }}
           persist-credentials: false
 
-      - name: Install aarch64 cross linker (linux)
+      - name: Prepare the Amazon Linux 2023 builder
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          set -euo pipefail
+          rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$rust_version"
+          docker build --file scripts/linux-release.Dockerfile \
+            --build-arg "RUST_VERSION=$rust_version" \
+            --tag box-linux-release .
 
       - name: Add rust target
         run: rustup target add ${{ matrix.target.triple }}
 
       - name: Install cargo-edit
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-edit
 
@@ -235,16 +278,43 @@ jobs:
           set -euo pipefail
           cargo set-version -p strands-box -p strands-box-containment "$VERSION"
 
-      # Standard releases exclude native interception and test-support features.
+      - name: Require the native macOS SDK
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          test "${sdk%%.*}" -ge 27
+
       - name: Build strands-box (release)
         # box, sock-alias, and contain-trampoline must ship together; the box
         # resolves the trampoline from beside its own executable and refuses
         # to start without it.
+        if: matrix.target.triple != 'aarch64-unknown-linux-gnu'
+        env:
+          TRIPLE: ${{ matrix.target.triple }}
         run: |
+          set -euo pipefail
+          features=()
+          if [ "$TRIPLE" = aarch64-apple-darwin ]; then
+            features=(--features native-filesystem-policy)
+          fi
           cargo build --release --locked \
-            --target ${{ matrix.target.triple }} \
+            --target "$TRIPLE" \
             -p strands-box \
-            -p strands-box-containment
+            -p strands-box-containment "${features[@]}"
+
+      - name: Build ARM64 Linux against glibc 2.34
+        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            --mount "type=bind,source=$PWD/target,target=/target" \
+            --env CARGO_TARGET_DIR=/target \
+            box-linux-release \
+            cargo build --release --locked --target aarch64-unknown-linux-gnu \
+              -p strands-box -p strands-box-containment
 
       - name: Package tarball
         # Stage the exact ./box-core layout, then tar its contents. Add a file
@@ -266,8 +336,7 @@ jobs:
 
       - name: Assert the packaged binary reports the stamped version
         # Each leg stamps its own crates, so the released leg checks its own binary.
-        # TODO: when Linux is released, also check x86_64-unknown-linux-gnu.
-        if: matrix.target.triple == 'aarch64-apple-darwin'
+        if: matrix.target.triple != 'x86_64-unknown-linux-gnu'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -279,6 +348,42 @@ jobs:
             exit 1
           fi
 
+      - name: Check and run the ARM64 Linux package
+        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          # Check the selected source's consent behavior before using its smoke script.
+          if output=$(env -u EXPERIMENTAL_LINUX_SUPPORT stage/box-core/box run \
+            --config "$RUNNER_TEMP/missing-linux-preview.toml" 2>&1); then
+            echo "::error::Linux startup did not require explicit consent."
+            exit 1
+          fi
+          grep -Fq 'EXPERIMENTAL_LINUX_SUPPORT=TRUE' <<< "$output"
+          # This named profile permits user namespaces for the disposable test container.
+          cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
+          abi <abi/4.0>,
+          profile box-package-smoke flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/box-package-smoke.apparmor"
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/check-linux-package.py stage/box-core
+          # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
+          docker run --rm --cap-drop ALL --user 1000:1000 \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=box-package-smoke \
+            --security-opt systempaths=unconfined \
+            --env HOME=/home/box-test \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/smoke-linux-package.py \
+              "dist/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -287,12 +392,157 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sign-macos:
+    name: Sign and notarize the macOS application
+    cache-mode: none
+    needs: [scan, test, build]
+    if: >-
+      github.repository == 'strands-agents/box' &&
+      (github.ref == 'refs/heads/main' ||
+       (inputs.premerge_signing_test == true && inputs.dry_run == true &&
+        github.ref == 'refs/heads/feature/macos-release-notarization')) &&
+      (inputs.dry_run != true || inputs.sign_macos == true)
+    runs-on: xcode-27
+    timeout-minutes: 90
+    environment: ${{ inputs.premerge_signing_test == true && 'macos-signing-test' || 'macos-signing' }}
+    outputs:
+      team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
+      profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CD_SIGNER_ENDPOINT: ${{ vars.CD_SIGNER_ENDPOINT }}
+      CD_SIGNER_BUCKET: ${{ vars.CD_SIGNER_BUCKET }}
+      CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
+      CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
+      CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+      NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
+    steps:
+      - name: Check approved test commits
+        if: inputs.premerge_signing_test == true
+        env:
+          APPROVED_WORKFLOW_SHA: ${{ vars.SIGNING_TEST_WORKFLOW_SHA }}
+          APPROVED_SOURCE_SHA: ${{ vars.SIGNING_TEST_SOURCE_SHA }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPROVED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$WORKFLOW_SHA" = "$APPROVED_WORKFLOW_SHA"
+          test "$SOURCE_SHA" = "$APPROVED_SOURCE_SHA"
+      - name: Checkout trusted workflow tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download this run's macOS build
+        uses: actions/download-artifact@v8
+        with:
+          name: box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
+          path: unsigned
+      - name: Install signing tools
+        run: |
+          brew install gnu-tar
+          python3 -m venv "$RUNNER_TEMP/signing-venv"
+          "$RUNNER_TEMP/signing-venv/bin/pip" install boto3==1.42.61 requests==2.32.5
+      - name: Obtain temporary signing credentials
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.CD_SIGNER_CALLER_ROLE }}
+          aws-region: ${{ vars.CD_SIGNER_REGION }}
+          role-session-name: box-release-${{ github.run_id }}
+          role-duration-seconds: 3600
+      - name: Sign, notarize, and staple the application
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release.py sign \
+            --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --notary-secret "$NOTARY_CREDENTIAL_SECRET"
+      - name: Retain signing evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signing-evidence
+          path: ${{ runner.temp }}/signing/**/*.json
+          if-no-files-found: warn
+      - name: Upload the verified signed package
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signed-package
+          path: signed/*.tar.gz
+          if-no-files-found: error
+
+  verify-macos:
+    name: Test the signed macOS package
+    cache-mode: none
+    needs: [scan, sign-macos]
+    runs-on: xcode-27
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CD_SIGNER_TEAM_ID: ${{ needs.sign-macos.outputs.team_id }}
+      CD_SIGNER_PROFILE_NAME: ${{ needs.sign-macos.outputs.profile_name }}
+    steps:
+      - name: Checkout trusted verification source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download the signed package
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-signed-package
+          path: signed
+      - name: Verify installation and signed native enforcement
+        env:
+          VERSION: ${{ inputs.version }}
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+          VERIFICATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 27
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          test "${sdk%%.*}" -ge 27
+          package="$RUNNER_TEMP/installed-box"
+          mkdir "$package"
+          tar -C "$package" -xzf "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          python3 scripts/macos-release.py verify \
+            --app "$package/Box.app" --evidence "$RUNNER_TEMP/package-verification"
+          printf '{"source_sha":"%s","verification_sha":"%s"}\n' \
+            "$SOURCE_SHA" "$VERIFICATION_SHA" > "$RUNNER_TEMP/package-verification/source.json"
+          "$package/box" --version | grep -F "$VERSION"
+          export STRANDS_BOX_SIGNED_TEST_BINARY="$package/box"
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked \
+            -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-tests.log"
+      - name: Retain package verification
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-package-verification
+          path: |
+            ${{ runner.temp }}/package-verification/*.json
+            ${{ runner.temp }}/native-tests.log
+          if-no-files-found: warn
+
   # ── Inspect the built tarballs, then re-upload the verified bundle ──────
   # The release job publishes only from this bundle, so the bytes on the run
   # page are the bytes attached to the release.
   inspect:
     name: Inspect release tarballs
-    needs: [scan, build]
+    needs: [scan, build, sign-macos, verify-macos]
+    if: >-
+      always() && needs.scan.result == 'success' && needs.build.result == 'success' &&
+      ((inputs.dry_run == true && inputs.sign_macos != true) ||
+       (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -301,12 +551,20 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: assets
+          pattern: box-*
+
+      - name: Download qualified macOS package
+        if: needs.verify-macos.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-signed-package
+          path: assets/box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
 
       - name: Collect tarballs and compute SHA256SUMS.txt
-        # Every target lands in built/. Only the macOS tarball is copied into
-        # release/, which is the bundle the release job publishes.
+        # Every target lands in built/. Only qualified architectures enter release/.
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           mkdir -p built release
@@ -316,8 +574,16 @@ jobs:
             echo "::error::missing the macOS tarball $darwin"
             exit 1
           fi
+          linux="built/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          if [ ! -f "$linux" ]; then
+            echo "::error::missing the ARM64 Linux tarball $linux"
+            exit 1
+          fi
           cp "$darwin" release/
-          (cd release && sha256sum *.tar.gz | sort -k 2 > SHA256SUMS.txt)
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            cp "$linux" release/
+          fi
+          (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
           echo
@@ -329,6 +595,7 @@ jobs:
       - name: Assert the expected tarballs, each carrying box
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           expected=(
@@ -354,10 +621,27 @@ jobs:
             echo "::error::expected ${#expected[@]} built tarballs, found $count"
             exit 1
           fi
-          # The release bundle holds the macOS tarball and nothing else.
-          released=$(cd release && ls -- *.tar.gz)
-          if [ "$released" != "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" ]; then
-            echo "::error::release bundle must hold only the macOS tarball (got: $released)"
+          released=$(cd release && printf '%s\n' *.tar.gz | sort)
+          release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            release_assets+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          fi
+          expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
+          if [ "$released" != "$expected_release" ]; then
+            echo "::error::release bundle has an unexpected asset set: $released"
+            exit 1
+          fi
+
+      - name: Assert the macOS package carries its notarization ticket
+        if: needs.verify-macos.result == 'success'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          darwin="release/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          listing=$(tar -tzf "$darwin")
+          if ! grep -qx './Box.app/Contents/CodeResources' <<<"$listing"; then
+            echo "::error::$darwin does not contain a stapled notarization ticket"
             exit 1
           fi
 
@@ -380,6 +664,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       (needs.test.result == 'success' ||
         (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
@@ -413,6 +698,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
@@ -436,12 +722,13 @@ jobs:
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           cat > body.md <<EOF
           ## Download
 
-          Box Core is an engine, not something you install. Download the binaries into a local directory on macOS (Apple Silicon):
+          Download Box Core into a local directory on macOS (Apple silicon):
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
@@ -455,9 +742,31 @@ jobs:
 
           The downloader picks a tarball from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
 
+          EOF
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            cat >> body.md <<EOF
+          ## Experimental Linux preview
+
+          Linux support is experimental and requires explicit opt-in. This preview does not establish security acceptance or production readiness.
+
+          For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
+
+          \`\`\`sh
+          awk '\$2 == "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"' SHA256SUMS.txt > box-linux.sha256 &&
+            test -s box-linux.sha256 &&
+            sha256sum --check box-linux.sha256 &&
+            mkdir -p box-core &&
+            tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz &&
+            EXPERIMENTAL_LINUX_SUPPORT=TRUE ./box-core/box run --config ./box.toml
+          \`\`\`
+
+          The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
+          EOF
+          fi
+          cat >> body.md <<EOF
           ## Assets
 
-          \`box-${NEW_TAG}-aarch64-apple-darwin.tar.gz\` unpacks to the \`./box-core\` layout: \`box\` beside its helper binaries. \`SHA256SUMS.txt\` is the aggregate checksum file the downloader verifies against.
+          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. \`SHA256SUMS.txt\` contains each archive's checksum.
           EOF
 
       - name: Tag the pinned SHA
@@ -482,7 +791,8 @@ jobs:
           name: ${{ needs.scan.outputs.new_tag }}
           target_commitish: ${{ needs.scan.outputs.release_sha }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.scan.outputs.linux_preview == 'true' }}
+          make_latest: ${{ needs.scan.outputs.linux_preview == 'true' && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: release/*
           body_path: body.md
@@ -510,6 +820,7 @@ jobs:
     if: |
       always() &&
       inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -519,12 +830,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
         run: |
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
             "SHA256SUMS.txt"
           )
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            expected+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+          fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
               missing=0
@@ -532,6 +847,11 @@ jobs:
                 grep -qx "$a" <<<"$names" || { echo "attempt $i/30: asset $a not present yet"; missing=1; break; }
               done
               if [ "$missing" = "0" ]; then
+                actual_preview=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')
+                if [ "$actual_preview" != "$LINUX_PREVIEW" ]; then
+                  echo "::error::$NEW_TAG has an incorrect prerelease setting."
+                  exit 1
+                fi
                 if [ "$(sort <<<"$names")" != "$(printf '%s\n' "${expected[@]}" | sort)" ]; then
                   echo "::error::$NEW_TAG publishes assets beyond the expected set: $(tr '\n' ' ' <<<"$names")"
                   exit 1

@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, feature/native-filesystem-core]
+    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
@@ -46,6 +46,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/rust-*'
+              - 'scripts/check-linux-test-output.py'
+              - 'scripts/test_linux_test_output.py'
               - '.github/workflows/ci.yml'
             containment:
               - 'crates/**/!(*.md)'
@@ -64,6 +66,22 @@ jobs:
               - 'test-workload/workload-native-filesystem/**'
               - '.github/workflows/verdict-hermetic.yml'
               - '.github/workflows/ci.yml'
+
+  packaging:
+    name: Packaging tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    cache-mode: read
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check release source and archive selection
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
   rust:
     name: Rust
@@ -86,8 +104,6 @@ jobs:
     uses: ./.github/workflows/containment-deterministic.yml
     permissions:
       contents: read
-    with:
-      ref: ${{ github.sha }}
 
   verdict:
     name: Verdict
@@ -111,7 +127,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [detect-changes, rust, containment, verdict, native]
+    needs: [detect-changes, packaging, rust, containment, verdict, native]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -329,13 +329,16 @@ impl Reach {
         // No exception for a home: `layout::refuse_home_in_box_state` refuses one here first.
         if self.forbidden.iter().any(|root| approved.starts_with(root))
             || has_ancestor_among(approved, &self.forbidden_identities)
-            || (mutates
-                && self
-                    .forbidden
-                    .iter()
-                    .any(|root| lies_within(root, approved)))
         {
             return Err(Refused::new(reported_as, BENEATH_THE_FLOOR));
+        }
+        if mutates
+            && self
+                .forbidden
+                .iter()
+                .any(|root| lies_within(root, approved))
+        {
+            return Err(Refused::new(reported_as, ENCLOSES_BOX_STATE));
         }
         Ok(())
     }
@@ -358,6 +361,9 @@ const OUTSIDE_THE_SET: &str = "outside this box's home and every declared bind";
 
 /// The one refusal a path beneath the deny floor gets.
 const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no policy may open";
+
+const ENCLOSES_BOX_STATE: &str =
+    "contains trusted Box state, so no policy may change this directory";
 
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";
@@ -923,7 +929,7 @@ mod private_tree_mutation_tests {
         (temporary, reach, box_root)
     }
 
-    fn refused_by_floor(reach: &Reach, named: &Path) {
+    fn refused_by_floor(reach: &Reach, named: &Path, reason: &str) {
         let direct = reach.refuse_forbidden(named, "dummy", true);
         let resolved = reach.approve_mutation(named, "dummy");
         assert!(
@@ -934,38 +940,63 @@ mod private_tree_mutation_tests {
             resolved.is_err(),
             "resolved mutation validation accepted {named:?}"
         );
-        assert_eq!(
-            direct.unwrap_err().to_string(),
-            format!("dummy: {BENEATH_THE_FLOOR}")
-        );
+        assert_eq!(direct.unwrap_err().to_string(), format!("dummy: {reason}"));
         assert_eq!(
             resolved.unwrap_err().to_string(),
-            format!("dummy: {BENEATH_THE_FLOOR}")
+            format!("dummy: {reason}")
         );
     }
 
     #[test]
     fn parent_mutation_is_refused() {
         let (_temporary, reach, box_root) = fixture();
-        refused_by_floor(&reach, box_root.parent().unwrap());
+        refused_by_floor(&reach, box_root.parent().unwrap(), ENCLOSES_BOX_STATE);
     }
 
     #[test]
     fn grandparent_mutation_is_refused() {
         let (_temporary, reach, box_root) = fixture();
-        refused_by_floor(&reach, box_root.parent().unwrap().parent().unwrap());
+        refused_by_floor(
+            &reach,
+            box_root.parent().unwrap().parent().unwrap(),
+            ENCLOSES_BOX_STATE,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_mutation_through_a_second_spelling_is_refused() {
+        let (temporary, reach, box_root) = fixture();
+        let home = temporary.path().canonicalize().unwrap();
+        for (name, ancestor) in [
+            ("parent-alias", box_root.parent().unwrap()),
+            (
+                "grandparent-alias",
+                box_root.parent().unwrap().parent().unwrap(),
+            ),
+        ] {
+            let alias = home.join(name);
+            std::os::unix::fs::symlink(ancestor, &alias).expect("ancestor alias");
+            assert!(!box_root.starts_with(&alias));
+            assert_eq!(disk_identity(&alias), disk_identity(ancestor));
+            let refusal = reach
+                .refuse_forbidden(&alias, "dummy", true)
+                .expect_err("the ancestor identity must remain protected");
+            assert_eq!(refusal.to_string(), format!("dummy: {ENCLOSES_BOX_STATE}"));
+            assert!(reach.refuse_forbidden(&alias, "dummy", false).is_ok());
+        }
     }
 
     #[test]
     fn protected_root_mutation_is_refused() {
         let (_temporary, reach, box_root) = fixture();
-        refused_by_floor(&reach, &box_root);
+        refused_by_floor(&reach, &box_root, BENEATH_THE_FLOOR);
     }
 
     #[test]
     fn protected_descendant_mutation_is_refused() {
         let (_temporary, reach, box_root) = fixture();
-        refused_by_floor(&reach, &box_root.join("private/child"));
+        refused_by_floor(&reach, &box_root.join("private/child"), BENEATH_THE_FLOOR);
     }
 
     #[test]

@@ -179,6 +179,16 @@ static int operation(const char *name, const char *from, const char *to) {
         errno = EINVAL;
         return -1;
     }
+    if (!strcmp(name, "chmod")) return chmod(from, 0500);
+    if (!strcmp(name, "fchmod")) {
+        int fd = open(from, O_RDONLY);
+        if (fd < 0) return -1;
+        int result = fchmod(fd, 0500);
+        int error = errno;
+        close(fd);
+        errno = error;
+        return result;
+    }
     if (!strcmp(name, "truncate")) return truncate(from, 0);
     if (!strcmp(name, "unlink")) return unlink(from);
     if (!strcmp(name, "mkdir")) return mkdir(from, 0700);

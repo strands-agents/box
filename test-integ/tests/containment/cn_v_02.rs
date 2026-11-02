@@ -2,8 +2,8 @@ use std::os::unix::fs::MetadataExt as _;
 
 use strands_det_harness::{det_case, user_home};
 
-// CN-V-01 measures the MEDIATED resolver: the hosted Shell refuses every symlink spelling as not its
-// own identity (reach.rs). This case measures the other route — the agent's own syscalls
+// CN-V-01 measures the MEDIATED resolver: the hosted Shell judges a symlink on the identity it
+// names. This case measures the other route — the agent's own syscalls
 // following a real symbolic link inside its writable workspace — where no resolver stands between
 // the workload and the kernel, so the property is the kernel view's: on Linux the workspace is a
 // bind and an absolute link target outside every grant is simply not in the view

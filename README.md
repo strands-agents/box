@@ -79,12 +79,14 @@ interpreters and keep those files out of the agent's direct grants. See
 Link the `strands-box` package in `crates/box`, then call:
 
 ```rust,no_run
-let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new());
+let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
 ```
 
 This runs the existing Box command in the calling process and waits until it finishes.
-It uses the process's terminal and returns its exit
+By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
+Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
+to start host threads after hardening and signal registration, before workload setup.
 Call it before starting application threads or loading secrets, and use one Box workload
 per host process. Later `run` calls fail, even if the first call failed.
 Ship the matching Box helper binaries beside the host application.
@@ -163,7 +165,7 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-Keep the downloaded binaries together in `./box-core`.
+Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
 
@@ -199,6 +201,16 @@ cargo build --release -p strands-box -p strands-box-containment
 
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
+
+Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
+credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+
+The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
+automated signing, notarization, package verification, and release gates.
+
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
+parser.
 
 Common tasks run through [`just`](https://github.com/casey/just):
 

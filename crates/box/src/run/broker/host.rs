@@ -672,6 +672,9 @@ async fn serve_transport(
             }
             // Either the peeked frame or the next one off the wire. A finished Call is taken first, so
             // its Program is back in `programs` before any frame naming it is handled.
+            // Keep partially read frames alive while completions are handled.
+            let next_frame = read_frame::<Frame, _>(&mut reader);
+            tokio::pin!(next_frame);
             let frame: Frame = match pending.take() {
                 Some(value) => serde_json::from_value(value)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
@@ -712,7 +715,7 @@ async fn serve_transport(
                         }
                         next = tokio::time::timeout(
                             idle_timeout(!mcp.is_empty()),
-                            read_frame::<Frame, _>(&mut reader),
+                            &mut next_frame,
                         ) => {
                             match next.map_err(|_| timed_out("read a transport frame"))?? {
                                 Some(frame) => break frame,
@@ -931,6 +934,7 @@ async fn serve_transport(
                     }
                     // The control handle stays reachable, so `Input`, `InputEof`, and `Signal` still
                     // find this Program while its Call runs. Moving the slot into the task is what
+                    slot.program.prepare_call();
                     let sequence = calls_accepted;
                     calls_accepted += 1;
                     running.insert(
@@ -1060,6 +1064,10 @@ async fn serve_transport(
     }
     .await;
 
+    for current in running.values() {
+        current.control.signal();
+        current.control.close_stdin();
+    }
     let cleanup = finish_mcp_servers(&mut mcp).await;
     drop(frames);
     let writer = finish_writer(&mut pump).await;
@@ -1259,6 +1267,9 @@ async fn run_call(
 ) -> io::Result<i32> {
     let deadline = tokio::time::Instant::now() + request_timeout;
     let control = slot.control.clone();
+    if control.is_cancelled() {
+        return Ok(BOUNDARY_FAILURE_STATUS);
+    }
 
     // Split the borrows: the Call takes `&mut program`, the chunker takes `&mut output`. Separate
     // fields, so both are live at once — which is why `Program` and `ProgramOutput` are different
@@ -3858,6 +3869,105 @@ done"#;
         );
     }
 
+    /// A completed Call preserves the next frame's partially read prefix.
+    #[test]
+    fn a_partial_transport_frame_survives_another_calls_completion() {
+        use std::os::fd::{AsFd, AsRawFd};
+        use tokio::io::AsyncWriteExt;
+
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let marker = tempfile::tempdir().expect("marker");
+                let spec = connection_spec(marker.path());
+                let (client, server) = UnixStream::pair().expect("transport pair");
+                let observer = server
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .expect("socket observer");
+                let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+                let first = serde_json::to_value(Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 1,
+                    body: Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                })
+                .expect("first frame");
+                let server =
+                    tokio::task::spawn_local(serve_transport(server, spec, first, None, shutdown));
+                let (mut reader, mut writer) = client.into_split();
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source:
+                            "printf running; while test ! -f \"$HOME/release\"; do sleep 0.01; done"
+                                .to_string(),
+                    },
+                )
+                .await;
+                await_output(&mut reader, 1, "running").await;
+
+                let payload = serde_json::to_vec(&Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 2,
+                    body: Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                })
+                .expect("next frame");
+                let length = u32::try_from(payload.len()).unwrap().to_be_bytes();
+                writer
+                    .write_all(&length[..1])
+                    .await
+                    .expect("partial prefix");
+                loop {
+                    let mut unread: libc::c_int = 0;
+                    // SAFETY: the owned descriptor is live and unread points to a writable integer.
+                    let result =
+                        unsafe { libc::ioctl(observer.as_raw_fd(), libc::FIONREAD, &mut unread) };
+                    assert_eq!(result, 0, "inspect queued socket bytes");
+                    if unread == 0 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                drop(observer);
+                std::fs::write(marker.path().join("release"), "").expect("release the call");
+                let (_, status) = collect(&mut reader, 1).await;
+                assert_eq!(
+                    status, 0,
+                    "the first call completes during the partial frame"
+                );
+
+                writer
+                    .write_all(&length[1..])
+                    .await
+                    .expect("remaining prefix");
+                writer.write_all(&payload).await.expect("remaining frame");
+                put(
+                    &mut writer,
+                    2,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: "printf replacement".to_string(),
+                    },
+                )
+                .await;
+                let (text, status) = collect(&mut reader, 2).await;
+                assert_eq!(status, 0);
+                assert_eq!(text, "replacement");
+                drop(reader);
+                drop(writer);
+                server.await.expect("server task").expect("clean transport");
+            })
+            .await
+            .expect("the fragmented exchange must finish");
+        }));
+    }
+
     /// A reused `ProgramId` is never answered with a closed Call's status.
     #[test]
     fn a_reused_program_id_never_reports_a_closed_calls_status() {
@@ -4145,6 +4255,102 @@ done"#;
             let (text, status) = collect(&mut reader, 0).await;
             assert_eq!(status, 0);
             assert!(text.contains("still_here"), "got {text:?}");
+        }));
+    }
+
+    #[test]
+    fn disconnect_before_first_call_poll_cancels_the_queued_call() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let spec = connection_spec(marker.path());
+            let (mut client, server) = UnixStream::pair().expect("transport pair");
+            write_frame(
+                &mut client,
+                &Frame {
+                    version: PROTOCOL_VERSION,
+                    program: 1,
+                    body: Body::Call {
+                        correlation: Default::default(),
+                        source: "printf started > queued-started; sleep 25".to_string(),
+                    },
+                },
+            )
+            .await
+            .expect("buffer the Call before the server runs");
+            tokio::io::AsyncWriteExt::shutdown(&mut client)
+                .await
+                .expect("buffer EOF after the Call");
+            let first = serde_json::to_value(Frame {
+                version: PROTOCOL_VERSION,
+                program: 1,
+                body: Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            })
+            .expect("Open frame");
+            let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                serve_transport(server, spec, first, None, shutdown),
+            )
+            .await
+            .expect("disconnect must cancel a Call before its first poll")
+            .expect("connection cleanup succeeds");
+            assert!(
+                !marker.path().join("queued-started").exists(),
+                "a cancelled queued call must not start"
+            );
+            drop(client);
+        }));
+    }
+
+    /// Dropping the connection reaps every Program on it.
+    #[test]
+    fn broker_shutdown_cancels_active_shell_calls_before_joining() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let spec = connection_spec(marker.path());
+            let socket = marker.path().join("shutdown.sock");
+            let listener = UnixListener::bind(&socket).expect("bind broker");
+            let (stop, stopped) = oneshot::channel();
+            let serving = tokio::task::spawn_local(async move {
+                serve(listener, spec, async {
+                    let _ = stopped.await;
+                })
+                .await
+            });
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "printf RUNNING; sleep 25".to_string(),
+                },
+            )
+            .await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                await_output(&mut reader, 1, "RUNNING"),
+            )
+            .await
+            .expect("the call must start");
+            stop.send(()).expect("request shutdown");
+            tokio::time::timeout(Duration::from_secs(2), serving)
+                .await
+                .expect("shutdown must cancel the active call before joining")
+                .expect("serving task joins")
+                .expect("shutdown succeeds");
         }));
     }
 

@@ -208,6 +208,7 @@ refuses makes `curl` exit non-zero.
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
+| Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 
 ## See also
 

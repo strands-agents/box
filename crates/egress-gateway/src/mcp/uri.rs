@@ -1,5 +1,6 @@
 //! RFC 3986 canonicalization of an MCP resource URI.
 
+use fluent_uri::{ParseErrorKind, UriRef};
 use serde_json::Value;
 
 /// Rewrite a `resources/read` frame's `params.uri` to its canonical form, or `None` when nothing changes.
@@ -10,7 +11,7 @@ pub(crate) fn canonicalize_frame_uri(frame: &[u8]) -> Option<Vec<u8>> {
     }
     let params = value.get_mut("params").and_then(Value::as_object_mut)?;
     let uri = params.get("uri").and_then(Value::as_str)?.to_owned();
-    let canonical = canonicalize_resource_uri(&uri);
+    let canonical = canonicalize_resource_uri(&uri).ok()?;
     if canonical == uri {
         return None;
     }
@@ -18,13 +19,13 @@ pub(crate) fn canonicalize_frame_uri(frame: &[u8]) -> Option<Vec<u8>> {
     Some(value.to_string().into_bytes())
 }
 
-pub(crate) fn canonicalize_resource_uri(uri: &str) -> String {
+pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     let Some((scheme, rest)) = uri.split_once(':') else {
-        return uri.to_string(); // no scheme — not a URI the box normalizes
+        return Ok(uri.to_string()); // no scheme — not a URI the box normalizes
     };
     let scheme = scheme.to_ascii_lowercase();
     if !matches!(scheme.as_str(), "file" | "http" | "https") {
-        return uri.to_string(); // opaque / custom scheme — never touch
+        return Ok(uri.to_string()); // opaque / custom scheme — never touch
     }
 
     // Split off `#fragment` then `?query`, kept verbatim (a literal or credential may live there, and
@@ -50,7 +51,7 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> String {
     } else {
         // An opaque hier-part under a scheme we would otherwise normalize (e.g. `file:etc`); leaving
         // it verbatim is safer than guessing where a path begins.
-        return uri.to_string();
+        return Ok(uri.to_string());
     };
 
     // Decode unreserved octets, collapse empty path segments (`//` resolves to `/` on common
@@ -65,7 +66,7 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> String {
     // `../etc` and traverse; on this (local) door that residual is backstopped ONLY when the server is
     // contained — the leaf box then bounds the filesystem on the resolved path. An uncontained
     // stdio server has no such backstop, so this stays a called-out residual at the string layer.
-    let canonical_path = remove_dot_segments(&collapse_slashes(&decode_unreserved(path)));
+    let canonical_path = normalize_path(&collapse_slashes(path))?;
 
     let mut out = String::with_capacity(uri.len());
     out.push_str(&scheme);
@@ -110,7 +111,7 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> String {
         out.push('#');
         out.push_str(fragment);
     }
-    out
+    Ok(out)
 }
 
 /// Whether a NORMALIZED `file:` authority is this machine: `localhost`, or a loopback IP literal (RFC 5735 `127.0.0.0/8`; RFC 4291 `::1`).
@@ -197,8 +198,8 @@ fn collapse_slashes(path: &str) -> String {
     out
 }
 
-/// Percent-decode only the unreserved octets of `path`; leave every reserved (or otherwise non-unreserved) escape encoded, normalizing its hex digits to uppercase (RFC 3986 §6.2.2.1).
-pub(crate) fn decode_unreserved(path: &str) -> String {
+/// Percent-decode only the unreserved octets of `path`; leave every reserved (or otherwise non-unreserved) escape encoded, normalizing its hex digits to uppercase (RFC 3986 §6.2.2.1), and encode a `%` that starts no escape as `%25`.
+fn decode_unreserved(path: &str) -> String {
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -219,7 +220,11 @@ pub(crate) fn decode_unreserved(path: &str) -> String {
             index += 3;
             continue;
         }
-        out.push(bytes[index]);
+        if bytes[index] == b'%' {
+            out.extend_from_slice(b"%25");
+        } else {
+            out.push(bytes[index]);
+        }
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -240,53 +245,168 @@ fn is_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
 }
 
-/// Remove dot-segments from a path per RFC 3986 §5.2.4.
-pub(crate) fn remove_dot_segments(path: &str) -> String {
-    let mut cursor = 0;
-    let mut output = String::with_capacity(path.len());
-    while cursor < path.len() {
-        let rest = &path[cursor..];
-        if rest.starts_with("../") {
-            cursor += 3;
-        } else if rest.starts_with("./") || rest.starts_with("/./") {
-            cursor += 2;
-        } else if rest == "/." {
-            output.push('/');
-            cursor += 2;
-        } else if rest.starts_with("/../") {
-            pop_last_segment(&mut output);
-            cursor += 3;
-        } else if rest == "/.." {
-            pop_last_segment(&mut output);
-            output.push('/');
-            cursor += 3;
-        } else if rest == "." {
-            cursor += 1;
-        } else if rest == ".." {
-            cursor += 2;
-        } else {
-            let start = usize::from(rest.starts_with('/'));
-            let end = rest[start..]
-                .find('/')
-                .map_or(rest.len(), |offset| start + offset);
-            output.push_str(&rest[..end]);
-            cursor += end;
-        }
+/// The RFC 3986 normal form of a path, or why the path is refused: unreserved escapes decoded, hex uppercased, and dot-segments removed from an absolute path.
+pub(crate) fn normalize_path(path: &str) -> Result<String, String> {
+    let prefix = if path.is_empty() || path.starts_with('/') {
+        "s://h"
+    } else {
+        "s:"
+    };
+    let reference = format!("{prefix}{path}");
+    let parsed = UriRef::parse(reference.as_str()).map_err(|error| {
+        let what = match error.kind() {
+            ParseErrorKind::InvalidPctEncodedOctet => "an invalid percent-escape",
+            _ => "a character a URI path does not allow",
+        };
+        let at = error.index().saturating_sub(prefix.len());
+        format!("a path that is not RFC 3986 is refused: {what} at byte {at}")
+    })?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("a path that is not RFC 3986 is refused: it holds a `?` or `#`".to_string());
     }
-    output
+    Ok(parsed.normalize().path().as_str().to_string())
 }
 
-/// Remove the last `/`-delimited segment (and its leading `/`) from `output`, for the `/..` cases.
-fn pop_last_segment(output: &mut String) {
-    match output.rfind('/') {
-        Some(position) => output.truncate(position),
-        None => output.clear(),
+/// Every string up to four bytes over an escape-heavy alphabet, plus seeded longer ones.
+#[cfg(test)]
+pub(crate) fn generated_spellings() -> Vec<String> {
+    const ALPHABET: &[&str] = &[
+        "%", "2", "5", "e", "E", "3", "6", "7", "f", "g", "/", ".", "a", "é",
+    ];
+    let mut spellings = vec![String::new()];
+    let mut frontier = vec![String::new()];
+    for _ in 0..4 {
+        frontier = frontier
+            .iter()
+            .flat_map(|prefix| ALPHABET.iter().map(move |piece| format!("{prefix}{piece}")))
+            .collect();
+        spellings.extend(frontier.iter().cloned());
     }
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..20_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let length = 5 + (state % 28) as usize;
+        let mut spelling = String::new();
+        let mut draw = state;
+        for _ in 0..length {
+            draw = draw.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            spelling.push_str(ALPHABET[(draw >> 33) as usize % ALPHABET.len()]);
+        }
+        spellings.push(spelling);
+    }
+    spellings
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The canonical form of a URI the test expects to be valid.
+    fn canonicalize_resource_uri(uri: &str) -> String {
+        super::canonicalize_resource_uri(uri).unwrap()
+    }
+
+    #[test]
+    fn a_resource_uri_whose_path_is_not_rfc_3986_is_refused() {
+        for uri in ["file:///%%365tc/hosts", "file:///a%zz", "https://h/a b"] {
+            assert!(super::canonicalize_resource_uri(uri).is_err(), "{uri}");
+        }
+        let frame = br#"{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"file:///%%365tc/hosts"}}"#;
+        assert!(crate::mcp::McpTarget::of_http_request(frame).is_err());
+        assert_eq!(canonicalize_frame_uri(frame), None);
+    }
+
+    #[test]
+    fn decode_unreserved_is_idempotent() {
+        for spelling in generated_spellings() {
+            let once = decode_unreserved(&spelling);
+            assert_eq!(decode_unreserved(&once), once, "{spelling:?}");
+        }
+    }
+
+    #[test]
+    fn canonicalize_resource_uri_is_idempotent() {
+        for prefix in [
+            "file://",
+            "file:///",
+            "http://h/",
+            "https://%41b.",
+            "file:/",
+        ] {
+            for spelling in generated_spellings() {
+                if let Ok(once) = super::canonicalize_resource_uri(&format!("{prefix}{spelling}")) {
+                    assert_eq!(
+                        super::canonicalize_resource_uri(&once),
+                        Ok(once.clone()),
+                        "{prefix}{spelling:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_well_formed_escape_decodes_only_unreserved_octets() {
+        for (spelling, decoded) in [
+            ("/%61dmin", "/admin"),
+            ("/%2e%2E/x", "/../x"),
+            ("/a%2fb", "/a%2Fb"),
+            ("/a%2Fb%3f", "/a%2Fb%3F"),
+            ("/%7E%5f%2D", "/~_-"),
+            ("/plain/path", "/plain/path"),
+            ("/%25", "/%25"),
+            ("/%C3%A9", "/%C3%A9"),
+        ] {
+            assert_eq!(decode_unreserved(spelling), decoded, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_percent_that_starts_no_escape_is_encoded() {
+        for (spelling, decoded) in [
+            ("/%", "/%25"),
+            ("/%4", "/%254"),
+            ("/%zz", "/%25zz"),
+            ("/%%3761/chat", "/%25761/chat"),
+            ("/v1/%%32%65%%32%65/x", "/v1/%252e%252e/x"),
+            ("/%%365tc/hosts", "/%2565tc/hosts"),
+        ] {
+            assert_eq!(decode_unreserved(spelling), decoded, "{spelling}");
+        }
+    }
+
+    /// One percent-decode of every escape, as a server does before it opens a `file:` path.
+    fn server_decode(uri: &str) -> String {
+        let bytes = uri.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%'
+                && let (Some(&high), Some(&low)) = (bytes.get(index + 1), bytes.get(index + 2))
+                && let (Some(high), Some(low)) = (hex_value(high), hex_value(low))
+            {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+            out.push(bytes[index]);
+            index += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn a_stray_percent_cannot_assemble_an_escape_the_server_decodes() {
+        match super::canonicalize_resource_uri("file:///%%365tc/hosts") {
+            Err(reason) => assert!(reason.contains("percent-escape at byte 1"), "{reason}"),
+            Ok(judged) => panic!(
+                "the box judged {judged}, which the server decodes to {}",
+                server_decode(&judged)
+            ),
+        }
+    }
 
     /// The three bypass classes from the finding all collapse to the one canonical spelling the
     /// server resolves, so a `forbid ... uri like "file:///etc/*"` now matches.

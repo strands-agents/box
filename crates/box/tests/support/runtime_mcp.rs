@@ -26,6 +26,22 @@ const AGENT_HOME: &str = "agent-home";
 const UNRELATED_SENTINEL: &str = "STRANDS_BOX_DISCOVERY_SENTINEL";
 const POLL: Duration = Duration::from_millis(20);
 
+fn fixture_python() -> PathBuf {
+    if cfg!(target_os = "linux") {
+        Path::new("/usr/bin/python3")
+            .canonicalize()
+            .expect("resolve the fixture script interpreter")
+    } else {
+        PathBuf::from("/usr/bin/python3")
+    }
+}
+
+fn fixture_sleep() -> PathBuf {
+    Path::new("/bin/sleep")
+        .canonicalize()
+        .expect("resolve the fixture's descendant helper")
+}
+
 /// What the first exec of a fresh box's own alias image may add on macOS, where the system assesses
 /// the new file once and serializes that assessment across every box starting on the host.
 const FIRST_ALIAS_EXEC: Duration = if cfg!(target_os = "macos") {
@@ -195,8 +211,10 @@ impl RuntimeMcpBox {
         if server.behavior.uses_release_fifo() {
             make_fifo(&self.release_path(server.program));
         }
+        let python = fixture_python();
+        let sleep = fixture_sleep();
         let script = format!(
-            r#"#!/usr/bin/python3
+            r#"#!{python}
 import json
 import os
 import pathlib
@@ -249,7 +267,7 @@ write("argv", json.dumps(sys.argv[1:], separators=(",", ":")))
 write("environment", json.dumps(dict(sorted(os.environ.items())), separators=(",", ":")))
 if behavior in ("fail", "hang"):
     descendant = subprocess.Popen(
-        ["/bin/sleep", "3600"],
+        [{sleep:?}, "3600"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
@@ -289,7 +307,7 @@ while True:
                 release.readline()
         elif behavior == "hang":
             while True:
-                subprocess.run(["/bin/sleep", "3600"], check=False)
+                subprocess.run([{sleep:?}, "3600"], check=False)
         if behavior == "fail":
             sys.exit(17)
         if behavior == "exchange":
@@ -438,6 +456,8 @@ while True:
         }})
 "#,
             control = self.control.to_string_lossy(),
+            python = python.display(),
+            sleep = sleep.to_string_lossy(),
             program = server.program,
             server = server.name,
             tool = server.tool,
@@ -493,7 +513,7 @@ while True:
             .expect("control dir resolves")
             .display()
             .to_string();
-        // The leaf's cwd (the workspace) must be listable, or getcwd()/uv_cwd fails EPERM at startup.
+        // The macOS leaf's cwd must be listable, or getcwd()/uv_cwd fails EPERM at startup.
         let workspace_path = self
             .workspace
             .canonicalize()
@@ -548,16 +568,46 @@ while True:
                     config.push_str(&format!("{key} = {value:?}\n"));
                 }
             }
-            // Grant the leaf read of its script's dir (operator-bin), the toolchain behind the
-            // `#!/usr/bin/python3` stub, and write+list of the control dir for its markers.
+            // Grant read of the script and its toolchain, and read/write of the control directory.
             let read = std::iter::once(operator_bin.clone())
                 .chain(std::iter::once(control.clone()))
                 .chain(toolchain.read)
                 .collect::<Vec<_>>();
+            // Linux enters the workspace without a list-only grant.
+            let list = if cfg!(target_os = "linux") {
+                String::new()
+            } else {
+                format!("list = [{control:?}, {workspace_path:?}]\n")
+            };
             config.push_str(&format!(
-                "[mcp.{}.filesystem]\nread = {read:?}\nwrite = [{control:?}]\nlist = [{control:?}, {workspace_path:?}]\n",
+                "[mcp.{}.filesystem]\nread = {read:?}\nwrite = [{control:?}]\n{list}",
                 server.name,
             ));
+            if cfg!(target_os = "linux") {
+                let mut files = Vec::new();
+                if matches!(
+                    server.behavior,
+                    DiscoveryBehavior::FailAfterRelease | DiscoveryBehavior::Hang
+                ) {
+                    files.push(fixture_sleep());
+                }
+                if server.executable != server.program {
+                    // An env launcher does not discover its script's interpreter.
+                    files.push(fixture_python());
+                }
+                if server.contain_egress == Some(false) {
+                    files.extend(
+                        ["/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf"]
+                            .into_iter()
+                            .map(Path::new)
+                            .filter(|path| path.is_file())
+                            .map(|path| path.canonicalize().expect("resolve resolver file")),
+                    );
+                }
+                if !files.is_empty() {
+                    config.push_str(&format!("read_file = {files:?}\n"));
+                }
+            }
         }
         std::fs::write(dot.join("box.toml"), config).expect("write box.toml");
     }
@@ -689,11 +739,60 @@ while True:
     }
 
     pub fn server_pid(&self, program: &str) -> u32 {
-        read_pid(&self.event_path(program, "pid"))
+        let pid = read_pid(&self.event_path(program, "pid"));
+        #[cfg(target_os = "linux")]
+        {
+            let processes = host_processes();
+            let servers = self.host_servers(program, &[pid], &processes);
+            assert_eq!(
+                servers.len(),
+                1,
+                "identify one live host server: {servers:?}"
+            );
+            servers[0].pid
+        }
+        #[cfg(not(target_os = "linux"))]
+        pid
     }
 
     pub fn descendant_pid(&self, program: &str) -> u32 {
-        read_pid(&self.event_path(program, "descendant.pid"))
+        let pid = read_pid(&self.event_path(program, "descendant.pid"));
+        #[cfg(target_os = "linux")]
+        {
+            let leader = self.server_pid(program);
+            let children: Vec<_> = host_processes()
+                .into_iter()
+                .filter(|process| process.parent == leader && process.namespace_pid == pid)
+                .collect();
+            assert_eq!(
+                children.len(),
+                1,
+                "identify one live host child: {children:?}"
+            );
+            children[0].pid
+        }
+        #[cfg(not(target_os = "linux"))]
+        pid
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_servers<'a>(
+        &self,
+        program: &str,
+        namespace_pids: &[u32],
+        processes: &'a [HostProcess],
+    ) -> Vec<&'a HostProcess> {
+        let script = self.server_executable(program);
+        processes
+            .iter()
+            .filter(|process| {
+                namespace_pids.contains(&process.namespace_pid)
+                    && process
+                        .command
+                        .split(|byte| *byte == 0)
+                        .any(|argument| argument == script.as_os_str().as_bytes())
+            })
+            .collect()
     }
 
     pub fn trace(&self, program: &str, field: &str) -> String {
@@ -739,6 +838,31 @@ while True:
             let leaders = self.event_process_ids(program, "pids");
             let descendants = self.event_process_ids(program, "descendant.pids");
             if leaders.len() == count && descendants.len() == count {
+                #[cfg(target_os = "linux")]
+                {
+                    let processes = host_processes();
+                    let servers = self.host_servers(program, &leaders, &processes);
+                    let groups: Vec<_> = servers
+                        .iter()
+                        .filter_map(|server| {
+                            let children: Vec<_> = processes
+                                .iter()
+                                .filter(|child| {
+                                    child.parent == server.pid
+                                        && descendants.contains(&child.namespace_pid)
+                                })
+                                .collect();
+                            match children.as_slice() {
+                                [child] => Some((server.pid, child.pid)),
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    if servers.len() == count && groups.len() == count {
+                        return groups;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 return leaders.into_iter().zip(descendants).collect();
             }
             std::thread::sleep(POLL);
@@ -1186,6 +1310,42 @@ impl Drop for RunningBox {
         }
         let _ = child.wait();
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct HostProcess {
+    pid: u32,
+    parent: u32,
+    namespace_pid: u32,
+    command: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+fn host_processes() -> Vec<HostProcess> {
+    std::fs::read_dir("/proc")
+        .expect("inspect the host process view")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+            let number = |field| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix(field))?
+                    .split_whitespace()
+                    .last()?
+                    .parse::<u32>()
+                    .ok()
+            };
+            Some(HostProcess {
+                pid,
+                parent: number("PPid:")?,
+                namespace_pid: number("NSpid:")?,
+                command: std::fs::read(entry.path().join("cmdline")).ok()?,
+            })
+        })
+        .collect()
 }
 
 pub fn wait_for_process_exit(pid: u32, timeout: Duration) {

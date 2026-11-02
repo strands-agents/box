@@ -19,6 +19,7 @@ const CREATE: u32 = 2;
 const UNLINK: u32 = 3;
 const RENAME: u32 = 4;
 const TRUNCATE: u32 = 5;
+const SETMODE: u32 = 6;
 const AUTH: u32 = 1;
 const NOTIFY: u32 = 2;
 const REPLY: u32 = 3;
@@ -233,6 +234,15 @@ impl Plan {
                 }
             }
             TRUNCATE => add(&source, FsOperation::WriteContent, "fs:write", false),
+            SETMODE
+                if event.source_identity == FILE_IDENTITY
+                    && matches!(
+                        event.mode & libc::S_IFMT as u32,
+                        mode if mode == libc::S_IFREG as u32 || mode == libc::S_IFDIR as u32
+                    ) =>
+            {
+                add(&source, FsOperation::SetPermissions, "fs:write", false);
+            }
             _ => return Err(refused("unsupported authorization event")),
         }
         Ok(Self { checks, identities })
@@ -307,7 +317,8 @@ impl Context {
                 "version": 1, "time_unix_ns": timestamp,
                 "event": match event.kind {
                     OPEN => "open", CREATE => "create", UNLINK => "unlink",
-                    RENAME => "rename", TRUNCATE => "truncate", _ => "unknown",
+                    RENAME => "rename", TRUNCATE => "truncate", SETMODE => "setmode",
+                    _ => "unknown",
                 },
                 "sequence": event.sequence, "pid": event.pid, "flags": event.flags,
                 "origin": origin, "verdict": "deny", "reason": reason,
