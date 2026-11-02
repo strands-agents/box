@@ -16,7 +16,7 @@ use crate::dogwood::{
 use crate::request::ActionRequest;
 use crate::schema::{ActionIdentity, GovernedBox};
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal};
+use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
@@ -210,9 +210,7 @@ impl Authority {
     /// set is replaced wholesale and refused wholesale: `open_staged` may install the
     /// schema-independent subset and open `Discovering`, because at startup the typed schemas
     /// have not arrived yet and a box that denied everything until they did would be useless.
-    /// A reload has no such excuse — the schemas are already here, so a set that cannot
-    /// validate is an operator error, and installing the part of it that happens to validate
-    /// would report success for a rule that is not live.
+    /// Reject the entire replacement if any rule fails validation, and keep the current policy.
     pub(super) fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
         // Same order as `stage_mcp_schema`: proposal first, then live. A reload that took them
         // the other way round would deadlock against a schema staging mid-discovery.
@@ -252,6 +250,7 @@ impl Authority {
         proposed.mark_all_ready();
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
+        live.degraded_tools.clear();
         drop(live);
         *proposal_guard = Some(proposed);
         Ok(())
@@ -460,45 +459,48 @@ impl Authority {
         live.engine.observe_response(identity, input, status)
     }
 
-    /// Returns whether the live authority declares a tool action, or true when its lock is unavailable.
-    pub(super) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        match self.live.lock() {
-            Ok(live) => live.engine.declares_tool_action(action),
-            Err(_) => true,
-        }
-    }
-
-    /// Whether a tool call names a typed action whose schema has not staged yet while
-    /// `Discovering`. Such a call is held transiently rather than letting it ride the coarse allow
-    /// with its argument constraint unenforceable. A poisoned lock fails closed (held).
-    pub(super) fn is_tool_pending(&self, identity: &ActionIdentity) -> bool {
-        let ActionIdentity::McpTool { namespace, tool } = identity else {
-            return false;
+    /// Decides one `tools/call` under a single live-lock read: a degraded tool is denied, a
+    /// pending tool is held, and a tool that no per-tool rule matches rides the coarse allow.
+    pub(super) fn refine_tool_call(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+    ) -> Decision {
+        let Ok(live) = self.live.lock() else {
+            return Decision::internal_fault();
         };
-        match self.live.lock() {
-            Ok(live) => {
-                live.readiness == Readiness::Discovering
-                    && live
-                        .pending_tools
-                        .contains(&(namespace.clone(), tool.clone()))
+        if let ActionIdentity::McpTool { namespace, tool } = identity {
+            let key = (namespace.clone(), tool.clone());
+            if live.degraded_tools.contains(&key) {
+                return Decision::no_match();
             }
-            Err(_) => true,
+            if live.readiness == Readiness::Discovering && live.pending_tools.contains(&key) {
+                return Decision::policy_pending();
+            }
         }
-    }
-
-    /// Whether a tool call names a degraded typed action — one whose server's `tools/list` was
-    /// denied so its schema never staged. Such a call is denied fail-closed at the per-tool
-    /// gate, so it cannot ride the coarse allow with its argument constraint unenforceable. A
-    /// poisoned lock fails closed (degraded).
-    pub(super) fn is_tool_degraded(&self, identity: &ActionIdentity) -> bool {
-        let ActionIdentity::McpTool { namespace, tool } = identity else {
-            return false;
+        let Ok(action) = identity.cedar_uid() else {
+            return Decision::internal_fault();
         };
-        match self.live.lock() {
-            Ok(live) => live
-                .degraded_tools
-                .contains(&(namespace.clone(), tool.clone())),
-            Err(_) => true,
+        let decision = if live.engine.declares_tool_action(&action) {
+            live.engine
+                .decide(governed, principal, ActionRequest::Request(request))
+        } else {
+            Decision::no_match()
+        };
+        match decision {
+            // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
+            Decision::Deny {
+                reason: crate::DenyReason::NoMatch,
+                ..
+            } => Decision::Allow {
+                rule: crate::RuleId::default_deny(),
+                attribution: Vec::new(),
+                resource: String::new(),
+            },
+            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
+            other => other,
         }
     }
 

@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
     CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
@@ -46,6 +46,31 @@ use crate::run::contain::boundary::{
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
 use crate::run::telemetry;
+
+type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+
+static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
+
+pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
+    let running = RUNNING_POLICY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let result = policy.reload(sources).map_err(BoxError::from);
+    let subject = telemetry::policy_subject(sources);
+    collector.control(match &result {
+        Ok(()) => telemetry::ControlRecord::completed(
+            telemetry::ControlOperation::PolicyInstalled,
+            &subject,
+        ),
+        Err(error) => telemetry::ControlRecord::refused(
+            telemetry::ControlOperation::PolicyRefused,
+            &subject,
+            &error.to_string(),
+        ),
+    });
+    result
+}
 
 /// What the workload's boundary needs from the box hosting it.
 #[derive(Debug, Clone)]
@@ -773,6 +798,9 @@ impl HostedBox {
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -847,6 +875,9 @@ impl HostedBox {
 
 impl Drop for HostedBox {
     fn drop(&mut self) {
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if let Some(discovery) = &self.discovery {
             discovery.close();
         }

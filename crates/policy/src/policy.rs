@@ -390,10 +390,6 @@ impl PolicyEngine {
         self.authority.warnings()
     }
 
-    pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        self.authority.declares_tool_action(action)
-    }
-
     /// The per-tool refinement for one `tools/call`.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
@@ -417,48 +413,9 @@ impl PolicyEngine {
             uri: None,
             arguments: Some(arguments),
         };
-        let action = match identity.cedar_uid() {
-            Ok(action) => action,
-            Err(_) => {
-                return self.conclude(&identity, request.resource(), Decision::internal_fault());
-            }
-        };
-        if !self.declares_tool_action(&action) {
-            // A tool with no declared per-tool action can be one of three things while its schema is
-            // absent: degraded (its server's `tools/list` was denied, so it never stages) →
-            // deny fail-closed, so a hardcoded call cannot ride the coarse allow with its argument
-            // constraint unenforceable; pending (still discovering) → hold transiently; or a
-            // genuinely unruled tool → ride the coarse allow as before.
-            let decision = if self.authority.is_tool_degraded(&identity) {
-                Decision::no_match()
-            } else if self.authority.is_tool_pending(&identity) {
-                Decision::policy_pending()
-            } else {
-                Decision::Allow {
-                    rule: crate::RuleId::default_deny(),
-                    attribution: Vec::new(),
-                    resource: String::new(),
-                }
-            };
-            return self.conclude(&identity, request.resource(), decision);
-        }
-        let decision =
-            match self
-                .authority
-                .decide(governed, principal, ActionRequest::Request(&request))
-            {
-                // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
-                Decision::Deny {
-                    reason: crate::DenyReason::NoMatch,
-                    ..
-                } => Decision::Allow {
-                    rule: crate::RuleId::default_deny(),
-                    attribution: Vec::new(),
-                    resource: String::new(),
-                },
-                // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
-                other => other,
-            };
+        let decision = self
+            .authority
+            .refine_tool_call(governed, principal, &request, &identity);
         self.conclude(&identity, request.resource(), decision)
     }
 }
@@ -1343,5 +1300,119 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             write_allowed(&engine, &target),
             "the refused reload validated before the live lock, so the previous policy serves"
         );
+    }
+
+    fn read_tool(engine: &PolicyEngine, server: &str) -> Decision {
+        engine.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            "read",
+            &serde_json::json!({"path": "/workspace/input"}),
+        )
+    }
+
+    /// During discovery, a reload that names a server whose tools have not arrived is refused,
+    /// and the installed forbid keeps serving through the end of discovery.
+    #[test]
+    fn a_reload_naming_an_undiscovered_server_is_refused_and_keeps_the_forbid() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == gamma::Action::"read", resource);"#,
+            ),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        engine
+            .stage_mcp_schema("alpha", mcp_fragment("alpha", "read"))
+            .unwrap();
+        assert!(matches!(
+            read_tool(&engine, "gamma"),
+            Decision::Deny {
+                reason: crate::DenyReason::PolicyPending,
+                ..
+            }
+        ));
+        engine
+            .reload(&source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == alpha::Action::"read", resource);"#,
+            ))
+            .unwrap();
+        assert!(!read_tool(&engine, "alpha").is_allow());
+
+        for rule in [
+            r#"forbid(principal, action == beta::Action::"read", resource);"#,
+            r#"forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+        ] {
+            let replacement = source(&format!("permit(principal, action, resource);\n{rule}"));
+            assert!(engine.reload(&replacement).is_err(), "{rule}");
+            assert!(
+                !read_tool(&engine, "alpha").is_allow(),
+                "the forbid must remain"
+            );
+        }
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "the forbid must survive discovery"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_policy_is_refused_after_tool_discovery_is_denied() {
+        let original = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" };
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" && context.input.method == "tools/list" };
+            forbid(principal, action == alpha::Action::"read", resource);"#;
+        let history = tempfile::tempdir().unwrap();
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(original),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        assert_eq!(
+            engine.finish_mcp_discovery().unwrap(),
+            vec!["alpha".to_string()]
+        );
+        assert!(engine.reload(&source(original)).is_err());
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "a refused reload must keep the tool blocked"
+        );
+    }
+
+    /// A staged tool whose server degrades stays denied, and a reload that drops the
+    /// unresolved rule lifts the block.
+    #[test]
+    fn a_degraded_tool_stays_denied_until_a_reload_drops_its_rule() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+            ),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        engine
+            .stage_mcp_schema("alpha", mcp_fragment("alpha", "read"))
+            .unwrap();
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "an unresolved forbid must keep its staged tool blocked"
+        );
+
+        engine
+            .reload(&source("permit(principal, action, resource);"))
+            .unwrap();
+        assert!(read_tool(&engine, "alpha").is_allow());
     }
 }
