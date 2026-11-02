@@ -1,65 +1,40 @@
-//! The L7 interception path: terminate TLS, run the request/response legs, forward.
+//! The L7 interception path: run the request/response legs, forward.
 
 use std::borrow::Cow;
-use std::io::{self, BufReader, Read, Write};
+use std::io;
 use std::net::TcpStream;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use crate::audit::RequestId;
-use rustls::{ClientConnection, ServerConnection, StreamOwned};
-use zeroize::Zeroizing;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
 use super::request_leg::{self, RequestDecision};
 use super::response_leg::{self, ResponseDecision};
-use super::{SharedState, http1, tls};
+use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::{EgressDecision, NetworkAuditEvent};
 use crate::boundary::{BodyRef, HeaderMap, InterceptedRequest, InterceptedResponse, Target};
 use crate::capability::CapabilityContext;
-use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome, McpFrame, McpListReply};
+use crate::client::http::Upstream;
+use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
 
-/// Terminate the client's TLS, run the L7 legs, and forward to the pinned upstream.
-///
-/// A thin transport wrapper: it does the TLS-specific setup (present a per-host leaf, open the
-/// upstream TLS), reads the request, checks the CONNECT binding, then hands the shared request and
-/// response legs to [`run_l7_legs`].
-pub(super) fn intercept_tls<C: Read + Write>(
-    client: C,
+/// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
+pub(crate) async fn forward_tls(
+    parsed: http1::ParsedRequest,
     upstream: TcpStream,
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
-) -> Result<()> {
-    let ca = state
-        .ca
-        .as_ref()
-        .ok_or_else(|| ProxyError::Intercept("no ephemeral CA (tls-intercept off)".to_string()))?;
-
-    // --- Server side: present a per-host leaf to the workload ---
-    let server_config = tls::server_config_for_host(ca, &connect.host, state.config.enable_h2)?;
-    let server_conn = ServerConnection::new(Arc::new(server_config))
-        .map_err(|e| ProxyError::Intercept(format!("server TLS init: {e}")))?;
-    // Wrap the client TLS stream in a BufReader so the HTTP head is read line-buffered (not one
-    // syscall per byte). Writes go through `get_mut()` to the underlying stream.
-    let mut client_tls = BufReader::new(StreamOwned::new(server_conn, client));
-
-    // --- Request leg: read plaintext, then run the shared legs ---
-    let parsed = http1::read_request(&mut client_tls, state.config.response_limits.max_body_bytes)?;
-
-    // --- Client side: connect to the pinned upstream over the additive trust bundle ---
-    // The listener already opened this exact pinned socket under the Connect lifecycle. A TLS
-    // handshake failure here is a hard-fail drop, never a second socket attempt.
-    let mut upstream_tls = BufReader::new(start_upstream_tls(
-        &connect.host,
-        Bounded::new(upstream, state.config.upstream_read_deadline),
-        state,
-    )?);
+) -> Result<WorkloadResponse> {
+    // Check the upstream's TLS name before any request effect.
+    let server_name =
+        rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
+            ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
+        })?;
+    let upstream = Upstream::new(upstream, Some(server_name), state);
     let correlation = correlation.with_headers(&parsed.headers);
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
@@ -84,13 +59,10 @@ pub(super) fn intercept_tls<C: Read + Write>(
             reason,
             correlation,
         ));
-        write_trusted_diagnostic(
-            client_tls.get_mut(),
-            &parsed.method,
+        return Ok(WorkloadResponse::refusal(
             error.http_status(),
             b"request authority rejected",
-        );
-        return Ok(());
+        ));
     }
     let mut target = Target::new(connect.host.clone(), connect.port);
     let (path, query) = split_target(&parsed.target);
@@ -112,38 +84,25 @@ pub(super) fn intercept_tls<C: Read + Write>(
     run_l7_legs(
         connect,
         req,
-        &mut upstream_tls,
-        client_tls.get_mut(),
+        upstream,
         state,
         correlation,
-        true, // TLS was terminated to see this request
         |method, target, headers| validate_request_binding(connect, method, target, headers),
     )
+    .await
 }
 
-/// Run the shared L7 request/response legs over an already-open client writer and upstream stream.
-///
-/// Both the TLS ([`intercept_tls`]) and plain-HTTP ([`forward_plain`]) paths converge here after
-/// their transport-specific setup: `req` is the parsed request, `upstream` the buffered upstream,
-/// and `client_writer` the sink for diagnostics and the governed response. `revalidate` runs after
-/// the credential mutation — the TLS path re-checks the CONNECT binding there; plain HTTP has no
-/// authority to bind, so it passes a no-op. Every control (request/response legs, effect lifecycle,
-/// audit) fires identically for both.
-#[allow(clippy::too_many_arguments)]
-fn run_l7_legs<S, CW>(
+/// Run the request and response legs, and return the response for the workload. `revalidate`
+/// re-checks the CONNECT binding after the credential edit; plain HTTP passes a no-op.
+async fn run_l7_legs(
     connect: &ConnectRequest,
     mut req: InterceptedRequest,
-    upstream: &mut BufReader<S>,
-    client_writer: &mut CW,
+    upstream: Upstream,
     state: &SharedState,
     correlation: RequestId,
-    intercepted: bool,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
-) -> Result<()>
-where
-    S: Read + Write,
-    CW: Write,
-{
+) -> Result<WorkloadResponse> {
+    let intercepted = upstream.is_tls();
     let correlation = correlation.with_headers(&req.headers);
     let correlation = if state.mcp_server_for(&connect.host).is_some() {
         correlation.with_mcp(req.body.as_bytes())
@@ -160,10 +119,9 @@ where
     req.target.path = match canonicalize_request_path(&req.target.path) {
         Ok(path) => path,
         Err(reason) => {
-            refuse_request(
+            return Ok(refuse_request(
                 state,
                 connect,
-                client_writer,
                 RefusedRequest {
                     method: req.method.as_deref(),
                     path: &req.target.path,
@@ -171,17 +129,15 @@ where
                     diagnostic: b"request path is not a valid address",
                 },
                 correlation,
-            );
-            return Ok(());
+            ));
         }
     };
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     if !intercepted && state.controls.matches_any(&req.target.as_destination()) {
-        refuse_request(
+        return Ok(refuse_request(
             state,
             connect,
-            client_writer,
             RefusedRequest {
                 method: req.method.as_deref(),
                 path: &req.target.path,
@@ -189,8 +145,7 @@ where
                 diagnostic: b"credential not permitted on a plaintext request",
             },
             correlation,
-        );
-        return Ok(());
+        ));
     }
 
     let cx = CapabilityContext::new(
@@ -227,13 +182,7 @@ where
                 &reason,
                 correlation,
             );
-            write_trusted_diagnostic(
-                client_writer,
-                req.method.as_deref().unwrap_or("GET"),
-                403,
-                b"blocked by egress control",
-            );
-            return Ok(());
+            return Ok(WorkloadResponse::refusal(403, b"blocked by egress control"));
         }
         RequestDecision::Forward => {}
     }
@@ -266,13 +215,10 @@ where
             &reason,
             correlation,
         );
-        write_trusted_diagnostic(
-            client_writer,
-            &request_method,
+        return Ok(WorkloadResponse::refusal(
             error.http_status(),
             b"request authority rejected",
-        );
-        return Ok(());
+        ));
     }
     // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
     // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
@@ -305,8 +251,7 @@ where
                     &reason,
                     correlation,
                 );
-                write_trusted_diagnostic(client_writer, &request_method, 403, b"MCP frame refused");
-                return Ok(());
+                return Ok(WorkloadResponse::refusal(403, b"MCP frame refused"));
             }
         },
         None => None,
@@ -327,13 +272,11 @@ where
         }
         _ => Cow::Borrowed(req.body.as_bytes()),
     };
-    let mut prepared_request = Zeroizing::new(Vec::new());
-    http1::write_request(
-        &mut *prepared_request,
+    let prepared_request = http1::write_request(
         &request_method,
         &fwd_target,
         &req.headers,
-        &forwarded_body,
+        forwarded_body.len(),
     )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
@@ -387,15 +330,12 @@ where
                 &reason,
                 correlation.clone(),
             );
-            write_interceptor_error(
-                client_writer,
-                &request_method,
+            return Ok(interceptor_error(
                 &error,
                 state
                     .mcp_server_for(&connect.host)
                     .map(|_| req.body.as_bytes()),
-            );
-            return Ok(());
+            ));
         }
     };
     emit_decision(
@@ -411,46 +351,20 @@ where
         correlation.clone(),
     );
     // The request permit is consumed at reply time, or when no reply comes.
-    let (request_permit, request_bytes) = deliver_or_record_failure(
-        upstream.get_mut(),
-        &prepared_request,
-        request_permit,
-        "upstream request",
-    )?;
+    let (outcome, response) = upstream
+        .send(
+            state,
+            &request_method,
+            prepared_request.as_bytes(),
+            &forwarded_body,
+        )
+        .await;
+    request_permit
+        .record_outcome(outcome)
+        .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
 
     // --- Response leg: read, evaluate+apply, return ---
-    let parsed_res = match http1::read_response(
-        &mut *upstream,
-        &request_method,
-        state.config.response_limits.max_body_bytes,
-    ) {
-        Ok(parsed_res) => parsed_res,
-        Err(failure) => {
-            let outcome = match failure.status {
-                Some(status) => EffectOutcome::Replied {
-                    accepted_bytes: request_bytes,
-                    status,
-                },
-                None => EffectOutcome::Completed(request_bytes),
-            };
-            request_permit.record_outcome(outcome).map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording upstream request outcome after a failed reply: {error}"
-                ))
-            })?;
-            return Err(failure.error);
-        }
-    };
-    request_permit
-        .record_outcome(EffectOutcome::Replied {
-            accepted_bytes: request_bytes,
-            status: parsed_res.status,
-        })
-        .map_err(|error| {
-            ProxyError::Io(format!(
-                "recording upstream request outcome after the reply: {error}"
-            ))
-        })?;
+    let parsed_res = response?;
     // Move, don't clone — `parsed_res` is dead after this; the body can be large.
     let mut res = InterceptedResponse::http(
         parsed_res.status,
@@ -471,13 +385,10 @@ where
                 reason.clone(),
                 correlation.clone(),
             ));
-            write_trusted_diagnostic(
-                client_writer,
-                &request_method,
+            return Ok(WorkloadResponse::refusal(
                 403,
                 b"response blocked by egress control",
-            );
-            return Ok(());
+            ));
         }
         ResponseDecision::RedirectReentry(location) => Some(location),
         ResponseDecision::Return => None,
@@ -503,16 +414,8 @@ where
         );
     }
 
-    // Serialize only after response controls and leakback scrubbing have finished, then claim the
+    // Wait until response controls and leakback scrubbing have finished, then claim the
     // release immediately before the governed bytes are delivered to the workload.
-    let mut prepared_response = Vec::new();
-    http1::write_response(
-        &mut prepared_response,
-        &request_method,
-        res.status,
-        &res.headers,
-        res.body.as_bytes(),
-    )?;
     let response_attempt = EffectAttempt::ResponseRelease {
         host: &connect.host,
         port: connect.port,
@@ -531,8 +434,7 @@ where
                 reason.clone(),
                 correlation.clone(),
             ));
-            write_interceptor_error(client_writer, &request_method, &error, None);
-            return Ok(());
+            return Ok(interceptor_error(&error, None));
         }
     };
 
@@ -554,32 +456,29 @@ where
         ));
     }
 
-    deliver_effect(
-        client_writer,
-        &prepared_response,
-        response_permit,
-        "governed response",
-    )
+    Ok(WorkloadResponse {
+        status: res.status,
+        reason: None,
+        headers: res.headers,
+        body: match res.body {
+            BodyRef::Bytes(body) => body,
+            BodyRef::Empty => Vec::new(),
+        },
+        release: Some(response_permit),
+        header_case: parsed_res.header_case,
+    })
 }
 
-/// Forward a plain-HTTP (non-TLS) exchange to an already-open plaintext upstream.
-///
-/// A thin transport wrapper mirroring [`intercept_tls`] without any TLS: the request was already
-/// read (`parsed`) and `origin_target` is its origin-form target (`/path?query`) from the absolute
-/// URL. It builds the boundary request and hands the shared legs to [`run_l7_legs`], which
-/// canonicalizes the path and refuses a credential on it. Plain HTTP has no CONNECT authority to bind
-/// against, so the post-mutation re-check is a no-op.
-pub(super) fn forward_plain(
-    client_writer: &mut TcpStream,
+/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`.
+pub(crate) async fn forward_plain(
     upstream: TcpStream,
     connect: &ConnectRequest,
     parsed: http1::ParsedRequest,
     origin_target: String,
     state: &SharedState,
     correlation: RequestId,
-) -> Result<()> {
-    let mut upstream_buf =
-        BufReader::new(Bounded::new(upstream, state.config.upstream_read_deadline));
+) -> Result<WorkloadResponse> {
+    let upstream = Upstream::new(upstream, None, state);
 
     let mut target = Target::new(connect.host.clone(), connect.port);
     let (path, query) = split_target(&origin_target);
@@ -613,74 +512,62 @@ pub(super) fn forward_plain(
     run_l7_legs(
         connect,
         req,
-        &mut upstream_buf,
-        client_writer,
+        upstream,
         state,
         correlation,
-        false, // plain HTTP was never encrypted — not TLS-intercepted
         |_method, _target, _headers| Ok(()),
     )
+    .await
 }
 
-/// Wrap the already-open pinned upstream socket in the additive TLS trust bundle.
-fn start_upstream_tls<S: Read + Write>(
-    host: &str,
-    tcp: S,
-    state: &SharedState,
-) -> Result<StreamOwned<ClientConnection, S>> {
-    let server_name = host
-        .to_string()
-        .try_into()
-        .map_err(|_| ProxyError::UpstreamConnect(format!("invalid upstream host {host}")))?;
-    let conn = ClientConnection::new(state.upstream_config.clone(), server_name)
-        .map_err(|e| ProxyError::Intercept(format!("upstream TLS init: {e}")))?;
-    Ok(StreamOwned::new(conn, tcp))
+/// The response to the workload: a gateway diagnostic, or the governed response.
+pub(crate) struct WorkloadResponse {
+    pub(crate) status: u16,
+    /// A reason phrase in place of the standard one.
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Vec<u8>,
+    /// The claimed release of a governed response, recorded once hyper has written it.
+    pub(crate) release: Option<ClaimedEffectPermit>,
+    /// The upstream's header case. Without it, hyper writes header names in lowercase.
+    pub(crate) header_case: hyper::http::Extensions,
 }
 
-/// An upstream stream whose reads and writes fail once the exchange's deadline has passed.
-struct Bounded<S> {
-    inner: S,
-    deadline: Instant,
-}
-
-impl<S> Bounded<S> {
-    fn new(inner: S, within: Duration) -> Self {
+impl WorkloadResponse {
+    /// A proxy-originated diagnostic, outside the response-release lifecycle.
+    fn refusal(status: u16, body: &[u8]) -> Self {
         Self {
-            inner,
-            deadline: Instant::now() + within,
+            reason: None,
+            headers: proxy_originated_headers(),
+            body: body.to_vec(),
+            ..Self::bare(status)
         }
     }
 
-    fn check(&self, direction: &'static str) -> io::Result<()> {
-        if Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("upstream {direction} deadline passed"),
-            ));
+    /// A proxy-level refusal with no body, with the gateway's lowercase reason phrase.
+    pub(crate) fn bare(status: u16) -> Self {
+        let reason = match status {
+            400 => Some("bad request"),
+            407 => Some("proxy authentication required"),
+            502 => Some("bad gateway"),
+            _ => None,
+        };
+        Self {
+            status,
+            reason,
+            headers: HeaderMap::new(),
+            body: Vec::new(),
+            release: None,
+            header_case: hyper::http::Extensions::new(),
         }
-        Ok(())
-    }
-}
-
-impl<S: Read> Read for Bounded<S> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.check("read")?;
-        self.inner.read(buf)
-    }
-}
-
-/// The most bytes one upstream write hands the inner stream.
-const BOUNDED_WRITE_CHUNK: usize = 64 * 1024;
-
-impl<S: Write> Write for Bounded<S> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.check("write")?;
-        // Split a large plain-HTTP write, as TLS already splits one into records.
-        self.inner.write(&buf[..buf.len().min(BOUNDED_WRITE_CHUNK)])
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+    /// The CONNECT acknowledgement: the tunnel is open.
+    pub(crate) fn connected() -> Self {
+        Self {
+            reason: Some("Connection Established"),
+            ..Self::bare(200)
+        }
     }
 }
 
@@ -695,48 +582,21 @@ fn claim_effect(
         .map(ClaimedEffectPermit::new)
 }
 
-/// Write an effect refusal or a static interceptor failure.
-pub(super) fn write_interceptor_error<W: Write>(
-    stream: &mut W,
-    request_method: &str,
-    error: &io::Error,
-    mcp_request: Option<&[u8]>,
-) {
+/// The response to an effect refusal or a static interceptor failure.
+pub(super) fn interceptor_error(error: &io::Error, mcp_request: Option<&[u8]>) -> WorkloadResponse {
     if error.kind() != io::ErrorKind::PermissionDenied {
-        write_trusted_diagnostic(
-            stream,
-            request_method,
-            502,
-            b"effect interceptor unavailable",
-        );
-        return;
+        return WorkloadResponse::refusal(502, b"effect interceptor unavailable");
     }
     let message = super::diagnostic::denial_message(error);
     if let Some(response) = mcp_request.and_then(|request| mcp_denial_response(request, &message)) {
-        let mut headers = proxy_originated_headers();
-        headers.set("Content-Type", "application/json".to_string());
-        let _ = http1::write_response(stream, request_method, 403, &headers, response.as_bytes());
-        let _ = stream.flush();
+        let mut refusal = WorkloadResponse::refusal(403, response.as_bytes());
+        refusal
+            .headers
+            .set("Content-Type", "application/json".to_string());
+        refusal
     } else {
-        write_trusted_diagnostic(stream, request_method, 403, message.as_bytes());
+        WorkloadResponse::refusal(403, message.as_bytes())
     }
-}
-
-/// Write a proxy-originated diagnostic outside the response-release lifecycle.
-fn write_trusted_diagnostic<W: Write>(
-    stream: &mut W,
-    request_method: &str,
-    status: u16,
-    body: &[u8],
-) {
-    let _ = http1::write_response(
-        stream,
-        request_method,
-        status,
-        &proxy_originated_headers(),
-        body,
-    );
-    let _ = stream.flush();
 }
 
 /// The headers every response the gateway originates carries, and no relayed response does.
@@ -747,64 +607,6 @@ fn proxy_originated_headers() -> crate::boundary::HeaderMap {
         crate::PROXY_ORIGIN_VALUE.to_string(),
     );
     headers
-}
-
-/// Deliver prepared bytes and consume the claimed permit with the observed truth.
-fn deliver_effect<W: Write>(
-    stream: &mut W,
-    prepared: &[u8],
-    permit: ClaimedEffectPermit,
-    description: &str,
-) -> Result<()> {
-    let (permit, accepted_bytes) =
-        deliver_or_record_failure(stream, prepared, permit, description)?;
-    permit
-        .record_outcome(EffectOutcome::Completed(accepted_bytes))
-        .map_err(|error| {
-            ProxyError::Io(format!(
-                "recording {description} outcome after I/O: {error}"
-            ))
-        })
-}
-
-/// Deliver prepared bytes; a failure consumes the permit, and a delivery hands it back with the
-/// accepted count so the caller records the outcome it observes.
-fn deliver_or_record_failure<W: Write>(
-    stream: &mut W,
-    prepared: &[u8],
-    permit: ClaimedEffectPermit,
-    description: &str,
-) -> Result<(ClaimedEffectPermit, usize)> {
-    match http1::write_prepared_and_flush(stream, prepared) {
-        Ok(accepted_bytes) => Ok((permit, accepted_bytes)),
-        Err(failure) => {
-            let error_kind = failure.error.kind();
-            let error_message = failure.error.to_string();
-            let outcome = if failure.during_flush {
-                EffectOutcome::Indeterminate {
-                    accepted_bytes: failure.accepted_bytes,
-                }
-            } else if failure.accepted_bytes == 0 {
-                EffectOutcome::Failed {
-                    accepted_bytes: 0,
-                    error_kind,
-                }
-            } else {
-                EffectOutcome::Partial {
-                    accepted_bytes: failure.accepted_bytes,
-                    error_kind,
-                }
-            };
-            permit.record_outcome(outcome).map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording failed {description} outcome after I/O: {error}"
-                ))
-            })?;
-            Err(ProxyError::Io(format!(
-                "delivering {description}: {error_message}"
-            )))
-        }
-    }
 }
 
 /// What an egress decision is *about* — the non-secret identity of one exchange.
@@ -856,10 +658,9 @@ struct RefusedRequest<'a> {
 fn refuse_request(
     state: &SharedState,
     connect: &ConnectRequest,
-    client_writer: &mut impl Write,
     refused: RefusedRequest<'_>,
     correlation: RequestId,
-) {
+) -> WorkloadResponse {
     state.audit.push(NetworkAuditEvent::deny(
         &connect.host,
         connect.port,
@@ -878,12 +679,7 @@ fn refuse_request(
         refused.reason,
         correlation,
     );
-    write_trusted_diagnostic(
-        client_writer,
-        refused.method.unwrap_or("GET"),
-        403,
-        refused.diagnostic,
-    );
+    WorkloadResponse::refusal(403, refused.diagnostic)
 }
 
 /// The `params.cursor` a `tools/list` request names.
@@ -962,30 +758,19 @@ fn validate_request_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::EffectPermit;
 
     /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
     /// denial, so a refusal this gateway writes must name itself.
     #[test]
     fn a_gateway_refusal_carries_the_marker() {
-        let mut response = Vec::new();
-        write_interceptor_error(
-            &mut response,
-            "GET",
+        let response = interceptor_error(
             &io::Error::new(io::ErrorKind::PermissionDenied, "refused"),
             None,
         );
-        let response = String::from_utf8(response).unwrap();
-        let marker = format!(
-            "{}: {}",
-            crate::PROXY_ORIGIN_HEADER,
-            crate::PROXY_ORIGIN_VALUE
-        );
-        assert!(
-            response
-                .to_ascii_lowercase()
-                .contains(&marker.to_ascii_lowercase()),
-            "the gateway's own refusal names itself: {response}"
+        assert_eq!(
+            response.headers.get(crate::PROXY_ORIGIN_HEADER),
+            Some(crate::PROXY_ORIGIN_VALUE),
+            "the gateway's own refusal names itself"
         );
     }
 
@@ -997,11 +782,9 @@ mod tests {
                 io::ErrorKind::PermissionDenied,
                 format!("refused\n\u{1b}\u{202e}{}", "🦀".repeat(5000)),
             );
-            let mut response = Vec::new();
-            write_interceptor_error(&mut response, "POST", &error, request);
-            let response = String::from_utf8(response).unwrap();
-            let (head, body) = response.split_once("\r\n\r\n").unwrap();
-            assert!(head.starts_with("HTTP/1.1 403 "));
+            let response = interceptor_error(&error, request);
+            assert_eq!(response.status, 403);
+            let body = std::str::from_utf8(&response.body).unwrap();
             let decoded: serde_json::Value;
             let message = if request.is_some() {
                 decoded = serde_json::from_str(body).unwrap();
@@ -1015,27 +798,10 @@ mod tests {
             assert!(!message.chars().any(char::is_control));
             assert!(!message.contains('\u{202e}'));
 
-            let mut response = Vec::new();
-            write_interceptor_error(
-                &mut response,
-                "POST",
-                &io::Error::other("private backend failure"),
-                request,
-            );
-            let response = String::from_utf8(response).unwrap();
-            assert!(response.starts_with("HTTP/1.1 502 "));
-            assert!(response.ends_with("effect interceptor unavailable"));
-            assert!(!response.contains("private"));
+            let response = interceptor_error(&io::Error::other("private backend failure"), request);
+            assert_eq!(response.status, 502);
+            assert_eq!(response.body, b"effect interceptor unavailable");
         }
-        let mut response = Vec::new();
-        write_interceptor_error(
-            &mut response,
-            "HEAD",
-            &io::Error::new(io::ErrorKind::PermissionDenied, "refused"),
-            None,
-        );
-        let response = String::from_utf8(response).unwrap();
-        assert!(response.ends_with("\r\n\r\n"));
     }
 
     /// FIX B (finding 1): the judged path is percent-decoded (unreserved only) so `/%61dmin` cannot
@@ -1114,7 +880,6 @@ mod tests {
         ConnectRequest {
             host: host.to_string(),
             port,
-            proxy_authorization: None,
         }
     }
 
@@ -1168,115 +933,5 @@ mod tests {
                 "target={target:?}, hosts={hosts:?}"
             );
         }
-    }
-    use std::sync::{Arc, Mutex};
-
-    struct RecordingPermit {
-        outcomes: Arc<Mutex<Vec<EffectOutcome>>>,
-    }
-
-    impl EffectPermit for RecordingPermit {
-        fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
-            self.outcomes.lock().unwrap().push(outcome);
-            Ok(())
-        }
-
-        fn mark_indeterminate(self: Box<Self>) {
-            panic!("delivery tests always report a terminal outcome");
-        }
-    }
-
-    fn permit(outcomes: &Arc<Mutex<Vec<EffectOutcome>>>) -> ClaimedEffectPermit {
-        ClaimedEffectPermit::new(Box::new(RecordingPermit {
-            outcomes: outcomes.clone(),
-        }))
-    }
-
-    struct FailingWriter {
-        limit: usize,
-        accepted: usize,
-        fail_flush: bool,
-    }
-
-    impl Write for FailingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.accepted == self.limit {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write failed"));
-            }
-            let count = bytes.len().min(self.limit - self.accepted);
-            self.accepted += count;
-            Ok(count)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            if self.fail_flush {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "flush failed"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn recorded_outcome(writer: &mut impl Write, bytes: &[u8]) -> (Result<()>, EffectOutcome) {
-        let outcomes = Arc::new(Mutex::new(Vec::new()));
-        let result = deliver_effect(writer, bytes, permit(&outcomes), "test message");
-        let outcome = outcomes.lock().unwrap()[0];
-        (result, outcome)
-    }
-
-    #[test]
-    fn delivery_records_completed_bytes() {
-        let mut writer = Vec::new();
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_ok());
-        assert_eq!(outcome, EffectOutcome::Completed(7));
-    }
-
-    #[test]
-    fn delivery_records_zero_byte_failure() {
-        let mut writer = FailingWriter {
-            limit: 0,
-            accepted: 0,
-            fail_flush: false,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(
-            outcome,
-            EffectOutcome::Failed {
-                accepted_bytes: 0,
-                error_kind: io::ErrorKind::BrokenPipe,
-            }
-        );
-    }
-
-    #[test]
-    fn delivery_records_partial_write() {
-        let mut writer = FailingWriter {
-            limit: 3,
-            accepted: 0,
-            fail_flush: false,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(
-            outcome,
-            EffectOutcome::Partial {
-                accepted_bytes: 3,
-                error_kind: io::ErrorKind::BrokenPipe,
-            }
-        );
-    }
-
-    #[test]
-    fn delivery_records_indeterminate_flush() {
-        let mut writer = FailingWriter {
-            limit: usize::MAX,
-            accepted: 0,
-            fail_flush: true,
-        };
-        let (result, outcome) = recorded_outcome(&mut writer, b"message");
-        assert!(result.is_err());
-        assert_eq!(outcome, EffectOutcome::Indeterminate { accepted_bytes: 7 });
     }
 }

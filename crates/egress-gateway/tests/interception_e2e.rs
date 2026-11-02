@@ -254,9 +254,10 @@ fn chunked_http1_is_normalized_across_tls_interception() {
     client.send_chunked_request("POST", "/responses", b"chunked-request");
     let response = client.read_response();
 
+    // The gateway frames the de-chunked body itself, so it writes that name in lowercase.
     assert_eq!(
         response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 16\r\n\r\nmantle-stream-ok"
+        "HTTP/1.1 200 OK\r\nConnection: close\r\ncontent-length: 16\r\n\r\nmantle-stream-ok"
     );
     let seen = upstream.last_request();
     assert!(seen.raw.ends_with("chunked-request"));

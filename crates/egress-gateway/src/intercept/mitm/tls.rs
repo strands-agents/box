@@ -8,11 +8,7 @@ use crate::error::{ProxyError, Result};
 
 /// Build a rustls [`ServerConfig`] presenting the per-host leaf minted under `ca` for `host`.
 /// This is the server side of interception: what the workload's client sees.
-pub(super) fn server_config_for_host(
-    ca: &EphemeralCa,
-    host: &str,
-    enable_h2: bool,
-) -> Result<ServerConfig> {
+pub(crate) fn server_config_for_host(ca: &EphemeralCa, host: &str) -> Result<ServerConfig> {
     let leaf = ca.leaf_for(host)?;
     let cert_chain: Vec<CertificateDer<'static>> = leaf
         .cert_chain_der
@@ -25,11 +21,7 @@ pub(super) fn server_config_for_host(
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
         .map_err(|e| ProxyError::Intercept(format!("server TLS config for {host}: {e}")))?;
-    if enable_h2 {
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    } else {
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    }
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }
 
@@ -86,20 +78,10 @@ mod tests {
     #[test]
     fn server_config_presents_minted_leaf() {
         let ca = EphemeralCa::generate(None, None).unwrap();
-        let config = server_config_for_host(&ca, "api.example.com", false);
+        let config = server_config_for_host(&ca, "api.example.com");
         assert!(config.is_ok());
         let config = config.unwrap();
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
-    }
-
-    #[test]
-    fn server_config_offers_h2_when_enabled() {
-        let ca = EphemeralCa::generate(None, None).unwrap();
-        let config = server_config_for_host(&ca, "api.example.com", true).unwrap();
-        assert_eq!(
-            config.alpn_protocols,
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-        );
     }
 
     #[test]

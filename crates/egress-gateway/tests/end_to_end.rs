@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use credentials::{Backend, DestinationPattern, Locator, RouteSpec, Vault, VaultConfig};
 use egress_gateway::{
     CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor, EffectOutcome,
-    EffectPermit, Interceptor, MitmConfig, MitmInterceptor,
+    EffectPermit, MitmConfig, MitmInterceptor,
 };
 
 /// Allows every effect.
@@ -165,6 +165,50 @@ fn a_plaintext_upstream_is_no_longer_reachable_un_inspected() {
     );
 }
 
+/// The best-effort proxy token: a wrong token is refused with 407 on the CONNECT path and on the
+/// plain-HTTP path, and the expected token is accepted.
+#[test]
+fn a_wrong_proxy_token_is_refused_on_both_paths() {
+    let upstream = spawn_echo_upstream();
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            expected_token: Some("tok".to_string()),
+            ..MitmConfig::default()
+        },
+        CapabilitySet::default(),
+        permit_everything(),
+    )
+    .unwrap();
+    let proxy = handle.port().expect("TCP mode has a port");
+    let head_of = |request: String| {
+        let mut client = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut head = [0u8; 256];
+        let n = client.read(&mut head).unwrap();
+        String::from_utf8_lossy(&head[..n]).into_owned()
+    };
+    let target = format!("127.0.0.1:{}", upstream.port());
+
+    let head = head_of(format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Bearer wrong\r\n\r\n"
+    ));
+    assert!(
+        head.starts_with("HTTP/1.1 407 proxy authentication required\r\n"),
+        "{head}"
+    );
+    let head = head_of(format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Bearer tok\r\n\r\n"
+    ));
+    assert!(head.contains("200 Connection Established"), "{head}");
+    let head = head_of(format!(
+        "GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: wrong\r\n\r\n"
+    ));
+    assert!(
+        head.starts_with("HTTP/1.1 407 proxy authentication required\r\n"),
+        "{head}"
+    );
+}
+
 /// A benign name that resolves to a link-local address is refused at CONNECT by the decision on the
 /// pinned address, before any upstream socket.
 #[test]
@@ -216,37 +260,6 @@ fn config_load_visibility_gate() {
     // Every connection is terminated and inspected, so a credential mutator is always
     // satisfiable and validation turns only on the one-control-per-pattern rule.
     assert!(set.validate().is_ok());
-}
-
-/// The same `CapabilitySet` value could be handed to a hypothetical second adapter
-/// unchanged. A compile-level assertion: a fn generic over `Interceptor` accepts any adapter driving one.
-#[test]
-fn credential_injection_is_adapter_agnostic() {
-    fn drives_controls<I: Interceptor>(interceptor: &I) -> usize {
-        interceptor.credential_injection().len()
-    }
-
-    let handle = MitmInterceptor::start(
-        MitmConfig::default(),
-        CapabilitySet::default(),
-        permit_everything(),
-    )
-    .unwrap();
-    let _ = &handle;
-
-    // A hypothetical second adapter reusing the SAME type with no change to the controls.
-    struct HypotheticalAdapter {
-        controls: CapabilitySet,
-    }
-    impl Interceptor for HypotheticalAdapter {
-        fn credential_injection(&self) -> &CapabilitySet {
-            &self.controls
-        }
-    }
-    let second = HypotheticalAdapter {
-        controls: CapabilitySet::default(),
-    };
-    assert_eq!(drives_controls(&second), 0);
 }
 
 // ============================================================================================
