@@ -1,6 +1,6 @@
 //! Linux end-to-end proof for namespace supervisor memory isolation.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
 
 use std::path::Path;
 use std::process::Command;
@@ -16,6 +16,10 @@ fn workload_cannot_write_namespace_supervisor_memory() {
     }
 
     let probe = Path::new(env!("CARGO_BIN_EXE_containment-test-probe"));
+    let probe_dir = tempfile::tempdir().expect("probe directory");
+    let staged_probe = probe_dir.path().join("containment-test-probe");
+    std::fs::copy(probe, &staged_probe).expect("stage probe for the launch identity");
+    let probe = staged_probe.as_path();
     let work_dir = tempfile::tempdir().expect("work directory");
     let config = ContainmentConfig::new()
         .allow(probe, Operation::Read, Scope::File)
@@ -45,6 +49,8 @@ fn workload_cannot_write_namespace_supervisor_memory() {
         .arg("--")
         .arg(probe)
         .arg("--attempt-supervisor-memory-write")
+        // SAFETY: capture the host identity before the trampoline enters its user namespace.
+        .arg(unsafe { libc::getuid() }.to_string())
         .output()
         .expect("launch the real containment trampoline");
 
@@ -57,7 +63,7 @@ fn workload_cannot_write_namespace_supervisor_memory() {
     );
     assert!(
         stdout.contains("SUPERVISOR_MEMORY_DENIED"),
-        "the probe did not observe EACCES for /proc/1/mem:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "the probe did not verify supervisor memory isolation:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 

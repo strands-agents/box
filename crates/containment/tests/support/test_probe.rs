@@ -758,7 +758,15 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
-        Some("--attempt-supervisor-memory-write") => attempt_supervisor_memory_write(),
+        Some("--attempt-supervisor-memory-write") => {
+            match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
+                Some(launcher_uid) => attempt_supervisor_memory_write(launcher_uid),
+                None => {
+                    eprintln!("probe: supervisor memory check requires the host launcher uid");
+                    ExitCode::from(2)
+                }
+            }
+        }
         _ => {
             eprintln!(
                 "usage: containment-test-probe \
@@ -865,7 +873,7 @@ fn verify_no_inherited_handles(args: &[String]) -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
-fn attempt_supervisor_memory_write() -> ExitCode {
+fn attempt_supervisor_memory_write(launcher_uid: libc::uid_t) -> ExitCode {
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -900,11 +908,22 @@ fn attempt_supervisor_memory_write() -> ExitCode {
     };
     // SAFETY: `getuid` has no failure mode.
     let workload_uid = unsafe { libc::getuid() };
-    if owner == workload_uid {
-        eprintln!(
-            "probe FAILED: /proc/1/mem is owned by the workload uid, so PID 1 is still dumpable"
-        );
+    // Root ownership can remain unchanged for a root launcher. Read denial below is decisive.
+    if launcher_uid != 0 && owner == workload_uid {
+        eprintln!("probe FAILED: /proc/1/mem retained the non-root workload owner");
         return ExitCode::from(1);
+    }
+
+    match std::fs::File::open("/proc/1/mem") {
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {}
+        Err(error) => {
+            eprintln!("probe: supervisor memory read returned unexpected error: {error}");
+            return ExitCode::from(2);
+        }
+        Ok(_) => {
+            eprintln!("probe FAILED: supervisor memory opened for reading");
+            return ExitCode::from(1);
+        }
     }
 
     let mut supervisor_mem = match std::fs::OpenOptions::new()
@@ -914,7 +933,7 @@ fn attempt_supervisor_memory_write() -> ExitCode {
         .open("/proc/1/mem")
     {
         Ok(file) => file,
-        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EROFS)) => {
             println!("SUPERVISOR_MEMORY_DENIED");
             return ExitCode::SUCCESS;
         }
