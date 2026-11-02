@@ -399,6 +399,7 @@ mod tests {
             },
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         }
     }
 

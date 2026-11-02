@@ -1203,6 +1203,7 @@ mod linked_command_mutation_tests {
                     filesystem: Default::default(),
                     network: None,
                     grammar: None,
+                    ingress: Vec::new(),
                 },
             )]),
             egress: Default::default(),

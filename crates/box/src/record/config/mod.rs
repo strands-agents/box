@@ -15,6 +15,7 @@
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
+//! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
@@ -27,6 +28,7 @@ pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
 pub(crate) mod grammar;
+pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
@@ -485,6 +487,10 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
+                    self.file
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| !agent.ingress.is_empty()),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -633,6 +639,8 @@ const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 27;
 const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
+/// The record version of a record whose agent declares an ingress.
+const INGRESS_RECORD_VERSION: u32 = 29;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,11 +650,13 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) tool_grammars: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ingress: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.tool_grammars
+        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
     }
 
     fn record_version(&self) -> u32 {
@@ -679,8 +689,11 @@ fn record_version<'a>(
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
+    ingress: bool,
 ) -> u32 {
-    if mcp
+    if ingress {
+        INGRESS_RECORD_VERSION
+    } else if mcp
         .iter()
         .any(|server| Path::new(server.executable()).is_absolute())
     {
@@ -943,6 +956,7 @@ impl Record {
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
             MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -966,6 +980,10 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
+            record
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.ingress.is_empty()),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -991,6 +1009,7 @@ impl Record {
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
@@ -1291,6 +1310,7 @@ impl ConfigFile {
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
@@ -1385,7 +1405,8 @@ mod tests {
                             &stored.experimental_features,
                             &stored.limits,
                             std::iter::empty(),
-                            &stored.mcp
+                            &stored.mcp,
+                            false
                         ),
                         28
                     );
@@ -1434,7 +1455,8 @@ mod tests {
                 &stored.experimental_features,
                 &stored.limits,
                 std::iter::empty(),
-                &stored.mcp
+                &stored.mcp,
+                false,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1547,6 +1569,7 @@ mod tests {
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         }
     }
 
@@ -1649,6 +1672,7 @@ mod tests {
                     let features = ExperimentalFeatures {
                         native_filesystem_policy,
                         tool_grammars: true,
+                        ingress: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -1660,6 +1684,7 @@ mod tests {
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
+                                    false,
                                 ),
                                 27
                             );
@@ -2101,6 +2126,9 @@ native-filesystem-policy = false
             format!("{required}[agent]\ncommand = [\"codex\"]"),
             format!("{required}policy = \"policy.dw\""),
             format!("{required}[tool.git]\ncommand = [\"git\"]"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
         ] {
             assert!(
                 toml::from_str::<ConfigFile>(&known).is_ok(),
@@ -2111,6 +2139,13 @@ native-filesystem-policy = false
             format!("{required}workload = [\"codex\"]"),
             format!("{required}command = [\"codex\"]"),
             format!("{required}wat = 1"),
+            format!("{required}[ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nhost = \"0.0.0.0\"\nport = 8080"
+            ),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[agent.ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
             "[agent]\ncommand = [\"codex\"]".to_string(),
             "name = \"codex\"\n".to_string(),
             "box_dir = \"/var/lib/box\"\n".to_string(),
@@ -2120,6 +2155,88 @@ native-filesystem-policy = false
                 "a config carrying {unknown:?} must fail loudly, not be ignored"
             );
         }
+    }
+
+    /// The switch that turns on `[[agent.ingress]]`.
+    const INGRESS_ON: &str = "[experimental-features]\ningress = true\n";
+
+    /// **`[[agent.ingress]]` needs the `ingress` switch**: it is refused while the switch is omitted
+    /// or `false`, and loads once it is `true`.
+    #[test]
+    fn an_agent_ingress_needs_the_ingress_switch() {
+        let agent = "[agent]\ncommand = [\"x\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let refusal = "invalid `[agent]` table: `ingress` is experimental: set `ingress = true` in \
+             `[experimental-features]` to load it";
+        for switch in ["", "[experimental-features]\ningress = false\n"] {
+            let error = load(&format!("{agent}{switch}")).expect_err("the switch is off");
+            assert_eq!(error.to_string(), refusal, "{switch:?}");
+        }
+        let file = load(&format!("{agent}{INGRESS_ON}")).expect("the switch is on");
+        assert_eq!(file.agent.expect("the agent").ingress.len(), 1);
+        assert!(
+            load(&format!("[agent]\ncommand = [\"x\"]\n{INGRESS_ON}")).is_ok(),
+            "the switch alone declares no listener"
+        );
+    }
+
+    /// A stored ingress needs the stored switch, so a record cannot carry a listener the operator
+    /// did not turn on.
+    #[test]
+    fn a_stored_ingress_needs_the_stored_switch() {
+        let mut stored = record_from_config(&format!(
+            "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress loads");
+        assert!(stored.experimental_features.ingress);
+        stored.experimental_features.ingress = false;
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_err(),
+            "a stored ingress needs the switch"
+        );
+    }
+
+    /// **`ingress` belongs to `[agent]`**: it fills the record's agent ingress in order, and a tool
+    /// or a stdio MCP server refuses one.
+    #[test]
+    fn an_ingress_is_declared_on_the_agent() {
+        let ingress = "listen = \"127.0.0.1:8080\"\nworkload_port = 8081";
+        let file = load(&format!(
+            "[agent]\ncommand = [\"x\"]\n[[agent.ingress]]\n{ingress}\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8000\"\nworkload_port = 8001\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress list is accepted");
+        let entries: Vec<_> = file
+            .agent
+            .as_ref()
+            .expect("the agent is declared")
+            .ingress
+            .iter()
+            .map(|entry| (entry.listen.as_str(), entry.workload_port))
+            .collect();
+        assert_eq!(
+            entries,
+            [("127.0.0.1:8080", 8081), ("127.0.0.1:8000", 8001)]
+        );
+
+        let tool = load(&format!(
+            "[tool.dev]\ncommand = [\"y\"]\n[[tool.dev.ingress]]\n{ingress}"
+        ))
+        .expect_err("a tool's ingress is not built yet");
+        assert!(
+            tool.to_string().contains("supported on `[agent]` only"),
+            "{tool}"
+        );
+        let mcp = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n[mcp.dev]\ntype = \"stdio\"\n\
+             command = [\"y\"]\n[[mcp.dev.ingress]]\n{ingress}"
+        ));
+        assert!(mcp.is_err(), "a stdio MCP server has no `ingress` field");
     }
 
     #[test]
@@ -2536,7 +2653,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, MCP_ABSOLUTE_COMMAND_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, INGRESS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3393,6 +3510,66 @@ command = ["mcp-server-fetch"]
             Err(ConfigError::RecordVersion {
                 found: SHARED_PROGRAM_RECORD_VERSION,
                 expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    /// An agent ingress takes the newest record version, even beside servers that share a program.
+    #[test]
+    fn an_agent_ingress_beside_a_shared_program_stores_the_ingress_version() {
+        let ingress = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{SHARED_PROGRAM}{ingress}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// An agent ingress takes the newest record version beside an absolute MCP command.
+    #[test]
+    fn an_agent_ingress_beside_an_absolute_mcp_command_stores_the_ingress_version() {
+        let body = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\", \"--stdio\"]\n\
+             [agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// An agent ingress stores its own record version, so an earlier build refuses the box, and a
+    /// record without one keeps the version it had.
+    #[test]
+    fn an_agent_ingress_stores_a_version_no_earlier_build_reads() {
+        let agent = "[agent]\ncommand = [\"/bin/sh\"]\n";
+        let ingress = "[[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let plain = record_from_config(agent).expect("an agent without ingress loads");
+        assert_eq!(plain.version, RECORD_VERSION);
+        let reached = record_from_config(&format!("{agent}{ingress}{INGRESS_ON}"))
+            .expect("an agent ingress loads");
+        assert_eq!(reached.version, INGRESS_RECORD_VERSION);
+        let text = toml::to_string(&reached).expect("the record serializes");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            reached
+        );
+        let mut hidden = reached;
+        hidden.version = RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(
+                &toml::to_string(&hidden).expect("the record serializes"),
+                Path::new("record.toml")
+            ),
+            Err(ConfigError::RecordVersion {
+                found: RECORD_VERSION,
+                expected: INGRESS_RECORD_VERSION
             })
         ));
     }

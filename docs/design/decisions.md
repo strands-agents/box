@@ -1378,9 +1378,10 @@ reaches the operator as the serializer's parse-error text, reported verbatim.
 <a id="localhost-names-the-ports-the-workload-reaches"></a>
 ### Loopback network access names the ports the workload reaches, and no count bounds them
 
-The loopback network mode carries two lists, one for outbound connect and one for listen. Only
-`connect` renders. Both backends refuse a non-empty `listen`, so the field does not yet support
-inbound binds. Box refuses an empty connect list because it would select loopback access without
+The loopback network mode carries two lists, one for outbound connect and one for listen. Both
+render: Seatbelt port rules on macOS, and sockets from the namespace's PID 1 on Linux
+([ingress relay design](../../team/designs/0003-ingress-relay.md)). Box refuses an empty connect
+list because it would select loopback access without
 granting any. It also refuses repeated entries. No count bounds the lists, because a limit there
 would refuse a composition the caller authorized, at a layer that cannot see what was asked for.
 Every entry is loopback and policy still decides each request, so this list cannot become a
