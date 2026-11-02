@@ -202,6 +202,7 @@ printf 'UNRELATED_AFTER=%s\n' "$?"
         "PERMITTED_AFTER_UNRELATED=0",
         "MOVE_STATUS=0",
         "DENIED_AFTER=126",
+        "PERMITTED_AFTER_MUTATION=126",
         "UNRELATED_AFTER=0",
     ] {
         assert!(
@@ -211,6 +212,11 @@ printf 'UNRELATED_AFTER=%s\n' "$?"
     }
     assert_eq!(marker(&home.join("blocked-before")), None, "{evidence}");
     assert_eq!(marker(&home.join("blocked-after")), None, "{evidence}");
+    assert_eq!(
+        marker(&home.join("allowed-after-mutation")),
+        None,
+        "{evidence}"
+    );
     for name in ["allowed-before", "allowed-after-unrelated"] {
         assert_eq!(
             marker(&home.join(name)).as_deref(),
