@@ -44,12 +44,13 @@ class ReleaseSourceTests(unittest.TestCase):
             ["git", "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL
         ).strip()
 
-    def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1"):
+    def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1", publish_linux="true"):
         output = self.root / "output"
         output.write_text("")
         environment = {
             **os.environ,
             "NEW_VERSION": version,
+            "PUBLISH_LINUX": publish_linux,
             "SHA_INPUT": source,
             "DRY_RUN": dry_run,
             "DISPATCH_SHA": dispatch or self.candidate,
@@ -123,6 +124,29 @@ class ReleaseSourceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("linux_preview=false\n", output)
 
+    def test_stable_can_omit_linux_without_changing_the_channel(self):
+        result, output = self.scan_source("false", publish_linux="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("publish_linux=false\n", output)
+        self.assertIn("linux_preview=false\n", output)
+        self.assertIn(f"release_sha={self.main}\n", output)
+
+    def test_preview_cannot_omit_linux(self):
+        result, output = self.scan_source(
+            "true", version="0.1.1-linux-preview.1", publish_linux="false"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a Linux preview requires publish_linux=true", result.stdout)
+        self.assertEqual(output, "")
+
+    def test_invalid_linux_selection_refuses_before_outputs(self):
+        for value in ["", "TRUE", "1", "yes"]:
+            with self.subTest(value=value):
+                result, output = self.scan_source("true", publish_linux=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("publish_linux must be true or false", result.stdout)
+                self.assertEqual(output, "")
+
     def test_preview_cannot_publish_unmerged_source(self):
         result, output = self.scan_source(
             "false", self.candidate, version="0.1.1-linux-preview.1"
@@ -151,18 +175,23 @@ class ReleaseSourceTests(unittest.TestCase):
 
 class ReleaseBundleTests(unittest.TestCase):
     def test_published_assets_and_prerelease_state_must_match_the_channel(self):
-        for preview, metadata_preview, linux_asset, extra_asset, success in [
-            (False, False, True, False, True),
-            (True, True, True, False, True),
-            (True, False, True, False, False),
-            (False, True, True, False, False),
-            (False, False, False, False, False),
-            (True, True, False, False, False),
-            (False, False, True, True, False),
-            (True, True, True, True, False),
+        for preview, publish_linux, metadata_preview, linux_asset, extra_asset, success in [
+            (False, True, False, True, False, True),
+            (True, True, True, True, False, True),
+            (False, False, False, False, False, True),
+            (False, False, False, True, False, False),
+            (False, False, True, False, False, False),
+            (False, False, False, False, True, False),
+            (True, True, False, True, False, False),
+            (False, True, True, True, False, False),
+            (False, True, False, False, False, False),
+            (True, True, True, False, False, False),
+            (False, True, False, True, True, False),
+            (True, True, True, True, True, False),
         ]:
             with self.subTest(
-                preview=preview, metadata=metadata_preview, linux=linux_asset, extra=extra_asset
+                preview=preview, publish_linux=publish_linux, metadata=metadata_preview,
+                linux=linux_asset, extra=extra_asset
             ), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
@@ -187,6 +216,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     env={
                         **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                         "NEW_TAG": tag, "LINUX_PREVIEW": str(preview).lower(),
+                        "PUBLISH_LINUX": str(publish_linux).lower(),
                         "GITHUB_REPOSITORY": "example/box",
                         "FAKE_NAMES": "\n".join(names),
                         "FAKE_PREVIEW": str(metadata_preview).lower(),
@@ -199,8 +229,8 @@ class ReleaseBundleTests(unittest.TestCase):
         import io
         import tarfile
 
-        for preview in [False, True]:
-            with self.subTest(preview=preview), tempfile.TemporaryDirectory() as directory:
+        for preview, publish_linux in [(False, False), (False, True), (True, True)]:
+            with self.subTest(preview=preview, publish_linux=publish_linux), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
                 assets = root / "assets"
@@ -220,6 +250,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 environment = {
                     **os.environ, "NEW_TAG": tag,
                     "LINUX_PREVIEW": str(preview).lower(),
+                    "PUBLISH_LINUX": str(publish_linux).lower(),
                 }
                 for step in [
                     "Collect tarballs and compute SHA256SUMS.txt",
@@ -232,24 +263,23 @@ class ReleaseBundleTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 release = root / "release"
-                expected = {
-                    f"box-{tag}-aarch64-apple-darwin.tar.gz",
-                    f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz",
-                    "SHA256SUMS.txt",
-                }
+                expected = {f"box-{tag}-aarch64-apple-darwin.tar.gz", "SHA256SUMS.txt"}
+                if publish_linux:
+                    expected.add(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz")
                 self.assertEqual({path.name for path in release.iterdir()}, expected)
                 checksums = (release / "SHA256SUMS.txt").read_text()
-                self.assertEqual(len(checksums.splitlines()), 2)
+                self.assertEqual(len(checksums.splitlines()), 2 if publish_linux else 1)
                 verified = subprocess.run(
                     ["sha256sum", "--check", "SHA256SUMS.txt"], cwd=release,
                     capture_output=True, text=True,
                 )
                 self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
                 body = (root / "body.md").read_text()
-                self.assertIn("EXPERIMENTAL_LINUX_SUPPORT=TRUE", body)
-                self.assertIn(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz", body)
-                self.assertIn("sha256sum --check box-linux.sha256", body)
-                self.assertEqual("## Linux ARM64" in body, not preview)
+                self.assertEqual("EXPERIMENTAL_LINUX_SUPPORT=TRUE" in body, publish_linux)
+                self.assertEqual(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz" in body, publish_linux)
+                self.assertEqual("sha256sum --check box-linux.sha256" in body, publish_linux)
+                self.assertEqual("Package availability does not establish security acceptance" in body, publish_linux)
+                self.assertEqual("## Linux ARM64" in body, publish_linux and not preview)
                 self.assertEqual("## Experimental Linux preview" in body, preview)
                 # Unqualified architectures must fail inspection in both channels.
                 extra = release / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz"

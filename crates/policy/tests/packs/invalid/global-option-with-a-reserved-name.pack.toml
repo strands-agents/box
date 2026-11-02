@@ -1,0 +1,36 @@
+# expect: tool pack <file>: `[shell.commit]`: field "program" has a name that the schema gives every action
+# A tool pack for git: push, commit, and status.
+
+pack    = "git"
+program = "git"
+format  = 1
+version = 1
+
+[effects]
+force_push      = "Replaces commits on a remote branch"
+network         = "Contacts a remote repository"
+override_config = "Overrides git configuration for this one command"
+skip_hooks      = "Bypasses the repository's commit or push hooks"
+
+[global]
+options.program   = { flag = "-C", value = "required" }
+options.config    = { flag = "-c", value = "required", repeated = true, adds = ["override_config"] }
+
+[shell.push]
+usage = "git [global options] push [options] [<remote> [<refspec>...]]"
+adds  = ["network"]
+options.force            = { flag = ["-f", "--force"], adds = ["force_push"] }
+options.force_with_lease = { flag = ["--force-with-lease"], value = "optional", adds = ["force_push"] }
+options.dry_run          = { flag = ["-n", "--dry-run"], removes = ["force_push", "network"] }
+options.no_verify        = { flag = ["--no-verify"], adds = ["skip_hooks"] }
+operands.refspec         = { like = "+*", adds = ["force_push"], when = [{ like = ":*", adds = ["force_push"] }] }
+
+[shell.commit]
+usage   = "git [global options] commit [options] [--] [<pathspec>...]"
+aliases = ["ci"]
+options.message   = { flag = ["-m", "--message"], value = "required", repeated = true }
+options.no_verify = { flag = ["-n", "--no-verify"], adds = ["skip_hooks"] }
+
+[shell.status]
+usage = "git [global options] status [options] [--] [<pathspec>...]"
+options.short = { flag = ["-s", "--short"] }

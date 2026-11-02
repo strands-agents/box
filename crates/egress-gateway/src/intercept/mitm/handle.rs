@@ -17,21 +17,10 @@ pub(super) enum BoundTransport {
     Unix(PathBuf),
 }
 
-/// A phantom-token env pair the supervisor seeds into the workload (a `*_BASE_URL` plus the phantom).
-#[derive(Debug, Clone)]
-pub(super) struct CredentialEnv {
-    /// The env var name (e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`).
-    pub(super) name: String,
-    /// The value — a phantom token, never a real secret.
-    pub(super) value: String,
-}
-
 /// The running MITM adapter's control surface.
 pub struct MitmHandle {
     transport: BoundTransport,
     ca_path: Option<PathBuf>,
-    ssl_cert_file: Option<PathBuf>,
-    credential_env: Vec<CredentialEnv>,
     audit: SharedAuditLog,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
@@ -43,8 +32,6 @@ impl MitmHandle {
     pub(super) fn new(
         transport: BoundTransport,
         ca_path: Option<PathBuf>,
-        ssl_cert_file: Option<PathBuf>,
-        credential_env: Vec<CredentialEnv>,
         audit: SharedAuditLog,
         stop: Arc<AtomicBool>,
         accept_thread: JoinHandle<()>,
@@ -52,8 +39,6 @@ impl MitmHandle {
         Self {
             transport,
             ca_path,
-            ssl_cert_file,
-            credential_env,
             audit,
             stop,
             accept_thread: Some(accept_thread),
@@ -97,19 +82,10 @@ impl MitmHandle {
             }
             BoundTransport::Unix(_) => Vec::new(),
         };
-        if let Some(cert) = &self.ssl_cert_file {
+        if let Some(cert) = &self.ca_path {
             vars.push(("SSL_CERT_FILE".to_string(), cert.display().to_string()));
         }
         vars
-    }
-
-    /// The credential env vars (`*_BASE_URL` + phantom token) the supervisor seeds the workload
-    /// with. The phantom is non-secret; the real secret never enters the box.
-    pub fn credential_env_vars(&self) -> Vec<(String, String)> {
-        self.credential_env
-            .iter()
-            .map(|e| (e.name.clone(), e.value.clone()))
-            .collect()
     }
 
     /// Drain the buffered fast-lane audit events. Leaves the log empty.
@@ -189,8 +165,6 @@ mod tests {
         let handle = MitmHandle::new(
             BoundTransport::Unix(path.clone()),
             None,
-            None,
-            Vec::new(),
             SharedAuditLog::new(),
             stop,
             accept_thread,
@@ -217,8 +191,6 @@ mod tests {
         MitmHandle::new(
             BoundTransport::Tcp(port),
             None,
-            None,
-            Vec::new(),
             SharedAuditLog::new(),
             stop,
             accept_thread,

@@ -17,7 +17,7 @@ mod run;
 mod test_support;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -73,6 +73,39 @@ impl std::fmt::Display for CheckFailed {
 }
 
 impl std::error::Error for CheckFailed {}
+
+/// The program names the box keeps for its own shell and Python runtime, which no MCP server takes.
+pub const INTERPRETER_ALIASES: [&str; 5] = [
+    run::broker::protocol::SHELL_ALIAS_NAMES[0],
+    run::broker::protocol::SHELL_ALIAS_NAMES[1],
+    run::broker::protocol::SHELL_ALIAS_NAMES[2],
+    run::broker::protocol::PYTHON_ALIAS_NAMES[0],
+    run::broker::protocol::PYTHON_ALIAS_NAMES[1],
+];
+
+const _: () = assert!(
+    run::broker::protocol::SHELL_ALIAS_NAMES.len()
+        + run::broker::protocol::PYTHON_ALIAS_NAMES.len()
+        == INTERPRETER_ALIASES.len()
+);
+
+/// Check a read grant on the absolute `path` as a box checks a `read` entry, and return whether it
+/// lies in a credential store, which a box grants only when a grant names it, and announces.
+pub fn check_read_grant(path: &Path) -> Result<bool, GrantRefused> {
+    record::config::filesystem::judge_read_grant(path).map_err(GrantRefused)
+}
+
+/// A read grant that a box refuses, with the reason.
+#[derive(Debug)]
+pub struct GrantRefused(error::BoxError);
+
+impl std::fmt::Display for GrantRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GrantRefused {}
 
 /// Generate policy action and event schemas from a Box configuration.
 pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode {

@@ -2,16 +2,20 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | `bindings` | which installed pack covers a program file's identity and its called name |
 //! | `format` | the `*.pack.toml` document as written |
 //! | `model` | the checked pack that loading builds from that document |
 //! | `usage` | one `usage` line, read into the shape of its command lines |
 //! | `grammar` | the shell grammar that compiling a pack builds |
 //! | `parse` | one command line, read against the shell grammar |
+//! | `schema` | the Cedar schema fragment that a checked pack generates |
 
+mod bindings;
 mod format;
 mod grammar;
 mod model;
 mod parse;
+mod schema;
 mod usage;
 
 #[cfg(test)]
@@ -23,6 +27,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub(crate) use model::Pack;
+pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;
 
 /// The pack file formats this Box reads.
@@ -93,6 +98,12 @@ pub(crate) enum PackRefusal {
     BadRest { place: Place },
     #[error("{place}: two fields have the name {field:?}")]
     FieldTaken { place: Place, field: String },
+    #[error("{place}: the name is reserved for a command that no action matches")]
+    ReservedAction { place: Place },
+    #[error("{place}: field {field:?} has a name that the schema gives every action")]
+    ReservedField { place: Place, field: String },
+    #[error("{place}: field {field:?} starts with `__`, which Box reserves for Cedar record keys")]
+    CedarReservedField { place: Place, field: String },
 }
 
 /// Why Box refuses one option of a tool pack.

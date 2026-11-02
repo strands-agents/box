@@ -1,7 +1,31 @@
 //! Process protections and repeat-run refusal through the public library entry point.
 
+#[cfg(target_os = "macos")]
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+
 #[cfg(unix)]
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("BOX_TEST_INSTALLATION") {
+        let home = std::path::PathBuf::from(home);
+        let code = strands_box::run(
+            home.join("box.toml"),
+            Vec::new(),
+            strands_box::RunOptions {
+                on_ready: Some(Box::new(|| {
+                    std::os::unix::fs::symlink("new", home.join("packages/next"))?;
+                    std::fs::rename(home.join("packages/next"), home.join("packages/current"))
+                })),
+                ..Default::default()
+            },
+        );
+        std::process::exit(if code == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        });
+    }
     #[cfg(target_os = "linux")]
     if std::env::args().any(|argument| argument == "--linux-refusal") {
         let mut called = false;
@@ -61,6 +85,9 @@ fn main() {
         return;
     }
 
+    #[cfg(target_os = "macos")]
+    symlinked_library_keeps_helpers_after_upgrade();
+
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--probe")
         .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
@@ -119,6 +146,96 @@ fn main() {
             "{stderr}"
         );
         assert!(!stderr.contains("missing-linux-"), "{stderr}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn symlinked_library_keeps_helpers_after_upgrade() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+    use std::process::Command;
+
+    let directory = tempfile::Builder::new()
+        .prefix("bi")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let home = directory.path().canonicalize().unwrap();
+    let release = home.join("packages/old");
+    fs::create_dir_all(&release).unwrap();
+    fs::create_dir_all(home.join("packages/new")).unwrap();
+    fs::create_dir(home.join("bin")).unwrap();
+    fs::create_dir(home.join("project")).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), release.join("boxy")).unwrap();
+    let built = Path::new(env!("CARGO_BIN_EXE_strands-box"))
+        .parent()
+        .unwrap();
+    let helpers = ["strands-box-sock-alias", "strands-box-contain-trampoline"];
+    for helper in helpers {
+        fs::copy(built.join(helper), release.join(helper)).unwrap();
+    }
+    symlink("../packages/current/boxy", home.join("bin/boxy")).unwrap();
+    fs::write(
+        home.join("policy.dw"),
+        r#"
+permit(principal, action == Box::Action::"shell:exec", resource)
+when { context.input.command == "printf helper-ok" };
+"#,
+    )
+    .unwrap();
+    fs::write(
+        home.join("box.toml"),
+        format!(
+            r#"
+name = "installation"
+box_dir = "{home}/state"
+policy = "{home}/policy.dw"
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc", "-c", "bash -c 'printf helper-ok'"]
+workspace = "{home}/project"
+"#,
+            home = home.display()
+        ),
+    )
+    .unwrap();
+    for missing in [None, Some(helpers[0]), Some(helpers[1])] {
+        if home.join("state").exists() {
+            fs::remove_dir_all(home.join("state")).unwrap();
+        }
+        let current = home.join("packages/current");
+        if current.exists() {
+            fs::remove_file(&current).unwrap();
+        }
+        symlink("old", &current).unwrap();
+        if let Some(helper) = missing {
+            fs::rename(
+                release.join(helper),
+                release.join(format!("{helper}.saved")),
+            )
+            .unwrap();
+        }
+        let mut command = Command::new(home.join("bin/boxy"));
+        command
+            .env("BOX_TEST_INSTALLATION", &home)
+            .env("HOME", &home);
+        let output = bounded_output::bounded_output(command);
+        if let Some(helper) = missing {
+            fs::rename(
+                release.join(format!("{helper}.saved")),
+                release.join(helper),
+            )
+            .unwrap();
+            assert!(!output.status.success(), "missing {helper} must fail");
+            assert!(String::from_utf8_lossy(&output.stderr).contains(helper));
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"helper-ok");
+        }
+        assert_eq!(fs::read_link(&current).unwrap(), Path::new("new"));
     }
 }
 

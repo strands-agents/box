@@ -1,11 +1,7 @@
-//! Part A — interception. The [`Interceptor`] port and its v1 [`mitm`] adapter.
-
-mod port;
+//! The [`mitm`] adapter: the egress gateway.
 
 #[cfg(feature = "tls-intercept")]
-mod mitm;
-
-pub use port::Interceptor;
+pub(crate) mod mitm;
 
 #[cfg(feature = "tls-intercept")]
 pub use mitm::{MitmConfig, MitmHandle, MitmInterceptor, ResponseLimits};

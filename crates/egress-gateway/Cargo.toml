@@ -22,6 +22,11 @@ tls-intercept = [
     "dep:webpki-roots",
     "dep:ring",
     "dep:rcgen",
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
 ]
 
 [dependencies]
@@ -64,6 +69,13 @@ webpki-roots = { version = "1", optional = true }
 ring = { version = "0.17", optional = true }
 # X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
+# HTTP/1.1 on both legs. Each connection thread runs a small runtime for its own connection.
+tokio = { version = "1", optional = true, features = ["macros", "net", "rt", "time"] }
+# `ring`, as `rustls` above; the default features pull `aws-lc-rs`.
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring"] }
+hyper = { version = "1", optional = true, features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # The full-interception E2E stands up a real TLS upstream and a real TLS workload client (both
@@ -71,3 +83,5 @@ rcgen = { version = "0.14", optional = true, default-features = false, features 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# The unit tests drive both sockets of one exchange in memory.
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }
