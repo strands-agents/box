@@ -1,28 +1,5 @@
 # Cloud deployment profiles
 
-Cloud deployment profiles describe the surrounding environment for Box on three cloud targets.
-
-These are reference configurations for the exact candidate named in the guide.
-They contain environment settings and recorded test limits, rather than deployment scripts.
-Use your selected build's installation and configuration instructions before repeating qualification.
-
-For managed Python code, use the
-[AgentCore Runtime managed code profile](../../docs/user/cloud-deployments.md#runtime-managed-code).
-It records the service runtime, bundled files, application endpoint, and operator identity.
-
-For your own container image, use the
-[AgentCore Runtime container profile](../../docs/user/cloud-deployments.md#runtime-container).
-It records the image dependencies, non-root identity, and application endpoint.
-
-For lifecycle-controlled execution, use the
-[Lambda MicroVM profile](../../docs/user/cloud-deployments.md#lambda-microvm).
-Its recorded configuration uses root and the service's `ALL` capability setting.
-Treat it as a qualification configuration.
-For that candidate, normal completion passed, but cancellation and timeout left task processes running.
-The guide records the explicit library grants used by the tests.
-
-Read the guide's [shared requirements](../../docs/user/cloud-deployments.md#shared-requirements)
-and [qualification results](../../docs/user/cloud-deployments.md#qualification-results) before choosing a profile.
-
-The results cover ordinary Linux operating system enforcement and policy checks through Box's built-in tools.
-They do not qualify the separate experimental native filesystem policy mechanism or a later release.
+Read the [cloud deployment guide](../../docs/user/cloud-deployments.md) for Linux environment requirements, service configuration, and deployment checks.
+It covers AgentCore Runtime managed code, Runtime customer containers, and Lambda MicroVM.
+This directory contains a reference link, not deployment scripts.

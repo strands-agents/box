@@ -27,7 +27,7 @@ it reads, writes, or deletes goes through the box's shell. The
 
 [Cloud deployment profiles](./cloud-deployments/): reference configurations for Amazon Bedrock
 AgentCore Runtime managed code, Runtime customer containers, and Lambda MicroVM.
-These profiles record one candidate's environment and failed qualification results. They are reference configurations rather than runnable deployment examples.
+Follow the deployment guide for environment requirements and checks. These are reference pages, not runnable deployment examples.
 
 Agent runs require model access. Each tutorial states its platform requirements.
 For Box installation and configuration, follow [getting started](../docs/user/getting-started.md).
