@@ -411,14 +411,15 @@ partial read-write access. `linux_rejects_write_only_before_any_process_runs` pi
 This accepted platform limitation avoids silently adding read permission. Landlock is the planned
 long-term approach; its implementation and qualification remain deferred.
 
-On Linux, when the
-authority directory sits more than one level below a write grant, the workload can rename the
-ancestor between them and create a fresh directory at the vacated path, which a later run whose
-`--config` names that path adopts; macOS refuses the ancestor rename, and
-`this_boxs_authority_survives_a_rename_of_its_parent` records both platforms. Placing the authority
-directly under the granted root, as `<project>/.strands-box` is, leaves no ancestor to rename. And a
-path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes the
-agent's own read work while `cat` through the Shell stays refused.
+Both platforms refuse native workload renames of ancestors between a write grant and the loaded
+authority directory. Linux keeps these ancestors fixed with mounts inside the workload's mount
+namespace; macOS denies changes to their directory entries. The test
+`this_boxs_authority_survives_a_rename_of_its_parent` checks both platforms and confirms that unrelated
+sibling operations still work. On Linux, this protection does not cover a permitted Shell move
+executed outside the workload's mount namespace.
+
+A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
+the agent's own read work while `cat` through the Shell stays refused.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one

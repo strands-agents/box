@@ -2782,7 +2782,8 @@ mod tests {
                 entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
             });
             view.materialize().unwrap();
-            assert!(std::fs::rename(&parent, root.join("moved")).is_err());
+            let error = std::fs::rename(&parent, root.join("moved")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
             assert!(!denied.exists());
             assert!(std::fs::write(&denied, b"changed").is_err());
             assert_eq!(std::fs::read_dir(&metadata).unwrap().count(), 0);

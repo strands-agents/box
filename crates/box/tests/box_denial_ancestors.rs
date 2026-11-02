@@ -165,10 +165,8 @@ fn denial_matrix(directory: bool, variants: &[(&str, bool)]) {
             let errno = report["rename_errno"].as_i64();
             let expected_refusal = if variant.starts_with("renameat2") {
                 errno == Some(i64::from(libc::EPERM))
-            } else if *same_parent {
-                errno == Some(i64::from(libc::EBUSY))
             } else {
-                errno == Some(i64::from(libc::EBUSY)) || errno == Some(i64::from(libc::EXDEV))
+                errno == Some(i64::from(libc::EBUSY))
             };
             check(expected_refusal, "rename failed for an unexpected reason");
             check(
