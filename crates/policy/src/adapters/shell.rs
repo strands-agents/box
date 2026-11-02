@@ -115,7 +115,8 @@ impl ShellPolicyInterceptor {
 
     /// Construct the handle that decides a spawn of a program a tool pack binds as its pack action
     /// (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
-    pub fn into_handle_with_pack_bindings(
+    #[cfg(test)]
+    pub(crate) fn into_handle_with_pack_bindings(
         policy: Arc<PolicyEngine>,
         principal: Principal,
         governed: GovernedBox,

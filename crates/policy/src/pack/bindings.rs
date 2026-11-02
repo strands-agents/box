@@ -12,7 +12,7 @@ const MAXIMUM_LINKS: usize = 40;
 
 /// One resolved program file: the device and inode found there, and each spelling that led to it.
 #[derive(Debug, Clone)]
-pub struct ProgramFile {
+pub(crate) struct ProgramFile {
     identity: FileIdentity,
     path: PathBuf,
     spellings: Vec<PathBuf>,
@@ -27,14 +27,14 @@ struct FileIdentity {
 /// A program file whose identity Box cannot read.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot read the program file {}: {reason}", .path.display())]
-pub struct UnreadableProgramFile {
+pub(crate) struct UnreadableProgramFile {
     path: PathBuf,
     reason: std::io::Error,
 }
 
 impl ProgramFile {
     /// Read the identity of the file at `path`, after the host resolves each link in it.
-    pub fn read(path: impl Into<PathBuf>) -> Result<Self, UnreadableProgramFile> {
+    pub(crate) fn read(path: impl Into<PathBuf>) -> Result<Self, UnreadableProgramFile> {
         let path = path.into();
         let read = std::fs::canonicalize(&path)
             .and_then(|canonical| std::fs::metadata(&canonical).map(|found| (canonical, found)));
@@ -68,7 +68,7 @@ impl ProgramFile {
     }
 
     /// The canonical path the identity was read at.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -93,7 +93,7 @@ fn links_from(path: &Path) -> Vec<PathBuf> {
 /// The installed tool packs, the (program file, called name) pairs each one covers, and the file
 /// identity that each bound spelling led to when it was bound.
 #[derive(Debug, Default)]
-pub struct PackBindings {
+pub(crate) struct PackBindings {
     packs: Vec<Pack>,
     bound: BTreeMap<(FileIdentity, String), usize>,
     spellings: BTreeMap<PathBuf, FileIdentity>,
@@ -127,7 +127,7 @@ pub(crate) enum CoverageRefusal {
 
 /// Why Box refuses the installed packs or one binding.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum BindingRefusal {
+pub(crate) enum BindingRefusal {
     /// Two installed packs have one name.
     #[error("two installed tool packs are named {pack:?}")]
     NamedTwice {
@@ -167,7 +167,7 @@ pub(crate) fn called_name(spelling: &str) -> &str {
 
 impl PackBindings {
     /// Hold the installed `packs`, each with a distinct name, and no binding yet.
-    pub fn new(packs: Vec<Pack>) -> Result<Self, BindingRefusal> {
+    pub(crate) fn new(packs: Vec<Pack>) -> Result<Self, BindingRefusal> {
         let mut seen = BTreeMap::<&str, usize>::new();
         for pack in &packs {
             *seen.entry(pack.name.as_str()).or_default() += 1;
@@ -184,12 +184,12 @@ impl PackBindings {
     }
 
     /// Declare that a `[tool]` runs `program` under the name `name`.
-    pub fn declare(&mut self, program: &ProgramFile, name: impl Into<String>) {
+    pub(crate) fn declare(&mut self, program: &ProgramFile, name: impl Into<String>) {
         self.declared.insert((program.identity, name.into()));
     }
 
     /// Bind the pack named `pack` to `program` called by `name`.
-    pub fn bind(
+    pub(crate) fn bind(
         &mut self,
         program: &ProgramFile,
         name: impl Into<String>,

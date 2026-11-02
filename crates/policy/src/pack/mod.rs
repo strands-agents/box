@@ -28,11 +28,11 @@ mod fuzz;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use bindings::{BindingRefusal, PackBindings, ProgramFile, UnreadableProgramFile};
+pub(crate) use bindings::ProgramFile;
 #[cfg(feature = "shell-adapter")]
-pub(crate) use bindings::{CoverageRefusal, PackCoverage};
+pub(crate) use bindings::{CoverageRefusal, PackBindings, PackCoverage};
 pub(crate) use invocation::{PackInvocation, PackRequest, PendingPackResponse};
-pub use model::Pack;
+pub(crate) use model::Pack;
 pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;
 
@@ -42,7 +42,7 @@ const KNOWN_FORMATS: &[i64] = &[1];
 /// A tool pack file that Box refuses to load.
 #[derive(Debug, thiserror::Error)]
 #[error("tool pack {}: {refusal}", .origin.display())]
-pub struct PackError {
+pub(crate) struct PackError {
     origin: PathBuf,
     refusal: Box<PackRefusal>,
 }
@@ -161,7 +161,7 @@ impl fmt::Display for Place {
 
 impl Pack {
     /// Read and check the tool pack file at `path`.
-    pub fn load(path: &Path) -> Result<Self, PackError> {
+    pub(crate) fn load(path: &Path) -> Result<Self, PackError> {
         let text = std::fs::read_to_string(path).map_err(|error| PackError {
             origin: path.to_path_buf(),
             refusal: Box::new(PackRefusal::Unreadable(error.to_string())),

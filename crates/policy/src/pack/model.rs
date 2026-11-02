@@ -40,7 +40,7 @@ impl Borrow<str> for EffectName {
 /// One tool pack, read and checked.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug)]
-pub struct Pack {
+pub(crate) struct Pack {
     pub(super) name: String,
     pub(super) version: u32,
     pub(super) program: String,

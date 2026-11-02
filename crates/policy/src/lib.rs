@@ -44,7 +44,6 @@ pub use mcp_schema::{
 };
 pub use observe::DecisionObserver;
 pub use outcome::{Delivery, FsResult, Outcome};
-pub use pack::{BindingRefusal, Pack, PackBindings, PackError, ProgramFile, UnreadableProgramFile};
 pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,
