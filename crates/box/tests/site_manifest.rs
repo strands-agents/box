@@ -125,6 +125,18 @@ fn validate_source(root: &Path, source: &str, location: &str) -> Result<(), Stri
     )
 }
 
+fn load_source_title(root: &Path, source: &str, location: &str) -> Result<String, String> {
+    let path = root.join(source);
+    let markdown = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    markdown
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# "))
+        .map(str::to_string)
+        .ok_or_else(|| format!("{location} must start with an H1 heading"))
+}
+
 fn validate_page(
     root: &Path,
     page: &Page,
@@ -151,6 +163,16 @@ fn validate_page(
         format!("{location}.source duplicates {}", page.source),
     )?;
 
+    validate_text(&page.title, &format!("{location}.title"))?;
+    let source_title = load_source_title(root, &page.source, &format!("{location}.source"))?;
+    require(
+        page.title == source_title,
+        format!(
+            "{location}.title must match the first H1 in {}",
+            page.source
+        ),
+    )?;
+
     validate_text(&page.slug, &format!("{location}.slug"))?;
     require(
         is_safe_slug(&page.slug),
@@ -161,7 +183,6 @@ fn validate_page(
         format!("{location}.slug duplicates {}", page.slug),
     )?;
 
-    validate_text(&page.title, &format!("{location}.title"))?;
     validate_text(&page.description, &format!("{location}.description"))?;
     validate_text(&page.nav.group, &format!("{location}.nav.group"))?;
     require(
@@ -349,6 +370,62 @@ fn absent_or_empty_metadata_is_refused() {
                 .contains("must not be empty")
         );
     }
+}
+
+#[test]
+fn unknown_fields_are_refused() {
+    let root = repository_root();
+    let mut cases = Vec::new();
+
+    let mut manifest = manifest_value(&root);
+    manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .insert("unexpected".to_string(), true.into());
+    cases.push(("manifest", manifest));
+
+    let mut product = manifest_value(&root);
+    product["product"]
+        .as_object_mut()
+        .expect("product object")
+        .insert("unexpected".to_string(), true.into());
+    cases.push(("product", product));
+
+    let mut page = manifest_value(&root);
+    page["pages"][0]
+        .as_object_mut()
+        .expect("page object")
+        .insert("unexpected".to_string(), true.into());
+    cases.push(("page", page));
+
+    let mut navigation = manifest_value(&root);
+    navigation["pages"][0]["nav"]
+        .as_object_mut()
+        .expect("navigation object")
+        .insert("unexpected".to_string(), true.into());
+    cases.push(("navigation", navigation));
+
+    for (location, value) in cases {
+        assert!(
+            serde_json::from_value::<SiteManifest>(value)
+                .expect_err("unknown field must fail")
+                .to_string()
+                .contains("unknown field"),
+            "{location} accepted an unknown field"
+        );
+    }
+}
+
+#[test]
+fn title_drift_from_source_heading_is_refused() {
+    let root = repository_root();
+    let mut manifest = load_manifest(&root).expect("load manifest");
+    manifest.pages[0].title = "A different title".to_string();
+    assert!(
+        validate_manifest(&root, &manifest)
+            .expect_err("title drift must fail")
+            .contains("must match the first H1")
+    );
 }
 
 #[test]

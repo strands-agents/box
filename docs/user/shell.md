@@ -1,4 +1,4 @@
-# Strands Shell
+# Strands Shell reference
 
 Strands Shell is the shell that runs each command the agent sends to `zsh`, `bash`, or `sh` in a
 box. Policy decides each command, and each file operation the command makes. A program outside the

@@ -1,4 +1,4 @@
-# The `[egress.<name>]` table
+# Egress credential configuration
 
 An `[egress.<name>]` table in `box.toml` binds a credential to a set of destinations. The box's
 egress gateway adds the credential to each request to those destinations. Policy decides whether

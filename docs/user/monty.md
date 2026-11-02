@@ -1,4 +1,4 @@
-# Python scripts in a box
+# Python in a box
 
 A box runs the agent's Python scripts in [Monty](https://github.com/pydantic/monty), an
 interpreter for a subset of Python. Policy decides each file operation a script makes, and the

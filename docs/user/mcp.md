@@ -1,4 +1,4 @@
-# The `[mcp.<name>]` table
+# MCP server configuration
 
 Each MCP server the agent uses is one `[mcp.<name>]` table in `box.toml`. A stdio server is a
 program that the box starts in its own sandbox. An http server

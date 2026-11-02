@@ -44,7 +44,7 @@
       "source": "docs/user/egress.md",
       "slug": "guides/network-and-credentials",
       "title": "Egress credential configuration",
-      "description": "Bind credentials to permitted network destinations with `box.toml` configuration.",
+      "description": "Bind credentials to permitted network destinations with Box configuration.",
       "nav": {
         "group": "Guides",
         "order": 3
