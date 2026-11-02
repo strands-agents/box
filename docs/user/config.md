@@ -242,11 +242,17 @@ on the surrounding OS, so the same `exec = ["/bin/sh"]` entry loads under one an
 another. Write the target the refusal names.
 
 Box binds each directory in `exec` to the directory present when the run starts.
-If that directory is replaced, Box refuses later launches that reuse the agent's filesystem lists.
-This includes replacement through a rename of an ancestor directory.
-Restore the original directory to resume those launches.
-Verify a replacement toolchain before you restart the run to use it.
-Unrelated permitted renames still work, and the directory's contents remain subject to existing write permissions.
+If that directory is replaced, Box refuses all later launches that reuse the agent's filesystem lists.
+This includes programs covered by unchanged entries and replacement through an ancestor rename.
+Restore the original directory to resume those launches if it still exists.
+
+Commands such as `cargo clean` and `npm ci` can delete a listed directory before rebuilding it.
+When the original was deleted, verify the rebuilt toolchain and restart `strands-box run`.
+Unrelated permitted renames still work.
+
+This identity check covers directory entries only.
+A file entry can still select a replacement program after an ancestor rename.
+The check does not prevent writes to files inside an unchanged directory when existing permissions allow them.
 
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these

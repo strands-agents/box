@@ -262,12 +262,17 @@ pub(crate) fn require_judged_identities(
     table: &str,
 ) -> Result<(), ConfigError> {
     for grant in &reach.grants {
+        let recovery = if grant.execution_directory.is_some() {
+            ". Restore the original directory, or verify the replacement and restart `strands-box run`"
+        } else {
+            ""
+        };
         let changed = |reason: &str| ConfigError::Filesystem {
             table: table.to_string(),
             entry: grant.authored.clone(),
             reason: format!(
                 "{} {reason} since the run judged it. A spawn acts on the identity the run \
-                 approved, so it is refused",
+                 approved, so it is refused{recovery}",
                 grant.resolved.display()
             ),
         };

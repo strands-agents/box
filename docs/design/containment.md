@@ -161,6 +161,8 @@ On macOS, the directory identity comparison detects replacement before the launc
 The macOS sandbox still applies pathname rules, so this comparison does not eliminate races after validation.
 
 These checks retain directory identity without freezing file contents inside the directory.
+They do not retain the startup identity of file entries in the agent's `exec` list.
+An ancestor rename can still replace the program selected by such a file entry.
 Policy-permitted unrelated renames continue to work.
 See [execution grants](../user/config.md#agentfilesystem-and-toolnamefilesystem) for the operator's recovery steps.
 

@@ -189,10 +189,17 @@ exec = ["~/src/project/target/debug"]
 ```
 
 Box retains the identity of each `exec` directory from startup.
-Replacing that directory, including through an ancestor rename, refuses later launches that use the agent's filesystem lists.
-Restore the original directory to resume launches.
-Before restarting with a replacement toolchain, verify its contents.
-Files inside the same directory remain subject to existing grants and policy.
+Replacing that directory, including through an ancestor rename, refuses all later launches that use the agent's filesystem lists.
+This includes programs covered by other, unchanged `exec` entries.
+Restore the original directory to resume launches if it still exists.
+
+`cargo clean` deletes the example's directory, and a later build creates a replacement.
+Likewise, `npm ci` replaces a listed `node_modules/.bin` directory.
+When the original was deleted, verify the rebuilt toolchain and restart `strands-box run`.
+
+This check applies to directory entries only.
+A file entry can still select a replacement program after an ancestor rename.
+The check also permits changes inside the same directory when existing write permissions allow them.
 See [execution grants](config.md#agentfilesystem-and-toolnamefilesystem) for the configuration contract.
 
 ## `PATH`
