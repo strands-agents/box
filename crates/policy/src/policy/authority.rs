@@ -198,9 +198,7 @@ impl Authority {
     /// set is replaced wholesale and refused wholesale: `open_staged` may install the
     /// schema-independent subset and open `Discovering`, because at startup the typed schemas
     /// have not arrived yet and a box that denied everything until they did would be useless.
-    /// A reload has no such excuse — the schemas are already here, so a set that cannot
-    /// validate is an operator error, and installing the part of it that happens to validate
-    /// would report success for a rule that is not live.
+    /// Reject the entire replacement if any rule fails validation, and keep the current policy.
     pub(super) fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
         // Same order as `stage_mcp_schema`: proposal first, then live. A reload that took them
         // the other way round would deadlock against a schema staging mid-discovery.
