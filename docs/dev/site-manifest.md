@@ -74,3 +74,5 @@ cargo test -p strands-box --test site_manifest --all-features
 ```
 
 Run the test after a change to the manifest or a publishable user page.
+Pull-request CI runs this focused test on Ubuntu for those changes. It does not start the full Rust
+matrix for a documentation-only pull request.

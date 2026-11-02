@@ -310,12 +310,34 @@ fn repository_manifest_is_valid() {
 fn ci_runs_validation_for_manifest_and_user_page_changes() {
     let root = repository_root();
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI");
+    let rust_filter = workflow
+        .split_once("            rust:\n")
+        .and_then(|(_, remainder)| remainder.split_once("            site_manifest:\n"))
+        .map(|(filter, _)| filter)
+        .expect("Rust path filter");
+    let site_manifest_filter = workflow
+        .split_once("            site_manifest:\n")
+        .and_then(|(_, remainder)| remainder.split_once("            containment:\n"))
+        .map(|(filter, _)| filter)
+        .expect("site manifest path filter");
     for path in ["docs/site-manifest.json", "docs/user/**/*.md"] {
         assert!(
-            workflow.contains(&format!("- '{path}'")),
-            "Rust CI must run for {path}"
+            site_manifest_filter.contains(&format!("- '{path}'")),
+            "site manifest CI must run for {path}"
+        );
+        assert!(
+            !rust_filter.contains(&format!("- '{path}'")),
+            "Rust CI must not run for {path}"
         );
     }
+    assert!(
+        workflow.contains("\n  site-manifest:\n"),
+        "CI must have a focused site manifest job"
+    );
+    assert!(
+        workflow.contains("cargo test -p strands-box --test site_manifest --locked --all-features"),
+        "site manifest CI must run the contract test"
+    );
 }
 
 #[test]
