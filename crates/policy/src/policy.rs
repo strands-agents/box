@@ -1303,6 +1303,31 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         );
     }
 
+    #[test]
+    fn an_unchanged_policy_is_refused_after_tool_discovery_is_denied() {
+        let original = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" };
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" && context.input.method == "tools/list" };
+            forbid(principal, action == alpha::Action::"read", resource);"#;
+        let history = tempfile::tempdir().unwrap();
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(original),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        assert_eq!(
+            engine.finish_mcp_discovery().unwrap(),
+            vec!["alpha".to_string()]
+        );
+        assert!(engine.reload(&source(original)).is_err());
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "a refused reload must keep the tool blocked"
+        );
+    }
+
     /// A staged tool whose server degrades stays denied, and a reload that drops the
     /// unresolved rule lifts the block.
     #[test]
