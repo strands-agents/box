@@ -595,12 +595,7 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "changes mount attributes, so a read-only bind could be made \
                  writable; absent on 5.10 but named so a newer kernel is covered",
     },
-    // KNOWN GAP: `open_tree_attr` (467, kernel >= 6.15) clones a mount and sets
-    // attributes in one call, and is not in this table — the pinned libc 0.2.189
-    // exports `SYS_open_tree_attr` for no supported arch, and a hand-written
-    // number is against this crate's rule. Two backstops hold meanwhile: every
-    // capability set is cleared and `no_new_privs` is set, so the whole mount
-    // API returns `EPERM`. Add the entry when libc carries the constant.
+    // The permit filter refuses unlisted mount calls, including `open_tree_attr`.
     // Privilege and identity surfaces the namespaces do not close.
     MediatedSyscall {
         name: "ioctl",

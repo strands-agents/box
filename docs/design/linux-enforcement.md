@@ -40,6 +40,21 @@ Direct Linux file operations use filesystem grants rather than individual policy
 Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
 See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
+## Capabilities inside nested namespaces
+
+A Linux [capability](#terms) is a privilege for an operation such as namespace administration.
+Box clears every capability set before the workload starts.
+This step removes startup authority but does not prevent Linux from granting capabilities in a nested user namespace.
+
+The filters permit `unshare`, `clone`, and `clone3` to create user namespaces, and `setns` to enter eligible child namespaces.
+The process can then hold capabilities within that namespace and the namespaces it owns.
+Those capabilities do not grant privileges in a parent user namespace.
+
+Box's seccomp filters remain active after namespace creation or entry, and child processes inherit them.
+The filters still refuse `mount` and `fsopen`, which mount a filesystem or begin filesystem setup.
+Other permitted operations can use the restored capabilities, such as creation of a nested mount namespace.
+These namespaces share the surrounding OS kernel, so [kernel security remains a dependency](security.md#the-operator-and-platform-own-the-environment).
+
 ## How the filesystem view changes access
 
 The view starts with an isolated root and adds the files that the workload needs.
@@ -159,6 +174,9 @@ Minimum versions, minimum privileges, package installation, and testing the asse
 | Term | Definition | Notes |
 |---|---|---|
 | Namespace | A kernel mechanism that gives processes a separate view of selected resources. | Box uses several namespace types. |
+| Capability | A Linux privilege for a specific operation. | User namespaces scope these privileges. |
+| `unshare`, `clone`, `clone3`, and `setns` | System calls that create or enter namespaces. | `clone` and `clone3` also create processes. |
+| `mount` and `fsopen` | System calls that mount a filesystem or begin filesystem setup. | Box refuses both after nested namespace creation or entry. |
 | Bind mount | An existing file or directory exposed at another mount point. | Its access flags affect direct file operations. |
 | Seccomp | A Linux mechanism that filters system calls. | Box uses static filters before workload execution. |
 | Shared library | Code that a program loads from a separate file. | The loader needs readable, executable access. |

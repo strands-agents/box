@@ -105,5 +105,10 @@ name = "child_ipc"
 path = "tests/child_ipc.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "nested_user_namespace_linux"
+path = "tests/nested_user_namespace_linux.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unused_must_use = "deny"
