@@ -202,6 +202,10 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
+Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
+credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
 

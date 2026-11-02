@@ -2,15 +2,19 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | `bindings` | which installed pack covers a program file's identity and its called name |
 //! | `format` | the `*.pack.toml` document as written |
 //! | `model` | the checked pack that loading builds from that document |
 //! | `usage` | one `usage` line, read into the shape of its command lines |
 //! | `grammar` | the shell grammar that compiling a pack builds |
 //! | `parse` | one command line, read against the shell grammar |
 //! | `schema` | the Cedar schema fragment that a checked pack generates |
+//! | `invocation` | one command line that a pack read, as the record its action decides |
 
+mod bindings;
 mod format;
 mod grammar;
+mod invocation;
 mod model;
 mod parse;
 mod schema;
@@ -24,6 +28,7 @@ mod fuzz;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub(crate) use invocation::{PackInvocation, PackRequest, PendingPackResponse};
 pub(crate) use model::Pack;
 pub(crate) use schema::PACK_NAMESPACE;
 use usage::UsageFault;

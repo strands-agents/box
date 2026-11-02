@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 enum Fault {
     None,
     Bounding,
+    SupervisorMemory,
     Capabilities,
     Privileges,
     Filter,
@@ -70,6 +71,7 @@ fn start(fault: Fault, script: &str, gate: Option<RawFd>) -> Run {
     let descriptor = writer.as_raw_fd();
     let syscall = match fault {
         Fault::Bounding => Some((libc::SYS_prctl, Some(libc::PR_CAPBSET_DROP))),
+        Fault::SupervisorMemory => Some((libc::SYS_prctl, Some(libc::PR_SET_DUMPABLE))),
         Fault::Capabilities => Some((libc::SYS_capset, None)),
         Fault::Privileges => Some((libc::SYS_prctl, Some(libc::PR_SET_NO_NEW_PRIVS))),
         Fault::Filter | Fault::KillFilter => Some((libc::SYS_seccomp, None)),
@@ -208,6 +210,13 @@ fn bounding_failure_reports_apply() {
         return;
     }
     check_failure(Fault::Bounding, 3);
+}
+#[test]
+fn supervisor_memory_refusal_reports_apply_before_workload_start() {
+    if !the_host_can_build_a_view() {
+        return;
+    }
+    check_failure(Fault::SupervisorMemory, 3);
 }
 #[test]
 fn capability_failure_reports_apply() {

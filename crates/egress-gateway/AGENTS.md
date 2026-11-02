@@ -11,21 +11,21 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 43 names (`src/lib.rs`): 39 unconditional, and 4 behind the default-on
+The façade exports 34 names (`src/lib.rs`): 30 unconditional, and 4 behind the default-on
 `tls-intercept` feature — `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` — which stay
 behind it. `audit::Decision` exits as `AuditDecision`. `normalize_host` and `is_bindable_host` are
 the one host spelling, exported for `policy::spelling`, which refuses a host literal no bound host
-can equal. A 44th name needs a named external caller.
+can equal. A 35th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
 - **Keep authorization out of this crate.** The authored policy decides, reached only through
   `EffectInterceptor`; the engine is Dogwood (`ENGINE_ID = "dogwood-0.1.0"`). Never add an allow or
-  deny authority here, and never add an `Allow` variant to `CapabilityOutcome`. `AuditDecision`
-  carries `Allow` and `Deny` and authorizes nothing.
+  deny authority here, and never let a capability return an allow. `AuditDecision` carries `Allow`
+  and `Deny` and authorizes nothing.
 - Do not depend on `policy`. The direction is `policy -> egress-gateway`.
-- Preserve `CapabilitySet::validate` as the startup gate, and keep `evaluate_request` and
-  `evaluate_response` socket-free.
+- Preserve `CapabilitySet::validate` as the startup gate, and keep `apply_to_request` and
+  `apply_to_response` socket-free.
 - Keep interception side effects outside capabilities, domain decisions behind `EffectInterceptor`,
   and audit behind `Emitter`.
 - Add a public item only for a concrete external consumer.
@@ -43,25 +43,25 @@ The gateway holds no destination deny list. A metadata or link-local address is 
 `forbid` on `context.input.ip`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
-- **`CapabilitySet` holds the credential mutators, not a second authority.** `CapabilityOutcome` is
-  `Applied(Vec<Mutation>)` or `Unavailable(CapabilityFault)`, and it has **no `Allow` variant**. A
-  fold's `Verdict::Allow` comes from the *absence* of a fault, never from a capability.
+- **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
+  its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
+  *absence* of a fault.
 
 ## Security Invariants
 
 - Decide every connection and transport twice: the host before resolution, and each resolved,
   pinned address before its socket opens. The address decided is the address dialed.
 - `open_upstream` authorizes through `EffectInterceptor` before the socket opens.
-- One `CapabilityOutcome::Unavailable` denies the exchange, at any position in the fold.
-- Apply request mutations only when the verdict allows.
+- One capability fault denies the exchange, at any position in the fold.
+- Apply request mutations only when the fold has no fault and no collision.
 - Use the same pinned addresses for resolution and for the upstream connection.
 - Keep an intercepted HTTP authority bound to the admitted CONNECT destination.
 - `CredentialCapability` checks the destination-bound phantom before it attaches material. The vault
-  owns the check: a `Strict` route (the default) makes an absent or mismatched phantom a
-  `CapabilityOutcome::Unavailable`; an `Advisory` route warns and attaches the secret anyway. The
-  destination binding still gates injection in both modes. An advisory injection carries the vault's
-  non-secret reason via `Attachment::advisory_reason` onto `InterceptedRequest::advisory_note`, and
-  the request leg journals it on the allow `EgressDecision` (destination, reason, correlation).
+  owns the check: a `Strict` route (the default) makes an absent or mismatched phantom a fault; an
+  `Advisory` route warns and attaches the secret anyway. The destination binding still gates
+  injection in both modes. An advisory injection carries the vault's non-secret reason via
+  `Attachment::advisory_reason` onto `InterceptedRequest::advisory_note`, and the request leg
+  journals it on the allow `EgressDecision` (destination, reason, correlation).
 - Keep secret-bearing headers and body content out of effect attempts.
 - Keep audit values to routing, decision, reason, and correlation data.
 - Fail startup on duplicate per-pattern capabilities. There is no visibility check, because
@@ -81,9 +81,8 @@ The capability modules carry no authority.
 
 Three divergences from `docs/conventions.md` are live, and none is license to rename:
 
-- No root noun: 44 exports, no single type reached by one verb, `Interceptor` a one-method port,
-  `MitmInterceptor::start` taking three arguments and returning `MitmHandle`, and
-  `CapabilitySet::builder()` → `CapabilitySetBuilder::build()`.
+- No root noun: 34 exports, no single type reached by one verb, `Interceptor` a one-method port, and
+  `MitmInterceptor::start` taking three arguments and returning `MitmHandle`.
 - A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.
 - `Mitm*` states the mechanism, and `ProxyError`'s "proxy" strings diverge from the crate name.
 
@@ -97,14 +96,14 @@ Conventions: `docs/conventions.md`.
 - Hand policy the pinned `SocketAddr` unchanged. `policy/src/address.rs` unwraps the four IPv6
   transition encodings to the IPv4 address they carry; a forbid on `169.254.*` reopens through
   three spellings if that unwrapping is lost.
-- Keep `Arc<dyn EffectInterceptor>` mandatory in `MitmInterceptor::start` and `start_with_emitter`,
+- Keep `Arc<dyn EffectInterceptor>` mandatory in `MitmInterceptor::start` and `start_with`,
   and never add `start_without_policy()` or an `Option` form.
 - Use `WorkloadResponse::refusal` and `WorkloadResponse::bare` only for static, secret-free,
   proxy-originated bytes. Upstream bytes always need a `ResponseRelease` permit.
 - Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
   `ProxyOnly` kernel pin, the real anti-hijack defence.
-- Report the pre-mutation `workload_path`, which `emit_decision` reads from `DecisionSubject`. Never
-  read `req.target.path`; a `UrlPath` credential makes it the secret.
+- Report the pre-mutation `workload_path` in every `emit_decision` and `deny`. Never read
+  `req.target.path`; a `UrlPath` credential makes it the secret.
 - Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
   `POST /v1/messages` by 6 bytes in 500 of 500 runs.
 - Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300
@@ -118,13 +117,15 @@ Conventions: `docs/conventions.md`.
   protection is its boundary
   ([memory is a defended asset](../../docs/design/decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
   Only the public cert reaches disk, at `0o400`.
-- Return `ResponseDecision::RedirectReentry` for a cross-host 3xx, only after the response fold.
-  Otherwise a redirect reaches a refused host or releases an unscrubbed secret.
-- Keep the set-level prefilter in `evaluate_request` and `evaluate_response`; deleting the
-  "redundant" `continue` gives a two-route box a `MutationCollision` outage.
+- Release a reply only after the response fold (`CapabilitySet::apply_to_response`), so a redirect
+  or any other reply that carries a secret is scrubbed first. The workload follows a redirect, so
+  each hop is a new request that policy decides.
+- Keep both pattern checks: `CapabilitySet` applies only the credentials whose pattern matches, and
+  `CredentialCapability::on_request` and `on_response` check again. Without them, a two-route box
+  has a mutation-collision outage.
 - Count only `SetHeader`, `RewritePath`, and `AddQueryParam` in collision detection; `StripQueryParam`
   shares its `MutationTarget`, so counting a strip makes a route collide with itself. The surfaced
-  fault is the first `Unavailable`, deterministic only through one-capability-per-pattern.
+  fault is the first one, deterministic only through one-capability-per-pattern.
 - Decode the key in `strip_query_param`, because the workload picks the spelling and `a%2Fb`, `a%2fb`,
   and `a+b` are one key. Leave a malformed `%` escape verbatim. `AddQueryParam` appends, so keep
   `StripQueryParam` beside it.

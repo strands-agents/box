@@ -5,8 +5,9 @@ Follow [repository guidance](../../AGENTS.md).
 Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
-on-disk records (`Record` at `RECORD_VERSION`, `BoxLive` at
-`LIVE_VERSION`), the broker wire protocol, the alias names and their socket derivation, the
+on-disk records (`Record` at `RECORD_VERSION` and each later record version through
+`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
 current interface needs no approval and is almost always the right move. Even a *narrowing*
@@ -250,7 +251,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   are **not** among them: they belong to `Record`.
 
   **The box is the credential boundary. No process table selects what it reaches.** The agent gets
-  every declared `[tool.<label>]`, every `[mcp.<name>]` alias, and every egress route. Each tool and
+  every declared `[tool.<label>]`, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
   each MCP leaf gets every egress route, and no alias and no broker socket, so it starts no tool.
   [The box is the credential boundary](../../docs/design/decisions.md#the-box-is-the-credential-boundary)
   owns why. **Do not add a per-process selection**: the gateway and the broker cannot tell
