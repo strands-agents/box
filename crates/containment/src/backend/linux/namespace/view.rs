@@ -297,8 +297,7 @@ impl MountView {
                         source: Some(dependency.resolved),
                         target: dependency.path,
                         kind: MountKind::Bind,
-                        // Never writable: read-plus-execute is the safe pairing precisely
-                        // because the bytes cannot change under the grant.
+                        // Write access stays on the explicitly granted mount.
                         writable: false,
                         executable: true,
                         origin: dependency.origin,
@@ -1412,7 +1411,8 @@ fn require_loadable(
     restricted: bool,
     missing: &mut MissingReads,
 ) -> Result<Option<(PathBuf, Rc<std::fs::File>, bool)>, ContainmentError> {
-    let restricted = restricted || workload_writable(config, library, MECHANISM)?;
+    let writable = workload_writable(config, library, MECHANISM)?;
+    let restricted = restricted || writable;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1437,6 +1437,24 @@ fn require_loadable(
     {
         missing.add(&granted.resolved, image);
         return Ok(None);
+    }
+    if writable
+        && !config.broad_exec()
+        && !config.authorizations().iter().any(|grant| {
+            grant.operation == Operation::Exec
+                && match grant.scope {
+                    Scope::Root => granted.resolved.starts_with(&grant.resolved),
+                    Scope::File => granted.resolved == grant.resolved,
+                    Scope::Dir => false,
+                }
+        })
+    {
+        return Err(refusal(format!(
+            "writable dependency {:?} needed by {:?} has no explicit execution grant. \
+             Remove its write access or explicitly grant execution. \
+             Read and Write grants do not authorize loading writable code.",
+            granted.resolved, image
+        )));
     }
     let file = Rc::new(open_dependency(&granted.resolved)?);
     Ok(Some((granted.resolved, file, restricted)))

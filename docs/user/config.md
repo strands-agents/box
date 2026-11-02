@@ -292,6 +292,15 @@ startup disclosure carries a warning:
 `strands-box: warning: [agent] command <path> lies inside the writable grant <path>, so the process
 can replace the program it runs`.
 
+On Linux, an automatically discovered writable library also needs an explicit `exec` grant.
+Otherwise, startup fails with `writable dependency <path> needed by <program> has no explicit execution grant`.
+A `read` or `read_file` entry does not resolve this error.
+Remove write access to the library, or grant execution if the agent should run code it can change.
+
+The same check covers writable symbolic-link paths and hard-link aliases.
+Files with multiple hard links can require explicit execution permission when any directory is writable.
+Tools retain their broader execution permission for their own filesystem grants.
+
 ## `[tool.<name>]` selection
 
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
