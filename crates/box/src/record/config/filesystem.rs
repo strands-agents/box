@@ -19,7 +19,7 @@ use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct DirectGrant {
     /// Which list stated it.
     pub(crate) kind: Grant,
@@ -33,7 +33,15 @@ pub(crate) struct DirectGrant {
     pub(crate) scope: Scope,
     /// Whether the entry names a credential store exactly, which is the one way through the floor.
     pub(crate) credential_store: bool,
+    pub(crate) execution_directory: Option<ExecutionDirectory>,
     access: &'static str,
+}
+
+/// The execution directory approved for one run.
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionDirectory {
+    pub(crate) prepared: containment::PreparedFilesystemPath,
+    identity: FileIdentity,
 }
 
 impl DirectGrant {
@@ -268,6 +276,11 @@ pub(crate) fn require_judged_identities(
         if metadata.is_symlink() {
             return Err(changed("became a symbolic link"));
         }
+        if let Some(directory) = &grant.execution_directory
+            && FileIdentity::of(&metadata) != directory.identity
+        {
+            return Err(changed("was replaced"));
+        }
         if metadata.is_dir() != (grant.scope != Scope::File) {
             return Err(changed("changed between a file and a directory"));
         }
@@ -493,6 +506,22 @@ fn entry_grant(
             },
         )?;
 
+    let execution_directory = if operation == Operation::Exec && scope == Scope::Root {
+        let prepared = containment::ContainmentConfig::prepare_filesystem_path(&resolved)
+            .map_err(|error| named(&format!("cannot retain {}: {error}", resolved.display())))?;
+        if prepared.resolved_path() != resolved || !prepared.is_directory() {
+            return Err(named(
+                "the execution directory changed while the run judged it",
+            ));
+        }
+        Some(ExecutionDirectory {
+            prepared,
+            identity: FileIdentity::of(&metadata),
+        })
+    } else {
+        None
+    };
+
     Ok(DirectGrant {
         kind,
         authored,
@@ -501,6 +530,7 @@ fn entry_grant(
         operation,
         scope,
         credential_store,
+        execution_directory,
         access: "",
     })
 }
@@ -667,6 +697,50 @@ fn refuse(context: &FilesystemContext<'_>, authored: &str, reason: &str) -> Conf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_execution_directory_keeps_its_identity_until_the_run_ends() {
+        let fixture = Fixture::new();
+        let tools = fixture.home.join("tools");
+        let parked = fixture.home.join("parked-tools");
+        let replacement = fixture.home.join("replacement-tools");
+        let reach = direct_grants(&lists(r#"exec = ["~/tools"]"#), &fixture.context())
+            .expect("the execution directory is approved");
+        require_judged_identities(&reach, "[agent]").expect("the original directory is unchanged");
+
+        std::fs::rename(&tools, &parked).expect("move the approved directory");
+        std::fs::create_dir(&tools).expect("replace the approved directory");
+        let error = require_judged_identities(&reach, "[agent]")
+            .expect_err("a different directory cannot inherit execution reach");
+        assert!(error.to_string().contains("was replaced"), "{error}");
+
+        std::fs::rename(&tools, &replacement).expect("park the replacement");
+        std::fs::rename(&parked, &tools).expect("restore the approved directory");
+        require_judged_identities(&reach, "[agent]")
+            .expect("the original directory remains approved");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_execution_directory_stays_pinned_after_the_early_identity_check() {
+        let fixture = Fixture::new();
+        let tools = fixture.home.join("tools");
+        let reach = direct_grants(&lists(r#"exec = ["~/tools"]"#), &fixture.context())
+            .expect("the execution directory is approved");
+        require_judged_identities(&reach, "[agent]").expect("the early check passes");
+        std::fs::rename(&tools, fixture.home.join("parked-tools")).expect("move the directory");
+        std::fs::create_dir(&tools).expect("replace the directory after the check");
+        let directory = reach.grants[0].execution_directory.as_ref().unwrap();
+        let config = containment::ContainmentConfig::default()
+            .allow_prepared(directory.prepared.clone(), Operation::Exec, Scope::Root)
+            .expect("the grant carries the original reference");
+        let json = config
+            .to_json()
+            .expect("the original identity travels to the helper");
+        let error = containment::ContainmentConfig::from_json(&json)
+            .expect_err("the helper cannot accept the replacement directory");
+        assert!(error.to_string().contains("object changed"), "{error}");
+    }
 
     fn lists(text: &str) -> Filesystem {
         toml::from_str(text).expect("the lists parse")

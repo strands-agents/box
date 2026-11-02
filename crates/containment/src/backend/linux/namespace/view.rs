@@ -70,14 +70,22 @@ pub(crate) struct MountView {
     entries: Vec<MountEntry>,
     protected_parents: BTreeSet<PathBuf>,
     grant_identities: BTreeMap<PathBuf, ObjectIdentity>,
+    execution_directories: BTreeMap<PathBuf, ObjectIdentity>,
     grant_pins: Vec<ObjectPin>,
     dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
+}
+
+enum ExecutionTarget {
+    Uncovered,
+    PreservedLink,
+    Pinned(std::fs::File),
 }
 
 impl MountView {
     /// Plan the view from a request, without touching any namespace.
     pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
         let mut grant_identities = BTreeMap::new();
+        let mut execution_directories = BTreeMap::new();
         for granted in config.authorizations() {
             if let Some(identity) = granted.identity
                 && let Some(previous) = grant_identities.insert(granted.resolved.clone(), identity)
@@ -87,6 +95,25 @@ impl MountView {
                     "filesystem grants name different objects at '{}'",
                     granted.resolved.display()
                 )));
+            }
+            if granted.operation == Operation::Exec && granted.scope == Scope::Root {
+                let identity = granted.identity.ok_or_else(|| {
+                    refusal(format!(
+                        "missing execution directory identity for '{}'",
+                        granted.resolved.display()
+                    ))
+                })?;
+                for target in granted.reachable_paths() {
+                    if execution_directories
+                        .insert(target.clone(), identity)
+                        .is_some_and(|previous| previous != identity)
+                    {
+                        return Err(refusal(format!(
+                            "execution directory grants name different objects at '{}'",
+                            target.display()
+                        )));
+                    }
+                }
             }
         }
         let mut entries = vec![MountEntry {
@@ -479,6 +506,7 @@ impl MountView {
             entries,
             protected_parents,
             grant_identities,
+            execution_directories,
             grant_pins: config
                 .authorizations()
                 .iter()
@@ -707,10 +735,53 @@ impl MountView {
                     .get(&entry.target)
                     .map(|admitted| pin_admitted_source(admitted, source))
                     .transpose()?;
+                let dependency_identity = pinned_source
+                    .as_ref()
+                    .map(|(opened, _)| {
+                        opened
+                            .metadata()
+                            .map(|metadata| ObjectIdentity::from_metadata(&metadata))
+                            .map_err(|error| {
+                                refusal(format!("inspecting the pinned dependency: {error}"))
+                            })
+                    })
+                    .transpose()?;
+                let expected = expected.or(dependency_identity);
                 let source = pinned_source
                     .as_ref()
                     .map_or(source, |(_, path)| path.as_path());
                 let mount_source = pinned_path.as_deref().unwrap_or(source);
+                if !matches!(entry.origin, MountOrigin::Protection { .. })
+                    && std::fs::symlink_metadata(&target)
+                        .is_ok_and(|metadata| metadata.is_symlink())
+                    && self.enclosed_by_a_bind(&entry.target)
+                {
+                    self.pin_execution_directory(&entry.target, root)?;
+                    return Ok(());
+                }
+                let preserve_linked_spelling =
+                    matches!(entry.origin, MountOrigin::Grant | MountOrigin::Socket)
+                        && entry.target != source
+                        && self.entries.iter().any(|candidate| {
+                            candidate.kind == MountKind::Bind
+                                && candidate.target == source
+                                && candidate.source.as_deref() == Some(source)
+                        });
+                let execution_target = if let Some(identity) = expected {
+                    match self.pin_execution_target(
+                        &entry.target,
+                        root,
+                        identity,
+                        preserve_linked_spelling,
+                    )? {
+                        ExecutionTarget::Uncovered => None,
+                        ExecutionTarget::PreservedLink => return Ok(()),
+                        ExecutionTarget::Pinned(opened) => Some(opened),
+                    }
+                } else {
+                    None
+                };
+                let execution_target_path = execution_target.as_ref().map(targets::descriptor_path);
 
                 // The mountpoint must match the source's kind: a file binds onto a
                 // file, a directory onto a directory.
@@ -772,7 +843,7 @@ impl MountView {
 
                 mount_syscall(
                     Some(mount_source),
-                    &target,
+                    execution_target_path.as_deref().unwrap_or(&target),
                     None,
                     libc::MS_BIND | libc::MS_REC,
                     None,
@@ -787,6 +858,7 @@ impl MountView {
 
                 if let Some(identity) = expected {
                     require_grant_identity(&target, identity)?;
+                    self.pin_execution_directory(&entry.target, root)?;
                 }
                 if let MountOrigin::Protection { device, inode } = entry.origin {
                     require_mounted_identity(&target, device, inode)?;
@@ -824,6 +896,103 @@ impl MountView {
         }
 
         Ok(())
+    }
+
+    fn pin_execution_directory(
+        &self,
+        target: &Path,
+        root: &Path,
+    ) -> Result<Option<(PathBuf, std::fs::File)>, ContainmentError> {
+        let mut nearest: Option<(PathBuf, std::fs::File)> = None;
+        for (directory, identity) in &self.execution_directories {
+            if directory == target || !target.starts_with(directory) {
+                continue;
+            }
+            let path = root.join(directory.strip_prefix("/").unwrap_or(directory));
+            let opened = pin_grant_source(&path, *identity).map_err(|error| {
+                refusal(format!(
+                    "execution directory '{}' changed before its nested grant: {error}",
+                    directory.display()
+                ))
+            })?;
+            if nearest
+                .as_ref()
+                .is_none_or(|(current, _)| directory.starts_with(current))
+            {
+                nearest = Some((directory.clone(), opened));
+            }
+        }
+        Ok(nearest)
+    }
+
+    fn pin_execution_target(
+        &self,
+        target: &Path,
+        root: &Path,
+        expected: ObjectIdentity,
+        preserve_linked_spelling: bool,
+    ) -> Result<ExecutionTarget, ContainmentError> {
+        use std::os::fd::FromRawFd as _;
+
+        let Some((directory, mut parent)) = self.pin_execution_directory(target, root)? else {
+            return Ok(ExecutionTarget::Uncovered);
+        };
+        let relative = target
+            .strip_prefix(&directory)
+            .map_err(|error| refusal(error.to_string()))?;
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(refusal(
+                    "a nested grant target contains a non-normal component".into(),
+                ));
+            };
+            let name = path_to_c(Path::new(name))
+                .map_err(|error| refusal(format!("invalid nested grant target: {error}")))?;
+            let flags = libc::O_PATH
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | if components.peek().is_some() && !preserve_linked_spelling {
+                    libc::O_DIRECTORY
+                } else {
+                    0
+                };
+            // SAFETY: parent owns the descriptor, and name is a live C string.
+            let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if descriptor < 0 {
+                return Err(refusal(format!(
+                    "opening nested grant '{}' inside execution directory '{}': {}",
+                    target.display(),
+                    directory.display(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+            // SAFETY: openat returned a new owned descriptor.
+            parent = unsafe { std::fs::File::from_raw_fd(descriptor) };
+            if preserve_linked_spelling
+                && parent
+                    .metadata()
+                    .map_err(|error| refusal(format!("inspecting the linked spelling: {error}")))?
+                    .file_type()
+                    .is_symlink()
+            {
+                return Ok(ExecutionTarget::PreservedLink);
+            }
+        }
+        let metadata = parent.metadata().map_err(|error| {
+            refusal(format!(
+                "inspecting nested grant '{}': {error}",
+                target.display()
+            ))
+        })?;
+        if ObjectIdentity::from_metadata(&metadata) != expected {
+            return Err(refusal(format!(
+                "nested grant '{}' names a different object than execution directory '{}' exposes",
+                target.display(),
+                directory.display()
+            )));
+        }
+        Ok(ExecutionTarget::Pinned(parent))
     }
 
     /// Whether a planned bind of a host tree encloses this view path.
@@ -3538,6 +3707,7 @@ mod tests {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
+            execution_directories: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
         };
@@ -3566,6 +3736,7 @@ mod tests {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
+            execution_directories: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
         };
@@ -3606,6 +3777,7 @@ mod tests {
             entries: vec![parent],
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
+            execution_directories: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
         };
@@ -3666,6 +3838,7 @@ mod tests {
                 entries: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::from([(source.clone(), identity)]),
+                execution_directories: BTreeMap::new(),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
             };
@@ -3755,6 +3928,342 @@ mod tests {
                     error.to_string().contains("mounted grant identity changed"),
                     "{error}"
                 );
+            }
+        });
+    }
+
+    fn nested_execution_grant(directory_grant: bool, enclosing_read: bool, substituted: bool) {
+        let source = tempfile::tempdir().unwrap();
+        let project = source.path().join("project");
+        let tools = project.join("tools");
+        let replacement = source.path().join("replacement");
+        let saved = source.path().join("saved");
+        let relative = if directory_grant {
+            "nested/payload"
+        } else {
+            "program"
+        };
+        let original_bytes = synthetic_elf(None, &[], None);
+        let mut replacement_bytes = original_bytes.clone();
+        replacement_bytes.extend_from_slice(b"replacement");
+        planted_image(&tools, relative, &original_bytes);
+        planted_image(&replacement, relative, &replacement_bytes);
+        let target = tools.join(if directory_grant { "nested" } else { "program" });
+        let prepared_directory = ContainmentConfig::prepare_filesystem_path(&tools).unwrap();
+        if substituted {
+            std::fs::rename(&tools, &saved).unwrap();
+            std::fs::rename(&replacement, &tools).unwrap();
+        }
+        let prepared_child = ContainmentConfig::prepare_filesystem_path(&target).unwrap();
+        if substituted {
+            std::fs::rename(&tools, &replacement).unwrap();
+            std::fs::rename(&saved, &tools).unwrap();
+        }
+        let mut config = ContainmentConfig::new()
+            .allow_prepared(prepared_directory, Operation::Exec, Scope::Root)
+            .unwrap()
+            .allow_prepared(
+                prepared_child,
+                if directory_grant {
+                    Operation::Read
+                } else {
+                    Operation::Exec
+                },
+                if directory_grant {
+                    Scope::Root
+                } else {
+                    Scope::File
+                },
+            )
+            .unwrap();
+        if enclosing_read {
+            config = config
+                .allow(&project, Operation::Read, Scope::Root)
+                .unwrap();
+        }
+        let view = MountView::plan(&config).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        for entry in view
+            .entries
+            .iter()
+            .filter(|entry| entry.origin == MountOrigin::Grant && entry.target != target)
+        {
+            view.establish(entry, staging.path()).unwrap();
+        }
+        if substituted {
+            if enclosing_read {
+                let mounted = staging.path().join(tools.strip_prefix("/").unwrap());
+                let mounted = path_to_c(&mounted).unwrap();
+                // SAFETY: mounted names this test's mount inside its isolated namespace.
+                assert_eq!(
+                    unsafe { libc::umount2(mounted.as_ptr(), libc::MNT_DETACH) },
+                    0
+                );
+            }
+            std::fs::rename(&tools, &saved).unwrap();
+            std::fs::rename(&replacement, &tools).unwrap();
+        }
+        let unrelated = source.path().join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let renamed = source.path().join("renamed");
+        std::fs::rename(&unrelated, &renamed).unwrap();
+        assert!(renamed.is_dir());
+        let entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.target == target)
+            .unwrap();
+        let before = targets::mount_ids().unwrap();
+        let result = view.establish(entry, staging.path());
+        if substituted {
+            let error = result
+                .expect_err("a child from the replacement tree must not overlay the approved tree");
+            assert!(error.to_string().contains("nested grant"), "{error}");
+            assert_eq!(
+                targets::mount_ids().unwrap(),
+                before,
+                "refusal must precede the bind"
+            );
+            if !enclosing_read {
+                let visible = staging
+                    .path()
+                    .join(tools.strip_prefix("/").unwrap())
+                    .join(relative);
+                assert_eq!(std::fs::read(visible).unwrap(), original_bytes);
+            }
+        } else {
+            result.expect("unchanged nested grants must still mount");
+            let visible = staging
+                .path()
+                .join(tools.strip_prefix("/").unwrap())
+                .join(relative);
+            assert_eq!(std::fs::read(visible).unwrap(), original_bytes);
+        }
+    }
+
+    #[test]
+    fn a_nested_exec_file_cannot_replace_its_execution_directory_contents() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            nested_execution_grant(false, false, true);
+        });
+    }
+
+    #[test]
+    fn a_nested_directory_cannot_replace_its_execution_directory_contents() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            nested_execution_grant(true, false, true);
+        });
+    }
+
+    #[test]
+    fn a_nested_grant_refuses_a_replaced_execution_directory_under_a_read_bind() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            for directory_grant in [false, true] {
+                nested_execution_grant(directory_grant, true, true);
+            }
+        });
+    }
+
+    #[test]
+    fn nested_grants_preserve_unchanged_objects_and_unrelated_renames() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            for directory_grant in [false, true] {
+                for enclosing_read in [false, true] {
+                    nested_execution_grant(directory_grant, enclosing_read, false);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_pinned_library_matches_its_writable_execution_directory() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            for substituted in [false, true] {
+                let source = tempfile::tempdir().unwrap();
+                let tools = source.path().join("tools");
+                let replacement = source.path().join("replacement");
+                let saved = source.path().join("saved");
+                for directory in [&tools, &replacement] {
+                    planted_image(
+                        directory,
+                        "program",
+                        &synthetic_elf(None, &["libfixture.so"], Some("$ORIGIN")),
+                    );
+                    planted_image(directory, "libfixture.so", &synthetic_elf(None, &[], None));
+                }
+                let prepared = ContainmentConfig::prepare_filesystem_path(&tools).unwrap();
+                let mut config = ContainmentConfig::new()
+                    .allow_prepared(prepared.clone(), Operation::Exec, Scope::Root)
+                    .unwrap()
+                    .allow_prepared(prepared.clone(), Operation::Read, Scope::Root)
+                    .unwrap()
+                    .allow_prepared(prepared, Operation::Write, Scope::Root)
+                    .unwrap();
+                if substituted {
+                    std::fs::rename(&tools, &saved).unwrap();
+                    std::fs::rename(&replacement, &tools).unwrap();
+                }
+                config = config
+                    .allow(tools.join("program"), Operation::Exec, Scope::File)
+                    .unwrap();
+                let view = MountView::plan(&config).unwrap();
+                let library = tools.join("libfixture.so");
+                let entry = view
+                    .entries
+                    .iter()
+                    .find(|entry| entry.target == library)
+                    .expect("the writable root retains a library bind");
+                assert_eq!(entry.origin, MountOrigin::Library);
+                if substituted {
+                    std::fs::rename(&tools, &replacement).unwrap();
+                    std::fs::rename(&saved, &tools).unwrap();
+                }
+                let staging = tempfile::tempdir().unwrap();
+                let parent = view
+                    .entries
+                    .iter()
+                    .find(|entry| entry.target == tools)
+                    .unwrap();
+                view.establish(parent, staging.path()).unwrap();
+                if substituted {
+                    std::fs::rename(&tools, &saved).unwrap();
+                    std::fs::rename(&replacement, &tools).unwrap();
+                }
+                let before = targets::mount_ids().unwrap();
+                let result = view.establish(entry, staging.path());
+                if substituted {
+                    let error = result.expect_err(
+                        "a library from another directory must not overlay the retained directory",
+                    );
+                    assert!(error.to_string().contains("nested grant"), "{error}");
+                    assert_eq!(targets::mount_ids().unwrap(), before);
+                } else {
+                    result.expect(
+                        "the original library still mounts inside a writable execution directory",
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_linked_exec_spelling_inside_an_execution_directory_keeps_its_link() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let source = tempfile::tempdir().unwrap();
+            let tools = source.path().join("tools");
+            let program = planted_image(&tools, "program", &synthetic_elf(None, &[], None));
+            let alias = tools.join("alias");
+            std::os::unix::fs::symlink("program", &alias).unwrap();
+            let config = ContainmentConfig::new()
+                .allow(&tools, Operation::Exec, Scope::Root)
+                .unwrap()
+                .allow(&alias, Operation::Exec, Scope::File)
+                .unwrap();
+            let view = MountView::plan(&config).unwrap();
+            let staging = tempfile::tempdir().unwrap();
+            for entry in view
+                .entries
+                .iter()
+                .filter(|entry| entry.origin == MountOrigin::Grant)
+            {
+                view.establish(entry, staging.path()).unwrap();
+            }
+            let visible = staging.path().join(alias.strip_prefix("/").unwrap());
+            assert!(std::fs::symlink_metadata(&visible).unwrap().is_symlink());
+            assert_eq!(
+                std::fs::read(&visible).unwrap(),
+                std::fs::read(&program).unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn a_linked_directory_inside_an_execution_directory_keeps_its_link() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let source = tempfile::tempdir().unwrap();
+            let tools = source.path().join("tools");
+            let program = planted_image(&tools, "nested/program", &synthetic_elf(None, &[], None));
+            let alias = tools.join("alias");
+            std::os::unix::fs::symlink("nested", &alias).unwrap();
+            let config = ContainmentConfig::new()
+                .allow(&tools, Operation::Exec, Scope::Root)
+                .unwrap()
+                .allow(&alias, Operation::Read, Scope::Root)
+                .unwrap();
+            let view = MountView::plan(&config).unwrap();
+            let staging = tempfile::tempdir().unwrap();
+            for entry in view
+                .entries
+                .iter()
+                .filter(|entry| entry.origin == MountOrigin::Grant)
+            {
+                view.establish(entry, staging.path()).unwrap();
+            }
+            let visible = staging.path().join(alias.strip_prefix("/").unwrap());
+            assert!(std::fs::symlink_metadata(&visible).unwrap().is_symlink());
+            assert_eq!(
+                std::fs::read(visible.join("program")).unwrap(),
+                std::fs::read(&program).unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn a_file_beneath_a_linked_directory_preserves_its_original_spelling() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            for outside in [false, true] {
+                let source = tempfile::tempdir().unwrap();
+                let tools = source.path().join("tools");
+                std::fs::create_dir(&tools).unwrap();
+                let original_bytes = synthetic_elf(None, &[], None);
+                let program = if outside {
+                    planted_image(source.path(), "outside/program", &original_bytes)
+                } else {
+                    planted_image(&tools, "nested/program", &original_bytes)
+                };
+                let alias = tools.join("alias");
+                std::os::unix::fs::symlink(if outside { "../outside" } else { "nested" }, &alias)
+                    .unwrap();
+                let linked_program = alias.join("program");
+                let config = ContainmentConfig::new()
+                    .allow(&tools, Operation::Exec, Scope::Root)
+                    .unwrap()
+                    .allow(&linked_program, Operation::Exec, Scope::File)
+                    .unwrap();
+                let view = MountView::plan(&config).unwrap();
+                assert!(
+                    view.entries
+                        .iter()
+                        .any(|entry| entry.target == linked_program)
+                );
+                assert!(view.entries.iter().any(|entry| entry.target == program));
+                let staging = tempfile::tempdir().unwrap();
+                for entry in view
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.origin == MountOrigin::Grant)
+                {
+                    let before = targets::mount_ids().unwrap();
+                    view.establish(entry, staging.path()).unwrap();
+                    if entry.target == linked_program {
+                        assert_eq!(
+                            targets::mount_ids().unwrap(),
+                            before,
+                            "the existing link must not get an overlay"
+                        );
+                    }
+                }
+                let visible_alias = staging.path().join(alias.strip_prefix("/").unwrap());
+                assert!(
+                    std::fs::symlink_metadata(visible_alias)
+                        .unwrap()
+                        .is_symlink()
+                );
+                let visible = staging
+                    .path()
+                    .join(linked_program.strip_prefix("/").unwrap());
+                assert_eq!(std::fs::read(visible).unwrap(), original_bytes);
+                assert_eq!(std::fs::read(&program).unwrap(), original_bytes);
             }
         });
     }
@@ -3908,6 +4417,7 @@ mod tests {
                 entries: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::new(),
+                execution_directories: BTreeMap::new(),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
             };
@@ -3987,6 +4497,7 @@ mod tests {
                 entries: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities,
+                execution_directories: BTreeMap::new(),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
             };
@@ -4098,6 +4609,7 @@ mod tests {
             entries: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities,
+            execution_directories: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
         };

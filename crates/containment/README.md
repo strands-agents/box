@@ -16,7 +16,7 @@ The public API describes one complete request and applies it once:
 | `ContainmentConfig` | Complete validated request: path grants, network, process reach modes, and an explicit backend override. Fields are private, and the type *is* the wire format — it serializes itself, and each field that holds an invariant validates itself on load. |
 | `ContainmentConfig::allow` | Grant one `Operation` at one `Scope` on one path. A path needing read and write takes two calls. |
 | `ContainmentConfig::prepare_filesystem_path` / `allow_prepared` | Resolve a path's identity once, inspect it, then consume that same identity in a grant — the TOCTOU-free route for a path the caller must also use for something else. |
-| `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
+| `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Clone it for later grants. Linux clones share its open reference. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
 | `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
@@ -281,6 +281,12 @@ calls `Containment::apply`. The supervisor retains the temporary directory only
 through helper read/unlink, not for the workload lifetime. Only after apply
 succeeds does the trampoline install the target environment and execute the
 command in the same process.
+
+On Linux, serialized authorizing grants carry their recorded device, inode, and object type.
+Denials omit the identity field.
+Loading reopens each path and refuses an identity mismatch before applying the sandbox.
+Older configurations can omit this identity field and bind the object when loaded.
+Older trampolines reject the added field. Use the library and trampoline from the same build.
 
 The caller finds `strands-box-contain-trampoline` beside its own executable and
 nowhere else; no configuration key names another path. The caller assumes its

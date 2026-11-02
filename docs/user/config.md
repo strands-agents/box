@@ -241,6 +241,13 @@ and the refusal names what the link points at. Whether a path such as `/bin/sh` 
 on the surrounding OS, so the same `exec = ["/bin/sh"]` entry loads under one and is refused under
 another. Write the target the refusal names.
 
+Box binds each directory in `exec` to the directory present when the run starts.
+If that directory is replaced, Box refuses later launches that reuse the agent's filesystem lists.
+This includes replacement through a rename of an ancestor directory.
+Restore the original directory to resume those launches.
+Verify a replacement toolchain before you restart the run to use it.
+Unrelated permitted renames still work, and the directory's contents remain subject to existing write permissions.
+
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
@@ -258,8 +265,9 @@ states how a rule spells `program_path`.
 
 Every refusal below names the table and the entry, as ``` `[agent]` filesystem entry "<entry>" is
 refused: <reason>```. `<path>` stands for the path the message names, and `filesystem.read` for
-whichever list holds the entry. Shape refusals happen at parse; existence and identity refusals
-happen after the box directory is created and before the workload starts.
+whichever list holds the entry. Shape refusals happen during parsing.
+Box checks existence and identity after it creates the box directory and before the workload starts.
+It checks `exec` directories again before later launches.
 
 | Entry | Refusal |
 |---|---|

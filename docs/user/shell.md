@@ -188,6 +188,13 @@ covers every file under it.
 exec = ["~/src/project/target/debug"]
 ```
 
+Box retains the identity of each `exec` directory from startup.
+Replacing that directory, including through an ancestor rename, refuses later launches that use the agent's filesystem lists.
+Restore the original directory to resume launches.
+Before restarting with a replacement toolchain, verify its contents.
+Files inside the same directory remain subject to existing grants and policy.
+See [execution grants](config.md#agentfilesystem-and-toolnamefilesystem) for the configuration contract.
+
 ## `PATH`
 
 A bare program name in a command resolves on the `PATH` of the host OS's shell that runs `box run`, else on

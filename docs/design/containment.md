@@ -10,8 +10,8 @@ sandbox for a tool or a local MCP server, and what sits outside operating system
 Box runs on macOS today, where Seatbelt enforces each sandbox. Where a property comes from the macOS
 backend, this page says so. [macOS enforcement](macos-enforcement.md) explains how Seatbelt does it.
 
-> **Platform scope.** This page describes operating system enforcement on macOS. Its guarantees do not describe
-> Linux behavior.
+> **Platform scope.** This page describes operating system enforcement on macOS.
+> The [execution directories section](#execution-directories) also describes the corresponding Linux launch checks.
 
 ## Two kinds of enforcement
 
@@ -138,6 +138,31 @@ the same four plus `network`. One translator turns each of them into a set of sa
   `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
+
+<a id="execution-directories"></a>
+### Execution directories
+
+Box records the filesystem identity of each directory in the agent's `exec` list when the run starts.
+That identity identifies the directory itself, independently of its pathname.
+Before a later launch reuses the agent's filesystem lists, Box checks that the pathname still selects the original directory.
+A different directory at that path causes refusal, including when an ancestor rename substitutes the directory.
+Restoring the original directory permits launches again. A restarted run judges the directories then present.
+
+On Linux, the trusted process also retains an open descriptor for each approved directory and reuses that reference when it prepares later launches.
+The launch configuration carries each authorizing grant's recorded device, inode, and object type.
+An inode is the filesystem's identifier for an object on one device.
+The launcher compares that identity with the object it opens when it loads the configuration.
+A mismatch refuses the launch before the sandbox applies.
+After that check, the launcher uses its retained open references to build the sandbox's filesystem view.
+Before a nested bind, the launcher checks that its source is the same object already visible through the approved execution directory.
+It mounts through that checked object and checks the covering execution directories again.
+
+On macOS, the directory identity comparison detects replacement before the launch check.
+The macOS sandbox still applies pathname rules, so this comparison does not eliminate races after validation.
+
+These checks retain directory identity without freezing file contents inside the directory.
+Policy-permitted unrelated renames continue to work.
+See [execution grants](../user/config.md#agentfilesystem-and-toolnamefilesystem) for the operator's recovery steps.
 
 ### The runtime minimum
 

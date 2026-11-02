@@ -588,6 +588,17 @@ impl Boundary {
                 // path, which the credential-store exception validates on its own terms.
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+            } else if let Some(directory) = &grant.execution_directory {
+                guard.judge(
+                    directory.prepared.resolved_path(),
+                    grant.operation,
+                    grant.scope,
+                )?;
+                containment.allow_prepared(
+                    directory.prepared.clone(),
+                    grant.operation,
+                    grant.scope,
+                )?
             } else {
                 allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
             };
