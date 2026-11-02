@@ -180,7 +180,7 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
-| A refusal that says `[default-deny]` on a tool of a server the startup warning names | That server's per-tool rule never loaded, so every call the rule decides is refused. The permit is there; the rule is the problem. |
+| A refusal that says `[default-deny]`, and the startup warning `a per-tool rule never loaded` printed | A per-tool rule never loaded, so every call it decides is refused. The permit is there; the rule is the problem. Do not expect the refused tool's server to be one the warning names — the warning names the servers the rule waits for, and a rule can wait for one server while deciding a tool on another. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
 When a per-tool rule cannot load, the box starts and that rule never takes effect. Every call it
