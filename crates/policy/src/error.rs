@@ -37,7 +37,7 @@ pub enum PolicyError {
     #[error("policy writes a cap as a permit: {0}")]
     InertTemporalPermit(String),
 
-    /// Reserved for API compatibility.
+    /// A temporal predicate names an action group, which no recorded event matches.
     #[error("policy uses an unsupported clause: {0}")]
     UnsupportedClause(String),
 

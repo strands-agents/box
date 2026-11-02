@@ -11,7 +11,7 @@ use credentials::{
     Backend, DestinationPattern, InjectMode, Locator, RouteSpec, Vault, VaultConfig,
 };
 use egress_gateway::{
-    AuditDecision, CapabilitySet, CredentialCapability, MitmConfig, MitmInterceptor,
+    AuditDecision, CapabilitySet, CredentialCapability, MitmConfig, MitmInterceptor, StubEmitter,
 };
 use harness::{TlsUpstream, WorkloadClient};
 use policy::{EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal};
@@ -73,19 +73,24 @@ fn a_bound_host_with_a_get_only_permit_refuses_delete_before_the_upstream_and_le
         Principal::agent(),
         GovernedBox::assigned("credential-method-scope"),
     );
-    let capabilities = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            DestinationPattern::parse(&format!("{HOST}:{port}")).expect("a host:port pattern"),
-            vault,
-        ))
-        .build();
+    let capabilities = CapabilitySet::new(vec![CredentialCapability::new(
+        DestinationPattern::parse(&format!("{HOST}:{port}")).expect("a host:port pattern"),
+        vault,
+    )]);
     let config = MitmConfig {
         upstream_ca_pems: vec![upstream.ca_pem()],
         dns_overrides: vec![(HOST.to_string(), "127.0.0.1".parse().expect("loopback"))],
         ..MitmConfig::default()
     };
-    let handle =
-        MitmInterceptor::start(config, capabilities, interceptor).expect("the gateway starts");
+    let records = StubEmitter::new();
+    let handle = MitmInterceptor::start_with(
+        config,
+        capabilities,
+        interceptor,
+        Box::new(records.clone()),
+        None,
+    )
+    .expect("the gateway starts");
     let proxy_port = handle.port().expect("a TCP gateway has a port");
     let authorization = format!("Bearer {phantom}");
 
@@ -133,14 +138,14 @@ fn a_bound_host_with_a_get_only_permit_refuses_delete_before_the_upstream_and_le
     );
     assert!(!delete_response.contains(REAL_SECRET), "{delete_response}");
 
-    let events = handle.drain_audit_events();
+    let records = records.records();
     assert!(
-        events
+        records
             .iter()
-            .any(|event| event.decision == AuditDecision::Deny),
-        "the DELETE refusal is audited: {events:?}"
+            .any(|record| record.decision == AuditDecision::Deny),
+        "the DELETE refusal is recorded: {records:?}"
     );
-    for event in &events {
-        assert!(!format!("{event:?}").contains(REAL_SECRET), "{event:?}");
+    for record in &records {
+        assert!(!format!("{record:?}").contains(REAL_SECRET), "{record:?}");
     }
 }
