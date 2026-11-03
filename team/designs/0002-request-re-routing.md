@@ -114,7 +114,7 @@ decided. It is also the only check for metadata addresses and private addresses,
 
 **Decision:** For a destination that has a backend, Box runs the host check on the original destination, and Box skips the IP check i.e. Box does not run `net:connect` on the backend IP address. Neither does Box try to connect to the original destination.
 
-Box still applies a deny-only floor to the backend address. Box refuses a pinned backend address in the link-local range or the metadata range (`169.254.0.0/16`, `fd00:ec2::254`, `fe80::/10`). No gateway runs at these addresses. A loopback gateway or a private sidecar gateway still works.
+Box still applies a deny-only floor to the backend address. Box refuses the backend address when its unwrapped IPv4 form is in `169.254.0.0/16`, or when the address is `fd00:ec2::254`, or when the address is in `fe80::/10`. Box unwraps an IPv4-mapped address and the other embedded IPv6 forms with the same helper that the policy engine uses (`crates/policy/src/address.rs`), so the floor and the policy metadata recipe cannot drift. No gateway runs at these addresses. A loopback gateway or a private sidecar gateway still works.
 
 **Rationale:** The connection to the backend is a Box action, not an agent action. KD 3 states that policy does not apply on Box actions. So the backend address needs no permission, and the address check does not apply to it. The host check still covers the agent's intent, because it runs on the original destination.
 
