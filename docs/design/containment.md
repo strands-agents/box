@@ -134,6 +134,14 @@ the same four plus `network`. One translator turns each of them into a set of sa
   the proxy and certificate variables. `HOME` is the
   operator's own home unless `env.HOME` names another directory, and a home grants nothing either
   ([`HOME` is the operator's own home](decisions.md#home-is-the-operators-and-the-workspace-is-entered)).
+  [`env`](../user/config.md) refuses four kinds of entry. A library caller asks about one entry
+  through `check_workload_env(name, value)`. It runs the checks that `box.toml` runs on one entry
+  when it loads (a `HOME` in or above `box_dir` needs `box_dir`, so the check does not see it), and its error's `kind()` is an `EnvRefusal`: `InvalidName`, `SetByBox` (a name Box sets
+  itself), `LoadsCode` (a name in a family that can make a runtime load code, such as `PYTHON*`; Box refuses
+  the whole family, so a member such as `PYTHONUNBUFFERED` is `LoadsCode` and need not load code), or `NotAbsolute` (a relative `HOME`
+  or `TMPDIR`). The caller gets the kind, so it can drop a name Box sets and refuse a name that loads
+  code without its own copy of the lists. The check does not cover a credential's `env://` name,
+  which Box also refuses for `HOME` and `PATH`.
 - **`filesystem`:** lists that name paths and access. The agent takes eight: `read`, `write`,
   `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
@@ -178,7 +186,13 @@ A library caller asks about one path through `check_read_grant`. It judges the p
 same function that judges a `read` entry in `box.toml`: it refuses an absent path, a link, a
 spelling that is not canonical, and a path under a floor, and it reports a path in a credential
 store as one that Box grants only when a grant names it. The caller gets the decision, not the
-list, because each row carries a rule (`exact` or `overlap`) and a class.
+list, because each row carries a rule (`exact` or `overlap`) and a class. The refusal's `kind()` is
+a `GrantRefusal`: `NotAbsolute`, `Absent`, `Link`, `NotCanonical`, `Forbidden` with the class of
+the floor row that refused the path (for example `SystemTree` for `/usr`), or `Other`. The
+credential-store check runs before the rows, so a path that encloses a credential store without
+naming it is `Other`, and so are `/`, `/Users`, and the operator home. A read grant therefore never
+reports `Forbidden` with `WholeFilesystem` or `CredentialStore`. The caller can treat a
+`SystemTree` refusal differently from every other refusal without its own copy of the rows.
 
 ### Linux file permission changes
 

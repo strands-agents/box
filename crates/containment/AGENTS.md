@@ -95,7 +95,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `[agent.filesystem]`, reaches `require_bounded_grant`. Two entry points serve it:
   `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known, and
   `validate_grant(path, operator_home, operation, scope)` judges one composed grant and reports a
-  named-exactly credential store in its `bool`. Two lists in two crates was the divergence this merge removed,
+  named-exactly credential store in its `bool`. A refusal by a row carries the row's
+  `ForbiddenClass`, which `ContainmentError::forbidden_class` returns. Two lists in two crates was the divergence this merge removed,
   and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
   `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
   witness cannot see that `/Users` renders a home only because no credential entry sits under it.
