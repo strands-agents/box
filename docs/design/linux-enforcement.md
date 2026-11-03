@@ -144,6 +144,13 @@ For an exact ELF binary grant, Box discovers its executable-format interpreter a
 It also follows the dependencies of discovered system libraries.
 System libraries are libraries within the recognized loader directories listed above.
 
+Before an agent starts, Box checks whether each discovered loader or shared library is writable through the workload's grants.
+A writable dependency needs an explicit `exec` grant, even when a read-only program loads it.
+Otherwise, Box refuses startup.
+This check includes writable symbolic-link paths and hard-link aliases.
+Hard-linked libraries can retain automatic execution access when ownership, permissions, and mount checks establish that the workload cannot modify them.
+See [writable library grants](../user/config.md#linux-writable-libraries) for the configuration requirements and limits.
+
 This discovery does not inspect script interpreter lines.
 Box handles the declared command's script interpreter chain separately.
 An additional script reached through an execution grant can need explicit interpreter and library access.

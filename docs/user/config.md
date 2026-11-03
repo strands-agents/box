@@ -310,6 +310,21 @@ startup disclosure carries a warning:
 `strands-box: warning: [agent] command <path> lies inside the writable grant <path>, so the process
 can replace the program it runs`.
 
+<a id="linux-writable-libraries"></a>
+
+On Linux, an agent also needs an explicit `exec` grant for an automatically discovered writable loader or shared library.
+Otherwise, startup fails with `writable dependency <path> needed by <program> has no explicit execution grant`.
+A `read` or `read_file` entry does not resolve this error.
+Remove write access to the library, or grant execution if the agent should run code it can change.
+
+The same check covers writable symbolic-link paths and hard-link aliases.
+Immutable hard-linked libraries retain automatic execution access when Box can verify their ownership, permissions, and mount boundaries.
+A read-only file that the workload owns remains writable for this check because its owner can change its permissions.
+Ordinary local mounts can retain this exception when their ownership rules agree.
+Remapped ownership, nested mounts, unrecognized filesystem types, and inconclusive checks can still require explicit execution permission.
+Tools and local MCP servers retain their broader execution permission for their own filesystem grants.
+Their filesystem tables reject `exec`; only `[agent.filesystem]` accepts that list.
+
 ## `[tool.<name>]` selection
 
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
