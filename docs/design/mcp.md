@@ -275,13 +275,17 @@ a pin beside it can only disagree with it, and reading one would hold a tool on 
 can never decide a call to.
 
 One limit remains. A rule whose head names no tool, and whose condition does not pin one server and
-one tool, cannot be expressed as a set of tools. stderr names the server it waits for, so the
-operator learns the rule is inert, but no call is held on its behalf. Two of those shapes are
-enumerable and Box still does not read them: a condition that pins the server alone decides every
-call to that server, and the box knows a call's server when it decides it; and
-`["a", "b"].contains(context.input.tool)` names a finite set of pairs. Reading either one needs a
-hold that is coarser than a `(server, tool)` pair, or one that expands a set, so each is a widening
-of this mechanism rather than a correction to it.
+one tool, holds no call. stderr names the server it waits for, so the operator learns the rule is
+inert, but no call is held on its behalf.
+
+The reason differs by shape, and only one of them is a real impossibility. A condition that narrows
+on something unbounded — `context.input.method`, or an argument value — or that does not narrow at
+all, reaches tools whose names the rule never spells, so there is no set of tools to refuse. The
+other two shapes do name a refusable set, and Box still does not read them: a condition that pins
+the server alone decides every call to that server, and the box knows a call's server when it
+decides it; and `["a", "b"].contains(context.input.tool)` names a fixed set of pairs. Reading either
+needs a hold that is coarser than a `(server, tool)` pair, or one that expands a set, so each is a
+widening of this mechanism rather than a correction to it.
 
 ## How Box decides a tool call
 
