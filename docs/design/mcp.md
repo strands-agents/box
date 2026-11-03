@@ -57,6 +57,14 @@ workload wrote it. The server is then sent the canonical form, so it reads the r
 decided on. Write each `uri` literal in that form: a rule compares text exactly, so a literal in
 any other spelling never matches.
 
+**The URI must spell its own shape**, because a URL parser supplies any delimiter it omits and then
+opens something the box never judged. A `file:` URI needs an absolute path, which RFC 8089 spells
+`local-path = path-absolute`, so `file:etc/passwd` is refused — a parser reads it as
+`file:///etc/passwd`. An `http` or `https` URI needs an authority with a host, which RFC 9110
+requires, so `http:/etc/passwd` and `https:///notes/page` are refused too: a parser reads the first
+path segment as the host, which makes `http:/etc/passwd` into the host `etc`. `file:/x` is the one
+shape the box completes itself, because RFC 8089 makes an absent authority the local one.
+
 **A query is treated by scheme, because only one scheme sends it anywhere.** Under `http` or
 `https` the query is part of the request the origin server receives, so it is part of what the URI
 names and is kept as written — a credential can live there. A `file:` URI has no query at all: RFC

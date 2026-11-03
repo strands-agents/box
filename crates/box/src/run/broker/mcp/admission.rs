@@ -855,6 +855,10 @@ mod tests {
             // A URL parser reads a `\\` as a path separator, so these name the guarded file too.
             "file://localhost\\\\home\\\\op\\\\.env",
             "file:///home/op\\\\.env",
+            // A parser supplies the slashes these omit, so each reads as the authority form and
+            // reaches the same file: `file:home/op/.env` becomes `file:///home/op/.env`.
+            "file:home/op/.env",
+            "file:./home/op/.env",
         ] {
             assert!(
                 call(&guards_env, &read(spelling)).is_err(),

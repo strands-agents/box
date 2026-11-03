@@ -78,16 +78,31 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     } else if hierarchical.starts_with('/') {
         (None, hierarchical)
     } else {
-        // An opaque hier-part under a scheme we would otherwise normalize (e.g. `file:etc`); leaving
-        // it verbatim is safer than guessing where a path begins. The scheme and the delimiters are
-        // not the path, so they fold here as they do above.
-        let mut out = format!("{scheme}:{hierarchical}");
-        if let Some(query) = query {
-            out.push('?');
-            out.push_str(query);
-        }
-        return Ok(out);
+        // An opaque hier-part under one of these schemes is outside both grammars: RFC 8089 §2 has
+        // `local-path = path-absolute`, and RFC 9110 §4.2.1 requires `"//" authority`. A URL parser
+        // supplies the delimiters the URI omits, so `file:etc/passwd` reads as `file:///etc/passwd`
+        // and `https:notes/page` as `https://notes/page`. Keeping it verbatim is not the safe
+        // reading it looks like: the parser does the guessing, and it reaches the resource a rule
+        // names.
+        return Err(
+            "a resource URI whose hier-part is neither an absolute path nor an authority is \
+                    refused: a URL parser supplies the delimiters it omits, so the box and the \
+                    server would not read one identity"
+                .to_string(),
+        );
     };
+
+    // RFC 9110 §4.2.1 requires `"//" authority` and forbids an empty host, and a URL parser that
+    // meets neither reads the first path segment as the host: `http:/etc/passwd` becomes host `etc`,
+    // and `https:///notes/page` becomes host `notes`. `file:` is the exception the grammar states —
+    // RFC 8089 makes an absent or empty authority the local one, which folds to `file:///`.
+    if scheme != "file" && matches!(authority, None | Some("")) {
+        return Err(
+            "an http or https URI with no authority is refused: RFC 9110 requires \"//\" and a \
+                    host, and a URL parser reads the first path segment as the host instead"
+                .to_string(),
+        );
+    }
 
     // Decode unreserved octets, collapse empty path segments (`//` resolves to `/` on common
     // file/HTTP resolvers, so `file:////etc/passwd` is the same identity as `file:///etc/passwd` —
@@ -715,19 +730,27 @@ mod tests {
 
     /// The fold reaches the opaque hier-part too, which returns before the path is canonicalized.
     #[test]
-    fn an_opaque_hier_part_folds_its_fragment_and_empty_query() {
-        for uri in ["file:etc/passwd#", "file:etc/passwd?", "FILE:etc/passwd#x"] {
-            assert_eq!(
-                canonicalize_resource_uri(uri),
-                "file:etc/passwd",
-                "{uri}: the delimiters drop, and the scheme lowercases as it does elsewhere"
+    fn an_opaque_hier_part_is_refused_because_a_parser_supplies_the_delimiters() {
+        // A URL parser reads each of these as the authority form, reaching the resource a rule
+        // names: `file:etc/passwd` becomes `file:///etc/passwd` and `https:notes/page` becomes
+        // `https://notes/page`, in Node and in the Rust `url` crate alike.
+        for uri in [
+            "file:etc/passwd",
+            "file:home/op/.env",
+            "file:./home/op/.env",
+            "file:etc/passwd#x",
+            "FILE:etc/passwd#x",
+            "https:notes/page",
+            "http:etc/passwd?a=1",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("an opaque hier-part has no canonical form");
+            assert!(
+                refusal.contains("neither an absolute path nor an authority")
+                    || refusal.contains("RFC 8089 gives a file URI no query"),
+                "{uri}: {refusal}"
             );
         }
-        assert_eq!(
-            canonicalize_resource_uri("http:etc/passwd?a=1"),
-            "http:etc/passwd?a=1",
-            "an http query is part of the request, so it is not the path and rides through"
-        );
     }
 
     /// The forwarded frame carries the same identity the decision used.
@@ -835,23 +858,33 @@ mod tests {
         );
     }
 
+    /// An `http`/`https` URI needs an authority, and `file:` is the grammar's exception.
     #[test]
-    fn a_path_only_http_uri_keeps_its_path_only_form() {
-        assert_eq!(
-            canonicalize_resource_uri("http:/etc/passwd"),
+    fn an_http_uri_with_no_authority_is_refused_and_file_keeps_its_local_one() {
+        // A parser reads the first path segment as the host — `http:/etc/passwd` becomes host `etc`
+        // — so keeping the path-only form was never the safe reading it looked like.
+        for uri in [
             "http:/etc/passwd",
-            "no authority present — do not fabricate `http:///`"
-        );
-        assert_eq!(
-            canonicalize_resource_uri("https:/a/../b"),
-            "https:/b",
-            "path canonicalizes, but the path-only form is preserved"
-        );
+            "https:/a/../b",
+            "https:///notes/page",
+            "http://",
+            "https://",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("an http or https URI must spell an authority");
+            assert!(
+                refusal.contains("no authority is refused"),
+                "{uri}: {refusal}"
+            );
+        }
+        // RFC 8089 makes an absent or empty `file:` authority the local one, which still folds.
         assert_eq!(
             canonicalize_resource_uri("file:/etc/x"),
             "file:///etc/x",
             "`file:` no-authority is the empty local authority (RFC 8089)"
         );
+        assert_eq!(canonicalize_resource_uri("file:///etc/x"), "file:///etc/x");
+        assert_eq!(canonicalize_resource_uri("file://"), "file:///");
     }
 
     /// Only `resources/read` has its `uri` rewritten. A method that carries `params.uri` for another

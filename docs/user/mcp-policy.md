@@ -161,6 +161,8 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
 | `a file URI that carries a query is refused` | The agent asked for a `file:` resource with a `?` in it. A `file:` URI has no query, so the box cannot say which file it names. The agent must ask for the path alone. |
 | `a resource URI that holds a space, a control character, or a backslash is refused` | The agent asked for a `file:`, `http:`, or `https:` resource whose URI holds a space, a tab, another control character, or a `\`. A URI allows none of these, and a URL parser gives each its own meaning, so the box and the server would read two different resources. |
+| `a resource URI whose hier-part is neither an absolute path nor an authority is refused` | The agent asked for something like `file:etc/passwd` or `https:notes/page`. A URL parser supplies the missing slashes and opens a resource no rule judged. Write `file:///etc/passwd` or `https://notes/page`. |
+| `an http or https URI with no authority is refused` | The agent asked for something like `http:/etc/passwd` or `https:///notes/page`. An `http` or `https` URI needs a host, and a parser reads the first path segment as one. Write `http://host/path`. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
 When a rule refuses `tools/list` for a server that a per-tool rule names, the box starts and that
