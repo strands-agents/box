@@ -548,14 +548,16 @@ mod tests {
         }
     }
 
-    /// **The `file:` pattern the design page recommends holds against any authority.**
+    /// **The `file:` pattern the design page recommends is a SUFFIX match, in a `forbid` only.**
     ///
     /// Under `file:` the authority is not load-bearing: Node and the Rust `url` crate refuse every
     /// host but an empty one and `localhost`, and Python's `url2pathname` ignores the host, so any
-    /// host reaches the local path. The page therefore tells an operator to anchor a `file:` rule on
-    /// the path and allow any authority. This pins that the recommended pattern does that.
+    /// host reaches the local path. The page therefore gives a `forbid` a pattern that allows any
+    /// authority. `*` matches a `/` too, so the pattern also reaches a DEEPER path ending in the
+    /// same characters — which refuses more than the rule names, and is why the page says not to
+    /// use the shape in a `permit`.
     #[test]
-    fn a_file_pattern_that_allows_any_authority_reaches_every_host_spelling() {
+    fn a_file_forbid_pattern_is_a_suffix_match_across_every_authority() {
         let guards_path = policy(
             r#"permit (principal, action == Box::Action::"mcp:call", resource)
                when { context.input.server == "issues-mcp" };
@@ -588,11 +590,30 @@ mod tests {
                 "the recommended pattern must reach every authority: {spelling}"
             );
         }
-        // It still names one path: a sibling the rule does not name reads.
-        assert_eq!(
-            call(&guards_path, &read("file:///home/op/.env.example")).expect("permitted"),
-            Some("file:///home/op/.env.example".to_string())
-        );
+        // `*` crosses a `/`, so a deeper path ending in the same characters is refused too. That
+        // is the over-reach the page warns about, and it is the safe direction in a `forbid`.
+        for deeper in [
+            "file:///srv/backup/home/op/.env",
+            "file:///tmp/x/home/op/.env",
+            "file://notes/srv/backup/home/op/.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(deeper)).is_err(),
+                "the pattern is a suffix match, so a deeper path is refused too: {deeper}"
+            );
+        }
+        // What it does NOT reach: a path that does not end in those characters.
+        for reads in [
+            "file:///home/op/.env.example",
+            "file:///home/op/other/.env.bak",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(
+                call(&guards_path, &read(reads)).expect("permitted"),
+                Some(reads.to_string()),
+                "a path the pattern does not end on still reads: {reads}"
+            );
+        }
     }
 
     const SEARCH: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",

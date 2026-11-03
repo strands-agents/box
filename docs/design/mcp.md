@@ -115,9 +115,19 @@ crate's `to_file_path` open an empty host or `localhost` and refuse every other 
 `file://notes/home/op/.env`, `file://[::2]/home/op/.env`, and `file://127.1/home/op/.env` each open
 `/home/op/.env`. The box keeps a non-local authority as the workload wrote it, so against a server
 built on `urlsplit` a `forbid` naming `file:///home/op/.env` is dodged by **any** host, not only by
-a respelling of a local one. Until that is settled, do not write a `file:` rule that depends on the
-authority: anchor it on the path with a `like` pattern that allows any authority, such as
-`uri like "file://*/home/op/.env"`.
+a respelling of a local one.
+
+Until that is settled, a **`forbid`** can cover it with `uri like "file://*/home/op/.env"`. Read
+that as a suffix match and not as "this path at any authority": `*` matches a `/` too, so the same
+pattern refuses `file:///srv/backup/home/op/.env` and any other path ending in those characters. In
+a `forbid` that refuses more than you named, which is the safe direction.
+
+**Do not use the same shape in a `permit`**, where it widens instead:
+`uri like "file://*/srv/public/readme"` also permits `file:///home/op/srv/public/readme`. No `like`
+pattern can say "any authority, exactly this path", because nothing stops `*` at the first `/`. So a
+`permit` on a `file:` path names the authority it expects — in practice the folded empty one,
+`file:///srv/public/readme` — and the same file asked for through another host is then refused by the
+absence of a permit.
 
 The loopback fold above is therefore a narrowing and not a claim about which host a resolver opens:
 folding `[::0001]` to the empty authority makes a path-anchored rule match more spellings, never
