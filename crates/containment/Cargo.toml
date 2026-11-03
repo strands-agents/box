@@ -91,6 +91,11 @@ path = "tests/inherited_handles_linux.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "supervisor_memory_linux"
+path = "tests/supervisor_memory_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "inherited_handles_macos"
 path = "tests/inherited_handles_macos.rs"
 required-features = ["test-support"]

@@ -33,8 +33,8 @@ Preserve these premises and the tests that enforce them. Do not delete or `#[ign
 test to make a suite pass.
 
 - **Policy is the only authorizer.** Absent policy is default-deny. Deny-only floors stay beneath
-  policy. The egress gateway has no independent authorization authority, and `CapabilityOutcome`
-  has no `Allow` variant. A credential binding is not an authorization.
+  policy. The egress gateway has no independent authorization authority. A credential capability
+  returns edits or a refusal, never an allow. A credential binding is not an authorization.
 - **The workload is untrusted.** It writes only where a filesystem list grants a write.
   Validate once, then act on the identity you approved.
 - **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only

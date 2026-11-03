@@ -67,11 +67,13 @@ only Box program inside the box, and it has no power of its own: it can't open t
 can't serve requests.
 
 `strands-box` puts the alias in the box directory's `bin/` under the names `zsh`, `bash`, `sh`,
-`python3`, and `python` (`INTERPRETER_ALIASES` in the library), plus the program name of each MCP
-server the box declares, so no MCP server can take one of those five names. `bin/`
+`python3`, and `python` (`INTERPRETER_ALIASES` in the library), plus each program name that a
+declared MCP server starts from, once however many servers share it, so no MCP server can take one
+of those five names. `bin/`
 comes first on the agent's `PATH`, so when the harness runs `zsh`, it gets the alias. The sandbox for a
-tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter or MCP server the
-request is for. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the
+tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter the
+request is for. As an MCP program name, it also sends its arguments, and `strands-box` starts the
+declared server whose full command is that name and those arguments, or refuses the launch. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the
 caller passes can point it anywhere else. The broker inside `strands-box` takes it from there
 ([an interpreter runs beside the workload](decisions.md#interpreters-are-brokered-aliases)).
 

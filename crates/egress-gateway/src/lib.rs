@@ -17,17 +17,11 @@ mod seams;
 #[cfg(feature = "tls-intercept")]
 mod transport;
 
-pub use audit::{
-    Decision as AuditDecision, EgressDecision, NetworkAuditEvent, RequestId, SharedAuditLog,
-};
+pub use audit::{Decision as AuditDecision, EgressDecision, RequestId};
 pub use boundary::{
-    BodyRef, DenyReason, HeaderMap, InterceptedRequest, InterceptedResponse, Mutation,
-    MutationTarget, Target, Verdict,
+    HeaderMap, InterceptedRequest, InterceptedResponse, Mutation, MutationTarget, Target,
 };
-pub use capability::{
-    CapabilityContext, CapabilityFault, CapabilityOutcome, CapabilitySet, CapabilitySetBuilder,
-    CredentialCapability, is_bindable_host, normalize_host,
-};
+pub use capability::{CapabilitySet, CredentialCapability, is_bindable_host, normalize_host};
 pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, McpFrame, McpListReply,
 };

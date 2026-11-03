@@ -195,12 +195,12 @@ fn connect_authorizes_the_exact_host_and_port() {
     );
 }
 
-/// The address the gateway pinned reaches history as the connect outcome's `ip`.
+/// The address the gateway pinned reaches history as the connect outcome's `ip4`.
 ///
 /// A probe connect on port 9001 is refused once history holds a `net:connect::response` on the
 /// pinned address, so the field a rule reads comes from the attempt the gateway raised.
 #[test]
-fn the_pinned_address_reaches_history_as_the_connect_outcomes_ip() {
+fn the_pinned_address_reaches_history_as_the_connect_outcomes_ip4() {
     let interceptor = egress_interceptor(
         r#"
         permit(principal, action == Box::Action::"net:connect", resource)
@@ -210,7 +210,7 @@ fn the_pinned_address_reaches_history_as_the_connect_outcomes_ip() {
         when { context.input.port == 9001 }
         when temporal {
             formerly within 3600s (
-                Box::Action::"net:connect"::response{ input.ip: "192.0.2.1" }
+                Box::Action::"net:connect"::response{ input.ip4: "192.0.2.1" }
             )
         };
         "#,
@@ -241,7 +241,7 @@ fn the_pinned_address_reaches_history_as_the_connect_outcomes_ip() {
 
     assert!(
         interceptor.intercept(&probe).is_err(),
-        "a rule keyed on `input.ip` must read the address the gateway pinned"
+        "a rule keyed on `input.ip4` must read the address the gateway pinned"
     );
 }
 

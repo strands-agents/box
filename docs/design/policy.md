@@ -218,9 +218,16 @@ A policy that validates can still fail to run, because opening the history has i
 The inert-rule check sorts each rule into one of three classes:
 
 - **Refused:** anything the load can prove inert. An action or field the schema doesn't declare, a
-  path literal no reported path can match, a host literal no destination host can equal, one `@id`
-  on two rules, and a cap written as a `permit` beside an unconditioned `permit` for the same
-  action, which can't narrow it.
+  read of `context.input.ip` under a network action, a path literal no reported path can match, a
+  host literal no destination host can equal, an address literal no pinned destination can equal or
+  that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
+  `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
+  unconditioned `permit` for the same action, which can't narrow it.
+
+  The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing
+  rather than cosmetic. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has ip`
+  is statically false; the validator then never typechecks the comparison behind that guard, and the
+  rule would load and enforce nothing. The refusal names both replacements.
 - **Warned:** a rule that might be inert, such as a `program` literal spelled as a path, or that cap
   beside a conditioned `permit`.
 - **Loads anyway:** two shapes the validator can't prove inert, a comparison between two different

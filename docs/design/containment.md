@@ -28,7 +28,7 @@ Box restricts the agent in two ways, and they cover different paths to a resourc
 | When it's decided | Once, before the process starts. | On every request. |
 
 **How the agent sends a request to Box.** The agent's sandbox holds a few **aliases**: programs named
-`zsh`, `bash`, `sh`, `python3`, `python`, and one per declared MCP server. When the agent runs one,
+`zsh`, `bash`, `sh`, `python3`, `python`, and one per program that a declared MCP server starts from. When the agent runs one,
 the alias forwards the request over a local socket to the **broker** in Box's trusted process. The
 broker hands it to Strands Shell (Box's shell interpreter), Monty (Box's Python interpreter), or the
 MCP server. The alias itself authorizes nothing. Outbound network traffic takes its own route,
@@ -179,6 +179,29 @@ same function that judges a `read` entry in `box.toml`: it refuses an absent pat
 spelling that is not canonical, and a path under a floor, and it reports a path in a credential
 store as one that Box grants only when a grant names it. The caller gets the decision, not the
 list, because each row carries a rule (`exact` or `overlap`) and a class.
+
+### Linux file permission changes
+
+A writable Linux bind shares the underlying file with the host. The mount's `nosuid` option
+prevents set-user-ID and set-group-ID bits from changing process identity when a file runs; it does not prevent them
+from being stored on the host file.
+
+The syscall restriction filter rejects either bit in `fchmod`, `fchmodat`, and `fchmodat2`.
+It also rejects either bit in `mkdirat` and in the creation mode of `openat` when `O_CREAT` or
+`O_TMPFILE` is present. It checks the low 32 bits that the kernel uses. An `openat` call without
+creation flags ignores the mode argument, so that unused argument does not cause a refusal.
+The permit filter continues to exclude ownership-changing calls, `openat2`, and `mknodat`.
+Ordinary writes and permitted compiler output remain available. Executable-bit changes require
+a requested mode without either special bit.
+
+These checks govern requested modes. A pre-existing set-group-ID directory can still pass its
+group and directory inheritance bit to new subdirectories. The filter does not remove existing
+bits or change the host's directory inheritance rules. It cannot distinguish keeping an existing
+bit from adding one: both requests fail if the requested mode contains either bit. A request
+that clears both bits can succeed. GNU `chmod` can preserve a directory's inherited group bit
+when changing ordinary permissions, so those commands can fail even when they add no special bit.
+`permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
+existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
 
 ### How you check a box's reach
 
