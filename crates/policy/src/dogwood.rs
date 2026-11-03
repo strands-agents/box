@@ -1,6 +1,6 @@
 //! The Dogwood decision engine — history-dependent authorization.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ use crate::outcome::Delivery;
 use crate::request::{ActionRequest, Principal, Request};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
-    UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema,
+    UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema, mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, DenyReason, Outcome, PolicyAttribution, RuleId};
@@ -571,21 +571,45 @@ impl DogwoodEngine {
     }
 }
 
-/// Parse and macro-expand a source bundle without an action schema.
-pub(crate) fn parse_policy_source(source: &str) -> Result<Vec<String>, PolicyError> {
-    check_policy_source(source).map_err(Refused::into_error)
+/// One macro-expanded rule, and the per-tool actions its head names.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpandedPolicy {
+    pub(crate) source: String,
+    /// The `(namespace, tool)` pairs the head names, read from the parsed scope.
+    pub(crate) head_tools: BTreeSet<(String, String)>,
 }
 
-/// Parse and macro-expand a source bundle, keeping the findings of a refusal.
-pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> {
+/// Parse and macro-expand a source bundle without an action schema.
+pub(crate) fn parse_policy_source(source: &str) -> Result<Vec<String>, PolicyError> {
+    expand_policy_source(source)
+        .map(|expanded| expanded.into_iter().map(|policy| policy.source).collect())
+        .map_err(Refused::into_error)
+}
+
+/// Parse and macro-expand a source bundle, keeping each rule's decoded head actions and the
+/// findings of a refusal.
+pub(crate) fn expand_policy_source(source: &str) -> Result<Vec<ExpandedPolicy>, Refused> {
     let service = service_schema()?;
     let parsed = dogwood_language::ParsedPolicySet::parse(source, &service)
         .map_err(|error| parse_refused(source, &error, true))?;
     refuse_providers(&parsed, &[])?;
     Ok(parsed
         .policies()
-        .map(|policy| policy.expanded_source())
+        .map(|policy| ExpandedPolicy {
+            source: policy.expanded_source(),
+            head_tools: head_tools(&policy.scope()),
+        })
         .collect())
+}
+
+/// The per-tool actions a parsed head names.
+fn head_tools(scope: &dogwood_language::PolicyScope) -> BTreeSet<(String, String)> {
+    let actions: &[cedar_policy::EntityUid] = match scope.action() {
+        dogwood_language::ActionConstraint::Any => &[],
+        dogwood_language::ActionConstraint::Eq(action) => std::slice::from_ref(action),
+        dogwood_language::ActionConstraint::In(actions) => actions.as_slice(),
+    };
+    actions.iter().filter_map(mcp_tool_action).collect()
 }
 
 /// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that
@@ -593,6 +617,42 @@ pub(crate) fn check_policy_source(source: &str) -> Result<Vec<String>, Refused> 
 pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
     let expanded = parse_policy_source(source)?;
     refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
+}
+
+/// The conditions of one macro-expanded rule, as the engine's own parsed tree rather than its
+/// rendered text, with each `temporal { … }` expression replaced by `true`. Empty when the rule
+/// cannot lower without an MCP action schema, which is the case for a rule that names a typed
+/// action outside a history clause. An `unless` condition arrives as a negated `when`, which is
+/// how Cedar states it.
+pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
+    let Ok(policy_schema) = action_schema(&[])
+        .and_then(|schema| {
+            PolicySchema::from_cedarschema_str(&schema.source)
+                .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))
+        })
+        .map_err(drop)
+    else {
+        return Vec::new();
+    };
+    let Ok(service) = service_schema() else {
+        return Vec::new();
+    };
+    let Ok(parsed) =
+        dogwood_language::ParsedPolicySet::parse(&without_temporal(expanded), &service)
+    else {
+        return Vec::new();
+    };
+    let Ok(lowered) = parsed.lower(&policy_schema) else {
+        return Vec::new();
+    };
+    lowered
+        .as_cedar()
+        .policies()
+        .filter_map(|policy| policy.to_json().ok())
+        .filter_map(|json| json.get("conditions")?.as_array().cloned())
+        .flatten()
+        .filter_map(|condition| condition.get("body").cloned())
+        .collect()
 }
 
 /// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
