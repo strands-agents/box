@@ -106,9 +106,32 @@ fn execution_of_one_library_file_does_not_authorize_its_writable_directory() {
     });
 }
 
+fn grant_bind_modes(view: &MountView) -> Vec<(&Path, Option<&Path>, bool, bool)> {
+    let mut modes = view
+        .entries()
+        .iter()
+        .filter(|entry| entry.origin == MountOrigin::Grant && entry.kind == MountKind::Bind)
+        .map(|entry| {
+            (
+                entry.target.as_path(),
+                entry.source.as_deref(),
+                entry.writable,
+                entry.executable,
+            )
+        })
+        .collect::<Vec<_>>();
+    modes.sort();
+    modes
+}
+
 #[test]
 fn explicit_tree_execution_and_broad_execution_preserve_combined_loader_grants() {
     with_loader_directory(|_, library, spelling| {
+        let mut expected = vec![
+            (library, Some(library), true, true),
+            (spelling, Some(library), true, true),
+        ];
+        expected.sort();
         for write_first in [false, true] {
             let config = read_write(library, spelling, write_first);
             for explicit in [library, spelling] {
@@ -119,14 +142,10 @@ fn explicit_tree_execution_and_broad_execution_preserve_combined_loader_grants()
                 crate::floors::require_all(&allowed).unwrap();
                 assert_eq!(allowed.warnings().len(), 1);
                 let view = MountView::plan(&allowed).unwrap();
-                assert!(view.entries().iter().any(|entry| {
-                    entry.source.as_deref() == Some(library) && entry.writable && entry.executable
-                }));
+                assert_eq!(grant_bind_modes(&view), expected);
             }
             let view = MountView::plan(&config.allow_broad_exec()).unwrap();
-            assert!(view.entries().iter().any(|entry| {
-                entry.source.as_deref() == Some(library) && entry.writable && entry.executable
-            }));
+            assert_eq!(grant_bind_modes(&view), expected);
         }
     });
 }
@@ -141,12 +160,13 @@ fn read_only_loader_access_and_unrelated_data_writes_keep_their_modes() {
             .unwrap();
         crate::floors::require_all(&config).unwrap();
         let view = MountView::plan(&config).unwrap();
-        assert!(view.entries().iter().any(|entry| {
-            entry.source.as_deref() == Some(library) && !entry.writable && entry.executable
-        }));
-        assert!(view.entries().iter().any(|entry| {
-            entry.source.as_deref() == Some(data.as_path()) && entry.writable && !entry.executable
-        }));
+        let mut expected = vec![
+            (data.as_path(), Some(data.as_path()), true, false),
+            (library, Some(library), false, true),
+            (spelling, Some(library), false, true),
+        ];
+        expected.sort();
+        assert_eq!(grant_bind_modes(&view), expected);
         assert!(!view.entries().iter().any(|entry| {
             matches!(
                 entry.origin,
