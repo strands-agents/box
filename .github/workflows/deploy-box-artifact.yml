@@ -3,8 +3,8 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS tarball and SHA256SUMS.txt to a stable GitHub Release. Linux preview
-# versions also publish the ARM64 Linux tarball, on a prerelease only.
+# the macOS and ARM64 Linux tarballs with SHA256SUMS.txt to a GitHub Release.
+# Stable releases can omit Linux. Linux previews always include ARM64 Linux.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -28,9 +28,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Stable: 0.1.1. Experimental Linux preview: 0.1.1-linux-preview.1. No leading v.'
+        description: 'Stable: 0.1.1. Linux preview: 0.1.1-linux-preview.1. No leading v.'
         required: true
         type: string
+      publish_linux:
+        description: 'Include the Linux ARM64 archive. Set false for a macOS-only stable release. Required for Linux previews.'
+        required: true
+        default: false
+        type: boolean
       sha:
         description: 'Optional source SHA. Releases require main history. Dry runs also accept the dispatched commit and default to it.'
         required: false
@@ -77,6 +82,7 @@ jobs:
       prev_tag: ${{ steps.scan.outputs.prev_tag }}
       new_tag: ${{ steps.scan.outputs.new_tag }}
       linux_preview: ${{ steps.scan.outputs.linux_preview }}
+      publish_linux: ${{ steps.scan.outputs.publish_linux }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -89,6 +95,7 @@ jobs:
         id: scan
         env:
           NEW_VERSION: ${{ inputs.version }}
+          PUBLISH_LINUX: ${{ inputs.publish_linux }}
           SHA_INPUT: ${{ inputs.sha }}
           DRY_RUN: ${{ inputs.dry_run }}
           DISPATCH_SHA: ${{ github.sha }}
@@ -104,6 +111,15 @@ jobs:
           LINUX_PREVIEW=false
           if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
             LINUX_PREVIEW=true
+          fi
+
+          if [ "$PUBLISH_LINUX" != "true" ] && [ "$PUBLISH_LINUX" != "false" ]; then
+            echo "::error::publish_linux must be true or false."
+            exit 1
+          fi
+          if [ "$LINUX_PREVIEW" = "true" ] && [ "$PUBLISH_LINUX" != "true" ]; then
+            echo "::error::a Linux preview requires publish_linux=true."
+            exit 1
           fi
 
           # 2. Dry runs can validate the dispatched commit before merge.
@@ -178,6 +194,7 @@ jobs:
             echo "prev_tag=$PREV_TAG"
             echo "new_tag=$NEW_TAG"
             echo "linux_preview=$LINUX_PREVIEW"
+            echo "publish_linux=$PUBLISH_LINUX"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -188,6 +205,7 @@ jobs:
             echo "| Previous tag | \`$PREV_TAG\` |"
             echo "| Proposed tag | \`$NEW_TAG\` |"
             echo "| Experimental Linux prerelease | $LINUX_PREVIEW |"
+            echo "| Publish Linux ARM64 | $PUBLISH_LINUX |"
             echo "| Pinned SHA | \`$RELEASE_SHA\` |"
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -568,6 +586,7 @@ jobs:
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
         run: |
           set -euo pipefail
           mkdir -p built release
@@ -583,7 +602,7 @@ jobs:
             exit 1
           fi
           cp "$darwin" release/
-          if [ "$LINUX_PREVIEW" = "true" ]; then
+          if [ "$PUBLISH_LINUX" = "true" ]; then
             cp "$linux" release/
           fi
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
@@ -599,6 +618,7 @@ jobs:
         env:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
         run: |
           set -euo pipefail
           expected=(
@@ -626,7 +646,7 @@ jobs:
           fi
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
           release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
-          if [ "$LINUX_PREVIEW" = "true" ]; then
+          if [ "$PUBLISH_LINUX" = "true" ]; then
             release_assets+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
           fi
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
@@ -728,6 +748,7 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
         run: |
           set -euo pipefail
           cat > body.md <<EOF
@@ -748,11 +769,20 @@ jobs:
           The downloader picks a tarball from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
 
           EOF
+          if [ "$PUBLISH_LINUX" = "true" ]; then
           if [ "$LINUX_PREVIEW" = "true" ]; then
             cat >> body.md <<EOF
           ## Experimental Linux preview
 
-          Linux support is experimental and requires explicit opt-in. This preview does not establish security acceptance or production readiness.
+          This preview does not establish security acceptance or production readiness.
+          EOF
+          else
+            printf "\n## Linux ARM64\n" >> body.md
+          fi
+          cat >> body.md <<EOF
+
+          Package availability does not establish security acceptance.
+          Linux startup requires explicit opt-in with \`EXPERIMENTAL_LINUX_SUPPORT=TRUE\`.
 
           For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
@@ -837,13 +867,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
         run: |
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
             "SHA256SUMS.txt"
           )
-          if [ "$LINUX_PREVIEW" = "true" ]; then
+          if [ "$PUBLISH_LINUX" = "true" ]; then
             expected+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
           fi
           for i in $(seq 1 30); do

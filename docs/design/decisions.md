@@ -69,14 +69,14 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux evaluation requires explicit consent
+### Linux publication and runtime consent stay separate
 
-Linux evaluation requires the operator to set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` before using the command line or library.
-Help and version checks remain available without consent.
-Linux archives belong to `-linux-preview.N` prereleases; stable releases continue to distribute macOS alone.
-A stable Linux download would imply readiness that the current qualification does not establish, so it is excluded.
-Operators and test automation must opt in, and the flag does not grant filesystem access or establish security acceptance.
-Removing these controls requires a later readiness decision.
+Linux evaluation requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`, while help and version checks remain available without consent.
+Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable release without a workflow revert.
+Keeping Linux in preview only would prevent an accepted Linux build from using the stable channel.
+The cost is an explicit platform choice: the release owner must establish Linux readiness before publishing its archive.
+Linux previews always include ARM64 Linux and leave the latest stable release unchanged.
+Package availability and runtime consent establish neither filesystem authority nor security acceptance.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
