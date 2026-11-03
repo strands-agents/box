@@ -182,7 +182,7 @@ jobs:
   lint:
     name: Lint
     if: ${{ inputs.run_lint }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Lint typically runs in ~2 min; 20 min caps a hung step instead of
     # letting it run to the 6-hour default.
     timeout-minutes: 20
