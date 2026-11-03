@@ -1064,6 +1064,82 @@ mod tests {
         );
     }
 
+    /// **A host spelling the URI grammar does not allow cannot dodge an exact `uri` forbid.**
+    ///
+    /// Each spelling below carries an authority outside RFC 3986 §3.2, and both reference parsers
+    /// resolve it to a host OTHER than the one the box emitted — an ignorable code point drops, a
+    /// Unicode dot separates a label, a non-ASCII letter becomes a punycode label, or a second `@`
+    /// is escaped. So the rule read one host and the server opened another. Each is refused now.
+    #[test]
+    fn a_host_spelling_outside_the_uri_grammar_cannot_dodge_an_exact_uri_forbid() {
+        let guards_both = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "file:///home/op/.env" };
+               @id("forbid_notes")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "https://notes/page" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            // A soft hyphen or a zero-width space in the host: both parsers drop it, so each of
+            // these reaches the guarded file or the guarded page.
+            "file://localhost\\u00ad/home/op/.env",
+            "file://localhost\\u200b/home/op/.env",
+            "file://LOCALHOST\\u200b/home/op/.env",
+            "file://loc\\u00adalhost/home/op/.env",
+            "https://no\\u00adtes/page",
+            "https://no\\u200btes/page",
+            "https://\\u00adnotes/page",
+            "https://notes\\u200b/page",
+            // A Unicode full stop or ideographic full stop: both parsers read it as the label
+            // separator, so each reaches `https://notes./page` or `https://notes.example/page`.
+            "https://notes\\u3002/page",
+            "https://notes\\uff0e/page",
+            "https://notes\\u3002example/page",
+            "https://notes\\uff0eexample/page",
+            // A non-ASCII letter: both parsers emit a punycode label, and the box lowercased the
+            // ASCII alone, so the authored case reached a rule as two strings.
+            "https://not\\u00e9s/page",
+            "https://NOT\\u00c9S/page",
+            "https://NOT\\u00c9S./page",
+            // A second unescaped `@`: both parsers escape it into the userinfo.
+            "https://a@b@notes/page",
+        ] {
+            assert!(
+                call(&guards_both, &read(spelling)).is_err(),
+                "a host outside §3.2 must not dodge the forbid: {spelling}"
+            );
+        }
+        // Over-rejection control: a conforming authority the rules do not name still reads, under
+        // each production the grammar spells — a plain name, an empty userinfo, an empty port, a
+        // percent-escape, an IPv4 literal, and an IPv6 literal.
+        for (spelling, canonical) in [
+            ("https://notes.example/page", "https://notes.example/page"),
+            ("https://@notes.example/page", "https://@notes.example/page"),
+            ("https://notes.example:/page", "https://notes.example:/page"),
+            ("https://%6Eotes.example/page", "https://notes.example/page"),
+            ("https://127.0.0.1/page", "https://127.0.0.1/page"),
+            ("https://[::1]/page", "https://[::1]/page"),
+            (
+                "file:///home/op/.env.example",
+                "file:///home/op/.env.example",
+            ),
+        ] {
+            assert_eq!(
+                call(&guards_both, &read(spelling)).expect("permitted"),
+                Some(canonical.to_string()),
+                "a conforming authority the rules do not name still reads: {spelling}"
+            );
+        }
+    }
+
     /// **A `notifications/` frame carrying an `id` is decided, not waved through.**
     ///
     /// The prefix is admitted undecided because a notification gets no reply, so the client learns

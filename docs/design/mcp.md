@@ -49,7 +49,8 @@ them, so a rule tests them with `has` first.
 
 **A `file`, `http`, or `https` resource URI reaches a rule in one canonical form**, so that the
 respellings below can't get two decisions. The scheme and the host are lowercased, a
-trailing dot on the host is dropped, percent-escapes of unreserved characters are decoded, `.` and
+trailing dot on the host is dropped, percent-escapes of unreserved characters are decoded, the hex
+digits of every escape that stays are uppercased, `.` and
 `..` and empty path segments are resolved, a default port is dropped, and `file:/x` and
 `file://localhost/x` both become `file:///x`. A fragment is dropped, because a fragment never
 reaches the server. An empty query is dropped. A URI under any other scheme is left exactly as the
@@ -64,6 +65,18 @@ opens something the box never judged. A `file:` URI needs an absolute path, whic
 requires, so `http:/etc/passwd` and `https:///notes/page` are refused too: a parser reads the first
 path segment as the host, which makes `http:/etc/passwd` into the host `etc`. `file:/x` is the one
 shape the box completes itself, because RFC 8089 makes an absent authority the local one.
+
+**The authority must be an authority**, which is the one grammar it had no check against. RFC 3986
+§3.2 spells it `[userinfo@]host[:port]`, with the host an IP literal, an IPv4 address, or a
+registered name. Normalization here is string surgery — lowercase, decode the unreserved escapes,
+drop a default port — while a URL parser maps a host through IDNA and its own forbidden-code-point
+rules. So a spelling the grammar refuses reaches the server as one host and a rule as another:
+`https://no<zero-width space>tes/page` is a host a parser resolves to `notes`, and
+`file://localhost<soft hyphen>/home/op/.env` opens the same file as `file:///home/op/.env`. The box
+refuses the request instead. That reaches a raw non-ASCII or ignorable character, a character no host
+may hold (`"`, `|`, `<`, `>`, `^`, a backquote, a brace), a `%` that starts no escape, an unbracketed
+IPv6 literal, a second `@`, and a port that is not digits. A path outside RFC 3986 §3.3 is refused
+the same way.
 
 **A port spelling is not folded yet, and for `http`/`https` that is a gap you must write around.** A
 URL parser reads a port as a number, so it treats `:0443` as `443` and drops it as the `https`

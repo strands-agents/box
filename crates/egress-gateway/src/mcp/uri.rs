@@ -94,10 +94,29 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
         );
     };
 
-    // Normalize before the check, so the refusal judges the authority this function would emit
-    // rather than the authored spelling. `https://./x` normalizes to an empty authority, and judging
-    // the raw `.` let it through and emitted `https:///x` — a form this same check refuses, so the
-    // output was not its own fixed point.
+    // RFC 3986 §3.2 spells `authority = [ userinfo "@" ] host [ ":" port ]`, with
+    // `host = IP-literal / IPv4address / reg-name`. An authority outside that grammar has no
+    // canonical form here, because normalization is string surgery — lowercase, percent-decode
+    // unreserved, drop a default port — and a URL parser instead maps a host through IDNA and its
+    // own forbidden-code-point rules. So a spelling the grammar refuses reaches the server as one
+    // host and a rule as another. It is refused for the same reason a path outside §3.3 is, which
+    // `normalize_path` already does.
+    if let Some(auth) = authority
+        && !is_rfc_3986_authority(auth)
+    {
+        return Err(
+            "a resource URI whose authority is not RFC 3986 is refused: RFC 3986 §3.2 spells an \
+                    authority `[userinfo@]host[:port]`, and a URL parser maps a host the grammar \
+                    refuses to a different host, so the box and the server would not read one \
+                    identity"
+                .to_string(),
+        );
+    }
+
+    // Normalize before the empty-authority check, so the refusal judges the authority this function
+    // would emit rather than the authored spelling. `https://./x` normalizes to an empty authority,
+    // and judging the raw `.` let it through and emitted `https:///x` — a form this same check
+    // refuses, so the output was not its own fixed point.
     let normalized_authority = authority.map(|auth| normalize_authority(auth, &scheme));
 
     // RFC 9110 §4.2.1 requires `"//" authority` and forbids an empty host, and a URL parser that
@@ -227,7 +246,7 @@ fn normalize_authority(auth: &str, scheme: &str) -> String {
         host // IPv6 literal — not percent-decoded or re-cased.
     } else {
         let decoded = decode_unreserved(&host);
-        decoded.trim_end_matches('.').to_ascii_lowercase()
+        lowercase_host(decoded.trim_end_matches('.'))
     };
     let port = port.filter(|port| !is_default_port(scheme, port));
     let mut out = String::with_capacity(auth.len());
@@ -241,6 +260,42 @@ fn normalize_authority(auth: &str, scheme: &str) -> String {
         out.push_str(&port);
     }
     out
+}
+
+/// `host` lowercased (RFC 3986 §6.2.2.1), except the hex digits of a percent-escape, which the same section asks to be uppercase.
+fn lowercase_host(host: &str) -> String {
+    let bytes = host.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            out.push(b'%');
+            out.push(bytes[index + 1].to_ascii_uppercase());
+            out.push(bytes[index + 2].to_ascii_uppercase());
+            index += 3;
+        } else {
+            out.push(bytes[index].to_ascii_lowercase());
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether `authority` is an RFC 3986 §3.2 authority, which the grammar spells `[ userinfo "@" ] host [ ":" port ]`.
+fn is_rfc_3986_authority(authority: &str) -> bool {
+    // Parse it in the authority position of a reference, so §3.2 is read from the one RFC 3986
+    // parser this module already uses for the path rather than re-stated here. The parsed authority
+    // must be the whole string: a `/`, a `?`, or a `#` would end it early and leave the tail as a
+    // path, and an authority this function splits off holds none of the three.
+    let reference = format!("s://{authority}");
+    UriRef::parse(reference.as_str())
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .authority()
+                .map(|parsed| parsed.as_str() == authority)
+        })
+        .unwrap_or(false)
 }
 
 /// Whether `port` is the default for `scheme` and so drops out of the canonical authority (RFC 3986 §6.2.3).
@@ -330,7 +385,7 @@ pub(crate) fn normalize_path(path: &str) -> Result<String, String> {
 pub(crate) fn generated_spellings() -> Vec<String> {
     const ALPHABET: &[&str] = &[
         "%", "2", "5", "e", "E", "3", "6", "7", "f", "g", "/", ".", "a", "é", "#", "?", ":", "\t",
-        " ", "\\",
+        " ", "\\", "@", "[", "]", "_", "|",
     ];
     let mut spellings = vec![String::new()];
     let mut frontier = vec![String::new()];
@@ -988,6 +1043,244 @@ mod tests {
         assert_eq!(
             canonicalize_resource_uri("http://example.com"),
             "http://example.com/"
+        );
+    }
+
+    /// RFC 3986 §3.2 spells `authority = [ userinfo "@" ] host [ ":" port ]`. Each row here is a
+    /// production the spelling breaks, not a character someone happened to list: a URL parser maps
+    /// a host the grammar refuses through IDNA and its own forbidden-code-point rules, so the box
+    /// and the server would read two hosts.
+    #[test]
+    fn an_authority_outside_rfc_3986_is_refused() {
+        for uri in [
+            // `reg-name = *( unreserved / pct-encoded / sub-delims )` allows no raw non-ASCII, so
+            // no IDNA form reaches here. Both reference parsers resolve each of these to a
+            // DIFFERENT host than the box emitted: an ignorable code point drops, a Unicode dot
+            // becomes a label separator, and a non-ASCII letter becomes a punycode label.
+            "https://no\u{ad}tes/page",
+            "https://no\u{200b}tes/page",
+            "https://\u{ad}notes/page",
+            "https://notes\u{200b}/page",
+            "https://notes\u{3002}example/page",
+            "https://notes\u{ff0e}example/page",
+            "https://not\u{e9}s/page",
+            "https://NOT\u{c9}S/page",
+            "https://notes\u{ff03}x/page",
+            "https://notes\u{ff1f}x/page",
+            "file://localhost\u{200b}/home/op/.env",
+            "file://localhost\u{ad}/home/op/.env",
+            "file://loc\u{ad}alhost/home/op/.env",
+            // A character `reg-name` holds under no production. `"`, `{`, `}`, and a backquote
+            // are the ones both parsers keep as written, so each refuses a host that is not a
+            // host rather than closing a measured respelling.
+            "https://no\"tes/page",
+            "https://no<tes/page",
+            "https://no>tes/page",
+            "https://no^tes/page",
+            "https://no{tes/page",
+            "https://no}tes/page",
+            "https://no|tes/page",
+            "https://no`tes/page",
+            "https://notes\u{7f}/page",
+            // `pct-encoded = "%" HEXDIG HEXDIG`, so a `%` that starts no escape is outside the
+            // grammar. The path already refuses this through `normalize_path`.
+            "https://a%/page",
+            "https://a%4/page",
+            "https://a%zz/page",
+            // `host = IP-literal / IPv4address / reg-name`, and `IP-literal` carries its own
+            // brackets. An unbracketed IPv6 literal is none of the three.
+            "https://::1/page",
+            "file://::/home/op/.env",
+            "file://::1/home/op/.env",
+            "https://[::1/page",
+            "https://[::g]/page",
+            "https://[]/page",
+            "https://[notes]/page",
+            // RFC 6874 adds a zone identifier, and RFC 3986 does not have one.
+            "https://[fe80::1%25eth0]/page",
+            // `userinfo` ends at the LAST `@`, and holds no second one unescaped.
+            "https://a@b@notes/page",
+            // `port = *DIGIT`, so an empty port conforms and a non-digit does not.
+            "https://notes:443./page",
+            "https://notes:+443/page",
+            "https://notes:44a/page",
+            "https://notes:443:443/page",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("an authority outside RFC 3986 §3.2 has no canonical form");
+            assert!(
+                refusal.contains("authority is not RFC 3986"),
+                "{uri:?}: {refusal}"
+            );
+        }
+    }
+
+    /// The check reads the WHOLE string as an authority. A `/`, a `?`, or a `#` ends an authority
+    /// early and leaves the tail as a path, and an authority this module splits off holds none of
+    /// the three — so this is what the guard is for, and no URI reaches it.
+    #[test]
+    fn the_grammar_check_reads_the_whole_authority() {
+        assert!(is_rfc_3986_authority("notes"));
+        for not_an_authority in ["notes/x", "notes?x", "notes#x"] {
+            assert!(
+                !is_rfc_3986_authority(not_an_authority),
+                "{not_an_authority:?}"
+            );
+        }
+    }
+
+    /// The over-rejection control. Every production §3.2 spells still canonicalizes, including the
+    /// ones no respelling of a host needs — `reg-name`'s sub-delims, an empty userinfo, an empty
+    /// port, an `IPvFuture` literal, and a `reg-name` that only looks like a bad IPv4 address.
+    #[test]
+    fn every_authority_the_grammar_spells_still_canonicalizes() {
+        for uri in [
+            "https://notes/page",
+            "https://notes.example.com/page",
+            "https://no-tes/page",
+            "https://no_tes/page",
+            "https://no~tes/page",
+            // `sub-delims = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="`
+            "https://no!tes/page",
+            "https://no$tes/page",
+            "https://no&tes/page",
+            "https://no'tes/page",
+            "https://no(tes/page",
+            "https://no)tes/page",
+            "https://no*tes/page",
+            "https://no+tes/page",
+            "https://no,tes/page",
+            "https://no;tes/page",
+            "https://no=tes/page",
+            // `pct-encoded`, including an escape of a character the raw form may not hold.
+            "https://%41b/page",
+            "https://no%2Ftes/page",
+            "https://no%7Ctes/page",
+            "https://no%00tes/page",
+            "https://notes%C2%ADexample/page",
+            // `IPv4address`, and a `reg-name` that is not one — `256.1.1.1` has no `dec-octet`
+            // over 255, so the grammar reads it as a name and the box may not refuse it.
+            "https://127.0.0.1/page",
+            "https://256.1.1.1/page",
+            "https://999.999.999.999/page",
+            "https://2130706433/page",
+            "https://0x7f.0.0.1/page",
+            // `IP-literal`, including `IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )`
+            "https://[::1]/page",
+            "https://[0:0:0:0:0:0:0:1]/page",
+            "https://[::ffff:127.0.0.1]/page",
+            "https://[v1.x]/page",
+            // `userinfo = *( unreserved / pct-encoded / sub-delims / ":" )`, so empty conforms.
+            "https://@notes/page",
+            "https://:@notes/page",
+            "https://user@notes/page",
+            "https://user:pass@notes/page",
+            "https://US%45R@notes/page",
+            // `port = *DIGIT`, so empty and a leading zero both conform.
+            "https://notes:/page",
+            "https://notes:0443/page",
+            "https://notes:8080/page",
+            "https://notes:443/page",
+            // `file:` reaches the same check, and its local fold still runs.
+            "file://localhost/home/op/.env",
+            "file:///home/op/.env",
+            "file://[::1]/home/op/.env",
+        ] {
+            super::canonicalize_resource_uri(uri)
+                .unwrap_or_else(|refusal| panic!("{uri:?} conforms to §3.2: {refusal}"));
+        }
+    }
+
+    /// Every generated spelling in the authority position, in both directions: the grammar decides,
+    /// and nothing else does. A spelling the grammar accepts never meets the authority refusal, and
+    /// one it refuses never gets a canonical form. The earlier refusals — a space, a control
+    /// character, or a `\` — come first and are the one exception.
+    #[test]
+    fn the_authority_refusal_follows_the_grammar_in_both_directions() {
+        let mut conforming = 0usize;
+        let mut refused = 0usize;
+        for scheme in ["https", "file"] {
+            for spelling in generated_spellings() {
+                if spelling.contains(['/', '?', '#'])
+                    || spelling.chars().any(|ch| ch <= ' ' || ch == '\\')
+                {
+                    continue; // not an authority this function splits off, or refused ahead of it
+                }
+                let uri = format!("{scheme}://{spelling}/x");
+                let judged = super::canonicalize_resource_uri(&uri);
+                if is_rfc_3986_authority(&spelling) {
+                    conforming += 1;
+                    if let Err(refusal) = &judged {
+                        assert!(
+                            !refusal.contains("authority is not RFC 3986"),
+                            "{uri:?} conforms to §3.2: {refusal}"
+                        );
+                    }
+                } else {
+                    refused += 1;
+                    let refusal = judged.expect_err("the grammar refuses this authority");
+                    assert!(
+                        refusal.contains("authority is not RFC 3986"),
+                        "{uri:?}: {refusal}"
+                    );
+                }
+            }
+        }
+        assert!(conforming > 1_000, "only {conforming} conforming spellings");
+        assert!(refused > 1_000, "only {refused} refused spellings");
+    }
+
+    /// The authority the box emits conforms too, so the canonical form is its own fixed point on
+    /// this axis. Normalization is string surgery, so it could in principle emit a spelling the
+    /// same check refuses — which is how judging a raw `.` emitted `https:///x` once before.
+    #[test]
+    fn the_emitted_authority_is_itself_rfc_3986() {
+        let mut judged = 0usize;
+        for prefix in ["https://", "file://", "http://"] {
+            for spelling in generated_spellings() {
+                let Ok(canonical) =
+                    super::canonicalize_resource_uri(&format!("{prefix}{spelling}"))
+                else {
+                    continue;
+                };
+                let Some(after) = canonical.split_once("://").map(|(_, rest)| rest) else {
+                    continue;
+                };
+                let emitted = after.split_once('/').map_or(after, |(auth, _)| auth);
+                assert!(
+                    is_rfc_3986_authority(emitted),
+                    "{prefix}{spelling:?} emitted {canonical:?}, whose authority {emitted:?} is \
+                     outside §3.2"
+                );
+                judged += 1;
+            }
+        }
+        assert!(judged > 1_000, "only {judged} canonical forms were judged");
+    }
+
+    /// RFC 3986 §6.2.2.1 asks for uppercase escape hex, and the path already emits it. The host
+    /// emitted lowercase, because lowercasing the host ran after the decode that uppercases a
+    /// reserved escape. So two spellings of one host stayed two strings.
+    #[test]
+    fn the_host_emits_uppercase_escape_hex_like_the_path() {
+        assert_eq!(
+            canonicalize_resource_uri("https://no%2ftes/page"),
+            "https://no%2Ftes/page"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("https://notes%3a443/page"),
+            canonicalize_resource_uri("https://notes%3A443/page"),
+            "one host, one string"
+        );
+        // The characters outside an escape still lowercase, and an escape of an unreserved octet
+        // still decodes and lowercases with them.
+        assert_eq!(
+            canonicalize_resource_uri("https://NO%2FTES/page"),
+            "https://no%2Ftes/page"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("https://A%41B%2Fc/page"),
+            "https://aab%2Fc/page"
         );
     }
 
