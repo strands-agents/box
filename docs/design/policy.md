@@ -197,7 +197,9 @@ reads `context.input`. The per-tool actions don't exist
 until a server reports its tools, so `run` stages each server's schema as it arrives and validates
 the whole policy once more when every server has reported. Until then a tool call for that server is
 denied without reaching the engine ([discovery serves the schema-independent
-subset](decisions.md#discovery-serves-the-schema-independent-subset)). A server whose tool listing
+subset](decisions.md#discovery-serves-the-schema-independent-subset)). A rule that names only tool
+grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
+from the start, so the rule loads at once or the box refuses it. A server whose tool listing
 the policy refused degrades alone: its per-tool rules don't load, and the box starts without them
 ([a server whose discovery a policy denies degrades
 alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).

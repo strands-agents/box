@@ -3798,6 +3798,7 @@ mod tests {
             env: std::collections::BTreeMap::from([("REFRESHED".to_string(), "yes".to_string())]),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         });
         let updated_text = updated.to_toml().expect("updated record");
 

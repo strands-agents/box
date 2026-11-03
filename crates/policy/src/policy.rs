@@ -7,11 +7,12 @@ use std::sync::Arc;
 mod authority;
 
 use crate::check::{Finding, PolicyCheck};
-use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
+use crate::dogwood::{DogwoodEngine, check_against, validate_staged_source};
 use crate::request::ActionRequest;
 use crate::schema::GovernedBox;
 use crate::{
-    Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
+    Decision, GrammarBindings, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning,
+    Principal, Request, ToolGrammars,
 };
 use authority::Authority;
 
@@ -57,6 +58,7 @@ pub enum SchemaStage {
 /// One durable policy authority.
 pub struct PolicyEngine {
     authority: Authority,
+    grammars: ToolGrammars,
     effective: EffectivePolicy,
     observer: Option<Arc<dyn crate::observe::DecisionObserver>>,
 }
@@ -89,6 +91,7 @@ impl PolicyEngine {
 
         Ok(Self {
             authority: Authority::open_complete(sources, mcp_schemas, history)?,
+            grammars: ToolGrammars::default(),
             effective,
             observer: None,
         })
@@ -106,6 +109,7 @@ impl PolicyEngine {
         };
         Ok(Self {
             authority: Authority::open_staged(operator, sources, history)?,
+            grammars: ToolGrammars::default(),
             effective,
             observer: None,
         })
@@ -118,15 +122,47 @@ impl PolicyEngine {
         history: File,
         label: PathBuf,
     ) -> Result<Self, PolicyStagingError> {
+        Self::open_staged_file_with_grammars(
+            operator,
+            sources,
+            ToolGrammars::default(),
+            history,
+            label,
+        )
+    }
+
+    /// Open durable history through an already-open file with the schema of each tool grammar in
+    /// `grammars`, and stage runtime MCP schemas over them. The engine owns `grammars`, and
+    /// [`grammar_bindings`](Self::grammar_bindings) gives out bindings for exactly those.
+    pub fn open_staged_file_with_grammars(
+        operator: &Operator,
+        sources: Vec<Policy>,
+        grammars: ToolGrammars,
+        history: File,
+        label: PathBuf,
+    ) -> Result<Self, PolicyStagingError> {
         let effective = EffectivePolicy {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
         Ok(Self {
-            authority: Authority::open_staged_file(operator, sources, history, label)?,
+            authority: Authority::open_staged_file(
+                operator,
+                sources,
+                grammars.schemas(),
+                history,
+                label,
+            )?,
+            grammars,
             effective,
             observer: None,
         })
+    }
+
+    /// The bindings of the tool grammars this engine installs, with no program declared yet.
+    #[must_use]
+    pub fn grammar_bindings(&self) -> GrammarBindings {
+        GrammarBindings::installed(&self.grammars)
     }
 
     /// Open durable history with the schema fragment of each tool grammar in `grammars`.
@@ -151,6 +187,7 @@ impl PolicyEngine {
                 &[],
                 history,
             )?,
+            grammars: ToolGrammars::default(),
             effective,
             observer: None,
         })
@@ -169,6 +206,7 @@ impl PolicyEngine {
         };
         Ok(Self {
             authority: Authority::open_with_faults(sources, history, faults)?,
+            grammars: ToolGrammars::default(),
             effective,
             observer: None,
         })
@@ -212,6 +250,21 @@ impl PolicyEngine {
         Self::validate_with_mcp_schemas(operator, sources, &[])
     }
 
+    /// Strict-validate candidate sources against the schema of each tool grammar in `grammars`.
+    pub fn validate_with_grammars(
+        operator: &Operator,
+        sources: &[Policy],
+        grammars: &ToolGrammars,
+    ) -> Result<(), PolicyError> {
+        crate::dogwood::validate_with_schemas(
+            &authored(sources),
+            &grammars.schemas(),
+            &[],
+            operator,
+        )
+        .map(|_| ())
+    }
+
     /// Strict-validate candidate sources with generated MCP action-schema fragments.
     pub fn validate_with_mcp_schemas(
         operator: &Operator,
@@ -224,6 +277,16 @@ impl PolicyEngine {
 
     /// Return every finding in `sources`, as `open` (`complete`) or `open_staged` would load them.
     pub fn check(operator: &Operator, sources: &[Policy], complete: bool) -> PolicyCheck {
+        Self::check_with_grammars(operator, sources, complete, &ToolGrammars::default())
+    }
+
+    /// Return every finding in `sources`, as the opener with `grammars` would load them.
+    pub fn check_with_grammars(
+        operator: &Operator,
+        sources: &[Policy],
+        complete: bool,
+        grammars: &ToolGrammars,
+    ) -> PolicyCheck {
         let text = authored(sources);
         let warning = |warning: PolicyWarning| Finding::new(warning.to_string());
         let placed = |findings: Vec<Finding>| {
@@ -239,7 +302,10 @@ impl PolicyEngine {
                 .collect::<Vec<_>>()
         };
         if complete {
-            return match check_and_expand(&text, &[], operator, true, &[]) {
+            let checked = crate::schema::composed_action_schema(&grammars.schemas(), &[])
+                .map_err(crate::check::Refused::from)
+                .and_then(|schema| check_against(&text, schema, operator, true, &[]));
+            return match checked {
                 Ok((_, _, warnings)) => PolicyCheck::new(
                     Vec::new(),
                     warnings.into_iter().map(warning).collect(),
@@ -248,7 +314,7 @@ impl PolicyEngine {
                 Err(refused) => PolicyCheck::new(placed(refused.findings), Vec::new(), Vec::new()),
             };
         }
-        match authority::check_staged(operator, sources) {
+        match authority::check_staged(operator, sources, grammars.schemas()) {
             Ok((warnings, unchecked)) => PolicyCheck::new(
                 Vec::new(),
                 warnings.into_iter().map(warning).collect(),
@@ -523,6 +589,7 @@ mod tests {
         PolicyEngine {
             authority: Authority::open_with_test_clock(sources.clone(), history, now_secs)
                 .expect("policy opens"),
+            grammars: ToolGrammars::default(),
             effective: EffectivePolicy {
                 engine: ENGINE_ID,
                 policy_id: effective_policy_id(&sources),

@@ -6,6 +6,7 @@
 //! | `workspace` | the initial working directory; grants nothing |
 //! | `env` | the literal environment, with no host inheritance |
 //! | `filesystem` | the eight path lists the process's own syscalls reach |
+//! | `grammar` | the tool grammar a `[tool.<name>]` carries, behind `tool-grammars` |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
 
 use super::env::{reserved_workload_environment, valid_environment_name};
+use super::grammar::GrammarTable;
 
 /// One process declaration, shared by `[agent]` and every `[tool.<name>]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +49,10 @@ pub(crate) struct ProcessSpec {
     /// `[agent]` refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<NetworkConfig>,
+
+    /// The tool grammar of a `[tool.<name>]`. Every other table refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) grammar: Option<GrammarTable>,
 }
 
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.
@@ -186,6 +192,23 @@ pub(crate) struct ContainedMcp {
 }
 
 impl ProcessSpec {
+    /// Refuse a `grammar` while `[experimental-features] tool-grammars` is off.
+    pub(crate) fn validate_grammar_selection(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if self.grammar.is_some() && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "`grammar` is experimental: set `tool-grammars = true` in \
+                         `[experimental-features]` to load it"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_native_policy(
         &self,
         table: &str,
@@ -230,6 +253,12 @@ impl ProcessSpec {
                  `network.contain_egress`"
                     .into(),
             ));
+        }
+        if self.grammar.is_some() && !table.starts_with("[tool.") {
+            return Err(refuse(format!(
+                "`grammar` is refused on `{table}`: a tool grammar describes a program the hosted \
+                 Shell starts, so only a `[tool.<name>]` takes one"
+            )));
         }
         match self.command.first() {
             None => {

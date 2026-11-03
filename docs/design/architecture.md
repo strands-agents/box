@@ -274,7 +274,9 @@ part of what you have to trust.
 1. **It hardens itself first**, refusing a same-user process its address space. This is defence in
    depth rather than a guarantee, and root bypasses it ([the trusted process refuses another process
    its address space](decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
-2. **It reads `box.toml`, prepares the box directory, and takes the run lock.** It records the
+2. **It reads `box.toml` and checks each tool grammar, then prepares the box directory and takes
+   the run lock.** A grammar that breaks a rule of the grammar format refuses the box before any box
+   state exists. It records the
    canonical path and the filesystem identity of each file it opened, and every later step acts on
    that identity rather than on the name, so replacing a file afterwards changes nothing ([a run
    validates once, then acts on the identity it
@@ -283,7 +285,12 @@ part of what you have to trust.
 4. **It installs the policy.** A policy that does not parse or does not validate refuses the box. A
    rule the load can prove will never fire is also refused, and a rule that might fire warns ([a rule
    that cannot fire is refused at
-   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)).
+   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). The
+   engine owns the box's tool grammars, so the policy validates against their actions too. Then the
+   box binds each grammar to the program file of every tool that runs the grammar's program ([a tool
+   grammar binds on the program file and the called
+   name](decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name)), and a program
+   file it can't read refuses the box.
 5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
    each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
    grant refuses the box here.

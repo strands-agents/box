@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.push] operands.refspec`: names effect "fast_forward", which `[effects]` does not declare
+# expect: `<grammar>.shell.push.operands.refspec`: names effect "fast_forward", which `effects` does not declare
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

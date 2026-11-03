@@ -96,6 +96,12 @@ Both tables hold the same four fields:
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
 
+A `[tool.<label>]` also takes `grammar`, the tool grammar for the program the tool runs. It is
+experimental and loads only when `[experimental-features] tool-grammars = true`. `[agent]` refuses
+it. The grammar's actions enter the policy schema, and the Shell does not yet decide a spawn as a
+grammar action. `tool_grammars.rs` pins the switch, the record version, and the startup refusal of
+a policy that names an action no grammar declares.
+
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
@@ -187,7 +193,7 @@ its own action, so a permit written for a different verb never inherits it.
 The rest of the fixed vocabulary is `Box::Action::"net:connect"`,
 `Box::Action::"http:request"`, `Box::Action::"shell:exec"`,
 `Box::Action::"shell:spawn"`, and `Box::Action::"mcp:call"`. MCP discovery adds one namespaced
-action for each tool.
+action for each tool, and each tool grammar adds its `Tool::<name>` actions.
 
 **There is no `net:response` action.** The reply is a phase of `http:request`. It takes no
 decision, and one exchange records one `http:request::response` at reply time, carrying the

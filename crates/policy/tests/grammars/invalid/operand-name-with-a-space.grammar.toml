@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.push] operands.ref spec`: "ref spec" is not an identifier (ASCII letters, digits, and `_`, not first a digit)
+# expect: `<grammar>.shell.push.operands."ref spec"`: "ref spec" is not an identifier (ASCII letters, digits, and `_`, not first a digit)
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

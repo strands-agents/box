@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::Grammar;
+use super::{Grammar, ToolGrammars};
 
 /// The most links Box records from one spelling.
 const MAXIMUM_LINKS: usize = 40;
@@ -90,11 +91,11 @@ fn links_from(path: &Path) -> Vec<PathBuf> {
     spellings
 }
 
-/// The installed tool grammars, the (program file, called name) pairs each one covers, and the file
-/// identity that each bound spelling led to when it was bound.
-#[derive(Debug, Default)]
-pub(crate) struct GrammarBindings {
-    grammars: Vec<Grammar>,
+/// The tool grammars an engine installs, the (program file, called name) pairs each one covers, and
+/// the file identity that each bound spelling led to when it was bound.
+#[derive(Debug)]
+pub struct GrammarBindings {
+    grammars: Vec<Arc<Grammar>>,
     bound: BTreeMap<(FileIdentity, String), usize>,
     spellings: BTreeMap<PathBuf, FileIdentity>,
     declared: BTreeSet<(FileIdentity, String)>,
@@ -130,7 +131,15 @@ pub(crate) enum CoverageRefusal {
 
 /// Why Box refuses the installed grammars or one binding.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum BindingRefusal {
+pub enum BindingRefusal {
+    /// Box cannot read the identity of a declared program file.
+    #[error("cannot read the program file {}: {reason}", .program_path.display())]
+    UnreadableProgram {
+        /// The path the `[tool]` command resolved to.
+        program_path: PathBuf,
+        /// What the host reported.
+        reason: String,
+    },
     /// Two installed grammars have one name.
     #[error("two installed tool grammars are named {grammar:?}")]
     NamedTwice {
@@ -169,7 +178,59 @@ pub(crate) fn called_name(spelling: &str) -> &str {
 }
 
 impl GrammarBindings {
+    /// Hold the grammars an engine installs, and no binding yet.
+    pub(crate) fn installed(grammars: &ToolGrammars) -> Self {
+        Self::holding(
+            grammars
+                .iter()
+                .map(|tool| Arc::clone(tool.grammar()))
+                .collect(),
+        )
+    }
+
+    /// No installed grammar, so no spawn is covered.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn none() -> Self {
+        Self::holding(Vec::new())
+    }
+
+    fn holding(grammars: Vec<Arc<Grammar>>) -> Self {
+        Self {
+            grammars,
+            bound: BTreeMap::new(),
+            spellings: BTreeMap::new(),
+            declared: BTreeSet::new(),
+        }
+    }
+
+    /// Declare that a `[tool]` runs the program file at `program_path` under the name `called`, and
+    /// bind the grammar whose `program` is `called`, when one is installed
+    /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    pub fn declare_tool(
+        &mut self,
+        program_path: &Path,
+        called: &str,
+    ) -> Result<(), BindingRefusal> {
+        let program = ProgramFile::read(program_path).map_err(|unreadable| {
+            BindingRefusal::UnreadableProgram {
+                program_path: unreadable.path,
+                reason: unreadable.reason.to_string(),
+            }
+        })?;
+        self.declare(&program, called);
+        let grammar = self
+            .grammars
+            .iter()
+            .find(|grammar| grammar.program == called)
+            .map(|grammar| grammar.name.clone());
+        match grammar {
+            Some(grammar) => self.bind(&program, called, &grammar),
+            None => Ok(()),
+        }
+    }
+
     /// Hold the installed `grammars`, each with a distinct name, and no binding yet.
+    #[cfg(test)]
     pub(crate) fn new(grammars: Vec<Grammar>) -> Result<Self, BindingRefusal> {
         let mut seen = BTreeMap::<&str, usize>::new();
         for grammar in &grammars {
@@ -180,10 +241,7 @@ impl GrammarBindings {
                 grammar: grammar.to_string(),
             });
         }
-        Ok(Self {
-            grammars,
-            ..Self::default()
-        })
+        Ok(Self::holding(grammars.into_iter().map(Arc::new).collect()))
     }
 
     /// Declare that a `[tool]` runs `program` under the name `name`.
@@ -399,6 +457,60 @@ mod tests {
     }
 
     const REFUSED: Option<Answer> = Some(Answer::Undeclared);
+
+    fn engine_grammars(names: &[&str]) -> ToolGrammars {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/grammars/valid");
+        ToolGrammars::new(
+            names
+                .iter()
+                .map(|name| {
+                    let text = std::fs::read_to_string(corpus.join(format!("{name}.grammar.toml")))
+                        .expect("a grammar");
+                    let table: toml::Table = toml::from_str(&text).expect("a table");
+                    crate::ToolGrammar::from_table(table, &format!("tool.{name}.grammar"))
+                        .expect("a grammar")
+                })
+                .collect(),
+        )
+        .expect("distinct grammars")
+    }
+
+    #[test]
+    fn a_grammar_binds_every_declared_tool_that_runs_its_program() {
+        let host = Host::new();
+        let system = host.program(GIT);
+        let homebrew = host.program("opt/homebrew/bin/git");
+        let cli = host.program("usr/bin/gh");
+        let mut bindings = GrammarBindings::installed(&engine_grammars(&["git"]));
+
+        for (program, called) in [(&system, "git"), (&homebrew, "git"), (&cli, "gh")] {
+            bindings
+                .declare_tool(program.path(), called)
+                .expect("the tool declares");
+        }
+
+        assert_eq!(answer(bindings.coverage(Ok(system), "git")), parsed("git"));
+        assert_eq!(
+            answer(bindings.coverage(Ok(homebrew), "git")),
+            parsed("git")
+        );
+        assert_eq!(answer(bindings.coverage(Ok(cli), "gh")), None);
+    }
+
+    #[test]
+    fn an_unreadable_tool_program_is_refused_when_declared() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&engine_grammars(&["git"]));
+
+        let refusal = bindings
+            .declare_tool(&host.path("usr/bin/absent"), "git")
+            .expect_err("the program file is absent");
+
+        assert!(
+            matches!(refusal, BindingRefusal::UnreadableProgram { .. }),
+            "{refusal}"
+        );
+    }
 
     #[test]
     fn each_spawn_resolves_by_its_program_file_and_its_called_name() {

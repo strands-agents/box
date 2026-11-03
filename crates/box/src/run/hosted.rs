@@ -195,6 +195,7 @@ pub(crate) fn select_tool(
             spec: ProcessSpec {
                 command: vec![invoked.display().to_string()],
                 network: None,
+                grammar: None,
                 ..caller.clone()
             },
             trailing: args.to_vec(),
@@ -577,13 +578,41 @@ impl HostedBox {
         root: &BoxRoot,
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
+        grammars: policy::ToolGrammars,
     ) -> Result<Arc<PolicyEngine>, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
         Ok(Arc::new(
-            PolicyEngine::open_staged_file(operator, sources, database, database_path)?
-                .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
+            PolicyEngine::open_staged_file_with_grammars(
+                operator,
+                sources,
+                grammars,
+                database,
+                database_path,
+            )?
+            .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
         ))
+    }
+
+    /// The bindings of the tool grammars `policy` installs, with every `[tool.<name>]` in `record`
+    /// declared (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    pub(crate) fn bind_tool_grammars(
+        policy: &PolicyEngine,
+        record: &Record,
+    ) -> Result<policy::GrammarBindings, BoxError> {
+        let mut bindings = policy.grammar_bindings();
+        if !record.experimental_features.tool_grammars {
+            return Ok(bindings);
+        }
+        for spec in record.tool.values() {
+            let program =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())?;
+            bindings.declare_tool(
+                program.invoked(),
+                crate::record::config::grammar::called_name(spec),
+            )?;
+        }
+        Ok(bindings)
     }
 
     /// Open this box's trusted half, or refuse. `workspace` and `home` are the agent's effective
@@ -826,7 +855,12 @@ impl HostedBox {
                 text,
             });
         }
-        Self::prepare_policy(root, &policy::Operator::unanchored(), sources)
+        Self::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            sources,
+            policy::ToolGrammars::default(),
+        )
     }
 
     /// What this run's boundary reads.
@@ -946,6 +980,7 @@ mod tests {
                 env: Default::default(),
                 filesystem: Default::default(),
                 network: None,
+                grammar: None,
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -1007,6 +1042,7 @@ permit (principal, action == Box::Action::"shell:spawn", resource);
 permit (principal, action == alpha::Action::"read", resource);"#
                     .to_string(),
             }],
+            policy::ToolGrammars::default(),
         )
         .expect("the staged authority opens");
         let owned = Lock::try_acquire(&root.lock())
@@ -1046,6 +1082,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 ..Default::default()
             },
             network: None,
+            grammar: None,
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -1070,8 +1107,13 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .tool
             .insert("u".to_string(), tool(home.join("absent")));
         let collector = collector(operator.path());
-        let policy = HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new())
-            .expect("an empty authority opens");
+        let policy = HostedBox::prepare_policy(
+            &root,
+            &policy::Operator::unanchored(),
+            Vec::new(),
+            policy::ToolGrammars::default(),
+        )
+        .expect("an empty authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
             .expect("the lock is free");
@@ -1913,6 +1955,7 @@ while :; do :; done"#
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         };
         let agent = spec(&["/bin/sh"]);
         Record {
@@ -2392,6 +2435,7 @@ while :; do :; done"#
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 

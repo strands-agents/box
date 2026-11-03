@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[global] options.directory`: flag "-C" is also a flag of `[global] options.chdir`
+# expect: `<grammar>.global.options.directory`: flag "-C" is also a flag of `<grammar>.global.options.chdir`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"
