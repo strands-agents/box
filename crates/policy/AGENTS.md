@@ -172,14 +172,22 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Shell outbound HTTP raises no attempt, so policy does not cover it and only the deny-only
   `network_enabled` switch and SSRF floor do. Do not decide egress in the Shell adapter. The MCP
   `shell` tool reaches `run_pipeline`, so it does raise `shell:exec`.
-- A degraded tool recovers only when one server is waiting. `stage_mcp_schema` clears the whole
-  `degraded_tools` set when a complete bundle commits, so a late list that completes the policy lifts
-  the refusal. When two servers are degraded, a late list from either still leaves the other's typed
-  action undeclared, so the bundle is `Rejected` and the arrived fragment goes out with the proposal
-  that held it. Neither recovers. Closing that would mean retaining an accepted fragment across a
-  rejected bundle — the partial install that only `Discovering` allows — so do not widen the clear to
-  reach it. Pinned by `runtime_mcp_policy_staging.rs::two_degraded_servers_do_not_recover_from_a_relist`
-  and `::a_complete_bundle_after_completion_clears_the_degraded_mark`.
+- A degraded tool recovers only when a complete bundle commits: a late list whose schema is the last
+  thing the bundle needs, or a reload. `stage_mcp_schema` and `reload` clear the whole
+  `degraded_tools` set then, so one commit lifts every hold, on every server. While anything else is
+  missing — a second schema, or a staged schema that does not match its rule — a late list is
+  `Rejected` and its fragment goes out with the proposal that held it, so two missing schemas
+  recover neither server. Closing that would mean retaining an accepted fragment across a rejected
+  bundle — the partial install that only `Discovering` allows — so do not widen the clear to reach
+  it. Clear nothing on `Rejected`, because a cleared tool whose action is undeclared rides the
+  coarse `mcp:call` grant past its `forbid`. Pinned by `runtime_mcp_policy_staging.rs`
+  `::a_complete_bundle_after_completion_clears_the_degraded_mark`,
+  `::a_late_list_that_supplies_the_last_schema_recovers_both_servers`,
+  `::two_missing_schemas_do_not_recover_from_a_relist`,
+  `::a_late_list_is_refused_while_a_staged_schema_does_not_match_its_rule`, and
+  `::a_late_list_refused_for_a_namespace_collision_keeps_the_degraded_mark`, and by
+  `policy.rs::a_degraded_tool_stays_denied_until_a_reload_drops_its_rule`. The `Rejected` exit for a
+  refused durable commit needs an exhausted store, and no test pins the mark there.
 - Record an outcome this vocabulary cannot name as `Indeterminate`; never drop it.
 - Refuse `os.getenv` and `os.environ` while the schema cannot name them, because the box projects
   credential phantoms into the environment. Pinned by

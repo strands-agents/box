@@ -262,10 +262,7 @@ permit(principal, action == alpha::Action::"write", resource);
     );
 }
 
-/// A first listing can fail for a reason that does not repeat: a timeout, a truncated page, or a
-/// closed connection. Discovery completes and the server degrades. A later listing then stages its
-/// schema and the complete bundle installs, so the per-tool rules enforce. The degraded mark must
-/// not outlive that, because it would keep refusing a tool whose rule is live.
+/// A late listing that completes the bundle after discovery finished lifts the degraded mark.
 #[test]
 fn a_complete_bundle_after_completion_clears_the_degraded_mark() {
     let history = tempfile::tempdir().expect("history directory");
@@ -379,8 +376,8 @@ when { context.input.env == "prod" };
         "deploy",
         &json!({"env": "prod"}),
     );
-    // Not merely "not allowed": the refusal is terminal, not the transient hold a pending tool
-    // takes, because no later schema can make this rule enforceable.
+    // Not merely "not allowed": the refusal is the degraded mark's, not the transient hold a
+    // pending tool takes, because discovery finished without this rule.
     assert!(
         matches!(
             decision,
@@ -3070,69 +3067,234 @@ fn an_existing_store_deletes_obsolete_policies_before_replacing_the_schema() {
     );
 }
 
-/// With two servers degraded, a relist from either is `Rejected` and leaves both refused.
+/// A tool on each of two servers, held while either server's schema is missing.
+const TWO_SERVERS: &str = r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+permit(principal, action, resource)
+when { action == alpha::Action::"read" || action == beta::Action::"read" };
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+forbid(principal, action == beta::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+"#;
+
+/// One server's `read` of `path`, through the per-tool refinement.
+fn read(authority: &PolicyEngine, server: &str, path: &str) -> Decision {
+    authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        server,
+        "read",
+        &json!({ "path": path }),
+    )
+}
+
+/// With two schemas missing, a late list from either server is `Rejected` in either order, and
+/// both servers keep their refusal.
 #[test]
-fn two_degraded_servers_do_not_recover_from_a_relist() {
+fn two_missing_schemas_do_not_recover_from_a_relist() {
+    for order in [["alpha", "beta"], ["beta", "alpha"]] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source("two-servers.dw", TWO_SERVERS)],
+            &history.path().join("dogwood.redb"),
+        );
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["alpha".to_string(), "beta".to_string()],
+            "neither listing staged, so both servers degrade"
+        );
+
+        for server in order {
+            let other = if server == "alpha" { "beta" } else { "alpha" };
+            let relist = authority
+                .stage_mcp_schema(server, generated(server, "read", "path", "string"))
+                .expect("the later listing is not a terminal fault");
+            assert!(
+                matches!(
+                    &relist,
+                    SchemaStage::Rejected { reason }
+                        if reason.contains(&format!("{other}::Action::\"read\""))
+                ),
+                "{order:?}: {other}'s schema is missing, so {server}'s relist is refused and its \
+                 schema is dropped with it: {relist:?}"
+            );
+            for held in ["alpha", "beta"] {
+                let call = read(&authority, held, "/workspace/secret");
+                assert!(
+                    matches!(
+                        call,
+                        Decision::Deny {
+                            reason: DenyReason::NoMatch,
+                            ..
+                        }
+                    ),
+                    "{order:?}: after {server}'s relist, {held}'s tool keeps the degraded \
+                     refusal rather than riding the coarse grant past its forbid: {call:?}"
+                );
+            }
+        }
+    }
+}
+
+/// One rule that decides a tool on each of two servers holds both while one schema is missing, and
+/// the late list that supplies that schema recovers both, in either order.
+#[test]
+fn a_late_list_that_supplies_the_last_schema_recovers_both_servers() {
+    for [early, late] in [["alpha", "beta"], ["beta", "alpha"]] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source("two-servers.dw", TWO_SERVERS)],
+            &history.path().join("dogwood.redb"),
+        );
+        assert_eq!(
+            authority
+                .stage_mcp_schema(early, generated(early, "read", "path", "string"))
+                .expect("the listing is not a terminal fault"),
+            SchemaStage::Accepted {
+                authority_ready: false,
+            },
+            "{early}'s schema stages during discovery, and the shared permit still waits for \
+             {late}'s"
+        );
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling");
+        for server in ["alpha", "beta"] {
+            let call = read(&authority, server, "/workspace/input");
+            assert!(
+                matches!(
+                    call,
+                    Decision::Deny {
+                        reason: DenyReason::NoMatch,
+                        ..
+                    }
+                ),
+                "{early} early: {server}'s tool is held whether or not its own schema arrived: \
+                 {call:?}"
+            );
+        }
+
+        assert_eq!(
+            authority
+                .stage_mcp_schema(late, generated(late, "read", "path", "string"))
+                .expect("the later listing is not a terminal fault"),
+            SchemaStage::Accepted {
+                authority_ready: true,
+            },
+            "{late}'s schema is the last one the bundle needs"
+        );
+        for server in ["alpha", "beta"] {
+            let forbidden = read(&authority, server, "/workspace/secret");
+            assert!(
+                matches!(
+                    forbidden,
+                    Decision::Deny {
+                        reason: DenyReason::Forbidden,
+                        ..
+                    }
+                ),
+                "{early} early: {server}'s forbid refuses the path it names: {forbidden:?}"
+            );
+            let permitted = read(&authority, server, "/workspace/input");
+            assert!(
+                matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
+                "{early} early: the shared permit allows {server}'s other path, and the call does \
+                 not ride the coarse grant: {permitted:?}"
+            );
+        }
+    }
+}
+
+/// A late list is refused while a schema that already staged does not match its server's rule.
+#[test]
+fn a_late_list_is_refused_while_a_staged_schema_does_not_match_its_rule() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source("two-servers.dw", TWO_SERVERS)],
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("alpha", generated("alpha", "read", "target", "string"))
+        .expect("the listing is not a terminal fault");
+    authority
+        .finish_mcp_discovery()
+        .expect("completion degrades rather than fataling");
+
+    let relist = authority
+        .stage_mcp_schema("beta", generated("beta", "read", "path", "string"))
+        .expect("the later listing is not a terminal fault");
+    assert!(
+        matches!(
+            &relist,
+            SchemaStage::Rejected { reason } if reason.contains("alpha::Action::\"read\"")
+        ),
+        "beta supplies the only missing schema, but alpha's forbid reads an argument alpha's schema \
+         does not declare: {relist:?}"
+    );
+    for held in ["alpha", "beta"] {
+        let call = read(&authority, held, "/workspace/secret");
+        assert!(
+            matches!(
+                call,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{held}'s tool keeps the degraded refusal: {call:?}"
+        );
+    }
+}
+
+/// A late list refused for a namespace collision leaves every degraded refusal in place.
+#[test]
+fn a_late_list_refused_for_a_namespace_collision_keeps_the_degraded_mark() {
     let history = tempfile::tempdir().expect("history directory");
     let authority = staged(
         vec![source(
-            "two-degraded.dw",
+            "collision.dw",
             r#"
 permit(principal, action == Box::Action::"mcp:call", resource);
-permit(principal, action == alpha::Action::"read", resource);
-permit(principal, action == beta::Action::"read", resource);
+permit(principal, action == a_b::Action::"read", resource);
+forbid(principal, action == beta::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
 "#,
         )],
         &history.path().join("dogwood.redb"),
     );
-
+    authority
+        .stage_mcp_schema("a-b", generated("a-b", "read", "path", "string"))
+        .expect("the listing is not a terminal fault");
     assert_eq!(
         authority
             .finish_mcp_discovery()
             .expect("completion degrades rather than fataling"),
-        vec!["alpha".to_string(), "beta".to_string()],
-        "neither listing staged, so both servers degrade"
+        vec!["beta".to_string()]
     );
 
-    let staged_alpha = authority
-        .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+    let relist = authority
+        .stage_mcp_schema("a.b", generated("a.b", "read", "path", "string"))
         .expect("the later listing is not a terminal fault");
     assert!(
-        matches!(staged_alpha, SchemaStage::Rejected { .. }),
-        "the bundle still names beta's action, which has no schema, so alpha's relist is refused: \
-         {staged_alpha:?}"
+        matches!(
+            &relist,
+            SchemaStage::Rejected { reason } if reason.contains("same Cedar namespace")
+        ),
+        "a.b and a-b share the namespace a_b, so a.b's list is refused: {relist:?}"
     );
-
-    let call = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({"path": "/workspace/input"}),
-    );
+    let call = read(&authority, "beta", "/workspace/secret");
     assert!(
-        !call.is_allow(),
-        "alpha's own tool stays refused although its schema arrived: {call:?}"
-    );
-
-    let staged_beta = authority
-        .stage_mcp_schema("beta", generated("beta", "read", "path", "string"))
-        .expect("the later listing is not a terminal fault");
-    assert!(
-        matches!(staged_beta, SchemaStage::Rejected { .. }),
-        "alpha's fragment was discarded with its rejected proposal, so beta's relist names an \
-         unknown alpha action and is refused in turn: {staged_beta:?}"
-    );
-    assert!(
-        !authority
-            .refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "alpha",
-                "read",
-                &json!({"path": "/workspace/input"}),
-            )
-            .is_allow(),
-        "neither relist recovered alpha, so both servers keep their refusal"
+        matches!(
+            call,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the refused list must not lift beta's degraded refusal, or beta's read rides the coarse \
+         grant past its forbid: {call:?}"
     );
 }

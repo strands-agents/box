@@ -191,8 +191,8 @@ subset](decisions.md#discovery-serves-the-schema-independent-subset)):
 2. **One more commit for each server whose schema stages** adds that server's per-tool rules, so
    they enforce from that moment.
 3. **The last commit** comes when the whole policy validates, and the engine is `Ready`. If startup
-   completes first, a per-tool rule still held back belongs to a server that has not staged, so
-   that server is degraded and the engine is `Ready`.
+   completes first, a per-tool rule still held back is inert: the servers it waits for are degraded,
+   and the engine is `Ready`.
 
 [How Box discovers MCP tools](./mcp-discovery.md) follows one server from its first `tools/list` to
 its commit.
@@ -236,21 +236,19 @@ The engine is then `Ready` for the rest of the run, and every rule that could lo
 
 A rule that didn't load leaves its tools refused, and that isn't always for the rest of the run. A
 tool list can still arrive after startup, stage its schema, and complete the whole policy. Those
-rules then load and enforce from that moment, and Box stops refusing their tools. Whether a server
-can get there depends on why it didn't stage:
+rules then load and enforce from that moment, and Box stops refusing their tools. Two things decide
+whether that happens:
 
-- **When the cause repeats, it can't.** A Degraded server is the clear case: the policy that refused
-  its `tools/list` is the policy still in force, so it refuses the next attempt the same way. A
-  refused schema and a spent discovery budget repeat for the same reason, and each keeps its refusal
-  for the run.
-- **When the cause doesn't repeat, an http server can and a stdio server can't** — the causes are no
-  reply in time, and a page Box couldn't read. On an http server nothing checks the failed state, so
-  any later `tools/list` carries the list, on any session. On a stdio server no later list can
-  arrive: the connection whose list failed closes, Box stops every other connection open to that
-  server, and it refuses a new one. So recovery is http-only.
-
-[How discovery finishes](./mcp-discovery.md#how-discovery-finishes) covers the limit when two
-servers are waiting on a rule at the same time.
+- **A later list has to get through.** It goes through the same decision and the same limits as the
+  first, so a refusal doesn't have to repeat: a rule that reads history can refuse one `tools/list`
+  and permit the next, and a server can replace a schema the policy refused with one it accepts. A
+  Degraded server gets through this way whether it's stdio or http. A Failed server gets through
+  only over http, because on stdio the failure stops the server: the connection whose list failed
+  closes, Box stops every other connection open to that server, and it refuses a new one.
+- **Its schema has to be the last thing the policy needs.** A late list is validated with the whole
+  policy, so while another schema is missing or doesn't match its rules, the list is refused and its
+  schema is dropped. How many servers have tools held doesn't decide it, and [how discovery
+  finishes](./mcp-discovery.md#how-discovery-finishes) shows one late list recovering two servers.
 
 The startup warning on stderr was true when it was printed, and nothing prints to say it no longer
 is. Read it as a record of startup, not as the state of the run.

@@ -185,10 +185,11 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 
 ### When a rule cannot load
 
-When a per-tool rule cannot load, the box starts and that rule never takes effect. Where Box can
-work out which calls that rule would have decided, it refuses each of them with `[default-deny]`,
-so an unenforceable rule costs the agent that tool rather than letting the call through. Where it
-cannot, those calls run on the `mcp:call` permit — [which rules Box can refuse
+When a per-tool rule cannot load at startup, the box starts without it, and the rule takes effect
+once a tool list that arrives later completes the policy. Until then, where Box can work out which
+calls that rule would have decided, it refuses each of them with `[default-deny]`, so an
+unenforceable rule costs the agent that tool rather than letting the call through. Where it cannot,
+those calls run on the `mcp:call` permit — [which rules Box can refuse
 for](#which-rules-box-can-refuse-for) says which is which, and it is worth reading, because the
 difference decides whether your rule fails closed or open. stderr names the servers the rule was
 waiting for in either case: `a per-tool rule never loaded for ["<server>"]`. Three things cause it.
