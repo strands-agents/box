@@ -278,6 +278,35 @@ impl Request<'_> {
     }
 }
 
+/// One request that the policy engine decides: a [`Request`] from an enforcement point, or a
+/// tool grammar action.
+#[derive(Clone, Copy)]
+pub(crate) enum ActionRequest<'a> {
+    Request(&'a Request<'a>),
+    #[cfg_attr(
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter decides a grammar action")
+    )]
+    Grammar(&'a crate::grammar::GrammarRequest),
+}
+
+impl ActionRequest<'_> {
+    pub(crate) fn identity(&self) -> crate::schema::ActionIdentity {
+        match self {
+            Self::Request(request) => crate::schema::ActionIdentity::for_request(request),
+            Self::Grammar(request) => request.identity().clone(),
+        }
+    }
+
+    /// The resource that the verdict names.
+    pub(crate) fn resource(&self) -> String {
+        match self {
+            Self::Request(request) => request.resource(),
+            Self::Grammar(request) => request.resource().to_string(),
+        }
+    }
+}
+
 /// How many arguments a resolved command line carries, clamped for the engine's `Long`.
 ///
 /// Saturating rather than wrapping, and in the direction that can only make a rule more

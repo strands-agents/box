@@ -74,6 +74,7 @@ jobs:
   scan:
     name: Resolve SHA and validate version
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -249,6 +250,7 @@ jobs:
     name: Build ${{ matrix.target.triple }}
     needs: scan
     runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -566,6 +568,7 @@ jobs:
       ((inputs.dry_run == true && inputs.sign_macos != true) ||
        (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -695,6 +698,7 @@ jobs:
       needs.build.result == 'success' &&
       needs.inspect.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       # Configure reviewers + main-only deployment branches in repo settings.
       # A fork has no reviewer config here, so this just passes on a fork; the
@@ -727,6 +731,7 @@ jobs:
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -855,6 +860,7 @@ jobs:
       inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

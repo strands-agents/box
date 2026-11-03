@@ -67,7 +67,9 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority)):
 
 - **The reachable paths check** runs in the Shell and Monty after the engine. It refuses the box directory,
   the `box.toml` and policy this run loaded, and anything outside the operator's home and the
-  workspace. Policy decides first, so a counting rule still sees the attempt, and the refusal is
+  workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
+  configured tool programs. Reads of those programs remain subject to policy.
+  Policy decides first, so a counting rule still sees the attempt, and the refusal is
   recorded beside policy's verdict.
 
 Cloud metadata protection comes from the operator's policy. The gateway asks policy about
@@ -213,14 +215,23 @@ and their `@id`, the line and column when the engine reports a span, and the val
 as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
-[durable history](#durable-history) lists them.
+[durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
+tool programs with multiple hard links or overlap with direct writable grants.
+[Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
 
 The inert-rule check sorts each rule into one of three classes:
 
 - **Refused:** anything the load can prove inert. An action or field the schema doesn't declare, a
-  path literal no reported path can match, a host literal no destination host can equal, one `@id`
-  on two rules, and a cap written as a `permit` beside an unconditioned `permit` for the same
-  action, which can't narrow it.
+  read of `context.input.ip` under a network action, a path literal no reported path can match, a
+  host literal no destination host can equal, an address literal no pinned destination can equal or
+  that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
+  `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
+  unconditioned `permit` for the same action, which can't narrow it.
+
+  The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing
+  rather than cosmetic. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has ip`
+  is statically false; the validator then never typechecks the comparison behind that guard, and the
+  rule would load and enforce nothing. The refusal names both replacements.
 - **Warned:** a rule that might be inert, such as a `program` literal spelled as a path, or that cap
   beside a conditioned `permit`.
 - **Loads anyway:** two shapes the validator can't prove inert, a comparison between two different

@@ -12,6 +12,7 @@ det_case! {
     desc: "Leaf build output: a tool with write=[work] (and read of it) execs a program and dlopens a library it copied into work; the agent's own exec and load of the same written files are refused",
     run: |b| {
         let probe = b.compile_probe("leafprobe-x04", PROBE);
+        let tool_probe = b.install_tool(&probe);
         let out = b.exec_tree();
         let source = out.join("detx04.rs");
         let library = out.join(format!("libdetx04.{}", std::env::consts::DLL_EXTENSION));
@@ -33,13 +34,14 @@ det_case! {
         let exec_tree = b.with_exec_tree();
         let edit = |text: String| format!(
             "{}\n[tool.x04]\ncommand = [{}]\n\n[tool.x04.filesystem]\nread = [{}, {}]\nwrite = [{}]\n",
-            exec_tree(text), quoted(&probe), quoted(&out), quoted(&work), quoted(&work)
+            exec_tree(text), quoted(&tool_probe), quoted(&out), quoted(&work), quoted(&work)
         );
         b.apply_policy(r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#);
         let p = sh_quote(&probe.to_string_lossy());
+        let tool_p = sh_quote(&tool_probe.to_string_lossy());
         let s = |path: &std::path::Path| sh_quote(&path.to_string_lossy());
         let r = b.run_mediated_with_config(edit, &format!(
-            "{p} copy {h} {c}; {p} exec {c} leaf-ran; {p} copy {l} {d}; {p} dlopen {d}",
+            "{tool_p} copy {h} {c}; {tool_p} exec {c} leaf-ran; {tool_p} copy {l} {d}; {tool_p} dlopen {d}",
             h = s(&b.built_tool()), c = s(&program), l = s(&library), d = s(&loaded),
         ));
         r.assert_mediated_permitted("shell:spawn", "leafprobe-x04");

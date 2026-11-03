@@ -91,6 +91,23 @@ Call it before starting application threads or loading secrets, and use one Box 
 per host process. Later `run` calls fail, even if the first call failed.
 Ship the matching Box helper binaries beside the host application.
 
+To replace the running box's policy from a host thread:
+
+```rust,no_run
+strands_box::reload(&[strands_box::Policy {
+    origin: "policy.dw".into(),
+    text: new_policy_text,
+}])?;
+```
+
+`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
+the current policy in place. An empty list denies all policy requests. Policy files and the
+OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
+Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
+A rule for an MCP tool can reload only after Box loads that server's tool definitions.
+Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
+waiting will not help. The current policy stays in place.
+
 To generate policy schemas:
 
 ```rust,no_run
@@ -211,7 +228,7 @@ credential-daemon fixture remain explicit in the report. Deterministic integrati
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
 
-The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
 
 Common tasks run through [`just`](https://github.com/casey/just):
@@ -227,6 +244,12 @@ just test-all      # workspace tests and box example checks
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
 
+In pull-request CI, changes to `docs/site-manifest.json`,
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+site-manifest contract test instead of the full Rust test matrix. The test compares the base
+contract to keep the product ID stable and require an append-only retirement before a page or route
+is removed.
+
 ## Documentation
 
 | Guide | Contents |
@@ -234,7 +257,7 @@ the `test-support` feature.
 | [`docs/user/`](docs/user) | How to install Box and run a box. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
 
-See [AGENTS.md](AGENTS.md) for the repository rules and the current state.
+See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 

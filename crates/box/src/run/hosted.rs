@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
     CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
@@ -46,6 +46,31 @@ use crate::run::contain::boundary::{
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
 use crate::run::telemetry;
+
+type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+
+static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
+
+pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
+    let running = RUNNING_POLICY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let result = policy.reload(sources).map_err(BoxError::from);
+    let subject = telemetry::policy_subject(sources);
+    collector.control(match &result {
+        Ok(()) => telemetry::ControlRecord::completed(
+            telemetry::ControlOperation::PolicyInstalled,
+            &subject,
+        ),
+        Err(error) => telemetry::ControlRecord::refused(
+            telemetry::ControlOperation::PolicyRefused,
+            &subject,
+            &error.to_string(),
+        ),
+    });
+    result
+}
 
 /// What the workload's boundary needs from the box hosting it.
 #[derive(Debug, Clone)]
@@ -90,12 +115,25 @@ pub(crate) struct SelectedTool {
 /// The prefix is compared expanded, because the translator runs the expanded arguments. Among
 /// prefixes of one length, a command with the file name of `called` wins. `called` is the path the
 /// caller used, and `program` is the file it resolves to.
-pub(crate) fn select_tool(
+#[cfg(test)]
+fn select_tool(
     record: &Record,
     attachment: &Attachment,
     program: &Path,
     called: &Path,
     args: &[String],
+) -> Result<SelectedTool, BoxError> {
+    let commands = crate::run::commands::ConfiguredCommands::load(record)?;
+    select_tool_with_commands(record, attachment, program, called, args, &commands)
+}
+
+fn select_tool_with_commands(
+    record: &Record,
+    attachment: &Attachment,
+    program: &Path,
+    called: &Path,
+    args: &[String],
+    commands: &crate::run::commands::ConfiguredCommands,
 ) -> Result<SelectedTool, BoxError> {
     let refuse = |reason: String| {
         BoxError::from(ConfigError::ToolSelection {
@@ -122,14 +160,13 @@ pub(crate) fn select_tool(
     let mut unexpandable: Vec<String> = Vec::new();
     let mut named_by_a_table = false;
     for (label, spec) in &record.tool {
-        let Ok(resolved) =
-            crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
-        else {
+        let Some(command) = commands.get(label) else {
             continue;
         };
-        if resolved.granted_path() != invoked {
+        if command.path() != invoked {
             continue;
         }
+        command.verify()?;
         named_by_a_table = true;
         // A token this build cannot expand is the operator's error, so the refusal names it rather
         // than reporting a non-match. It is held until the loop ends, so a malformed table cannot
@@ -257,12 +294,13 @@ fn tool_spawner(
         let workspace = workspace.clone();
         let protected_sources = protected_sources.clone();
         Box::pin(async move {
-            let selected = select_tool(
+            let mut selected = select_tool_with_commands(
                 &record,
                 &attachment,
                 &spawn.program,
                 &spawn.invoked,
                 &spawn.args,
+                approved.commands(),
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
@@ -272,6 +310,9 @@ fn tool_spawner(
             let reach = approved.table(&table).ok_or_else(|| {
                 std::io::Error::other(format!("{table} has no reach judged for this run"))
             })?;
+            if let Some(command) = reach.command.as_ref() {
+                selected.spec.command[0] = command.invoked().display().to_string();
+            }
             let site = Site {
                 attachment: &attachment,
                 layout: &layout,
@@ -400,6 +441,16 @@ impl McpLeafLauncher {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// `server`'s fixed arguments as its leaf starts them, or `None` when they do not expand.
+    pub(crate) fn launched_arguments(&self, server: &str) -> Option<Vec<String>> {
+        let contained = self.record.contained_mcp.get(server)?;
+        crate::run::contain::boundary::environment::expanded_arguments(
+            &contained.spec,
+            &self.attachment,
+        )
+        .ok()
     }
 
     /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
@@ -583,11 +634,13 @@ impl HostedBox {
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
-        let mut capabilities = CapabilitySet::builder();
-        for (destination, store) in projection.capabilities {
-            capabilities =
-                capabilities.add_credential(CredentialCapability::new(destination, store));
-        }
+        let capabilities = CapabilitySet::new(
+            projection
+                .capabilities
+                .into_iter()
+                .map(|(destination, store)| CredentialCapability::new(destination, store))
+                .collect(),
+        );
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -631,21 +684,20 @@ impl HostedBox {
                 Arc::new(move || coordinator.report_finished(DiscoveryDoor::Egress))
             },
         );
-        let proxy = MitmInterceptor::start_with_emitter_and_opened_ca(
+        let proxy = MitmInterceptor::start_with(
             MitmConfig {
                 intercept_ca_dir: Some(trust.clone()),
-                credential_env: projection.phantom_environment,
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
                 ..MitmConfig::default()
             },
-            capabilities.build(),
+            capabilities,
             // The box every request is judged as, taken from the root this process opened.
             telemetry::EgressDecisionInterceptor::over(egress_policy),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),
-            &trust_certificate,
+            Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
         let proxy_port = proxy
@@ -693,6 +745,16 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
+            match record.contained_mcp.get(&server.name) {
+                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                    &contained.spec,
+                    &attachment,
+                )
+                .ok(),
+                None => Some(server.arguments().to_vec()),
+            }
+        })?;
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
         let broker_listener = BrokerHost::bind(root)?;
@@ -749,9 +811,13 @@ impl HostedBox {
             host_spawner,
             mcp_leaf_launcher,
             protected_sources,
+            std::sync::Arc::clone(approved.commands()),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -826,6 +892,9 @@ impl HostedBox {
 
 impl Drop for HostedBox {
     fn drop(&mut self) {
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if let Some(discovery) = &self.discovery {
             discovery.close();
         }
@@ -1105,6 +1174,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     async fn initialized_mcp_client(
         root: &BoxRoot,
         program: &str,
+        arguments: &[String],
     ) -> (
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
@@ -1118,6 +1188,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             crate::run::broker::protocol::Body::Open {
                 mode: crate::run::broker::protocol::Interpreter::Mcp {
                     server: program.to_string(),
+                    arguments: arguments.to_vec(),
                 },
             },
         )
@@ -1279,9 +1350,11 @@ wait"#;
             .as_ref()
             .expect("the discovery host exists")
             .registry();
-        let (mut leader_reader, mut leader_writer) = initialized_mcp_client(&root, "/bin/sh").await;
+        let arguments = record.mcp[0].arguments().to_vec();
+        let (mut leader_reader, mut leader_writer) =
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh").await;
+            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");

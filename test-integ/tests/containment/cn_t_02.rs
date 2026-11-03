@@ -20,7 +20,7 @@ det_case! {
     id:   "CN-T-02",
     desc: "A tool with read=[<workspace>] cannot read the workspace's .strands-box/policy.dw or box.toml, or <box_dir>/private/*, and lists no entry of <box_dir>/private; a sibling file under the same grant reads; the host files are unchanged",
     run: |b| {
-        let probe = b.compile_probe("fsprobe-t02", PROBE);
+        let probe = b.install_tool(&b.compile_probe("fsprobe-t02", PROBE));
         let quoted = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
         let workspace = b.workspace().to_path_buf();
         let readable = workspace.join("readable.txt");

@@ -4,6 +4,9 @@
 //! own variable, and a credential's `env://` locator asks it of a phantom the box mints. Both must
 //! refuse a name that makes a runtime load code, and both must refuse a name Core sets itself.
 
+use std::path::Path;
+
+use crate::EnvRefusal;
 use crate::error::{BoxError, Internal};
 
 /// Prefixes whose whole family loads code. See [`reserved_workload_environment`].
@@ -63,6 +66,11 @@ fn composed_over(name: &str) -> bool {
 /// `HOME`, `PATH`, and `TMPDIR` are the operator's: Core supplies a default for the first two and
 /// prepends the alias directory to `PATH`, and it reserves none of them.
 pub(crate) fn reserved_workload_environment(name: &str) -> bool {
+    reserved_kind(name).is_some()
+}
+
+/// Which kind of reserved name `name` is, or `None` when a workload may set it.
+fn reserved_kind(name: &str) -> Option<EnvRefusal> {
     // Loader hooks first, because they are a different kind of refusal: the names below are
     // box-owned routing, while these make a runtime load code before the workload's first line.
     if LOADER_HOOK_PREFIXES
@@ -70,11 +78,11 @@ pub(crate) fn reserved_workload_environment(name: &str) -> bool {
         .any(|prefix| name.starts_with(prefix))
         || LOADER_HOOKS.contains(&name)
     {
-        return true;
+        return Some(EnvRefusal::LoadsCode);
     }
 
     if name.starts_with(OTLP_EXPORTER_PREFIX) {
-        return true;
+        return Some(EnvRefusal::SetByBox);
     }
 
     matches!(
@@ -98,6 +106,34 @@ pub(crate) fn reserved_workload_environment(name: &str) -> bool {
             | "PWD"
             | "USER"
     )
+    .then_some(EnvRefusal::SetByBox)
+}
+
+/// Why a process table's `env` refuses the name `name`, whatever its value.
+pub(crate) fn refused_name(name: &str) -> Option<EnvRefusal> {
+    if !valid_environment_name(name) {
+        return Some(EnvRefusal::InvalidName);
+    }
+    reserved_kind(name)
+}
+
+/// Why a process table's `env` refuses `value` for the name `name`.
+pub(crate) fn refused_value(name: &str, value: &str) -> Option<EnvRefusal> {
+    (matches!(name, "HOME" | "TMPDIR") && !Path::new(value).is_absolute())
+        .then_some(EnvRefusal::NotAbsolute)
+}
+
+/// The reason a process table states for a refused `env` entry.
+pub(crate) fn refusal_reason(kind: EnvRefusal, name: &str, value: &str) -> String {
+    match kind {
+        EnvRefusal::InvalidName => {
+            format!("`env` name {name:?} is not a valid environment-variable name")
+        }
+        EnvRefusal::SetByBox | EnvRefusal::LoadsCode => {
+            format!("`env` name {name:?} is set by the box itself, so a table cannot claim it")
+        }
+        EnvRefusal::NotAbsolute => format!("`env.{name}` must be an absolute path: {value:?}"),
+    }
 }
 
 pub(crate) fn valid_environment_name(name: &str) -> bool {
