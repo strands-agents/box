@@ -1095,8 +1095,10 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
   - **The Linux launcher writes `uid_map` as `0 <uid> 1`**, which under real root is `0 0 1`, so the
-    workload's in-namespace uid 0 is host uid 0. Capabilities are still all dropped, so no flag or
-    mount authority survives — but nothing detects the collapse. Still open.
+    workload's in-namespace uid 0 is host uid 0. Startup clears every capability set. A nested user
+    namespace can restore privileges within that namespace. Seccomp still refuses `mount` and
+    `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
+    Nothing detects the identity collapse. Still open.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
