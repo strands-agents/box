@@ -141,13 +141,27 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     //
     // Reserved-octet residual: `%2F` (and other reserved escapes) are left ENCODED, RFC 3986
     // §2.2/§6.2.2 — a `%2F` denotes a literal slash *within* a segment, not a separator, so `..%2Fetc`
-    // stays one segment and does not pop. This is sound for servers that treat `%2F` as literal (and
-    // matches the egress request-path canonicalization, which never decodes `%2F`). A local stdio
-    // server that percent-decodes reserved delimiters before resolving would read `..%2Fetc` as
-    // `../etc` and traverse; on this (local) door that residual is backstopped ONLY when the server is
-    // contained — the leaf box then bounds the filesystem on the resolved path. An uncontained
-    // stdio server has no such backstop, so this stays a called-out residual at the string layer.
+    // stays one segment and does not pop. That is the right reading under `http`/`https`, where the
+    // origin server receives the escape and may hold a segment that spells one, and it matches the
+    // egress request-path canonicalization, which never decodes `%2F`.
     let canonical_path = normalize_path(&collapse_slashes(path))?;
+
+    // Under `file:` the same escape names nothing. No POSIX or Windows file name holds a `/`, so a
+    // segment spelling one resolves to no file, and a resolver that decodes it reads a path the box
+    // never judged: Python's `url2pathname` and the Rust `url` crate both turn `%2F` into a
+    // separator, so `/home/op%2F.env` reaches `/home/op/.env` and `..%2Fetc` traverses. Node refuses
+    // the URI outright. So the escape has no canonical form here and is refused, which also takes the
+    // traversal this door otherwise left to the leaf box's filesystem bound. `%5C` is NOT refused
+    // with it: all three decode it to a literal `\`, which a POSIX name may hold, so it names a real
+    // file of its own and the two ends agree on which.
+    if scheme == "file" && canonical_path.contains("%2F") {
+        return Err(
+            "a file URI whose path holds an encoded slash is refused: no file name holds a `/`, \
+                    so the escape names no file, and a resolver that decodes it opens a path the \
+                    box did not judge"
+                .to_string(),
+        );
+    }
 
     let mut out = String::with_capacity(uri.len());
     out.push_str(&scheme);
@@ -583,12 +597,27 @@ mod tests {
         assert_eq!(canonicalize_resource_uri(canonical), canonical);
     }
 
-    /// A reserved octet stays encoded — `%2F` must NOT become `/`, or segment structure would change.
+    /// A reserved octet stays encoded — `%2F` must NOT become `/`, or segment structure would
+    /// change. Under `http`/`https` the origin server receives the escape, so it stays; under
+    /// `file:` it names no file and is refused instead.
     #[test]
-    fn reserved_octets_stay_encoded() {
-        assert_eq!(canonicalize_resource_uri("file:///a%2Fb"), "file:///a%2Fb");
+    fn reserved_octets_stay_encoded_under_http_and_are_refused_under_file() {
+        assert_eq!(
+            canonicalize_resource_uri("https://h/a%2Fb"),
+            "https://h/a%2Fb"
+        );
         // hex is normalized to uppercase, but the octet stays encoded.
-        assert_eq!(canonicalize_resource_uri("file:///a%2fb"), "file:///a%2Fb");
+        assert_eq!(
+            canonicalize_resource_uri("https://h/a%2fb"),
+            "https://h/a%2Fb"
+        );
+        // Another reserved octet still stays encoded under both schemes.
+        assert_eq!(canonicalize_resource_uri("file:///a%3Fb"), "file:///a%3Fb");
+        for uri in ["file:///a%2Fb", "file:///a%2fb"] {
+            let refusal =
+                super::canonicalize_resource_uri(uri).expect_err("an encoded slash names no file");
+            assert!(refusal.contains("encoded slash"), "{uri}: {refusal}");
+        }
     }
 
     /// http/https paths canonicalize like the egress twin; the host lowercases with it.
@@ -854,13 +883,17 @@ mod tests {
             "file:///etc/passwd",
             "interior empty segments collapse, then dot-segments pop"
         );
-        // `%2F` is a literal slash within a segment (RFC-literal), NOT collapsed: `..%2Fetc` stays one
-        // segment and does not pop — the documented reserved-octet residual.
+        // `%2F` is a literal slash within a segment (RFC-literal), NOT collapsed: `..%2Fetc` stays
+        // one segment and does not pop. Under `file:` that segment names no file and two of three
+        // resolvers decode it into a separator and traverse, so it is refused rather than emitted.
         assert_eq!(
-            canonicalize_resource_uri("file:///tmp/%2e%2e%2Fetc/passwd"),
-            "file:///tmp/..%2Fetc/passwd",
+            canonicalize_resource_uri("https://h/tmp/%2e%2e%2Fetc/passwd"),
+            "https://h/tmp/..%2Fetc/passwd",
             "%2F stays encoded and does not enable a dot-segment pop"
         );
+        let refusal = super::canonicalize_resource_uri("file:///tmp/%2e%2e%2Fetc/passwd")
+            .expect_err("an encoded slash names no file");
+        assert!(refusal.contains("encoded slash"), "{refusal}");
     }
 
     #[test]
@@ -1001,9 +1034,10 @@ mod tests {
             "file:///etc/passwd"
         );
         assert_eq!(
-            canonicalize_resource_uri("file:///tmp/%2e%2e%2Fetc/passwd"),
-            "file:///tmp/..%2Fetc/passwd"
+            canonicalize_resource_uri("https://h/tmp/%2e%2e%2Fetc/passwd"),
+            "https://h/tmp/..%2Fetc/passwd"
         );
+        assert!(super::canonicalize_resource_uri("file:///tmp/%2e%2e%2Fetc/passwd").is_err());
     }
 
     /// The remote door lowercases the resource-URI host and strips a trailing dot (RFC 3986
@@ -1178,6 +1212,65 @@ mod tests {
         assert_eq!(
             canonicalize_resource_uri("https://[::1]/page"),
             "https://[::1]/page"
+        );
+    }
+
+    /// **An encoded slash in a `file:` path is refused, and the `http`/`https` twin still rides.**
+    ///
+    /// Two of the three reference resolvers decode `%2F` into a separator — Python's `url2pathname`
+    /// and the Rust `url` crate — so `/home/op%2F.env` reaches `/home/op/.env` and `..%2Fetc`
+    /// traverses. Node refuses the URI. No POSIX or Windows file name holds a `/`, so the escape
+    /// names no file under `file:` and has no canonical form here.
+    #[test]
+    fn an_encoded_slash_in_a_file_path_is_refused() {
+        for uri in [
+            "file:///home/op%2F.env",
+            "file:///home/op%2f.env",
+            "file:///home%2Fop/.env",
+            "file://notes/home/op%2F.env",
+            "file://localhost/home/op%2F.env",
+            "file:/home/op%2F.env",
+            "FILE:///home/op%2F.env",
+            // The traversal the escape otherwise carries past a dot-segment pop.
+            "file:///tmp/%2e%2e%2Fetc/passwd",
+            "file:///tmp/..%2Fetc/passwd",
+            // An escape assembled from a decoded `%2e` pair still ends up as `%2F` and is caught.
+            "file:///a%2Fb%2Fc",
+        ] {
+            let refusal =
+                super::canonicalize_resource_uri(uri).expect_err("an encoded slash names no file");
+            assert!(refusal.contains("encoded slash"), "{uri}: {refusal}");
+        }
+
+        // The `http`/`https` twin keeps the escape, because the origin server receives it and may
+        // hold a segment that spells one. Refusing it there would be an over-fold.
+        assert_eq!(
+            canonicalize_resource_uri("https://notes/home/op%2F.env"),
+            "https://notes/home/op%2F.env"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("http://notes/a%2fb"),
+            "http://notes/a%2Fb"
+        );
+
+        // `%5C` is NOT refused with it: all three resolvers decode it to a literal `\`, which a
+        // POSIX name may hold, so it names a file of its own and both ends agree on which.
+        assert_eq!(
+            canonicalize_resource_uri("file:///home/op%5C.env"),
+            "file:///home/op%5C.env"
+        );
+        // Nor is any other reserved escape that names a legal file-name character.
+        assert_eq!(canonicalize_resource_uri("file:///a%3Fb"), "file:///a%3Fb");
+        assert_eq!(canonicalize_resource_uri("file:///a%23b"), "file:///a%23b");
+        // A literal `%` followed by `2F` text is `%252F`, which holds no encoded slash.
+        assert_eq!(
+            canonicalize_resource_uri("file:///a%252Fb"),
+            "file:///a%252Fb"
+        );
+        // An escape of an unreserved octet still decodes, so a path with no `%2F` still folds.
+        assert_eq!(
+            canonicalize_resource_uri("file:///%68ome/op/.env"),
+            "file:///home/op/.env"
         );
     }
 

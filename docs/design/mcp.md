@@ -117,7 +117,9 @@ crate's `to_file_path` open an empty host or `localhost` and refuse every other 
 built on `urlsplit` a `forbid` naming `file:///home/op/.env` is dodged by **any** host, not only by
 a respelling of a local one.
 
-Until that is settled, a **`forbid`** can cover it with `uri like "file://*/home/op/.env"`. Read
+Until that is settled, a **`forbid`** can cover the host spellings with
+`uri like "file://*/home/op/.env"`. It does not have to carry an encoded slash, which is refused at
+the door. Read
 that as a suffix match and not as "this path at any authority": `*` matches a `/` too, so the same
 pattern refuses `file:///srv/backup/home/op/.env` and any other path ending in those characters. In
 a `forbid` that refuses more than you named, which is the safe direction.
@@ -160,6 +162,16 @@ ignores anything after a `?`. So the box cannot say which resource such a URI as
 **refuses the request** rather than give it a canonical form the resolver would not agree with. That
 keeps a rule on `file:///home/op/.env` holding for `file:///home/op/.env?x`, which otherwise reads
 the same file under a string no rule matches.
+
+**An encoded slash in a `file:` path is refused.** No POSIX or Windows file name holds a `/`, so a
+segment that spells one with `%2F` names no file. A resolver that decodes the escape reads a
+different path: Python's `url2pathname` and the Rust `url` crate both turn it into a separator, so
+`file:///home/op%2F.env` opens `/home/op/.env`, and `file:///tmp/%2e%2e%2Fetc/passwd` traverses to
+`/tmp/../etc/passwd`. Node refuses the URI outright. So the box refuses it too, rather than emit a
+form a resolver reads as something else. **The `http`/`https` twin keeps the escape**, because the
+origin server receives it and a segment there may legitimately spell one. An encoded backslash is
+not refused with it: all three resolvers decode `%5C` to a literal `\`, which a POSIX name may
+hold, so it names a file of its own and both ends agree on which.
 
 **A space, a control character, or a backslash is refused**, anywhere in a URI under these three
 schemes. RFC 3986 allows none of them, and a URL parser gives each one a meaning of its own — so a

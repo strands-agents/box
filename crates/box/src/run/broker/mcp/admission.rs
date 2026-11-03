@@ -590,6 +590,20 @@ mod tests {
                 "the recommended pattern must reach every authority: {spelling}"
             );
         }
+        // An encoded slash reached the guarded file past both the exact and the suffix forbid,
+        // because two of three resolvers decode it into a separator. It is refused at the door now,
+        // so the pattern no longer has to carry it.
+        for encoded_slash in [
+            "file:///home/op%2F.env",
+            "file:///home%2Fop/.env",
+            "file://notes/home/op%2f.env",
+            "file:///srv/x/home/op%2F.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(encoded_slash)).is_err(),
+                "an encoded slash must not reach the file: {encoded_slash}"
+            );
+        }
         // `*` crosses a `/`, so a deeper path ending in the same characters is refused too. That
         // is the over-reach the page warns about, and it is the safe direction in a `forbid`.
         for deeper in [
