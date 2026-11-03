@@ -75,7 +75,13 @@ options.force = { flag = ["-f", "--force"], adds = ["force_push"] }
 
 Box Core doesn't read a grammar from a file by path. The reason is that the Box CLI compiles a profile and its tool packs into one finished `box.toml` plus `policy.dw`, and that output must run unchanged under Box Core with no other file. 
 
-The tool grammar's `program` key names the program its shell grammar covers. At startup, Box binds the grammar to the resolved path of the `[tool]` it sits on, and at runtime it matches each command by that exact path. The `[tool]` table is the one users already write so the agent can run git. Because the grammar sits on its own `[tool]`, the refusal for a grammar that matches no `[tool]` goes away by construction, and so do the refusals that loading a file by path would need: a missing file, a file inside `box_dir`, and a file that isn't a regular file. Box still refuses a grammar over a size limit. It also refuses two grammars that name the same program. The feature will sit behind `[experimental-features] tool-grammars`.
+The tool grammar's `program` key names the program its shell grammar covers, and it must match the name the `[tool]` it sits on is called by. Box refuses to start when they disagree, for example `[tool.gh] command = ["gh"]` with `program = "git"`, because that grammar could never read the tool's commands. The grammar's `name` is still required: it is the policy namespace (`Tool::git::`), it must be an identifier, and it is independent of the `[tool]` label, which can contain a `-`.
+
+The grammar is defined once, but it governs every `[tool]` that runs its `program`, not only the one it sits on. At startup, Box binds the grammar to the resolved path of each of those tables, and at runtime it matches each command by that exact path. So with `[tool.git] command = ["/usr/bin/git"]` and `[tool.brew_git] command = ["/opt/homebrew/bin/git"]`, a grammar on `[tool.git]` also covers Homebrew's git, and `git push -f` through either binary is the same `Tool::git::Action::"push"`. The `[tool]` table is the one users already write so the agent can run git.
+
+Inlining also removes the refusals that loading a file by path would need: a missing file, a file inside `box_dir`, and a file that isn't a regular file. Box still refuses a grammar over a size limit, and two grammars that name the same program. The feature will sit behind `[experimental-features] tool-grammars`.
+
+The `grammar` table is a sixth field on `[tool.<name>]`, which is a frozen surface. Adding it needs explicit approval, and the PR that adds it updates `docs/user/config.md`, `docs/user/shell.md`, `crates/box/README.md`, and the frozen-field list in `AGENTS.md` and `crates/box/AGENTS.md` in the same commit.
 
 ## 6. Who writes tool grammars? 
 
