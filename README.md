@@ -226,7 +226,7 @@ credential-daemon fixture remain explicit in the report. Deterministic integrati
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
 
-The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
 
 Common tasks run through [`just`](https://github.com/casey/just):
@@ -249,7 +249,7 @@ the `test-support` feature.
 | [`docs/user/`](docs/user) | How to install Box and run a box. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
 
-See [AGENTS.md](AGENTS.md) for the repository rules and the current state.
+See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 
