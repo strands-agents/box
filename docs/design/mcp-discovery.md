@@ -194,12 +194,12 @@ enforce from that moment. Two things narrow which servers reach that point.
 
 The first is whether the reason it didn't stage repeats. A policy refusal does: the policy that
 refused the `tools/list`, or refused the schema, is the policy still in force, so the next attempt
-goes the same way, and a spent discovery budget is spent for the run. Only a capture failure — no
-reply in time, or a page Box couldn't read — can be followed by a list that succeeds, and how that
-list reaches Box depends on the transport. On a stdio server the connection whose list failed closes,
-and `admit_open` refuses a new `Open` for that server, so the list has to come on another connection
-that was already open when the first one failed. On an http server no state guard stands in its way,
-so any later `tools/list` delivers it, on any session.
+goes the same way, and a spent discovery budget is spent for the run. That leaves a capture failure —
+no reply in time, or a page Box couldn't read — and only an http server recovers from one. On an http
+server no state guard stands in the way, so any later `tools/list` delivers the list, on any session.
+On a stdio server no later list can arrive at all: the connection whose list failed closes, the
+failure wakes every other connection open to that server and `admit_open` then stops each one, and a
+new `Open` is refused. Letting a stdio server recover would be a change to the broker.
 
 The second is how many servers are waiting. A late list is validated as a whole policy, so a list
 from one waiting server still leaves another's per-tool rules unvalidated. The policy doesn't

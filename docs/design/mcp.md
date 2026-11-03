@@ -243,11 +243,11 @@ can get there depends on why it didn't stage:
   its `tools/list` is the policy still in force, so it refuses the next attempt the same way. A
   refused schema and a spent discovery budget repeat for the same reason, and each keeps its refusal
   for the run.
-- **When the cause doesn't repeat, it can** — no reply in time, or a page Box couldn't read. How a
-  later list reaches Box depends on the transport. On a stdio server, the connection whose list
-  failed closes and Box refuses a new one for that server, so only another connection that was
-  already open when the list failed can carry it. On an http server, nothing checks the failed state,
-  so any later `tools/list` carries it, on any session.
+- **When the cause doesn't repeat, an http server can and a stdio server can't** — the causes are no
+  reply in time, and a page Box couldn't read. On an http server nothing checks the failed state, so
+  any later `tools/list` carries the list, on any session. On a stdio server no later list can
+  arrive: the connection whose list failed closes, Box stops every other connection open to that
+  server, and it refuses a new one. So recovery is http-only.
 
 [How discovery finishes](./mcp-discovery.md#how-discovery-finishes) covers the limit when two
 servers are waiting on a rule at the same time.
