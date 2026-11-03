@@ -110,12 +110,16 @@ Other alternatives like (1) authorizing only the backend (2) authorizing on orig
 
 ### KD 4: Address-Level Check of the Backend Connection
 **Background:** Box decides `net:connect` two times for a direct request. (1) It decides on the host first, before DNS. If this denies, Box does not resolve the host. (2) It decides on each resolved address next, after DNS and before it opens the socket. The address check does two jobs. It pins the result, so Box dials only the address that it
-decided. It is also the only check for metadata addresses and private addresses, because the rule reads `context.input.ip`, and the IP is known only at this step.
+decided. It is also the only check for metadata addresses and private addresses, because the rule reads `context.input.ip4` or `context.input.ip6`, and the address is known only at this step.
 
 **Decision:** For a destination that has a backend, Box runs the host check on the original destination, and Box skips the IP check i.e. Box does not run `net:connect` on the backend IP address. Neither does Box try to connect to the original destination.
+
+Box still applies a deny-only floor to the backend address. Box refuses a pinned backend address in the link-local range or the metadata range (`169.254.0.0/16`, `fd00:ec2::254`, `fe80::/10`). No gateway runs at these addresses. A loopback gateway or a private sidecar gateway still works.
 
 **Rationale:** The connection to the backend is a Box action, not an agent action. KD 3 states that policy does not apply on Box actions. So the backend address needs no permission, and the address check does not apply to it. The host check still covers the agent's intent, because it runs on the original destination.
 
 This decision keeps the premise "Validate once, then act on the identity you approved". In this case, we validate the agent's intent to connect to a destination, and then Box deterministically re-routes the call to a pre-approved destination, because it's defined in `box.toml` and not derived from the agent's request. The redirect is not a second identity that needs validation.
 
-**Residual risk:** No rule fires on the backend address. If the backend resolves to a metadata address or a private address, no `forbid` stops the connection. This is okay because (1) the backend is trusted by the Box operator (2) The backend cannot be overridden by the agent/workload.
+The deny-only floor adds no authorizer. It only refuses, and it never permits. It sits beneath policy, which keeps the premise "Deny-only floors stay beneath policy". So the floor does not conflict with the decision that no policy authorizes the backend connection.
+
+**Residual risk:** The operator's own `net:connect` rules do not apply to the backend address. This includes the metadata recipe in `docs/user/policy.md`. Only the built-in floor applies. The floor refuses the metadata range and the link-local range, so a re-routed request cannot reach the instance metadata service, even though the agent controls the request. A backend that resolves to another private address is still allowed, to support a loopback or sidecar gateway. This is okay because the backend host comes only from `box.toml`, and the agent and the workload cannot change it.
