@@ -836,6 +836,13 @@ mod tests {
             "file:///home/op/.env?",
             "file:///home/op/.env#x",
             "file:///home/op/.env?#",
+            // A query carries no part of a `file:` resource, so one more character after the `?`
+            // is not a second resource either. These reach the forbid's resource by refusal.
+            "file:///home/op/.env?x",
+            "file:///home/op/.env?a=1",
+            "file:///home/op/.env?a=1#",
+            "file:///home/op/.env?a=#b",
+            "file:/home/op/.env?x",
         ] {
             assert!(
                 call(&guards_env, &read(spelling)).is_err(),
@@ -846,6 +853,13 @@ mod tests {
             call(&guards_env, &read("file:///home/op/.env.example")).expect("permitted"),
             Some("file:///home/op/.env.example".to_string()),
             "a sibling the forbid does not name still reads"
+        );
+        // Over-folding control: an `http` query IS part of the request, so it still names its own
+        // resource and a rule that does not name it still admits it.
+        assert_eq!(
+            call(&guards_env, &read("https://notes/page?a=1")).expect("permitted"),
+            Some("https://notes/page?a=1".to_string()),
+            "an http query is part of the request and still rides through"
         );
     }
 

@@ -52,11 +52,19 @@ spellings of one resource can't get two decisions. The scheme and the host are l
 trailing dot on the host is dropped, percent-escapes of unreserved characters are decoded, `.` and
 `..` and empty path segments are resolved, a default port is dropped, and `file:/x` and
 `file://localhost/x` both become `file:///x`. A fragment is dropped, because a fragment never
-reaches the server. An empty query is dropped; a query with content is kept as written, because a
-credential can live there. A URI under any other scheme is left exactly as the workload wrote it.
-The server is then sent the canonical form, so it reads the resource the rule decided on. Write
-each `uri` literal in that form: a rule compares text exactly, so a literal in any other spelling
-never matches.
+reaches the server. An empty query is dropped. A URI under any other scheme is left exactly as the
+workload wrote it. The server is then sent the canonical form, so it reads the resource the rule
+decided on. Write each `uri` literal in that form: a rule compares text exactly, so a literal in
+any other spelling never matches.
+
+**A query is treated by scheme, because only one scheme sends it anywhere.** Under `http` or
+`https` the query is part of the request the origin server receives, so it is part of what the URI
+names and is kept as written — a credential can live there. A `file:` URI has no query at all: RFC
+8089 spells `file-URI = file-scheme ":" file-hier-part`, and a resolver opens the hier-part and
+ignores anything after a `?`. Such a URI names no resource the box can name, so the box **refuses
+the request** rather than give it a canonical form that the resolver would not agree with. That
+keeps a rule on `file:///home/op/.env` holding for `file:///home/op/.env?x`, which otherwise reads
+the same file under a string no rule matches.
 
 **A per-tool action is generated** for each tool a server lists. It's decided only for a
 `tools/call`, after `mcp:call` allows the call. A rule on it can refuse the whole tool, or only the

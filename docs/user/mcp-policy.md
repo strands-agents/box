@@ -159,6 +159,7 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
+| `a file URI that carries a query is refused` | The agent asked for a `file:` resource with a `?` in it. A `file:` URI has no query, so the box cannot say which file it names. The agent must ask for the path alone. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
 When a rule refuses `tools/list` for a server that a per-tool rule names, the box starts and that

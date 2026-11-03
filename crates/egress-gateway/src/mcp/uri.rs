@@ -30,13 +30,27 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
 
     // Split off `#fragment`, which drops: RFC 3986 §3.5 separates it before dereference, so it
     // never reaches the server and names no resource of its own. Then split off `?query`, where an
-    // empty query is no query, so a bare `?` drops with it. A non-empty query stays verbatim,
-    // because a literal or credential may live there — mirrors the egress query handling.
+    // empty query is no query, so a bare `?` drops with it. Under `http`/`https` a non-empty query
+    // is part of the request RFC 3986 §3.4 sends to the origin server, so it stays verbatim —
+    // a literal or a credential may live there, which mirrors the egress query handling.
     let before_fragment = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (hierarchical, query) = match before_fragment.split_once('?') {
         Some((hierarchical, query)) => (hierarchical, (!query.is_empty()).then_some(query)),
         None => (before_fragment, None),
     };
+
+    // RFC 8089 §2 gives a `file:` URI no query — `file-URI = file-scheme ":" file-hier-part` — so a
+    // query names no part of the resource, and a resolver opens the hier-part alone. Such a URI is
+    // outside the grammar this function canonicalizes and has no canonical form, so it is refused
+    // rather than guessed. An empty query folded away above, so a URI inside the grammar never
+    // reaches this.
+    if scheme == "file" && query.is_some() {
+        return Err(
+            "a file URI that carries a query is refused: RFC 8089 gives a file URI no \
+                    query, so the box cannot say which resource it names"
+                .to_string(),
+        );
+    }
 
     // Split authority from path. `//authority/path` carries an authority; a leading `/` with no `//`
     // is the no-authority form RFC 8089 treats as an empty (local) authority for `file:`.
@@ -498,9 +512,89 @@ mod tests {
     #[test]
     fn a_non_empty_query_is_preserved() {
         assert_eq!(
-            canonicalize_resource_uri("file:///a/../b?x=%2e"),
-            "file:///b?x=%2e"
+            canonicalize_resource_uri("https://h/a/../b?x=%2e"),
+            "https://h/b?x=%2e"
         );
+    }
+
+    /// RFC 8089 gives a `file:` URI no query, so one that carries a query is refused on every
+    /// branch rather than given a canonical form the resolver would not agree with.
+    #[test]
+    fn a_file_uri_that_carries_a_query_is_refused() {
+        for uri in [
+            "file:///home/op/.env?x",
+            "file:///home/op/.env?a=1",
+            "file:///home/op/.env?a=1#f",
+            "file:///home/op/.env?a=#b",
+            "file:///home/op/.env??y",
+            "file:///home/op/.env?=",
+            "file:/home/op/.env?x",
+            "file://localhost/home/op/.env?x",
+            "file://example.com/home/op/.env?x",
+            "FILE:///home/op/.env?x",
+            "file:etc/passwd?a=1",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("a file URI with a query has no canonical form");
+            assert!(
+                refusal.contains("RFC 8089 gives a file URI no query"),
+                "{uri}: {refusal}"
+            );
+        }
+        // The frame rewrite reports no rewrite for a refused URI, so the decision path refuses it
+        // and nothing is forwarded — the same pairing an unparsable path already gets.
+        let frame = br#"{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"file:///home/op/.env?x"}}"#;
+        assert!(crate::mcp::McpTarget::of_http_request(frame).is_err());
+        assert!(crate::mcp::McpTarget::of_stdio_request(frame).is_err());
+        assert_eq!(canonicalize_frame_uri(frame), None);
+    }
+
+    /// The refusal is the only thing a `file:` query reaches: no generated spelling that carries
+    /// one is given a canonical form, and every `http`/`https` twin of it still canonicalizes.
+    #[test]
+    fn no_generated_file_uri_with_a_query_gets_a_canonical_form() {
+        let mut refused = 0usize;
+        let mut kept = 0usize;
+        for prefix in ["file://", "file:///", "file:/", "file:", "FILE:"] {
+            for spelling in generated_spellings() {
+                let uri = format!("{prefix}{spelling}");
+                // The query is what survives the fragment split, and an empty one folds away.
+                let before_fragment = uri
+                    .split_once('#')
+                    .map_or(uri.as_str(), |(before, _)| before);
+                let carries_query = before_fragment
+                    .split_once('?')
+                    .is_some_and(|(_, query)| !query.is_empty());
+                if !carries_query {
+                    continue;
+                }
+                refused += 1;
+                let refusal = super::canonicalize_resource_uri(&uri)
+                    .expect_err("a file URI with a query has no canonical form");
+                assert!(
+                    refusal.contains("RFC 8089 gives a file URI no query"),
+                    "{uri}: {refusal}"
+                );
+                // Over-folding control: the same query under `https` is part of the request the
+                // origin server receives, so it must still produce a canonical form.
+                let twin = format!(
+                    "https://h/{}",
+                    before_fragment.trim_start_matches(|ch| ch != '?')
+                );
+                if let Ok(canonical) = super::canonicalize_resource_uri(&twin) {
+                    assert!(
+                        canonical.contains('?'),
+                        "{twin} lost its query: {canonical}"
+                    );
+                    kept += 1;
+                }
+            }
+        }
+        assert!(
+            refused > 1_000,
+            "the generator reached only {refused} queries"
+        );
+        assert!(kept > 1_000, "the https control ran only {kept} times");
     }
 
     /// A fragment and an empty query give a resource no second identity.
@@ -541,9 +635,9 @@ mod tests {
             );
         }
         assert_eq!(
-            canonicalize_resource_uri("file:etc/passwd?a=1"),
-            "file:etc/passwd?a=1",
-            "a non-empty query is still not the path, and still rides through"
+            canonicalize_resource_uri("http:etc/passwd?a=1"),
+            "http:etc/passwd?a=1",
+            "an http query is part of the request, so it is not the path and rides through"
         );
     }
 
