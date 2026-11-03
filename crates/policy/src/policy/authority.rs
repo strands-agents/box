@@ -71,19 +71,19 @@ impl Authority {
         mcp_schemas: &[String],
         history: &Path,
     ) -> Result<Self, PolicyError> {
-        Self::open_complete_with_packs(sources, &[], mcp_schemas, history)
+        Self::open_complete_with_grammars(sources, &[], mcp_schemas, history)
     }
 
-    /// Opens a ready authority with a complete policy set, tool pack schemas, and MCP schemas.
-    pub(super) fn open_complete_with_packs(
+    /// Opens a ready authority with a complete policy set, tool grammar schemas, and MCP schemas.
+    pub(super) fn open_complete_with_grammars(
         sources: Vec<Policy>,
-        pack_schemas: &[String],
+        grammar_schemas: &[String],
         mcp_schemas: &[String],
         history: &Path,
     ) -> Result<Self, PolicyError> {
         let (engine, warnings) = DogwoodEngine::open_with_schemas(
             &authored(&sources),
-            pack_schemas,
+            grammar_schemas,
             mcp_schemas,
             history,
             &Operator::unanchored(),
@@ -444,7 +444,10 @@ impl Authority {
     /// Records the `::response` of one completed action whose `input` is a JSON record.
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter records a pack response")
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
     )]
     pub(super) fn record_response(
         &self,
@@ -1014,30 +1017,30 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
     }
 
     #[test]
-    fn a_pack_action_decides_the_same_while_mcp_discovery_holds_or_degrades_a_tool() {
-        let pack = crate::pack::Pack::load(std::path::Path::new(concat!(
+    fn a_grammar_action_decides_the_same_while_mcp_discovery_holds_or_degrades_a_tool() {
+        let grammar = crate::grammar::Grammar::load(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/packs/valid/git.pack.toml"
+            "/tests/grammars/valid/git.grammar.toml"
         )))
-        .expect("the git pack loads");
+        .expect("the git grammar loads");
         let history = tempfile::tempdir().expect("history directory");
-        let authority = Authority::open_complete_with_packs(
+        let authority = Authority::open_complete_with_grammars(
             source(
                 r#"permit (principal, action == Tool::git::Action::"push", resource);
                 forbid (principal, action == Tool::git::Action::"push", resource)
                 when { context.input.force };"#,
             ),
-            &[pack.schema()],
+            &[grammar.schema()],
             &[],
             &history.path().join("dogwood.redb"),
         )
         .expect("authority opens");
         let decide = |words: &[&str]| {
             let args: Vec<String> = words.iter().map(ToString::to_string).collect();
-            let request = crate::pack::PackInvocation::new(
-                &pack,
+            let request = crate::grammar::GrammarInvocation::new(
+                &grammar,
                 "git",
-                &crate::pack::ProgramFile::fixed("/usr/bin/git", 1),
+                &crate::grammar::ProgramFile::fixed("/usr/bin/git", 1),
                 None,
                 "/work",
                 &args,
@@ -1047,7 +1050,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             authority.decide(
                 &governed(),
                 &Principal::agent(),
-                ActionRequest::Pack(&request),
+                ActionRequest::Grammar(&request),
             )
         };
         let push = ["push", "origin", "main"];

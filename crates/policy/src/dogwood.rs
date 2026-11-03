@@ -55,7 +55,7 @@ impl ActionIdentity {
             Self::McpTool { namespace, tool } => {
                 Event::builder_for(&[namespace, "Action"], tool, kind)
             }
-            Self::PackAction { namespace, action } => {
+            Self::GrammarAction { namespace, action } => {
                 let mut path: Vec<&str> = namespace.split("::").collect();
                 path.push("Action");
                 Event::builder_for(&path, action, kind)
@@ -187,19 +187,19 @@ impl DogwoodEngine {
         Self::open_with_schemas(source, &[], mcp_schemas, history, operator)
     }
 
-    /// Open durable history and install sources against canonical, tool pack, and MCP schemas.
+    /// Open durable history and install sources against canonical, tool grammar, and MCP schemas.
     pub(crate) fn open_with_schemas(
         source: &str,
-        pack_schemas: &[String],
+        grammar_schemas: &[String],
         mcp_schemas: &[String],
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
-        let effective_schema = composed_action_schema(pack_schemas, mcp_schemas)?;
+        let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
         let (canonical_policies, effective_schema, warnings) =
             check_against(source, effective_schema, operator, true, &[])
                 .map_err(Refused::into_error)?;
-        let fragments: Vec<String> = pack_schemas.iter().chain(mcp_schemas).cloned().collect();
+        let fragments: Vec<String> = grammar_schemas.iter().chain(mcp_schemas).cloned().collect();
         let mut engine = open_history(history, durable_config()).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
@@ -424,7 +424,7 @@ impl DogwoodEngine {
                 crate::schema::to_cedar_request(principal, request, &identity, &self.request_schema)
                     .map(|_| ())
             }
-            ActionRequest::Pack(request) => crate::schema::to_cedar_input_request(
+            ActionRequest::Grammar(request) => crate::schema::to_cedar_input_request(
                 principal,
                 &identity,
                 request.input(),
@@ -440,7 +440,7 @@ impl DogwoodEngine {
             ActionRequest::Request(request) => {
                 request_event(governed, principal, request, &identity)
             }
-            ActionRequest::Pack(request) => with_input(
+            ActionRequest::Grammar(request) => with_input(
                 identity.event_builder(KIND_REQUEST),
                 entity_json_value(request.input()),
             ),
@@ -471,7 +471,10 @@ impl DogwoodEngine {
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter records a pack response")
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
     )]
     pub(crate) fn observe_response(
         &self,
@@ -1800,25 +1803,25 @@ when temporal {
 
     #[test]
     fn an_action_input_that_its_schema_does_not_type_is_refused_as_a_fault() {
-        let pack = crate::pack::Pack::load(std::path::Path::new(concat!(
+        let grammar = crate::grammar::Grammar::load(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/packs/valid/git.pack.toml"
+            "/tests/grammars/valid/git.grammar.toml"
         )))
-        .expect("the git pack loads");
+        .expect("the git grammar loads");
         let history = tempfile::tempdir().expect("history directory");
         let (engine, _) = DogwoodEngine::open_with_schemas(
             "permit (principal, action, resource);",
-            &[pack.schema()],
+            &[grammar.schema()],
             &[],
             &history.path().join("dogwood.redb"),
             &Operator::unanchored(),
         )
         .expect("policy loads");
         let args = ["push".to_string(), "origin".to_string()];
-        let invocation = crate::pack::PackInvocation::new(
-            &pack,
+        let invocation = crate::grammar::GrammarInvocation::new(
+            &grammar,
             "git",
-            &crate::pack::ProgramFile::fixed("/usr/bin/git", 1),
+            &crate::grammar::ProgramFile::fixed("/usr/bin/git", 1),
             None,
             "/work",
             &args,
@@ -1832,12 +1835,12 @@ when temporal {
         let typed = engine.decide(
             &governed(),
             &Principal::agent(),
-            ActionRequest::Pack(&typed),
+            ActionRequest::Grammar(&typed),
         );
         let mistyped = engine.decide(
             &governed(),
             &Principal::agent(),
-            ActionRequest::Pack(&mistyped),
+            ActionRequest::Grammar(&mistyped),
         );
 
         assert!(typed.is_allow(), "the typed input is allowed: {typed:?}");
