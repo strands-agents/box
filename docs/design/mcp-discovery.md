@@ -195,10 +195,11 @@ enforce from that moment. Two things narrow which servers reach that point.
 The first is whether the reason it didn't stage repeats. A policy refusal does: the policy that
 refused the `tools/list`, or refused the schema, is the policy still in force, so the next attempt
 goes the same way, and a spent discovery budget is spent for the run. Only a capture failure — no
-reply in time, or a page Box couldn't read — can be followed by a list that succeeds. Box refuses a
-new `Open` for a server that failed that way, so the list has to come on the connection that is
-already open, from a repeat list or a `notifications/tools/list_changed` on it. A reconnect or a
-second window doesn't deliver it.
+reply in time, or a page Box couldn't read — can be followed by a list that succeeds, and how that
+list reaches Box depends on the transport. On a stdio server the connection whose list failed closes,
+and `admit_open` refuses a new `Open` for that server, so the list has to come on another connection
+that was already open when the first one failed. On an http server no state guard stands in its way,
+so any later `tools/list` delivers it, on any session.
 
 The second is how many servers are waiting. A late list is validated as a whole policy, so a list
 from one waiting server still leaves another's per-tool rules unvalidated. The policy doesn't
