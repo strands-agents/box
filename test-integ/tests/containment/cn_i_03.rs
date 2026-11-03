@@ -27,6 +27,13 @@ time.sleep(0.5)
 print("child_pid_nonzero", pid > 0)
 t("signal_own_child", lambda: os.kill(pid, 0))
 t("priority_own_child", lambda: os.setpriority(os.PRIO_PROCESS, pid, 5))
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+def pidinfo(target):
+    buffer = ctypes.create_string_buffer(512)
+    return "allowed" if libc.proc_pidinfo(target, 3, 0, buffer, 512) > 0 else "denied"
+t("pidinfo_own_child", lambda: pidinfo(pid))
+t("pidinfo_pid1", lambda: pidinfo(1))
 try:
     os.kill(pid, signal.SIGKILL)
 except OSError as e:
@@ -43,6 +50,9 @@ except OSError as e:
         r.assert_errno("signal_own_child", 1);
         // Changing that child's priority is refused too.
         r.assert_errno("priority_own_child", 1);
+        // Reading the child's process information is allowed, and a foreign process stays hidden.
+        r.assert_ok("pidinfo_own_child", "allowed");
+        r.assert_ok("pidinfo_pid1", "denied");
     }
 }
 
