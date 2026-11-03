@@ -851,6 +851,10 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   `mmap(PROT_EXEC)` from `execve`; a dependency beneath a planned exec-capable tree is not bound
   again. `a_read_root_on_a_loader_directory_is_bound_executable_and_read_only` and
   `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
+  If combined grants make that root writable, require a covering execution root or the leaf's
+  broad exec. Otherwise, refuse it.
+  `combined_loader_grants_require_execution_in_either_order_and_spelling` and
+  `a_writable_ancestor_cannot_make_a_loader_directory_executable` pin that refusal.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
   Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
   refuses reads with `EACCES`. Its owner changes for a non-root launcher; root ownership can
