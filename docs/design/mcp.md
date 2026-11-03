@@ -236,9 +236,10 @@ The engine is then `Ready` for the rest of the run, and every rule that can load
 
 A tool list can still arrive after startup is complete, because a listing can fail for a reason that
 doesn't repeat. If one does, and it completes the whole policy, the server's per-tool rules load and
-enforce from that moment and it is no longer degraded. The startup warning on stderr was true when
-it was printed, and nothing prints to say it no longer is, so read it as a record of startup rather
-than the state of the run.
+enforce from that moment and it is no longer degraded. This recovers one degraded server, and not
+two: [how discovery finishes](./mcp-discovery.md#how-discovery-finishes) states why. The startup
+warning on stderr was true when it was printed, and nothing prints to say it no longer is, so read
+it as a record of startup rather than the state of the run.
 
 ## How Box decides a tool call
 
