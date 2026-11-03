@@ -1,5 +1,7 @@
 //! RFC 3986 canonicalization of an MCP resource URI.
 
+use std::net::Ipv6Addr;
+
 use fluent_uri::{ParseErrorKind, UriRef};
 use serde_json::Value;
 
@@ -198,9 +200,17 @@ fn is_local_file_authority(normalized_auth: &str) -> bool {
     if normalized_auth == "localhost" {
         return true;
     }
-    if normalized_auth.starts_with('[') && normalized_auth.ends_with(']') {
-        let inner = &normalized_auth[1..normalized_auth.len() - 1];
-        return inner == "::1" || inner.eq_ignore_ascii_case("0:0:0:0:0:0:0:1");
+    if let Some(inner) = normalized_auth
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        // Parse the literal rather than compare its text. One address has many spellings — `[::1]`,
+        // `[::0001]`, `[0::1]`, and `[0:0:0:0:0:0:0:1]` are the same address, and a URL parser folds
+        // every one to `[::1]`, so a text comparison left the rest naming this machine to a resolver
+        // while reaching a rule as a host of their own.
+        return inner.parse::<Ipv6Addr>().is_ok_and(|address| {
+            address.is_loopback() || address.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        });
     }
     is_loopback_v4(normalized_auth)
 }
@@ -549,6 +559,14 @@ mod tests {
             "file://127.0.0.1/etc/passwd",
             "file://127.0.0.2/etc/passwd",
             "file://[::1]/etc/passwd",
+            // One address, four spellings. A URL parser folds each to `[::1]`, so a text
+            // comparison left these three naming this machine to a resolver while reaching a rule
+            // as a host of their own. An IPv4-mapped loopback literal carries the v4 test with it.
+            "file://[::0001]/etc/passwd",
+            "file://[0::1]/etc/passwd",
+            "file://[0:0:0:0:0:0:0:1]/etc/passwd",
+            "file://[::ffff:127.0.0.1]/etc/passwd",
+            "file://[::FFFF:127.0.0.1]/etc/passwd",
         ] {
             assert_eq!(canonicalize_resource_uri(uri), canonical, "{uri}");
         }
@@ -1354,6 +1372,14 @@ mod tests {
             "file://127.0.0.1/etc/passwd",
             "file://127.0.0.2/etc/passwd",
             "file://[::1]/etc/passwd",
+            // One address, four spellings. A URL parser folds each to `[::1]`, so a text
+            // comparison left these three naming this machine to a resolver while reaching a rule
+            // as a host of their own. An IPv4-mapped loopback literal carries the v4 test with it.
+            "file://[::0001]/etc/passwd",
+            "file://[0::1]/etc/passwd",
+            "file://[0:0:0:0:0:0:0:1]/etc/passwd",
+            "file://[::ffff:127.0.0.1]/etc/passwd",
+            "file://[::FFFF:127.0.0.1]/etc/passwd",
         ] {
             assert_eq!(
                 canonicalize_resource_uri(uri),
@@ -1374,5 +1400,14 @@ mod tests {
             canonicalize_resource_uri("file://[::1]:99/etc/passwd"),
             "file://[::1]:99/etc/passwd"
         );
+        // A literal that is not loopback, and one that is not an address at all, must not collapse.
+        for uri in [
+            "file://[::2]/etc/passwd",
+            "file://[2001:db8::1]/etc/passwd",
+            "file://[::ffff:10.0.0.1]/etc/passwd",
+            "file://[v1.x]/etc/passwd",
+        ] {
+            assert_eq!(canonicalize_resource_uri(uri), uri, "{uri}");
+        }
     }
 }

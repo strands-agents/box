@@ -527,8 +527,25 @@ mod tests {
             );
         }
 
-        // Neither pattern reaches an empty userinfo, which both reference parsers drop.
-        assert!(call(&host_prefix, &read("https://@notes/page")).is_ok());
+        // Neither pattern reaches ANY userinfo, empty or not, because the canonical form spells the
+        // userinfo before the host. All three parsers read the host as `notes` and the path as
+        // `/page`, so each of these fetches the page the rule names and matches no rule.
+        for carries_userinfo in [
+            "https://@notes/page",
+            "https://user@notes/page",
+            "https://a@notes/page",
+            "https://user:pass@notes/page",
+            "https://user:@notes/page",
+        ] {
+            assert!(
+                call(&with_separator, &read(carries_userinfo)).is_ok(),
+                "a pattern holding the path separator reaches no userinfo: {carries_userinfo}"
+            );
+            assert!(
+                call(&host_prefix, &read(carries_userinfo)).is_ok(),
+                "a host-prefix pattern reaches no userinfo either: {carries_userinfo}"
+            );
+        }
     }
 
     const SEARCH: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
