@@ -29,14 +29,6 @@ enum Refusal {
         first: String,
         second: String,
     },
-    #[error(
-        "`{first}` and `{second}` both have `program = {program:?}`; keep one grammar for each program"
-    )]
-    ProgramTwice {
-        program: String,
-        first: String,
-        second: String,
-    },
 }
 
 impl ToolGrammar {
@@ -62,31 +54,23 @@ impl ToolGrammar {
     }
 }
 
-/// The tool grammars of one box, no two with one name or one program.
+/// The tool grammars of one box, no two with one name.
 #[derive(Debug, Clone, Default)]
 pub struct ToolGrammars(Vec<ToolGrammar>);
 
 impl ToolGrammars {
-    /// Hold `grammars`, or refuse two that share a name or a program.
+    /// Hold `grammars`, or refuse two that share a name.
     pub fn new(grammars: Vec<ToolGrammar>) -> Result<Self, ToolGrammarError> {
         for (index, first) in grammars.iter().enumerate() {
-            for second in &grammars[index + 1..] {
-                let refusal = if first.name() == second.name() {
-                    Refusal::NamedTwice {
-                        name: first.name().to_string(),
-                        first: first.table.clone(),
-                        second: second.table.clone(),
-                    }
-                } else if first.program() == second.program() {
-                    Refusal::ProgramTwice {
-                        program: first.program().to_string(),
-                        first: first.table.clone(),
-                        second: second.table.clone(),
-                    }
-                } else {
-                    continue;
-                };
-                return Err(ToolGrammarError(Box::new(refusal)));
+            if let Some(second) = grammars[index + 1..]
+                .iter()
+                .find(|second| second.name() == first.name())
+            {
+                return Err(ToolGrammarError(Box::new(Refusal::NamedTwice {
+                    name: first.name().to_string(),
+                    first: first.table.clone(),
+                    second: second.table.clone(),
+                })));
             }
         }
         Ok(Self(grammars))
@@ -121,18 +105,12 @@ mod tests {
     }
 
     #[test]
-    fn two_grammars_with_one_program_are_refused_with_both_tables() {
-        let error = ToolGrammars::new(vec![
+    fn two_grammars_with_one_program_and_distinct_names_install() {
+        ToolGrammars::new(vec![
             grammar("tool.git.grammar", "git", "git"),
             grammar("tool.brew_git.grammar", "brew_git", "git"),
         ])
-        .expect_err("the set is refused");
-
-        assert_eq!(
-            error.to_string(),
-            "`tool.git.grammar` and `tool.brew_git.grammar` both have `program = \"git\"`; keep \
-             one grammar for each program"
-        );
+        .expect("the set installs");
     }
 
     #[test]
