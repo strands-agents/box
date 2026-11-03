@@ -167,7 +167,7 @@ impl Authority {
                     proposal.classify(&[])?;
                     // Serve the schema-independent subset while typed schemas stage
                     // (`Discovering`), instead of denying every request. A per-tool rule whose server
-                    // never stages (its `tools/list` is denied) is not refused here;
+                    // has not staged (its `tools/list` is denied) is not refused here;
                     // `finish_mcp_discovery` degrades that one server instead.
                     let subset = proposal.ready_policy_set();
                     let (effective_schema, warnings) = validate_canonical_policy_set(
@@ -355,7 +355,7 @@ impl Authority {
     /// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
     ///
     /// Every door has drained, so a candidate still pending means its server's `tools/list` was
-    /// denied and its schema will never arrive. Rather than fatally refuse the whole box, the still
+    /// denied and its schema has not arrived. Rather than fatally refuse the whole box, the still
     /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
     /// schema-independent subset becomes the final `Ready` authority, and the degraded server
     /// namespaces are returned so the caller can warn. Only a genuine durable fault is an `Err`.
@@ -370,8 +370,8 @@ impl Authority {
         if live.readiness == Readiness::Ready {
             return Ok(Vec::new());
         }
-        // The still-pending typed rules cannot stage (their servers finished discovery denied), so
-        // their tools are permanently unenforceable. Hold them fail-closed and finish `Ready`.
+        // The still-pending typed rules have not staged (their servers finished discovery denied),
+        // so their tools are not enforceable. Hold them fail-closed and finish `Ready`.
         let degraded = proposal
             .as_ref()
             .map(pending_typed_tools)
@@ -396,8 +396,8 @@ impl Authority {
         let identity = &request.identity();
         match self.live.lock() {
             Ok(live) => {
-                // Fail-closed for a degraded tool: its schema will never stage, so its
-                // argument constraint can never be enforced. Deny outright — in any state — rather
+                // Fail-closed for a degraded tool: its schema has not staged, so its
+                // argument constraint is not enforceable. Deny outright — in any state — rather
                 // than let a hardcoded call ride the coarse `mcp:call` permit unconstrained.
                 if let ActionIdentity::McpTool { namespace, tool } = identity
                     && live

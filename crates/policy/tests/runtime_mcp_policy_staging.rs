@@ -323,9 +323,9 @@ when { context.input.path == "/workspace/secret" };
         &json!({"path": "/workspace/input"}),
     );
     assert!(
-        permitted.is_allow(),
-        "a path the forbid does not name must stay allowed, not refused by a stale mark: \
-         {permitted:?}"
+        matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
+        "a path the forbid does not name must stay allowed by the staged per-tool permit itself, \
+         not refused by a stale mark and not riding the coarse grant: {permitted:?}"
     );
 }
 
