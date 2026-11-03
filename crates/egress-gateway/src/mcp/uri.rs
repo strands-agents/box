@@ -127,15 +127,17 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     let mut out = String::with_capacity(uri.len());
     out.push_str(&scheme);
     out.push(':');
-    // Emit `//` only where an authority belongs: when one is present, or for `file:`, whose
-    // no-authority form (`file:/x`) is the empty local authority (RFC 8089) — so it canonicalizes to
-    // `file:///x`. http/https with NO authority (`http:/etc/passwd`) must stay path-only: fabricating
-    // `http:///etc/passwd` invents an empty authority and changes the URI's meaning.
+    // Emit `//` where an authority belongs: when one is present, or for `file:`, whose no-authority
+    // form (`file:/x`) is the empty local authority (RFC 8089), so it canonicalizes to `file:///x`.
+    // An `http`/`https` URI reaches here only with an authority, because the refusal above takes the
+    // absent and the empty cases.
     let has_authority = match normalized_authority.as_deref() {
         // The local-authority case is decided on the normalized form, not the raw string, so it
         // catches the spellings of "this machine" that normalization folds (case, trailing dot,
-        // percent-encoding, loopback IP literals) and not just the exact string `localhost`. A
-        // spelling normalization leaves alone, such as an empty port or `[::0001]`, is a residual.
+        // percent-encoding, loopback IP literals) and not just the exact string `localhost`. A port
+        // spelling normalization leaves alone — an empty port, a leading zero, or `[::0001]` — is a
+        // residual, and for `http`/`https` a live one: a URL parser reads `:0443` as the default
+        // port and drops it, so two spellings reach one origin and the box reports two.
         Some(normalized) => {
             out.push_str("//");
             if !(scheme == "file" && is_local_file_authority(normalized)) {

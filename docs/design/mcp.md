@@ -47,8 +47,8 @@ Two actions decide MCP requests, and a rule can narrow either one.
 the method, and the item. `tool`, `prompt`, and `uri` are present only on the method that carries
 them, so a rule tests them with `has` first.
 
-**A `file`, `http`, or `https` resource URI reaches a rule in one canonical form**, so two
-spellings of one resource can't get two decisions. The scheme and the host are lowercased, a
+**A `file`, `http`, or `https` resource URI reaches a rule in one canonical form**, so that the
+respellings below can't get two decisions. The scheme and the host are lowercased, a
 trailing dot on the host is dropped, percent-escapes of unreserved characters are decoded, `.` and
 `..` and empty path segments are resolved, a default port is dropped, and `file:/x` and
 `file://localhost/x` both become `file:///x`. A fragment is dropped, because a fragment never
@@ -64,6 +64,16 @@ opens something the box never judged. A `file:` URI needs an absolute path, whic
 requires, so `http:/etc/passwd` and `https:///notes/page` are refused too: a parser reads the first
 path segment as the host, which makes `http:/etc/passwd` into the host `etc`. `file:/x` is the one
 shape the box completes itself, because RFC 8089 makes an absent authority the local one.
+
+**A port spelling is not folded yet, and for `http`/`https` that is a gap you must write around.** A
+URL parser reads a port as a number, so it treats `:0443` as `443` and drops it as the `https`
+default, and it drops a bare `:` the same way. The box keeps whichever the workload wrote. So
+`https://notes:0443/page`, `https://notes:08080/page`, and `https://notes:/page` each reach the same
+origin as a shorter spelling while reaching a rule as a different string, and a rule that names the
+shorter spelling does not match. Until this folds, name the host with a `like` pattern rather than
+matching a full `uri` that carries a port. The same applies to percent-escape hex case inside a
+query (`?a=%2e` against `?a=%2E`), and to a `file:` authority that carries userinfo or an empty
+port — though for `file:` both common parsers reject those outright.
 
 **A query is treated by scheme, because only one scheme sends it anywhere.** Under `http` or
 `https` the query is part of the request the origin server receives, so it is part of what the URI
