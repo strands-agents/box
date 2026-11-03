@@ -109,6 +109,9 @@ def run_scenario(name, output, binary):
                    "dispatch_after_failed_check": (403, True)},
         "unrelated": {"read_customer_case": (200, False), "unrelated_eligibility": (200, False),
                       "dispatch_after_unrelated_check": (403, True)},
+        "refund-first": {"read_customer_case": (200, False), "failed_refund": (400, False),
+                         "refund_order": (201, False), "repeat_refund": (403, True),
+                         "successful_eligibility": (200, False), "dispatch_after_refund": (403, True)},
     }[name]
     for label, (status, refused) in expected.items():
         step = steps.get(label, {})
@@ -116,13 +119,20 @@ def run_scenario(name, output, binary):
     expected_service = [("GET", "/orders/42", 200)]
     if name == "shipment":
         expected_service += [("GET", "/orders/42/eligibility", 200), ("POST", "/orders/42/dispatch", 201)]
+    elif name == "refund-first":
+        expected_service += [("POST", "/orders/42/refund", 400), ("POST", "/orders/42/refund", 201),
+                             ("GET", "/orders/42/eligibility", 200)]
     elif name == "failed":
         expected_service += [("GET", "/orders/42/eligibility", 409)]
     else:
         expected_service += [("GET", "/orders/43/eligibility", 200)]
     observed_service = [(x["method"], x["path"], x["status"]) for x in snapshot["requests"]]
     checks["only_permitted_requests_reached_service"] = observed_service == expected_service
-    expected_effects = [{"order_id": 42, "kind": "dispatch", "effect_id": "dispatch-42-001", "idempotency_key": "replacement-42"}] if name == "shipment" else []
+    expected_effects = []
+    if name == "shipment":
+        expected_effects = [{"order_id": 42, "kind": "dispatch", "effect_id": "dispatch-42-001", "idempotency_key": "replacement-42"}]
+    elif name == "refund-first":
+        expected_effects = [{"order_id": 42, "kind": "refund", "effect_id": "refund-42-001", "idempotency_key": "refund-42"}]
     checks["exact_expected_effects"] = snapshot["effects"] == expected_effects
     checks["expected_service_resolution"] = snapshot["resolution"] == (expected_effects[0] if expected_effects else None)
     if name == "shipment":
@@ -137,14 +147,49 @@ def run_scenario(name, output, binary):
         ])
         checks["reply_names_confirmed_dispatch"] = isinstance(receipt, dict) and receipt.get("effect_id", "missing") in workload.get("customer_reply", "")
 
+    if name == "refund-first":
+        receipt = steps.get("refund_order", {}).get("body", {})
+        checks["refund_receipt_matches_effect"] = isinstance(receipt, dict) and all([
+            receipt.get("effect_id") == expected_effects[0]["effect_id"],
+            receipt.get("order_id") == 42,
+            receipt.get("resolution") == "refund",
+        ])
+        checks["reply_names_confirmed_refund"] = isinstance(receipt, dict) and receipt.get("effect_id", "missing") in workload.get("customer_reply", "")
+        checks["failed_refund_has_no_effect"] = len(snapshot["requests"]) >= 2 and all([
+            snapshot["requests"][1]["status"] == 400,
+            snapshot["requests"][1]["new_effect"] is None,
+        ])
+
     telemetry = state / "private/telemetry/records.jsonl"
     if telemetry.exists():
         shutil.copyfile(telemetry, run / "box-records.jsonl")
     decisions = decision_records(telemetry)
-    expected_rules = ["dispatch_requires_eligibility", "dispatch_closes_mutations", "dispatch_closes_mutations"] if name == "shipment" else ["dispatch_requires_eligibility"]
+    expected_rules = {
+        "shipment": ["dispatch_requires_eligibility", "dispatch_closes_mutations", "dispatch_closes_mutations"],
+        "failed": ["dispatch_requires_eligibility"],
+        "unrelated": ["dispatch_requires_eligibility"],
+        "refund-first": ["refund_closes_mutations", "refund_closes_mutations"],
+    }[name]
     actual_rules = [d.get("strands.box.policy.rule") for d in decisions
                     if d.get("strands.box.policy.action") == "http:request" and d.get("strands.box.policy.verdict") == "deny"]
     checks["expected_policy_rules_refused_requests"] = actual_rules == expected_rules
+    if name == "refund-first":
+        expected_decisions = [
+            ("GET", "/orders/42", "permit", "shipment_fixture_reads"),
+            ("POST", "/orders/42/refund", "permit", "shipment_fixture_mutations"),
+            ("POST", "/orders/42/refund", "permit", "shipment_fixture_mutations"),
+            ("POST", "/orders/42/refund", "deny", "refund_closes_mutations"),
+            ("GET", "/orders/42/eligibility", "permit", "shipment_fixture_reads"),
+            ("POST", "/orders/42/dispatch", "deny", "refund_closes_mutations"),
+        ]
+        resource_prefix = "127.0.0.1:" + str(fixture.port)
+        observed_decisions = [(d.get("http.request.method"), d.get("strands.box.policy.resource"),
+                               d.get("strands.box.policy.verdict"), d.get("strands.box.policy.rule"))
+                              for d in decisions if d.get("strands.box.policy.action") == "http:request"]
+        checks["refund_policy_matches_requests"] = observed_decisions == [
+            (method, resource_prefix + path, verdict, rule)
+            for method, path, verdict, rule in expected_decisions
+        ]
     return {"scenario": name, "checks": checks, "status": "PASS" if all(checks.values()) else "FAIL",
             "exit_code": process.returncode, "duration_seconds": duration,
             "workload": workload, "service": snapshot, "policy_decisions": decisions}
@@ -170,7 +215,7 @@ def main():
               "source_sha256": {p.name: digest(p) for p in ROOT.iterdir()
                                 if p.is_file() and p.suffix in [".py", ".dw"]},
               "scenarios": []}
-    for name in ["shipment", "failed", "unrelated"]:
+    for name in ["shipment", "failed", "unrelated", "refund-first"]:
         entry = run_scenario(name, output, args.box_binary.resolve())
         result["scenarios"].append(entry)
         print(name + ": " + entry["status"], flush=True)

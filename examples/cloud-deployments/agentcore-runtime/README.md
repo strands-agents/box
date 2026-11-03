@@ -12,7 +12,7 @@ Follow the [full build guide](../../../docs/user/tutorials/agentcore-runtime.md)
 | --- | --- | --- |
 | Strands | [`sdk/`](sdk/) | One Strands agent uses four Python tools and sequential execution. |
 | LangChain | [`langchain-example/`](langchain-example/) | `langchain.agents.create_agent` uses `ChatBedrockConverse`. LangGraph runs the agent loop underneath. |
-| Scripted shipment | `run-demo.py` | Fixed requests test successful, failed, and unrelated eligibility responses without a model. |
+| Scripted shipment | `run-demo.py` | Fixed requests test eligibility responses and refund-first ordering without a model. |
 | Research control | [`research/`](research/) | Fixed requests compare a request budget with a static policy. |
 
 The service and customer are synthetic. The model calls in the two agent variants are live.

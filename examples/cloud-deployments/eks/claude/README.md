@@ -11,3 +11,15 @@ Box inserts that token into permitted model requests. The agent receives a subst
 The verifier requires 23 checks to pass. Model responses can vary and can fail verification.
 The fixed exercise does not measure general autonomous coding quality.
 The tested platform and outer-container settings appear in the [example README](../README.md#tested-configuration).
+
+## Check file permissions without a model
+
+On Linux ARM64, use the built Box executable with its helpers beside it:
+
+```sh
+python3 check-policy-boundaries.py --box-binary /absolute/path/to/box --evidence-dir /absolute/path/to/new-evidence
+```
+
+The check attempts native and shell writes to the reference file and verifies both refusals.
+It also verifies permitted project writes, private-file refusals, and deletion refusal against the policy records.
+The command writes a receipt and returns zero only when all checks pass.

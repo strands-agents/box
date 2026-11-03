@@ -58,6 +58,8 @@ python3 run.py --image "$IMAGE" --namespace "$NAMESPACE" --context "$KUBE_CONTEX
 The runner creates a Job, waits for completion, and saves logs and a receipt under `evidence/JOB_NAME/`.
 A successful receipt contains `passed: true` and 11 successful checks.
 A failed workload or missing result returns a nonzero exit code.
+If polling fails after submission, the runner saves an incomplete receipt and prints the command to inspect the existing Job.
+The Job can continue running. Use its recorded name for inspection and cleanup.
 
 ## Read the result
 

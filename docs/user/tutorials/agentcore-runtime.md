@@ -2,7 +2,7 @@
 
 Amazon Bedrock AgentCore Runtime runs this shipment agent with Box around its process.
 The agent reads a synthetic order, checks eligibility, and requests one replacement.
-Box refuses premature dispatch, duplicate dispatch, and a competing refund.
+Box refuses dispatch before eligibility and further shipment or refund requests after either resolution.
 Use Strands for the first run. The same sample also includes a LangChain variant.
 
 ## Before you start
@@ -38,6 +38,7 @@ python deploy-runtime.py package --with-strands --output-dir ./deployment-strand
 
 Preparation builds the pinned Box source and installs locked dependencies for Linux ARM64 and Python 3.12.
 It writes local manifests with file hashes. Packaging checks those hashes before producing `runtime.zip`.
+If a dependency download fails, rerun preparation from the same checkout to reuse the existing Box build.
 The output directory also contains `runtime.cloudformation.json` and `package-receipt.json`.
 
 Inspect the generated template before deployment.
@@ -128,6 +129,7 @@ Use `deployment-langchain/invocation-shipment-langchain-receipt.json` for its re
 Both framework packages include fixed shipment and research controls.
 Invoke them with `--example shipment` or `--example research` using the same deployment arguments.
 These controls make no model calls.
+The shipment control also tests refund before dispatch and failed refund responses.
 The research control compares a request budget with a static policy against a synthetic local receiver.
 
 ## Stop and remove the deployment

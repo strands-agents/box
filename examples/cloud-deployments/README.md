@@ -6,7 +6,7 @@ Each example includes source, setup commands, policy checks, and cleanup instruc
 | Example | What you run | What Box demonstrates |
 | --- | --- | --- |
 | [EKS](eks/) | A fixed coding exercise, with an optional Claude Code agent. | Permitted project changes, protected files, and refused deletion and network requests. |
-| [AgentCore Runtime](agentcore-runtime/) | A shipment agent using Strands or LangChain, with scripted controls. | A dispatch depends on an earlier eligibility response. A completed dispatch closes competing requests for five minutes. |
+| [AgentCore Runtime](agentcore-runtime/) | A shipment agent using Strands or LangChain, with scripted controls. | A dispatch depends on an earlier eligibility response. A completed shipment or refund closes competing requests for five minutes. |
 
 Start with the [EKS build guide](../../docs/user/tutorials/eks.md) or the [Runtime build guide](../../docs/user/tutorials/agentcore-runtime.md).
 The source examples pin the Box revisions used for their recorded cloud checks.

@@ -248,6 +248,20 @@ class StrandsRuntimeTests(unittest.TestCase):
         self.assertEqual(self.state["status"], "error")
         self.assertFalse(runtime.RUN_LOCK.locked())
 
+    def test_directory_failure_releases_lock_and_allows_next_invocation(self):
+        with mock.patch.object(runtime.tempfile, "mkdtemp", side_effect=OSError("No space left on device")), \
+                mock.patch.object(runtime.subprocess, "Popen") as popen:
+            status, body = self.request({"operation": "run"})
+        self.assertEqual((status, body["status"]), (500, "FAIL"))
+        self.assertIn("No space left on device", body["error"])
+        self.assertEqual(self.state["status"], "error")
+        self.assertFalse(runtime.RUN_LOCK.locked())
+        popen.assert_not_called()
+        with mock.patch.object(runtime.subprocess, "Popen", side_effect=self.completed_process):
+            status, body = self.request({"operation": "run"})
+        self.assertEqual((status, body["status"]), (200, "PASS"))
+        self.assertFalse(runtime.RUN_LOCK.locked())
+
     def test_missing_runner_rejects_strands_before_starting_a_process(self):
         path = self.application / "sdk/run-demo.py"
         path.rename(path.with_suffix(".disabled"))
@@ -284,6 +298,31 @@ class StrandsRuntimeTests(unittest.TestCase):
         with mock.patch.object(runtime, "run_demo") as run:
             self.assertEqual(self.request({"operation": "status"}), (200, self.state))
             run.assert_not_called()
+
+
+class RuntimeProcessCleanupTests(unittest.TestCase):
+    def test_reparented_descendant_is_killed_but_reused_pid_is_preserved(self):
+        process = mock.Mock(pid=100)
+        initial = {100: (90, "1000"), 101: (100, "1010"), 102: (100, "1020"), 200: (90, "2000")}
+        current = dict(initial)
+        calls = []
+
+        def killed(pid, sig):
+            calls.append((pid, sig))
+            if pid == 100 and sig == runtime.signal.SIGTERM:
+                current.pop(100)
+                current[101] = (1, "1010")
+                current[102] = (1, "9999")
+
+        with mock.patch.object(runtime.Path, "iterdir", return_value=[Path("/proc") / str(pid) for pid in initial]), \
+                mock.patch.object(runtime, "process_identity", side_effect=lambda pid: current.get(pid)), \
+                mock.patch.object(runtime.os, "kill", side_effect=killed), \
+                mock.patch.object(runtime.time, "sleep"):
+            runtime.stop_process_tree(process)
+        self.assertIn((101, runtime.signal.SIGKILL), calls)
+        self.assertNotIn((102, runtime.signal.SIGKILL), calls)
+        self.assertFalse(any(pid == 200 for pid, _ in calls))
+        process.wait.assert_called_once_with(timeout=5)
 
 
 class RuntimePreparationTests(unittest.TestCase):

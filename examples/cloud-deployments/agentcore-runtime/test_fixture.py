@@ -79,6 +79,18 @@ class FixtureTests(unittest.TestCase):
                 self.assertEqual((status, reply["error"]), (409, "order_already_resolved"))
                 self.assertEqual([e["kind"] for e in server.snapshot()["effects"]], [first])
 
+    def test_failed_refund_leaves_the_first_valid_refund_available(self):
+        status, reply, _ = request(self.fixture, "POST", "/orders/42/refund", {}, key="invalid key")
+        self.assertEqual((status, reply["error"]), (400, "valid_idempotency_key_required"))
+        snapshot = self.fixture.snapshot()
+        self.assertIsNone(snapshot["resolution"])
+        self.assertEqual(snapshot["effects"], [])
+        status, receipt, _ = request(self.fixture, "POST", "/orders/42/refund", {}, key="refund-42")
+        self.assertEqual((status, receipt["effect_id"]), (201, "refund-42-001"))
+        snapshot = self.fixture.snapshot()
+        self.assertEqual(snapshot["effect_counts"], {"dispatch": 0, "refund": 1})
+        self.assertEqual([row["new_effect"] for row in snapshot["requests"]], [None, "refund"])
+
     def test_lost_dispatch_response_keeps_one_effect_and_replays_receipt(self):
         with FixtureServer(drop_first_dispatch_response=True) as server:
             with self.assertRaises(http.client.RemoteDisconnected):

@@ -138,6 +138,10 @@ permit(principal, action == Box::Action::"shell:exec", resource);
 @id("project_files")
 permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
 when {{ context.input.path == "{project_prefix}" || context.input.path like "{project_prefix}/*" }};
+@id("reference_readonly")
+@description("The reference file cannot be changed.")
+forbid(principal, action == Box::Action::"fs:write", resource)
+when {{ context.input.path == "{project_prefix}/native-readonly.txt" }};
 @id("claude_state")
 permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
 when {{ context.input.path == "{home_prefix}" || context.input.path like "{home_prefix}/*" }};

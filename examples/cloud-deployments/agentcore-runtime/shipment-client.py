@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--service", required=True)
-    parser.add_argument("--scenario", choices=["shipment", "failed", "unrelated"], required=True)
+    parser.add_argument("--scenario", choices=["shipment", "failed", "unrelated", "refund-first"], required=True)
     args = parser.parse_args()
     proxy = urlsplit(os.environ["HTTP_PROXY"])
     service = urlsplit(args.service)
@@ -55,6 +55,17 @@ def main():
             )
         else:
             customer_reply = "I could not confirm a replacement dispatch. Please check the order service before retrying."
+    elif args.scenario == "refund-first":
+        request("failed_refund", "POST", "/orders/42/refund", "invalid key")
+        refund = request("refund_order", "POST", "/orders/42/refund", "refund-42")
+        request("repeat_refund", "POST", "/orders/42/refund", "refund-42")
+        request("successful_eligibility", "GET", "/orders/42/eligibility")
+        request("dispatch_after_refund", "POST", "/orders/42/dispatch", "replacement-42")
+        receipt = refund["body"]
+        if refund["status"] == 201 and isinstance(receipt, dict) and receipt.get("order_id") == 42 and receipt.get("resolution") == "refund":
+            customer_reply = "Your refund is confirmed. Your confirmation is " + receipt["effect_id"] + "."
+        else:
+            customer_reply = "I could not confirm a refund. Please check the order service before retrying."
     elif args.scenario == "failed":
         request("failed_eligibility", "GET", "/orders/42/eligibility")
         request("dispatch_after_failed_check", "POST", "/orders/42/dispatch", "replacement-42")

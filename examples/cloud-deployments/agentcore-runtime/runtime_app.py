@@ -77,7 +77,8 @@ def stop_process_tree(process):
         selected = expanded
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid in sorted(selected, reverse=True):
-            if processes.get(pid) is not None and process_identity(pid) == processes[pid]:
+            current = process_identity(pid)
+            if current is not None and pid in processes and current[1] == processes[pid][1]:
                 try:
                     os.kill(pid, sig)
                 except ProcessLookupError:
@@ -105,10 +106,10 @@ def run_demo(example="shipment"):
                      + " example. Package and deploy with " + live_examples[example][2] + "."}
     if not RUN_LOCK.acquire(blocking=False):
         return 409, {"error": "A demonstration is already running"}
-    directory = Path(tempfile.mkdtemp(prefix="box-shipment-run-", dir="/var/tmp"))
-    with STATE_LOCK:
-        STATE.update(status="running", example=example, mode=mode)
     try:
+        with STATE_LOCK:
+            STATE.update(status="running", example=example, mode=mode)
+        directory = Path(tempfile.mkdtemp(prefix="box-shipment-run-", dir="/var/tmp"))
         stdout_path, stderr_path = directory / "runner.stdout", directory / "runner.stderr"
         with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
             command = [sys.executable, str(APPLICATION / scripts[example]), "--output-dir", str(directory),
