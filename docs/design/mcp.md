@@ -105,10 +105,23 @@ userinfo and an empty password with it. The box keeps whichever the workload wro
 `https://notes:0443/page`, `https://notes:08080/page`, `https://notes:/page`, `https://@notes/page`,
 and `https://user:@notes/page` each reach the same origin as a shorter spelling while reaching a rule
 as a different string, and a rule that names the shorter spelling does not match. All three parsers
-accept every one of them. A `file:` URI carrying either is the same residual with a smaller cost:
-Node and the Rust `url` crate reject all of those spellings outright, so reaching the file needs a
-server on Python's lenient `urlsplit`. Percent-escape hex case inside a query (`?a=%2e` against
-`?a=%2E`) is unfolded the same way.
+accept every one of them. Percent-escape hex case inside a query (`?a=%2e` against `?a=%2E`) is
+unfolded the same way.
+
+**Under `file:` the authority is not load-bearing, and on one resolver any host reaches the local
+path.** None of the three implements a remote `file:` URI. Node's `fileURLToPath` and the Rust `url`
+crate's `to_file_path` open an empty host or `localhost` and refuse every other host outright,
+`[::1]` included. Python's `url2pathname` reads the path and **ignores the host entirely**, so
+`file://notes/home/op/.env`, `file://[::2]/home/op/.env`, and `file://127.1/home/op/.env` each open
+`/home/op/.env`. The box keeps a non-local authority as the workload wrote it, so against a server
+built on `urlsplit` a `forbid` naming `file:///home/op/.env` is dodged by **any** host, not only by
+a respelling of a local one. Until that is settled, do not write a `file:` rule that depends on the
+authority: anchor it on the path with a `like` pattern that allows any authority, such as
+`uri like "file://*/home/op/.env"`.
+
+The loopback fold above is therefore a narrowing and not a claim about which host a resolver opens:
+folding `[::0001]` to the empty authority makes a path-anchored rule match more spellings, never
+fewer.
 
 **Any userinfo, not only an empty one, puts the host out of a pattern's reach.** The canonical form
 spells the userinfo before the host, so `https://user@notes/page` and `https://user:pass@notes/page`

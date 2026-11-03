@@ -548,6 +548,53 @@ mod tests {
         }
     }
 
+    /// **The `file:` pattern the design page recommends holds against any authority.**
+    ///
+    /// Under `file:` the authority is not load-bearing: Node and the Rust `url` crate refuse every
+    /// host but an empty one and `localhost`, and Python's `url2pathname` ignores the host, so any
+    /// host reaches the local path. The page therefore tells an operator to anchor a `file:` rule on
+    /// the path and allow any authority. This pins that the recommended pattern does that.
+    #[test]
+    fn a_file_pattern_that_allows_any_authority_reaches_every_host_spelling() {
+        let guards_path = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env_any_authority")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri like "file://*/home/op/.env" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            // The local spellings, which fold to an empty authority.
+            "file:///home/op/.env",
+            "file:/home/op/.env",
+            "file://localhost/home/op/.env",
+            "file://127.0.0.1/home/op/.env",
+            "file://[::1]/home/op/.env",
+            "file://[::0001]/home/op/.env",
+            // A non-local authority, which the box keeps and `url2pathname` ignores.
+            "file://notes/home/op/.env",
+            "file://example.com/home/op/.env",
+            "file://[::2]/home/op/.env",
+            "file://127.1/home/op/.env",
+            "file://10.0.0.5/home/op/.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(spelling)).is_err(),
+                "the recommended pattern must reach every authority: {spelling}"
+            );
+        }
+        // It still names one path: a sibling the rule does not name reads.
+        assert_eq!(
+            call(&guards_path, &read("file:///home/op/.env.example")).expect("permitted"),
+            Some("file:///home/op/.env.example".to_string())
+        );
+    }
+
     const SEARCH: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"SearchIssues","arguments":{"query":"x"}}}"#;
     const COMMENT: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call",
