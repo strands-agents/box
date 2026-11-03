@@ -71,6 +71,7 @@ fn delivered() -> Outcome<'static> {
         path: "/v1/upload",
         delivery: Delivery::Completed { bytes: 60 },
         status: Some(200),
+        intercepted: true,
     }
 }
 

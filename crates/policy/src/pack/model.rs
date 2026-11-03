@@ -8,6 +8,9 @@ use super::grammar::ShellGrammar;
 use super::{OptionFault, PackRefusal, Place};
 use crate::schema::cedar_identifier;
 
+/// The action that a command line raises when no shell action of its pack matches it.
+pub(crate) const UNMODELED_ACTION: &str = "unmodeled";
+
 /// The name of one `[shell.<action>]` table of a checked pack.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ActionName(String);
@@ -178,6 +181,9 @@ impl ShellAction {
     ) -> Result<Self, PackRefusal> {
         let place = Place::Action(name.to_string());
         identifier(place.clone(), name)?;
+        if name == UNMODELED_ACTION {
+            return Err(PackRefusal::ReservedAction { place });
+        }
         let first = spec.usage.split_whitespace().next().unwrap_or_default();
         if first != program {
             return Err(PackRefusal::UsageDisagrees {

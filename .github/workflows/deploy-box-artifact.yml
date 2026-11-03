@@ -20,7 +20,7 @@ name: Release Box
 #           tag + release -> verify.
 #
 # Dry runs build and inspect without credentials by default. An upstream main
-# dry run can opt into signing and native tests. Protected premerge tests use a separate environment.
+# dry run can opt into signing, notarization, and native tests. Protected premerge tests use a separate environment.
 #
 # Configure macos-signing and release-gate before a signed run.
 
@@ -42,7 +42,7 @@ on:
         default: true
         type: boolean
       sign_macos:
-        description: 'Also sign and test macOS in a dry run. Requires the protected signing environment. Real releases always sign.'
+        description: 'Also sign, notarize, and test macOS in a dry run. Requires the protected signing environment. Real releases always sign.'
         required: true
         default: false
         type: boolean
@@ -205,7 +205,7 @@ jobs:
             test "$DRY_RUN" = true
             test "$SIGN_MACOS" = true
             test "$REPOSITORY" = strands-agents/box
-            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-signing
+            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-notarization
             git merge-base --is-ancestor "$RELEASE_SHA" origin/main
           elif [ "$DRY_RUN" != true ] || [ "$SIGN_MACOS" = true ]; then
             test "$REPOSITORY" = strands-agents/box
@@ -393,17 +393,17 @@ jobs:
           retention-days: 7
 
   sign-macos:
-    name: Sign the macOS application
+    name: Sign and notarize the macOS application
     cache-mode: none
     needs: [scan, test, build]
     if: >-
       github.repository == 'strands-agents/box' &&
       (github.ref == 'refs/heads/main' ||
        (inputs.premerge_signing_test == true && inputs.dry_run == true &&
-        github.ref == 'refs/heads/feature/macos-release-signing')) &&
+        github.ref == 'refs/heads/feature/macos-release-notarization')) &&
       (inputs.dry_run != true || inputs.sign_macos == true)
     runs-on: xcode-27
-    timeout-minutes: 40
+    timeout-minutes: 90
     environment: ${{ inputs.premerge_signing_test == true && 'macos-signing-test' || 'macos-signing' }}
     outputs:
       team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
@@ -417,6 +417,7 @@ jobs:
       CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
       CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
       CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+      NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
     steps:
       - name: Check approved test commits
         if: inputs.premerge_signing_test == true
@@ -453,7 +454,7 @@ jobs:
           aws-region: ${{ vars.CD_SIGNER_REGION }}
           role-session-name: box-release-${{ github.run_id }}
           role-duration-seconds: 3600
-      - name: Sign helpers and the Endpoint Security application
+      - name: Sign, notarize, and staple the application
         env:
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
@@ -462,7 +463,8 @@ jobs:
           "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release.py sign \
             --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
             --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
-            --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA"
+            --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --notary-secret "$NOTARY_CREDENTIAL_SECRET"
       - name: Retain signing evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -630,6 +632,19 @@ jobs:
             exit 1
           fi
 
+      - name: Assert the macOS package carries its notarization ticket
+        if: needs.verify-macos.result == 'success'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          darwin="release/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          listing=$(tar -tzf "$darwin")
+          if ! grep -qx './Box.app/Contents/CodeResources' <<<"$listing"; then
+            echo "::error::$darwin does not contain a stapled notarization ticket"
+            exit 1
+          fi
+
       - name: Upload verified release bundle for publish
         uses: actions/upload-artifact@v7
         with:
@@ -751,7 +766,7 @@ jobs:
           cat >> body.md <<EOF
           ## Assets
 
-          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. \`SHA256SUMS.txt\` contains each archive's checksum.
+          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. \`SHA256SUMS.txt\` contains each archive's checksum.
           EOF
 
       - name: Tag the pinned SHA

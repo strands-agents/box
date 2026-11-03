@@ -61,6 +61,14 @@ fn refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     }
 }
 
+fn schema_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
+    match result {
+        Ok(_) => panic!("an attribute the schema does not declare must refuse the load"),
+        Err(PolicyStagingError::Policy(PolicyError::Schema(reason))) => reason,
+        Err(other) => panic!("expected a schema refusal, got {other}"),
+    }
+}
+
 fn family_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     match result {
         Ok(_) => panic!("a read of the input without one action family must refuse the load"),
@@ -90,6 +98,20 @@ fn connects(engine: &PolicyEngine, host: &str) -> bool {
             &Request::Connect {
                 host,
                 ip: None,
+                port: 443,
+            },
+        )
+        .is_allow()
+}
+
+fn connects_to(engine: &PolicyEngine, address: &str) -> bool {
+    engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::Connect {
+                host: "metadata.example",
+                ip: Some(address.parse().expect("an address")),
                 port: 443,
             },
         )
@@ -541,4 +563,95 @@ fn a_trailing_dot_and_an_internationalized_host_are_refused_and_punycode_loads()
         .open("punycode-host", &ace)
         .expect("the punycode spelling loads");
     assert!(!connects(&engine, "xn--bcher-kva.example"));
+}
+
+/// A destination address reads as `ip4` and `ip6`, so a rule that names the removed `ip` is
+/// refused and the refusal names both replacements.
+#[test]
+fn a_rule_that_names_the_removed_address_attribute_is_refused_and_names_both_replacements() {
+    let home = Home::new();
+    let removed = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip && context.input.ip like "169.254.*" }};"#
+    );
+    let reason = schema_refusal(home.open("removed-ip", &removed));
+    assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
+    assert!(
+        reason.contains("reads context.input.ip, which no action carries"),
+        "{reason}"
+    );
+    assert!(reason.contains("context.input.ip4"), "{reason}");
+    assert!(reason.contains("context.input.ip6"), "{reason}");
+}
+
+/// One `ip4` literal covers every IPv6 encoding that carries that address, and an `ip6` literal
+/// of the IPv4 family is refused with the attribute that holds it.
+#[test]
+fn one_ipv4_literal_forbids_every_encoding_that_carries_it() {
+    let home = Home::new();
+    let wrong_family = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 == "169.254.169.254" }};"#
+    );
+    let reason = refusal(home.open("wrong-family", &wrong_family));
+    assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
+    assert!(
+        reason.contains("compare context.input.ip4 instead"),
+        "{reason}"
+    );
+
+    let control = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip4 && context.input.ip4 == "169.254.169.254" }};"#
+    );
+    let engine = home
+        .open("dotted-address", &control)
+        .expect("the dotted quad loads");
+    for encoding in [
+        "169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "::ffff:0:a9fe:a9fe",
+        "::ffff:a9fe:a9fe",
+        "2002:a9fe:a9fe::",
+    ] {
+        assert!(
+            !connects_to(&engine, encoding),
+            "one ip4 literal must deny {encoding}, which carries that address"
+        );
+    }
+    assert!(connects_to(&engine, "203.0.113.7"));
+}
+
+/// A rule on the translator prefix itself could not be written before the split: the fold
+/// replaced the wire form with the address it carried and discarded it.
+#[test]
+fn a_translator_prefix_rule_forbids_the_wire_form_and_leaves_the_address_it_carries() {
+    let home = Home::new();
+    let translator = format!(
+        r#"{CONNECT_ALL}
+        @id("no_nat64_translator")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 like "64:ff9b::*" }};"#
+    );
+    let engine = home
+        .open("translator-prefix", &translator)
+        .expect("a wire-form pattern loads");
+
+    for routed in ["64:ff9b::5db8:d822", "64:ff9b::a9fe:a9fe"] {
+        assert!(
+            !connects_to(&engine, routed),
+            "{routed} routes through the translator"
+        );
+    }
+    for direct in ["93.184.216.34", "2002:5db8:d822::", "64:ff9c::5db8:d822"] {
+        assert!(
+            connects_to(&engine, direct),
+            "{direct} does not route through the translator"
+        );
+    }
 }

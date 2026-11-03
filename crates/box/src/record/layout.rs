@@ -525,18 +525,21 @@ impl BoxRoot {
             .collect()
     }
 
-    /// Every Python alias path, one per name a harness might resolve.
+    /// One MCP alias path per declared program, however many servers share it.
     pub(crate) fn mcp_aliases(
         &self,
         servers: &[crate::record::config::mcp::McpServer],
     ) -> Vec<PathBuf> {
         let directory = self.bin_directory();
+        let mut placed = std::collections::BTreeSet::new();
         servers
             .iter()
+            .filter(|server| placed.insert(server.program()))
             .map(|server| directory.join(server.program()))
             .collect()
     }
 
+    /// Every Python alias path, one per name a harness might resolve.
     pub(crate) fn python_aliases(&self) -> Vec<PathBuf> {
         let bin = self.bin_directory();
         PYTHON_ALIAS_NAMES
@@ -4570,6 +4573,29 @@ mod tests {
             std::fs::read_dir(layout.bin_directory()).unwrap().count(),
             0,
             "bin/ must hold no executable until one is deliberately materialized"
+        );
+    }
+
+    /// One alias serves every server on one program.
+    #[test]
+    fn one_alias_serves_every_server_on_one_program() {
+        let (layout, _fixture) = layout("codex");
+        let server = |name: &str, command: &[&str]| crate::record::config::mcp::McpServer {
+            name: name.to_string(),
+            command: command.iter().map(ToString::to_string).collect(),
+        };
+        let servers = [
+            server("playwright", &["npx", "-y", "@playwright/mcp"]),
+            server("fetch", &["uvx", "mcp-server-fetch"]),
+            server(
+                "github",
+                &["npx", "-y", "@modelcontextprotocol/server-github"],
+            ),
+        ];
+        let bin = layout.bin_directory();
+        assert_eq!(
+            layout.mcp_aliases(&servers),
+            [bin.join("npx"), bin.join("uvx")]
         );
     }
 

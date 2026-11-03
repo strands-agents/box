@@ -12,7 +12,7 @@ each tool call.
 |---|---|---|
 | Declared as | `[mcp.<name>]` with `type = "stdio"` | `[mcp.<name>]` with `type = "http"` |
 | Runs in | Its own sandbox, which Box starts | Somewhere else. Box checks its requests, not the server. |
-| Reached through | The server's alias, then the MCP broker, then the server's stdin | The egress gateway |
+| Reached through | The alias for the server's program, then the MCP broker, then the server's stdin | The egress gateway |
 | Starting or connecting | `shell:spawn` | `net:connect` and `http:request` |
 | Each MCP request | `mcp:call` | `mcp:call` |
 
@@ -103,10 +103,23 @@ flowchart TD
 
 ### Starting the server
 
-**A stdio server starts on demand.** It starts when the agent's harness opens the server's alias in
-the box's `bin/`, not when `box run` starts. The broker decides `shell:spawn` on the program and
-arguments from `box.toml`, before the process exists. If it's allowed, the server starts in its own
-sandbox.
+**A stdio server starts on demand.** It starts when the agent's harness runs the server's full
+command through the alias in the box's `bin/`, not when `box run` starts. The alias is named for
+the program, so servers that share a program, such as `npx`, share one alias. The alias sends its
+name and its arguments to the broker, and the broker picks the one server whose `command` in
+`box.toml` is those words, in that order, with each argument as written in `box.toml` or as the
+leaf starts it, each `${OTEL_EXPORTER_OTLP_*}` token expanded (`McpLeafLauncher::launched_arguments`).
+A harness with a fixed configuration relies on the written form, because an endpoint token expands to
+a port that is new on each run. When
+no `command` matches, the broker refuses the launch and starts no server, so a launch never reaches
+a server it didn't name. The refusal names the servers on that program and never their commands,
+because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
+denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
+records. The arguments only select
+among the servers the operator declared: the agent could already start any of them.
+
+The broker then decides `shell:spawn` on the program and arguments from `box.toml`, before the
+process exists. If it's allowed, the server starts in its own sandbox.
 
 **An http server is already running.** The gateway decides `net:connect` before DNS, again for
 each resolved address, and `http:request` for each request. Each MCP request to the server is one

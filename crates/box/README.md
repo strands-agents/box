@@ -156,8 +156,8 @@ Two properties of that table carry the design:
   reachable. An entry with no `secret` is refused, because a destination alone *would* be a
   reachability claim — which is the policy's to make.
 - **The server name is policy identity.** An `mcp:call` decision reads it as
-  `context.input.server`. The command's program names the executable alias, so the
-  two values are not interchangeable.
+  `context.input.server`. The command's program names the executable alias, and the full
+  command selects the server, so the two values are not interchangeable.
 
 ## Policy
 
@@ -398,7 +398,8 @@ private/mcp/                 where a local MCP server is started
 and no namespace a verb can enumerate: a caller holds the path, so Box cannot locate a box it was
 not handed.
 
-Each declared MCP server adds one more alias to `bin/`, named for its program.
+Each program that a declared MCP server starts from adds one more alias to `bin/`, named for the
+program. Servers that share a program share its alias, and the alias's arguments select the server.
 
 **There are four children, and none of them is a home.** `HOME` is the operator's own home unless
 `[agent] env.HOME` names another directory, and the box copies no configuration into the box
