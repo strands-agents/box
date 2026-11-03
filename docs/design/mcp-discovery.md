@@ -188,15 +188,23 @@ reports, the coordinator finishes discovery once. A per-tool rule that still has
 belongs to a server that hasn't staged, so that server is degraded, stderr names it, and the
 engine becomes `Ready` for the rest of the run.
 
-A degraded server isn't degraded for good. A listing can fail for a reason that doesn't repeat, so a
-later list can still arrive and stage its schema. If that list completes the whole policy, the
-server's per-tool rules load, they enforce from that moment, and the server is no longer degraded.
+A rule held back this way isn't always held back for the rest of the run. A list that arrives after
+discovery finishes still stages its schema, and if it completes the whole policy those rules load and
+enforce from that moment. Two things narrow which servers reach that point.
 
-That recovers one degraded server, and not two. A later list is validated as a whole policy, so a
-list from one degraded server still leaves the other's per-tool rules unvalidated. The policy doesn't
+The first is whether the reason it didn't stage repeats. A policy refusal does: the policy that
+refused the `tools/list`, or refused the schema, is the policy still in force, so the next attempt
+goes the same way, and a spent discovery budget is spent for the run. Only a capture failure — no
+reply in time, or a page Box couldn't read — can be followed by a list that succeeds. Box refuses a
+new `Open` for a server that failed that way, so the list has to come on the connection that is
+already open, from a repeat list or a `notifications/tools/list_changed` on it. A reconnect or a
+second window doesn't deliver it.
+
+The second is how many servers are waiting. A late list is validated as a whole policy, so a list
+from one waiting server still leaves another's per-tool rules unvalidated. The policy doesn't
 validate, the list is refused, and the schema it carried is dropped with it. The other server's own
-later list then fails the same way, so no order of lists recovers either, and both stay degraded for
-the rest of the run.
+later list then fails the same way, so when two servers are waiting at once, neither recovers and
+both keep their refusal for the rest of the run.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays

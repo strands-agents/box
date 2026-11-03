@@ -230,14 +230,25 @@ Each server is then in one of four states:
 | Ready | Its tool list was accepted, and its tools are callable. | Enforced from the moment its schema staged. |
 | No tools | Policy refused its `tools/list`, so it has zero tools. | It has none. |
 | Degraded | Policy refused its `tools/list`, so it has zero tools, and each call to one of its tools is refused. | A rule names its tools, and it hasn't loaded. stderr names the server ([a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
-| Failed | Box couldn't read or stage its tool list. | Never enforced. stderr names the step that failed. |
+| Failed | Box couldn't read or stage its tool list. | Not loaded at startup, and each call to one of its tools is refused while a rule names them. stderr names the step that failed. |
 
-The engine is then `Ready` for the rest of the run, and every rule that can load has.
+The engine is then `Ready` for the rest of the run, and every rule that could load has.
 
-A tool list can still arrive after startup is complete, because a listing can fail for a reason that
-doesn't repeat. If one does, and it completes the whole policy, that server's per-tool rules load,
-they enforce from that moment, and the server is no longer degraded. This recovers one degraded
-server, and not two — [how discovery finishes](./mcp-discovery.md#how-discovery-finishes) says why.
+A rule that didn't load leaves its tools refused, and that isn't always for the rest of the run. A
+tool list can still arrive after startup, stage its schema, and complete the whole policy. Those
+rules then load and enforce from that moment, and Box stops refusing their tools. Whether a server
+can get there depends on why it didn't stage:
+
+- **When the cause repeats, it can't.** A Degraded server is the clear case: the policy that refused
+  its `tools/list` is the policy still in force, so it refuses the next attempt the same way. A
+  refused schema and a spent discovery budget repeat for the same reason, and each keeps its refusal
+  for the run.
+- **When the cause doesn't repeat, it can** — no reply in time, or a page Box couldn't read. The list
+  has to come on the connection that is already open, because Box refuses a new connection to a
+  server that failed that way, so a reconnect doesn't deliver it.
+
+[How discovery finishes](./mcp-discovery.md#how-discovery-finishes) covers the limit when two
+servers are waiting on a rule at the same time.
 
 The startup warning on stderr was true when it was printed, and nothing prints to say it no longer
 is. Read it as a record of startup, not as the state of the run.

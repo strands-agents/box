@@ -1814,12 +1814,7 @@ fn an_existing_store_deletes_obsolete_policies_before_replacing_the_schema() {
     );
 }
 
-/// The limit of the clear above. A relist is validated as a whole bundle, so when two servers
-/// degrade, a relist from either still names the other's typed action, which has no schema. The
-/// bundle does not validate, the stage is `Rejected`, and the fragment that did arrive is
-/// discarded with the proposal that held it. No ordering of later listings recovers either server.
-/// Recovery would have to retain an accepted fragment across a rejected bundle, which is the
-/// partial install that only `Discovering` allows, so it is not a change this test anticipates.
+/// With two servers degraded, a relist from either is `Rejected` and leaves both refused.
 #[test]
 fn two_degraded_servers_do_not_recover_from_a_relist() {
     let history = tempfile::tempdir().expect("history directory");
@@ -1882,6 +1877,6 @@ permit(principal, action == beta::Action::"read", resource);
                 &json!({"path": "/workspace/input"}),
             )
             .is_allow(),
-        "no ordering of later listings recovers either server"
+        "neither relist recovered alpha, so both servers keep their refusal"
     );
 }

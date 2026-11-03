@@ -172,6 +172,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Shell outbound HTTP raises no attempt, so policy does not cover it and only the deny-only
   `network_enabled` switch and SSRF floor do. Do not decide egress in the Shell adapter. The MCP
   `shell` tool reaches `run_pipeline`, so it does raise `shell:exec`.
+- A degraded tool recovers only when one server is waiting. `stage_mcp_schema` clears the whole
+  `degraded_tools` set when a complete bundle commits, so a late list that completes the policy lifts
+  the refusal. When two servers are degraded, a late list from either still leaves the other's typed
+  action undeclared, so the bundle is `Rejected` and the arrived fragment goes out with the proposal
+  that held it. Neither recovers. Closing that would mean retaining an accepted fragment across a
+  rejected bundle — the partial install that only `Discovering` allows — so do not widen the clear to
+  reach it. Pinned by `runtime_mcp_policy_staging.rs::two_degraded_servers_do_not_recover_from_a_relist`
+  and `::a_complete_bundle_after_completion_clears_the_degraded_mark`.
 - Record an outcome this vocabulary cannot name as `Indeterminate`; never drop it.
 - Refuse `os.getenv` and `os.environ` while the schema cannot name them, because the box projects
   credential phantoms into the environment. Pinned by

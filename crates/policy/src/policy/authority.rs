@@ -354,11 +354,12 @@ impl Authority {
     /// Completes discovery, degrading any server whose per-tool rule never staged
     /// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
     ///
-    /// Every door has drained, so a candidate still pending means its server's `tools/list` was
-    /// denied and its schema has not arrived. Rather than fatally refuse the whole box, the still
-    /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
-    /// schema-independent subset becomes the final `Ready` authority, and the degraded server
-    /// namespaces are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    /// Every door has drained, so a candidate still pending means its server's schema has not
+    /// arrived — its `tools/list` was denied, or its capture failed. Rather than fatally refuse the
+    /// whole box, the still-pending typed tools become `degraded_tools` — denied fail-closed in
+    /// `decide` — the committed schema-independent subset becomes the final `Ready` authority, and
+    /// the degraded server namespaces are returned so the caller can warn. Only a genuine durable
+    /// fault is an `Err`.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -370,8 +371,8 @@ impl Authority {
         if live.readiness == Readiness::Ready {
             return Ok(Vec::new());
         }
-        // The still-pending typed rules have not staged (their servers finished discovery denied),
-        // so their tools are not enforceable. Hold them fail-closed and finish `Ready`.
+        // The still-pending typed rules have not staged (their servers finished discovery with no
+        // schema), so their tools are not enforceable. Hold them fail-closed and finish `Ready`.
         let degraded = proposal
             .as_ref()
             .map(pending_typed_tools)
