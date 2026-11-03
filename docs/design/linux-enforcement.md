@@ -96,6 +96,13 @@ Linux configuration refuses a deny path that does not exist.
 For an existing denied file, Linux can substitute an empty file.
 A read can then succeed with empty output while writes fail.
 
+For denied files and directories beneath writable grants, Box protects the intermediate ancestor directories.
+It binds those directories onto themselves, then covers those mounts with the original writable grant.
+Within the workload's mount namespace, Linux keeps the hidden mounts attached to those directory entries and refuses to rename them.
+The visible grant stays continuous, so unrelated file and directory renames across those ancestors remain available.
+Box installs nested grants and denial masks after this covering bind, preserving their precedence and source identity checks.
+Existing boundaries between separate grants or filesystems still apply.
+
 Linux refuses `list`, because the mount view cannot expose directory names without file contents.
 An agent's metadata-only directory grant contributes no mount and causes no startup error.
 Other grants can still expose that directory.
