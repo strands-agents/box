@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Verify Box decisions against independent synthetic shipment effects."""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import signal
+import subprocess
+import sys
+import time
+import tempfile
+import shutil
+
+from fixture import FixtureServer
+
+ROOT = Path(__file__).resolve().parent
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def decision_records(path):
+    decisions = []
+    if not path.exists():
+        return decisions
+    for line in path.read_text().splitlines():
+        entry = json.loads(line)
+        for resource in entry.get("resourceLogs", []):
+            for scope in resource.get("scopeLogs", []):
+                for record in scope.get("logRecords", []):
+                    attrs = {a["key"]: a["value"] for a in record.get("attributes", [])}
+                    if "strands.box.policy.verdict" in attrs:
+                        decisions.append({k: v.get("stringValue", v) for k, v in attrs.items()
+                                          if k.startswith("strands.box.policy.") or k in ["http.request.method", "url.path", "server.address"]})
+    return decisions
+
+
+def run_scenario(name, output, binary):
+    run = output / name
+    run.mkdir()
+    (run / "workspace").mkdir()
+    state_root = Path(tempfile.mkdtemp(prefix="box-ship-"))
+    state = state_root / "state"
+    with FixtureServer(eligibility_status=409 if name == "failed" else 200) as fixture:
+        policy = (ROOT / "policy.dw").read_text().replace("port == 0", "port == " + str(fixture.port)).replace("port: 0", "port: " + str(fixture.port))
+        (run / "policy.dw").write_text(policy)
+        executable = str(Path(sys.executable).resolve())
+        command = [executable, "-I", "-B", str(ROOT / "shipment-client.py"), "--service", fixture.base_url, "--scenario", name]
+        python_dirs = sorted({str(Path(p).resolve()) for p in sys.path if p and Path(p).is_dir() and "python" in p and "site-packages" not in p})
+        python_dirs += [p for p in ["/usr/lib64", "/usr/lib"] if Path(p).is_dir()]
+        python_dirs = sorted(set(python_dirs))
+        extensions = json.loads(subprocess.check_output([executable, "-c",
+            "import runpy,sys,json; runpy.run_path(" + repr(str(ROOT / "shipment-client.py")) + "); "
+            "print(json.dumps(sorted({m.__file__ for m in sys.modules.values() if getattr(m, '__file__', '') and m.__file__.endswith('.so')})))"], text=True))
+        python_dirs = [p for p in python_dirs if not any(p != q and Path(q) in Path(p).parents for q in python_dirs)]
+        config = '\n'.join([
+            'name = "shipment-' + name + '"',
+            'box_dir = ' + json.dumps(str(state)),
+            'policy = "policy.dw"',
+            '[agent]',
+            'command = ' + json.dumps(command),
+            'workspace = ' + json.dumps(str(run / "workspace")),
+            'env = { PATH = "/usr/bin:/bin" }',
+            '[agent.filesystem]',
+            'read = ' + json.dumps(python_dirs),
+            'read_file = ' + json.dumps([str(ROOT / "shipment-client.py")]),
+            'exec = ' + json.dumps(extensions),
+            '',
+        ])
+        (run / "box.toml").write_text(config)
+        env = dict(os.environ, EXPERIMENTAL_LINUX_SUPPORT="TRUE")
+        start = time.monotonic()
+        process = subprocess.Popen([str(binary), "run", "--config", str(run / "box.toml")],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   env=env, start_new_session=True)
+        timed_out = False
+        try:
+            stdout, stderr = process.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+        duration = time.monotonic() - start
+        (run / "stdout.txt").write_text(stdout)
+        (run / "stderr.txt").write_text(stderr)
+        snapshot = fixture.snapshot()
+        (run / "service.json").write_text(json.dumps(snapshot, indent=2) + "\n")
+    try:
+        workload = json.loads(stdout)
+    except ValueError:
+        workload = {}
+    steps = {step["label"]: step for step in workload.get("steps", [])}
+    checks = {"workload_exit_zero": process.returncode == 0,
+              "workload_finished_within_history_window": not timed_out and duration < 300,
+              "customer_reply_present": bool(workload.get("customer_reply"))}
+    expected = {
+        "shipment": {"read_customer_case": (200, False), "premature_dispatch": (403, True),
+                     "successful_eligibility": (200, False), "dispatch_replacement": (201, False),
+                     "repeat_dispatch": (403, True), "competing_refund": (403, True)},
+        "failed": {"read_customer_case": (200, False), "failed_eligibility": (409, False),
+                   "dispatch_after_failed_check": (403, True)},
+        "unrelated": {"read_customer_case": (200, False), "unrelated_eligibility": (200, False),
+                      "dispatch_after_unrelated_check": (403, True)},
+    }[name]
+    for label, (status, refused) in expected.items():
+        step = steps.get(label, {})
+        checks[label] = step.get("status") == status and step.get("box_refused") is refused
+    expected_service = [("GET", "/orders/42", 200)]
+    if name == "shipment":
+        expected_service += [("GET", "/orders/42/eligibility", 200), ("POST", "/orders/42/dispatch", 201)]
+    elif name == "failed":
+        expected_service += [("GET", "/orders/42/eligibility", 409)]
+    else:
+        expected_service += [("GET", "/orders/43/eligibility", 200)]
+    observed_service = [(x["method"], x["path"], x["status"]) for x in snapshot["requests"]]
+    checks["only_permitted_requests_reached_service"] = observed_service == expected_service
+    expected_effects = [{"order_id": 42, "kind": "dispatch", "effect_id": "dispatch-42-001", "idempotency_key": "replacement-42"}] if name == "shipment" else []
+    checks["exact_expected_effects"] = snapshot["effects"] == expected_effects
+    checks["expected_service_resolution"] = snapshot["resolution"] == (expected_effects[0] if expected_effects else None)
+    if name == "shipment":
+        receipt = steps.get("dispatch_replacement", {}).get("body", {})
+        checks["dispatch_receipt_matches_effect"] = isinstance(receipt, dict) and all([
+            receipt.get("effect_id") == expected_effects[0]["effect_id"],
+            receipt.get("order_id") == 42,
+            receipt.get("resolution") == "dispatch",
+            receipt.get("item") == snapshot["order"]["item"],
+            receipt.get("quantity") == snapshot["order"]["quantity"],
+            receipt.get("estimated_delivery") == snapshot["order"]["replacement_estimated_delivery"],
+        ])
+        checks["reply_names_confirmed_dispatch"] = isinstance(receipt, dict) and receipt.get("effect_id", "missing") in workload.get("customer_reply", "")
+
+    telemetry = state / "private/telemetry/records.jsonl"
+    if telemetry.exists():
+        shutil.copyfile(telemetry, run / "box-records.jsonl")
+    decisions = decision_records(telemetry)
+    expected_rules = ["dispatch_requires_eligibility", "dispatch_closes_mutations", "dispatch_closes_mutations"] if name == "shipment" else ["dispatch_requires_eligibility"]
+    actual_rules = [d.get("strands.box.policy.rule") for d in decisions
+                    if d.get("strands.box.policy.action") == "http:request" and d.get("strands.box.policy.verdict") == "deny"]
+    checks["expected_policy_rules_refused_requests"] = actual_rules == expected_rules
+    return {"scenario": name, "checks": checks, "status": "PASS" if all(checks.values()) else "FAIL",
+            "exit_code": process.returncode, "duration_seconds": duration,
+            "workload": workload, "service": snapshot, "policy_decisions": decisions}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--box-binary", type=Path, default=ROOT / "box-core/box")
+    args = parser.parse_args()
+    manifest = json.loads((ROOT / "binary-manifest.json").read_text())
+    for relative, expected_hash in manifest["files"].items():
+        binary_file = args.box_binary.resolve() if relative.endswith("/box") else args.box_binary.resolve().parent / Path(relative).name
+        if digest(binary_file) != expected_hash:
+            raise SystemExit("Binary hash mismatch: " + str(binary_file))
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    result = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "mode": "deterministic scripted workload; no language model",
+              "platform": {"system": platform.system(), "machine": platform.machine(),
+                           "kernel": platform.release(), "python": sys.version, "uid": os.getuid()},
+              "box": json.loads((ROOT / "binary-manifest.json").read_text()),
+              "source_sha256": {p.name: digest(p) for p in ROOT.iterdir()
+                                if p.is_file() and p.suffix in [".py", ".dw"]},
+              "scenarios": []}
+    for name in ["shipment", "failed", "unrelated"]:
+        entry = run_scenario(name, output, args.box_binary.resolve())
+        result["scenarios"].append(entry)
+        print(name + ": " + entry["status"], flush=True)
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    result["status"] = "PASS" if all(x["status"] == "PASS" for x in result["scenarios"]) else "FAIL"
+    result["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps({"status": result["status"], "result": str(output / "result.json")}))
+    return 0 if result["status"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

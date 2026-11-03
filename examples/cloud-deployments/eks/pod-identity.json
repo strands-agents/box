@@ -1,0 +1,166 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Box EKS Pod Identity evaluation - separate test identity",
+  "Resources": {
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "pods.eks.amazonaws.com"
+              },
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/kubernetes-namespace": {
+                    "Ref": "Namespace"
+                  },
+                  "aws:RequestTag/kubernetes-service-account": {
+                    "Ref": "ServiceAccount"
+                  },
+                  "aws:RequestTag/eks-cluster-arn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "InvokeSelectedModel",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "bedrock:CallWithBearerToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-6"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "bedrock:GetInferenceProfile",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-6"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "box-pod-identity-evaluation"
+          }
+        ]
+      }
+    },
+    "Association": {
+      "Type": "AWS::EKS::PodIdentityAssociation",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "ClusterName"
+        },
+        "Namespace": {
+          "Ref": "Namespace"
+        },
+        "ServiceAccount": {
+          "Ref": "ServiceAccount"
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "Role",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "Agent": {
+      "Type": "AWS::EKS::Addon",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "ClusterName"
+        },
+        "AddonName": "eks-pod-identity-agent",
+        "AddonVersion": {
+          "Ref": "AgentVersion"
+        }
+      },
+      "Condition": "CreateAgent"
+    }
+  },
+  "Parameters": {
+    "ClusterName": {
+      "Type": "String"
+    },
+    "Namespace": {
+      "Type": "String",
+      "Default": "box-practice"
+    },
+    "ServiceAccount": {
+      "Type": "String",
+      "Default": "box-podidentity"
+    },
+    "AgentVersion": {
+      "Type": "String",
+      "Default": "v1.4.1-eksbuild.3"
+    },
+    "InstallAgent": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ]
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Role",
+          "Arn"
+        ]
+      }
+    }
+  },
+  "Conditions": {
+    "CreateAgent": {
+      "Fn::Equals": [
+        {
+          "Ref": "InstallAgent"
+        },
+        "true"
+      ]
+    }
+  }
+}
