@@ -104,6 +104,24 @@ impl ToolGrammars {
 }
 
 #[cfg(test)]
+impl ToolGrammars {
+    /// The grammars `tests/grammars/valid/<name>.grammar.toml`, each at `tool.<name>.grammar`.
+    pub(crate) fn corpus(names: &[&str]) -> Self {
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/grammars/valid");
+        let grammars = names
+            .iter()
+            .map(|name| {
+                let text = std::fs::read_to_string(corpus.join(format!("{name}.grammar.toml")))
+                    .expect("a grammar");
+                let table: toml::Table = toml::from_str(&text).expect("a table");
+                ToolGrammar::from_table(table, &format!("tool.{name}.grammar")).expect("a grammar")
+            })
+            .collect();
+        Self::new(grammars).expect("distinct grammars")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -128,6 +146,39 @@ mod tests {
             "`tool.git.grammar` and `tool.hub.grammar` both have `name = \"git\"`; give each \
              grammar its own name"
         );
+    }
+
+    #[test]
+    fn two_grammars_with_one_name_are_refused_in_any_order() {
+        let git = |table: &str| grammar(table, "git", "git");
+        let cargo = || grammar("tool.cargo.grammar", "cargo", "cargo");
+        for (case, grammars) in [
+            (
+                "alone",
+                vec![git("tool.git.grammar"), git("tool.hub.grammar")],
+            ),
+            (
+                "around another grammar",
+                vec![git("tool.git.grammar"), cargo(), git("tool.hub.grammar")],
+            ),
+            (
+                "before another grammar",
+                vec![git("tool.git.grammar"), git("tool.hub.grammar"), cargo()],
+            ),
+            (
+                "after another grammar",
+                vec![cargo(), git("tool.git.grammar"), git("tool.hub.grammar")],
+            ),
+        ] {
+            assert_eq!(
+                ToolGrammars::new(grammars)
+                    .expect_err("the set is refused")
+                    .to_string(),
+                "`tool.git.grammar` and `tool.hub.grammar` both have `name = \"git\"`; give each \
+                 grammar its own name",
+                "{case}"
+            );
+        }
     }
 
     #[test]

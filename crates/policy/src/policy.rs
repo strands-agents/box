@@ -167,9 +167,9 @@ impl PolicyEngine {
 
     /// Open durable history with the schema fragment of each tool grammar in `grammars`.
     #[cfg(test)]
-    pub(crate) fn open_with_grammars(
+    pub(crate) fn open_with_grammars<'a>(
         sources: Vec<Policy>,
-        grammars: &[crate::grammar::Grammar],
+        grammars: impl IntoIterator<Item = &'a crate::grammar::Grammar>,
         history: &Path,
     ) -> Result<Self, PolicyError> {
         let effective = EffectivePolicy {
@@ -177,7 +177,7 @@ impl PolicyEngine {
             policy_id: effective_policy_id(&sources),
         };
         let grammar_schemas: Vec<String> = grammars
-            .iter()
+            .into_iter()
             .map(crate::grammar::Grammar::schema)
             .collect();
         Ok(Self {

@@ -42,7 +42,7 @@ the six names in the last row.
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, and why one is refused. |
-| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's program file and called name, and why a binding is refused. |
+| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's program file and called name, and why declaring a tool is refused. |
 | `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:
