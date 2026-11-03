@@ -219,6 +219,8 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
+
 Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
 credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
@@ -226,7 +228,7 @@ credential-daemon fixture remain explicit in the report. Deterministic integrati
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
 
-The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool pack shell
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
 
 Common tasks run through [`just`](https://github.com/casey/just):
@@ -242,6 +244,12 @@ just test-all      # workspace tests and box example checks
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
 
+In pull-request CI, changes to `docs/site-manifest.json`,
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+site-manifest contract test instead of the full Rust test matrix. The test compares the base
+contract to keep the product ID stable and require an append-only retirement before a page or route
+is removed.
+
 ## Documentation
 
 | Guide | Contents |
@@ -249,7 +257,7 @@ the `test-support` feature.
 | [`docs/user/`](docs/user) | How to install Box and run a box. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
 
-See [AGENTS.md](AGENTS.md) for the repository rules and the current state.
+See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 

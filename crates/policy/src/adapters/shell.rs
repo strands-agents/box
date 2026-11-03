@@ -13,10 +13,11 @@ use strands_shell::{
 };
 
 use crate::GovernedBox;
-use crate::outcome::FsResult;
-use crate::pack::{
-    CoverageRefusal, PackBindings, PackCoverage, PackInvocation, PendingPackResponse, ProgramFile,
+use crate::grammar::{
+    CoverageRefusal, GrammarBindings, GrammarCoverage, GrammarInvocation, PendingGrammarResponse,
+    ProgramFile,
 };
+use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
 use crate::{Decision, Outcome, PolicyEngine, Principal, Request};
@@ -37,7 +38,7 @@ pub struct ShellPolicyInterceptor {
     home: Option<std::path::PathBuf>,
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
-    pack_bindings: Arc<PackBindings>,
+    grammar_bindings: Arc<GrammarBindings>,
 }
 
 impl ShellPolicyInterceptor {
@@ -53,7 +54,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
-            pack_bindings: Arc::default(),
+            grammar_bindings: Arc::default(),
         })
     }
 
@@ -74,7 +75,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
-            pack_bindings: Arc::default(),
+            grammar_bindings: Arc::default(),
         })
     }
 
@@ -91,7 +92,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
-            pack_bindings: Arc::default(),
+            grammar_bindings: Arc::default(),
         })
     }
 
@@ -109,20 +110,20 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
-            pack_bindings: Arc::default(),
+            grammar_bindings: Arc::default(),
         })
     }
 
-    /// Construct the handle that decides a spawn of a program a tool pack binds as its pack action
-    /// (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
+    /// Construct the handle that decides a spawn of a program a tool grammar binds as its grammar
+    /// action (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
     #[cfg(test)]
-    pub(crate) fn into_handle_with_pack_bindings(
+    pub(crate) fn into_handle_with_grammar_bindings(
         policy: Arc<PolicyEngine>,
         principal: Principal,
         governed: GovernedBox,
         home: Option<std::path::PathBuf>,
         spawn_credentials: BTreeMap<String, Vec<String>>,
-        pack_bindings: PackBindings,
+        grammar_bindings: GrammarBindings,
     ) -> Arc<dyn EffectInterceptor> {
         Arc::new(Self {
             policy,
@@ -130,7 +131,7 @@ impl ShellPolicyInterceptor {
             governed,
             home,
             spawn_credentials: Arc::new(spawn_credentials),
-            pack_bindings: Arc::new(pack_bindings),
+            grammar_bindings: Arc::new(grammar_bindings),
         })
     }
 
@@ -148,13 +149,13 @@ impl ShellPolicyInterceptor {
         })
     }
 
-    /// How the installed packs cover a spawn of `program_path` spelled `program`, or `None` when
-    /// `shell:spawn` decides it (docs/design/decisions.md#a-pack-action-replaces-shell-spawn).
-    fn pack_coverage(&self, program: &str, program_path: &str) -> Option<PackCoverage<'_>> {
-        if self.pack_bindings.is_empty() {
+    /// How the installed grammars cover a spawn of `program_path` spelled `program`, or `None` when
+    /// `shell:spawn` decides it (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
+    fn grammar_coverage(&self, program: &str, program_path: &str) -> Option<GrammarCoverage<'_>> {
+        if self.grammar_bindings.is_empty() {
             return None;
         }
-        self.pack_bindings
+        self.grammar_bindings
             .coverage(ProgramFile::read(program_path), program)
     }
 }
@@ -168,7 +169,7 @@ fn refused_spawn(program_path: &str, refusal: &CoverageRefusal) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "policy denied this operation on '{program_path}' [tool-pack]: {refusal}. \
+            "policy denied this operation on '{program_path}' [tool-grammar]: {refusal}. \
              No policy can permit it."
         ),
     )
@@ -297,14 +298,14 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             ..
         } = effect
         {
-            match self.pack_coverage(program, program_path) {
+            match self.grammar_coverage(program, program_path) {
                 None => {}
-                Some(PackCoverage::Refused(refusal)) => {
+                Some(GrammarCoverage::Refused(refusal)) => {
                     return Err(refused_spawn(program_path, &refusal));
                 }
-                Some(PackCoverage::Parsed { pack, file }) => {
-                    let invocation = PackInvocation::new(
-                        pack,
+                Some(GrammarCoverage::Parsed { grammar, file }) => {
+                    let invocation = GrammarInvocation::new(
+                        grammar,
                         program,
                         &file,
                         self.home.as_deref(),
@@ -312,13 +313,13 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                         args,
                         credential_reads,
                     );
-                    let (decision, pending) = self.policy.decide_pack_action(
+                    let (decision, pending) = self.policy.decide_grammar_action(
                         &self.governed,
                         &self.principal,
                         &invocation,
                     );
                     return match pending {
-                        Some(pending) => Ok(self.permit(Admitted::Pack(pending))),
+                        Some(pending) => Ok(self.permit(Admitted::Grammar(pending))),
                         None => Err(denied(&decision)),
                     };
                 }
@@ -515,8 +516,8 @@ enum Admitted {
         destination_removal: Option<FsOperation>,
         operation: FsOperation,
     },
-    /// One host binary that a pack action decided, which owes that action's `::response`.
-    Pack(PendingPackResponse),
+    /// One host binary that a grammar action decided, which owes that action's `::response`.
+    Grammar(PendingGrammarResponse),
     /// An attempt this adapter does not map. It is only ever admitted if the
     /// authorization arm above allowed it, and it records nothing.
     Unmapped,
@@ -641,9 +642,9 @@ impl PolicyEffectPermit {
     /// Submit this effect as history.
     fn submit(mut self, result: FsResult, reported_status: Option<i32>) -> io::Result<()> {
         let recorded = match std::mem::replace(&mut self.admitted, Admitted::Unmapped) {
-            Admitted::Pack(pending) => self
+            Admitted::Grammar(pending) => self
                 .policy
-                .record_pack_response(pending, reported_status.unwrap_or(-1)),
+                .record_grammar_response(pending, reported_status.unwrap_or(-1)),
             Admitted::Run {
                 command,
                 program,
@@ -1211,23 +1212,23 @@ mod tests {
         }
     }
 
-    fn pack(name: &str) -> crate::pack::Pack {
-        crate::pack::Pack::load(
+    fn grammar(name: &str) -> crate::grammar::Grammar {
+        crate::grammar::Grammar::load(
             &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("tests/packs/valid/{name}.pack.toml")),
+                .join(format!("tests/grammars/valid/{name}.grammar.toml")),
         )
-        .expect("the fixture pack loads")
+        .expect("the fixture grammar loads")
     }
 
-    /// An interceptor over an engine that knows `packs`, with `bind` as its bindings.
-    fn interceptor_with_packs(
+    /// An interceptor over an engine that knows `grammars`, with `bind` as its bindings.
+    fn interceptor_with_grammars(
         source: &str,
-        packs: &[&str],
-        bind: impl FnOnce(&mut PackBindings),
+        grammars: &[&str],
+        bind: impl FnOnce(&mut GrammarBindings),
     ) -> InterceptorFixture {
         let history = tempfile::tempdir().expect("history directory");
-        let installed: Vec<_> = packs.iter().map(|name| pack(name)).collect();
-        let policy = PolicyEngine::open_with_packs(
+        let installed: Vec<_> = grammars.iter().map(|name| grammar(name)).collect();
+        let policy = PolicyEngine::open_with_grammars(
             vec![Policy {
                 origin: PathBuf::from("shell-adapter-test.dw"),
                 text: source.to_string(),
@@ -1236,10 +1237,10 @@ mod tests {
             &history.path().join("dogwood.redb"),
         )
         .expect("policy opens");
-        let mut bindings = PackBindings::new(installed).expect("distinct packs");
+        let mut bindings = GrammarBindings::new(installed).expect("distinct grammars");
         bind(&mut bindings);
         InterceptorFixture {
-            interceptor: ShellPolicyInterceptor::into_handle_with_pack_bindings(
+            interceptor: ShellPolicyInterceptor::into_handle_with_grammar_bindings(
                 Arc::new(policy),
                 Principal::agent(),
                 GovernedBox::assigned("test-box"),
@@ -1266,16 +1267,16 @@ mod tests {
         }
     }
 
-    /// **A bound program is decided only as its pack action**: a `shell:spawn` permit does not
+    /// **A bound program is decided only as its grammar action**: a `shell:spawn` permit does not
     /// admit it, and a `shell:spawn` forbid does not refuse it.
     #[tokio::test]
-    async fn a_bound_spawn_is_decided_as_its_pack_action_and_never_as_shell_spawn() {
+    async fn a_bound_spawn_is_decided_as_its_grammar_action_and_never_as_shell_spawn() {
         let programs = Programs::new();
         let git = programs.path("git");
         let status = words(&["status"]);
         let push = words(&["push", "origin", "main"]);
         let bound = |source: &str| {
-            interceptor_with_packs(source, &["git"], |bindings| {
+            interceptor_with_grammars(source, &["git"], |bindings| {
                 bindings
                     .bind(&programs.file("git"), "git", "git")
                     .expect("git binds");
@@ -1288,7 +1289,7 @@ mod tests {
             .intercept(&spawn("git", &git, &status))
             .await
             .err()
-            .expect("a shell:spawn permit does not admit a pack action");
+            .expect("a shell:spawn permit does not admit a grammar action");
         assert_eq!(
             refused.to_string(),
             format!(
@@ -1297,23 +1298,23 @@ mod tests {
             )
         );
 
-        let pack_permitted = bound(
+        let grammar_permitted = bound(
             r#"permit (principal, action == Tool::git::Action::"status", resource);
                forbid (principal, action == Box::Action::"shell:spawn", resource);"#,
         );
         assert!(
-            pack_permitted
+            grammar_permitted
                 .intercept(&spawn("git", &git, &status))
                 .await
                 .is_ok(),
-            "the pack action permit admits the spawn, and the shell:spawn forbid never sees it"
+            "the grammar action permit admits the spawn, and the shell:spawn forbid never sees it"
         );
         assert!(
-            pack_permitted
+            grammar_permitted
                 .intercept(&spawn("git", &git, &push))
                 .await
                 .is_err(),
-            "a pack action that no rule permits is denied"
+            "a grammar action that no rule permits is denied"
         );
     }
 
@@ -1327,14 +1328,14 @@ mod tests {
         };
     "#;
 
-    /// **An admitted pack action records its `::response` with the exit status**, and a run that
+    /// **An admitted grammar action records its `::response` with the exit status**, and a run that
     /// ends with no status records `-1`.
     #[tokio::test]
-    async fn an_admitted_pack_action_records_its_response_with_the_exit_status() {
+    async fn an_admitted_grammar_action_records_its_response_with_the_exit_status() {
         let programs = Programs::new();
         let (git, cargo) = (programs.path("git"), programs.path("cargo"));
         let interceptor =
-            interceptor_with_packs(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
+            interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
                 b.bind(&programs.file("git"), "git", "git")
                     .expect("git binds");
                 b.bind(&programs.file("cargo"), "cargo", "cargo")
@@ -1374,7 +1375,7 @@ mod tests {
     }
 
     /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
-    /// under a policy that permits every action, and a file that no pack binds stays a
+    /// under a policy that permits every action, and a file that no grammar binds stays a
     /// `shell:spawn`.
     #[tokio::test]
     async fn an_undeclared_name_or_a_replaced_file_is_refused_whatever_the_policy_permits() {
@@ -1384,7 +1385,7 @@ mod tests {
             programs.path("git"),
             programs.path("make"),
         );
-        let interceptor = interceptor_with_packs(
+        let interceptor = interceptor_with_grammars(
             "permit (principal, action, resource);",
             &["git", "cargo", "aws"],
             |bindings| {
@@ -1406,8 +1407,8 @@ mod tests {
                 "python",
                 &mise,
                 Some(format!(
-                    "policy denied this operation on '{mise}' [tool-pack]: `python` runs \
-                     `{mise}`, which a tool pack covers, but no `[tool]` declares the name \
+                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
+                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
                      `python`. No policy can permit it."
                 )),
             ),
@@ -1416,8 +1417,8 @@ mod tests {
                 "/opt/shims/python",
                 &mise,
                 Some(format!(
-                    "policy denied this operation on '{mise}' [tool-pack]: `python` runs \
-                     `{mise}`, which a tool pack covers, but no `[tool]` declares the name \
+                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
+                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
                      `python`. No policy can permit it."
                 )),
             ),
@@ -1426,15 +1427,15 @@ mod tests {
                 "git",
                 &git,
                 Some(format!(
-                    "policy denied this operation on '{git}' [tool-pack]: `git` runs `{git}`, \
-                     which a tool pack bound, but the file at that path is no longer the file \
+                    "policy denied this operation on '{git}' [tool-grammar]: `git` runs `{git}`, \
+                     which a tool grammar bound, but the file at that path is no longer the file \
                      it bound. No policy can permit it."
                 )),
             ),
-            ("the first pack on the shim binary", "cargo", &mise, None),
-            ("the second pack on the shim binary", "aws", &mise, None),
-            ("a declared name with no pack", "node", &mise, None),
-            ("a file that no pack binds", "make", &make, None),
+            ("the first grammar on the shim binary", "cargo", &mise, None),
+            ("the second grammar on the shim binary", "aws", &mise, None),
+            ("a declared name with no grammar", "node", &mise, None),
+            ("a file that no grammar binds", "make", &make, None),
         ] {
             let decided = interceptor
                 .intercept(&spawn(program, program_path, &none))
@@ -1447,14 +1448,14 @@ mod tests {
 
     fn replaced_message(name: &str, program_path: &str) -> String {
         format!(
-            "policy denied this operation on '{program_path}' [tool-pack]: `{name}` runs \
-             `{program_path}`, which a tool pack bound, but the file at that path is no longer the \
+            "policy denied this operation on '{program_path}' [tool-grammar]: `{name}` runs \
+             `{program_path}`, which a tool grammar bound, but the file at that path is no longer the \
              file it bound. No policy can permit it."
         )
     }
 
     /// **A bound regular file replaced by a symlink is refused**, whether the symlink leads to a
-    /// file that no pack binds or to another bound file, and a `shell:spawn` permit does not
+    /// file that no grammar binds or to another bound file, and a `shell:spawn` permit does not
     /// admit it.
     #[tokio::test]
     async fn a_bound_file_replaced_by_a_symlink_is_refused() {
@@ -1465,7 +1466,7 @@ mod tests {
             let programs = Programs::new();
             let planted = programs.path("planted");
             let cargo = programs.path("cargo");
-            let interceptor = interceptor_with_packs(
+            let interceptor = interceptor_with_grammars(
                 r#"permit (principal, action == Box::Action::"shell:spawn", resource);
                    permit (principal, action in Tool::git::Action::"*", resource);
                    permit (principal, action in Tool::cargo::Action::"*", resource);"#,
@@ -1492,13 +1493,13 @@ mod tests {
         }
     }
 
-    /// **A shim binary that packs bind under other names, replaced by a symlink, is refused** for
-    /// a bound name and for an undeclared name, and a `shell:spawn` permit does not admit it.
+    /// **A shim binary that grammars bind under other names, replaced by a symlink, is refused**
+    /// for a bound name and for an undeclared name, and a `shell:spawn` permit does not admit it.
     #[tokio::test]
     async fn a_replaced_shim_binary_is_refused_under_each_name_it_covered() {
         let programs = Programs::new();
         let planted = programs.path("planted");
-        let interceptor = interceptor_with_packs(
+        let interceptor = interceptor_with_grammars(
             r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
             &["cargo"],
             |bindings| {
@@ -1525,14 +1526,14 @@ mod tests {
     }
 
     /// **A bound link retargeted to another bound file is refused**, and is never decided as the
-    /// other file's pack action.
+    /// other file's grammar action.
     #[tokio::test]
     async fn a_bound_link_retargeted_to_another_bound_file_is_refused() {
         let programs = Programs::new();
         let cargo = programs.path("cargo");
         programs.path("git-2.50");
         programs.link("git", "git-2.50");
-        let interceptor = interceptor_with_packs(
+        let interceptor = interceptor_with_grammars(
             "permit (principal, action, resource);",
             &["git", "cargo"],
             |bindings| {
@@ -1564,7 +1565,7 @@ mod tests {
                 .intercept(&spawn("cargo", &cargo, &words(&["test"])))
                 .await
                 .is_ok(),
-            "the other file, by its own bound name, still decides as its pack action"
+            "the other file, by its own bound name, still decides as its grammar action"
         );
     }
 
@@ -1574,7 +1575,7 @@ mod tests {
     async fn a_removed_bound_file_is_refused() {
         let programs = Programs::new();
         let git = programs.path("git");
-        let interceptor = interceptor_with_packs(
+        let interceptor = interceptor_with_grammars(
             r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
             &["git"],
             |bindings| {
@@ -1591,7 +1592,7 @@ mod tests {
             .err()
             .expect("a removed bound file is refused");
 
-        assert!(refused.to_string().contains("[tool-pack]"), "{refused}");
+        assert!(refused.to_string().contains("[tool-grammar]"), "{refused}");
     }
 
     /// **With empty bindings, every spawn decides exactly as `shell:spawn` decides it today**, and
@@ -1614,11 +1615,11 @@ mod tests {
             programs.path("mise"),
         );
         let absent = programs.0.path().join("absent").display().to_string();
-        let empty = |packs: &[&str]| interceptor_with_packs(POLICY, packs, |_| {});
-        let declared_only = interceptor_with_packs(POLICY, &["git"], |bindings| {
+        let empty = |grammars: &[&str]| interceptor_with_grammars(POLICY, grammars, |_| {});
+        let declared_only = interceptor_with_grammars(POLICY, &["git"], |bindings| {
             bindings.declare(&programs.file("mise"), "node");
         });
-        let bound_elsewhere = interceptor_with_packs(POLICY, &["git"], |bindings| {
+        let bound_elsewhere = interceptor_with_grammars(POLICY, &["git"], |bindings| {
             bindings
                 .bind(&programs.file("vendored-git"), "git", "git")
                 .expect("git binds another file");
@@ -1637,8 +1638,11 @@ mod tests {
             (engine, history)
         };
         let gates = [
-            ("no packs", empty(&[])),
-            ("installed packs and no binding", empty(&["git", "cargo"])),
+            ("no grammars", empty(&[])),
+            (
+                "installed grammars and no binding",
+                empty(&["git", "cargo"]),
+            ),
             ("a declared name and no binding", declared_only),
             ("a binding on another file", bound_elsewhere),
         ];

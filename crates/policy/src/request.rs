@@ -279,22 +279,22 @@ impl Request<'_> {
 }
 
 /// One request that the policy engine decides: a [`Request`] from an enforcement point, or a
-/// tool pack action.
+/// tool grammar action.
 #[derive(Clone, Copy)]
 pub(crate) enum ActionRequest<'a> {
     Request(&'a Request<'a>),
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter decides a pack action")
+        expect(dead_code, reason = "only the shell adapter decides a grammar action")
     )]
-    Pack(&'a crate::pack::PackRequest),
+    Grammar(&'a crate::grammar::GrammarRequest),
 }
 
 impl ActionRequest<'_> {
     pub(crate) fn identity(&self) -> crate::schema::ActionIdentity {
         match self {
             Self::Request(request) => crate::schema::ActionIdentity::for_request(request),
-            Self::Pack(request) => request.identity().clone(),
+            Self::Grammar(request) => request.identity().clone(),
         }
     }
 
@@ -302,7 +302,7 @@ impl ActionRequest<'_> {
     pub(crate) fn resource(&self) -> String {
         match self {
             Self::Request(request) => request.resource(),
-            Self::Pack(request) => request.resource().to_string(),
+            Self::Grammar(request) => request.resource().to_string(),
         }
     }
 }

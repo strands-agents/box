@@ -52,6 +52,21 @@ Direct Linux file operations use filesystem grants rather than individual policy
 Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
 See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
+## Capabilities inside nested namespaces
+
+A Linux [capability](#terms) is a privilege for an operation such as namespace administration.
+Box clears every capability set before the workload starts.
+This step removes startup authority but does not prevent Linux from granting capabilities in a nested user namespace.
+
+The filters permit `unshare`, `clone`, and `clone3` to create user namespaces, and `setns` to enter eligible child namespaces.
+The process can then hold capabilities within that namespace and the namespaces it owns.
+Those capabilities do not grant privileges in a parent user namespace.
+
+Box's seccomp filters remain active after namespace creation or entry, and child processes inherit them.
+The filters still refuse `mount` and `fsopen`, which mount a filesystem or begin filesystem setup.
+Other permitted operations can use the restored capabilities, such as creation of a nested mount namespace.
+These namespaces share the surrounding OS kernel, so [kernel security remains a dependency](security.md#the-operator-and-platform-own-the-environment).
+
 ## How the filesystem view changes access
 
 The view starts with an isolated root and adds the files that the workload needs.
@@ -96,6 +111,13 @@ Linux configuration refuses a deny path that does not exist.
 For an existing denied file, Linux can substitute an empty file.
 A read can then succeed with empty output while writes fail.
 
+For denied files and directories beneath writable grants, Box protects the intermediate ancestor directories.
+It binds those directories onto themselves, then covers those mounts with the original writable grant.
+Within the workload's mount namespace, Linux keeps the hidden mounts attached to those directory entries and refuses to rename them.
+The visible grant stays continuous, so unrelated file and directory renames across those ancestors remain available.
+Box installs nested grants and denial masks after this covering bind, preserving their precedence and source identity checks.
+Existing boundaries between separate grants or filesystems still apply.
+
 Linux refuses `list`, because the mount view cannot expose directory names without file contents.
 An agent's metadata-only directory grant contributes no mount and causes no startup error.
 Other grants can still expose that directory.
@@ -112,6 +134,10 @@ This also permits execution of programs in those directories.
 
 On ARM64, the recognized paths are `/lib64`, `/usr/lib64`, `/lib/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`, `/lib`, and `/usr/lib`.
 Box compares their resolved directory identities with the granted directory.
+After combining overlapping grants, Box refuses a writable, executable mount without an explicit execution grant covering its source.
+This includes a loader-directory read combined with a write on the same directory or an ancestor.
+An execution grant for one file does not authorize execution across its containing directory.
+Read-only library directories keep their automatic execution access.
 
 ELF means Executable and Linkable Format, the Linux binary format.
 For an exact ELF binary grant, Box discovers its executable-format interpreter and declared library dependencies.
@@ -208,6 +234,9 @@ Minimum versions, minimum privileges, package installation, and testing the asse
 | Term | Definition | Notes |
 |---|---|---|
 | Namespace | A kernel mechanism that gives processes a separate view of selected resources. | Box uses several namespace types. |
+| Capability | A Linux privilege for a specific operation. | User namespaces scope these privileges. |
+| `unshare`, `clone`, `clone3`, and `setns` | System calls that create or enter namespaces. | `clone` and `clone3` also create processes. |
+| `mount` and `fsopen` | System calls that mount a filesystem or begin filesystem setup. | Box refuses both after nested namespace creation or entry. |
 | Bind mount | An existing file or directory exposed at another mount point. | Its access flags affect direct file operations. |
 | Seccomp | A Linux mechanism that filters system calls. | Box uses static filters before workload execution. |
 | Shared library | Code that a program loads from a separate file. | The loader needs readable, executable access. |

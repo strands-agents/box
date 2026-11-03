@@ -22,6 +22,7 @@ jobs:
   check-bot-reviews:
     name: 2 Approvers for Bots
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Enforce maintainer reviews for bot/agent PRs
         uses: actions/github-script@v9

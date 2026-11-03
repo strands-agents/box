@@ -30,6 +30,7 @@ const BODY: &str = "STRANDS_NATIVE_EGRESS_OK";
 /// - **Linux:** copied to `/usr/bin/<this>` — world-accessible + binds into the leaf's mount view.
 /// - **macOS:** copied to a test-owned dir injected onto the box PATH, with a read+exec grant
 ///   (Seatbelt reads the binary in place; there is no mount view to bind).
+///
 /// The name differs from `FETCH_BINARY` so it never collides with the built copy in `target/`.
 #[cfg(target_os = "linux")]
 const FETCH_PROGRAM: &str = "box-mcp-fetch-linux";

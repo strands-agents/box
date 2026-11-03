@@ -15,7 +15,7 @@ labels:
   Area - Agent Containment:
     description: "OS containment of the agent process: macOS and Linux backends, seccomp, namespaces, filesystem grants in box.toml, the box's private tree, workload lifecycle"
   Area - Tool Containment (Binaries/Local MCP):
-    description: "Tools, binaries, and local MCP servers launched inside a box: leaf exec, the MCP broker, tool packs"
+    description: "Tools, binaries, and local MCP servers launched inside a box: leaf exec, the MCP broker, tool grammars"
   Area - Egress/Creds:
     description: "Egress gateway, outbound network and proxy, DNS, IPv6, credential vault and credential injection at the network boundary"
   Area - policy-engine:

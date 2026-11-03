@@ -69,14 +69,14 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux evaluation requires explicit consent
+### Linux publication and runtime consent stay separate
 
-Linux evaluation requires the operator to set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` before using the command line or library.
-Help and version checks remain available without consent.
-Linux archives belong to `-linux-preview.N` prereleases; stable releases continue to distribute macOS alone.
-A stable Linux download would imply readiness that the current qualification does not establish, so it is excluded.
-Operators and test automation must opt in, and the flag does not grant filesystem access or establish security acceptance.
-Removing these controls requires a later readiness decision.
+Linux evaluation requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`, while help and version checks remain available without consent.
+Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable release without a workflow revert.
+Keeping Linux in preview only would prevent an accepted Linux build from using the stable channel.
+The cost is an explicit platform choice: the release owner must establish Linux readiness before publishing its archive.
+Linux previews always include ARM64 Linux and leave the latest stable release unchanged.
+Package availability and runtime consent establish neither filesystem authority nor security acceptance.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -411,14 +411,15 @@ partial read-write access. `linux_rejects_write_only_before_any_process_runs` pi
 This accepted platform limitation avoids silently adding read permission. Landlock is the planned
 long-term approach; its implementation and qualification remain deferred.
 
-On Linux, when the
-authority directory sits more than one level below a write grant, the workload can rename the
-ancestor between them and create a fresh directory at the vacated path, which a later run whose
-`--config` names that path adopts; macOS refuses the ancestor rename, and
-`this_boxs_authority_survives_a_rename_of_its_parent` records both platforms. Placing the authority
-directly under the granted root, as `<project>/.strands-box` is, leaves no ancestor to rename. And a
-path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes the
-agent's own read work while `cat` through the Shell stays refused.
+Both platforms refuse native workload renames of ancestors between a write grant and the loaded
+authority directory. Linux keeps these ancestors fixed with mounts inside the workload's mount
+namespace; macOS denies changes to their directory entries. The test
+`this_boxs_authority_survives_a_rename_of_its_parent` checks both platforms and confirms that unrelated
+sibling operations still work. On Linux, this protection does not cover a permitted Shell move
+executed outside the workload's mount namespace.
+
+A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
+the agent's own read work while `cat` through the Shell stays refused.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
@@ -982,64 +983,64 @@ strands an operator who runs no agent and leaves review without a trusted refere
 standing maintenance burden: the examples and the authoring skill must track the action vocabulary as
 it moves.
 
-<a id="a-tool-pack-holds-grammars-never-code"></a>
-### A tool pack holds grammars, never code
+<a id="a-tool-grammar-is-data-never-code"></a>
+### A tool grammar is data, never code
 
-A tool pack is a TOML file that describes one tool: its actions, its effects, and the grammar Box uses
-to recognize those actions. It holds no code. So Box puts no external code inside its trusted process,
-and a pack stays easy to write and to review. Parsers written as Python code that runs in Monty were
-rejected. The cost is that a pack can describe only what its grammar can express.
+A tool grammar is TOML that describes one tool: its actions, its effects, and the rules Box uses to
+recognize those actions. It holds no code. So Box puts no external code inside its trusted process,
+and a grammar stays easy to write and to review. Parsers written as Python code that runs in Monty were
+rejected. The cost is that a grammar can describe only what its rules can express.
 
-<a id="box-owns-the-tool-pack-format"></a>
-### Box owns the tool pack file format, and it is separate from the pack's own version
+<a id="box-owns-the-tool-grammar-format"></a>
+### Box owns the tool grammar file format, and it is separate from the grammar's own version
 
-A tool pack file declares two versions. `format` is the version of the pack file language, and Box owns
-it: Box bumps it when it adds or changes keys in a way an older Box cannot read. `version` is the major
-version of the pack's content, and the pack author owns it. Box refuses a file with no `format`, or with
-a `format` it does not read, and a missing `format` does not default to 1. The cost is that every pack
-file must state `format = 1`.
+A tool grammar file declares two versions. `format` is the version of the grammar file language, and
+Box owns it: Box bumps it when it adds or changes keys in a way an older Box cannot read. `version` is
+the major version of the grammar's content, and the grammar author owns it. Box refuses a file with no
+`format`, or with a `format` it does not read, and a missing `format` does not default to 1. The cost
+is that every grammar file must state `format = 1`.
 
-<a id="a-pack-action-replaces-shell-spawn"></a>
-### One gate: a tool pack action replaces `shell:spawn` for a bound program
+<a id="a-grammar-action-replaces-shell-spawn"></a>
+### One gate: a tool grammar action replaces `shell:spawn` for a bound program
 
-When a tool pack binds a program, Box decides each spawn of it that the Shell raises as the pack
+When a tool grammar binds a program, Box decides each spawn of it that the Shell raises as the grammar
 action alone, such as `Tool::git::Action::"push"`, or `unmodeled` when the grammar can't read the
-command. It doesn't decide `shell:spawn` as well. A pack action is a normal action: it needs a permit, absent policy is
+command. It doesn't decide `shell:spawn` as well. A grammar action is a normal action: it needs a permit, absent policy is
 default-deny, and a forbid wins. To allow every git command the grammar reads, you write:
 
 ```dw
 permit (principal, action in Tool::git::Action::"*", resource);
 ```
 
-Two gates, `shell:spawn` first and the pack action second, was rejected. In that model the second gate
-can only narrow the first, so a permit on a pack action means nothing by itself, and a command the
+Two gates, `shell:spawn` first and the grammar action second, was rejected. In that model the second
+gate can only narrow the first, so a permit on a grammar action means nothing by itself, and a command the
 grammar can't read is allowed by whatever `shell:spawn` permits. When the team reviewed it, everyone
-found that confusing. The cost is that a `shell:spawn` rule stops applying to a program once a pack
+found that confusing. The cost is that a `shell:spawn` rule stops applying to a program once a grammar
 binds it, in both directions: a `shell:spawn` permit no longer admits `git`, and a `shell:spawn`
-forbid no longer refuses it. An operator who installs a pack must move those rules to the pack's
+forbid no longer refuses it. An operator who installs a grammar must move those rules to the grammar's
 actions. A `when temporal` rule that reads `shell:spawn` history also stops seeing a bound program,
-because each spawn of it enters history as its pack action.
+because each spawn of it enters history as its grammar action.
 
-<a id="a-pack-action-names-no-enforcement-point"></a>
-### A tool pack action doesn't name where Box enforces it
+<a id="a-grammar-action-names-no-enforcement-point"></a>
+### A tool grammar action doesn't name where Box enforces it
 
-A tool pack action names what the tool does, not where Box sees it happen. To deny a git force push,
+A tool grammar action names what the tool does, not where Box sees it happen. To deny a git force push,
 you forbid `Tool::git::Action::"push"` when
 `context.input.effects.contains(Tool::git::Effect::"force_push")`, and the rule doesn't say whether
 the push arrives as a shell command or as an HTTP request. That's the point of a semantic policy: you
 state the rule in the tool's own words, and Box works out how and where to enforce it. An action per
 enforcement point, such as a separate shell push and HTTP push, was rejected, because you'd have to
 write each rule once for each enforcement point, and a rule written for one would silently miss the
-others. The cost is that the action name can't tell two enforcement points apart, so every grammar in a
-tool pack must read a request into the same fields and effects, or one rule means different things at
-each enforcement point.
+others. The cost is that the action name can't tell two enforcement points apart, so each enforcement
+point that a tool grammar covers must read a request into the same fields and effects, or one rule means
+different things at each enforcement point.
 
 <a id="an-unmodeled-command-is-denied-by-default"></a>
 ### A request the grammar can't read is the `unmodeled` action, and it's denied by default
 
-When a tool pack's grammar can't read a request, Box raises `Tool::<pack>::Action::"unmodeled"`, and
+When a tool grammar can't read a request, Box raises `Tool::<name>::Action::"unmodeled"`, and
 your policy decides it like any other action. With no rule that permits it, it's denied. `unmodeled`
-sits outside the tool pack's `"*"` group, so a permit on `action in Tool::git::Action::"*"` never
+sits outside the tool grammar's `"*"` group, so a permit on `action in Tool::git::Action::"*"` never
 allows a command the grammar can't read. To allow one, a rule must name
 `Tool::git::Action::"unmodeled"` itself. Putting `unmodeled` inside `"*"` was rejected, because then a
 permit over the whole tool would also allow every command the grammar can't read, including one spelled
@@ -1050,40 +1051,40 @@ to slip past it, such as `git push --dele origin main`. The cost is that a forbi
 forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
 ```
 
-<a id="a-tool-pack-binds-on-the-program-file-and-the-called-name"></a>
-### A tool pack binds on the program file's identity and the name it was called by
+<a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
+### A tool grammar binds on the program file's identity and the name it was called by
 
-Box binds a tool pack to a pair: the identity of the resolved program file, and the name the program
+Box binds a tool grammar to a pair: the identity of the resolved program file, and the name the program
 was called by. The identity is the file's device and inode on the host, so a hard link or a symbolic
 link to a bound file is that same file, and a link can't route around the binding. A command is
-parsed with a pack's grammar only when both halves match one binding. The file identity alone isn't
+parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
 enough, because several programs can share one binary. mise runs every tool it manages through one shim
 binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can be links
 to one binary. The name alone isn't enough, because the caller picks the name, so any file called `git`
-would claim the git pack. Binding on the file identity alone was rejected: it's one lookup, but it
+would claim the git grammar. Binding on the file identity alone was rejected: it's one lookup, but it
 would read `npm install` through the mise shim binary as a cargo command.
 
-Several packs can bind one file, each under its own name. So a cargo pack binds the mise shim binary as
-`cargo`, and an npm pack binds the same file as `npm`. Box refuses a second pack only on a pair that
-another pack already binds. One pack per file was rejected, because then only one tool that mise
-manages could have a pack.
+Several grammars can bind one file, each under its own name. So a cargo grammar binds the mise shim
+binary as `cargo`, and an npm grammar binds the same file as `npm`. Box refuses a second grammar only on
+a pair that another grammar already binds. One grammar per file was rejected, because then only one
+tool that mise manages could have a grammar.
 
 Box refuses a spawn of a bound file before any policy decides it, in two cases, and no rule can permit
 either one. The first is a name that no `[tool]` declares, such as `python` through the mise shim
-binary, or a link `g` to a bound `git`. The second is a replaced file: the path a pack bound, or the
+binary, or a link `g` to a bound `git`. The second is a replaced file: the path a grammar bound, or the
 link it bound through, leads to another file now, for example after an update while the box runs. So
 a new name, a new link, or a new file can't fall back to a `shell:spawn` rule that permits more. Reading an undeclared
-name as the pack's `unmodeled` action was rejected. When several packs bind one file, no single pack
-owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
-named. A name that a `[tool]` declares with no pack stays a `shell:spawn`, also after its file is
-replaced, because the operator named it and chose no pack for it.
+name as the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
+grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
+named. A name that a `[tool]` declares with no grammar stays a `shell:spawn`, also after its file is
+replaced, because the operator named it and chose no grammar for it.
 
 The cost has three parts. An operator must declare each name that runs a bound file, or Box refuses
 that name. An update that replaces a bound binary while the box runs refuses that program until the
-box restarts. And a pack covers a file identity, not a program: a file that no pack binds stays a
+box restarts. And a grammar covers a file identity, not a program: a file that no grammar binds stays a
 `shell:spawn` under every name, even a name that no `[tool]` declares. So a copy of a bound binary at
 another path, or the same program reached through an unbound shim binary, is decided by the
-`shell:spawn` rules and not by its pack.
+`shell:spawn` rules and not by its grammar.
 
 ## Containment
 

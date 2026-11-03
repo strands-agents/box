@@ -486,6 +486,9 @@ pub(crate) enum TrampolineError {
     #[error("read containment setup status: {source}")]
     StatusRead { source: std::io::Error },
 
+    #[error("containment setup channel closed before completion")]
+    SetupIncomplete,
+
     #[error("invalid containment setup status protocol: {reason}")]
     StatusProtocol { reason: String },
 

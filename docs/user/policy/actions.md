@@ -1,4 +1,4 @@
-# The action vocabulary
+# Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
 ships ten actions, and generates one more for each MCP tool it discovers.

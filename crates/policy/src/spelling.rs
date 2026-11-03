@@ -309,11 +309,11 @@ fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Opt
     ))
 }
 
-/// The prefix before `:` of a `Box::Action`, the action type of a tool pack action, or the whole
+/// The prefix before `:` of a `Box::Action`, the action type of a tool grammar action, or the whole
 /// action for any other.
 fn input_family(uid: &EntityUid) -> String {
     let mut namespace = uid.type_name().namespace_components();
-    if namespace.next() == Some(crate::pack::PACK_NAMESPACE) && namespace.next().is_some() {
+    if namespace.next() == Some(crate::grammar::TOOL_NAMESPACE) && namespace.next().is_some() {
         return uid.type_name().to_string();
     }
     let id = uid.id().escaped();
