@@ -83,6 +83,7 @@ fn history_example() -> Result<(), PolicyError> {
                 path: "/v1/items",
                 delivery: Delivery::Completed { bytes: 512 },
                 status: Some(200),
+                intercepted: true,
             },
         )
     }

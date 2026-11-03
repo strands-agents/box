@@ -378,6 +378,9 @@ enum AttemptIdentity {
         port: u16,
         method: String,
         path: String,
+        /// Whether the gateway decrypted a TLS exchange, carried from the attempt so the
+        /// response leg reports the transport the request leg reported.
+        intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
     },
@@ -404,6 +407,7 @@ impl AttemptIdentity {
                 port,
                 method,
                 path,
+                intercepted,
                 mcp,
                 ..
             } => Self::Http {
@@ -411,6 +415,7 @@ impl AttemptIdentity {
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
+                intercepted: *intercepted,
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -485,6 +490,7 @@ impl LocalPolicyEffectPermit {
                     port,
                     method,
                     path,
+                    intercepted,
                     mcp,
                 },
                 Some(delivery),
@@ -499,6 +505,7 @@ impl LocalPolicyEffectPermit {
                         path,
                         delivery,
                         status: reply_status_of(outcome),
+                        intercepted: *intercepted,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -1318,7 +1325,7 @@ mod tests {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && context.input.ip like "10.*" };"#,
+               when { context.input has ip4 && context.input.ip4 like "10.*" };"#,
         );
         assert!(
             fixture
@@ -1583,14 +1590,15 @@ mod tests {
         }
     }
 
-    /// A forbid on `ip` refuses the pinned address and leaves every other address to the permit.
+    /// A clause per family refuses the pinned address and leaves every other address to the
+    /// permit. One `ip4` clause covers every IPv6 encoding that carries the address.
     #[test]
     fn an_address_forbid_refuses_only_its_addresses() {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && (context.input.ip like "169.254.*"
-                      || context.input.ip == "fd00:ec2::254") };"#,
+               when { (context.input has ip4 && context.input.ip4 like "169.254.*")
+                      || (context.input has ip6 && context.input.ip6 == "fd00:ec2::254") };"#,
         );
         for refused in [
             "169.254.169.254:80",
@@ -1598,6 +1606,8 @@ mod tests {
             "[fd00:ec2::254]:80",
             "[::ffff:169.254.169.254]:80",
             "[2002:a9fe:a9fe::]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[::ffff:0:a9fe:a9fe]:80",
         ] {
             assert!(
                 fixture
@@ -1618,7 +1628,32 @@ mod tests {
         }
     }
 
-    /// `ip` is a string, so the Cedar `ipaddr` form fails when the policy loads.
+    /// An `ip6` clause refuses the translator prefix itself, which no `ip4` clause can state: the
+    /// wrapped address is reachable under a different IPv6 prefix.
+    #[test]
+    fn a_translator_prefix_forbid_refuses_the_wire_form_and_not_the_address_it_carries() {
+        let fixture = interceptor(
+            r#"permit(principal, action == Box::Action::"net:connect", resource);
+               @id("no_nat64_translator")
+               forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input has ip6 && context.input.ip6 like "64:ff9b::*" };"#,
+        );
+        for refused in ["[64:ff9b::5db8:d822]:443", "[64:ff9b::a9fe:a9fe]:80"] {
+            assert!(
+                fixture
+                    .intercept(&connect_attempt(refused.parse().unwrap()))
+                    .is_err(),
+                "{refused} routes through the translator"
+            );
+        }
+        for admitted in ["93.184.216.34:443", "[2002:5db8:d822::]:443"] {
+            fixture
+                .intercept(&connect_attempt(admitted.parse().unwrap()))
+                .unwrap_or_else(|error| panic!("{admitted} is admitted: {error}"));
+        }
+    }
+
+    /// `ip4` is a string, so the Cedar `ipaddr` form fails when the policy loads.
     #[test]
     fn an_ipaddr_rule_is_refused_when_the_policy_loads() {
         let history = tempfile::tempdir().expect("history directory");
@@ -1626,7 +1661,7 @@ mod tests {
             vec![Policy {
                 origin: PathBuf::from("adapter-test.cedar"),
                 text: r#"forbid(principal, action == Box::Action::"net:connect", resource)
-                    when { context.input has ip && context.input.ip.isInRange(ip("10.0.0.0/8")) };"#
+                    when { context.input has ip4 && context.input.ip4.isInRange(ip("10.0.0.0/8")) };"#
                     .to_string(),
             }],
             &history.path().join("dogwood.redb"),
@@ -1634,7 +1669,10 @@ mod tests {
             panic!("an ipaddr comparison does not load");
         };
         let refusal = refusal.to_string();
-        assert!(refusal.contains("schema validation"), "{refusal}");
+        assert!(
+            refusal.contains("expected ipaddr but saw String"),
+            "{refusal}"
+        );
     }
 
     /// The request leg projects `port` and `body_bytes` into its decision. No rule runs on the
@@ -1704,6 +1742,58 @@ mod tests {
         assert!(
             interceptor.intercept(&request(false)).is_err(),
             "a plain-HTTP request must not satisfy a rule that requires intercepted"
+        );
+    }
+
+    /// A `http:request::response` reports the transport the exchange really used. A plain-HTTP
+    /// exchange records `intercepted: false`, and a TLS-intercepted exchange records `true`.
+    #[test]
+    fn the_response_leg_reports_the_real_transport() {
+        // One `::response` with `input.intercepted: true` arms the forbid. A plain-HTTP
+        // exchange must leave it unarmed; a TLS-intercepted exchange must arm it.
+        let tls_only_history = || {
+            interceptor(
+                r#"permit(principal, action == Box::Action::"http:request", resource);
+                   forbid(principal, action == Box::Action::"http:request", resource)
+                   when temporal {
+                     formerly within 3600s (
+                       Box::Action::"http:request"::response{ input.intercepted: true }
+                     )
+                   };"#,
+            )
+        };
+        let request = |intercepted| EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "POST",
+            path: "/v1/messages",
+            body_bytes: 0,
+            intercepted,
+            mcp: None,
+        };
+        let exchange = |fixture: &InterceptorFixture, intercepted| {
+            fixture
+                .intercept(&request(intercepted))
+                .expect("the permit admits the request")
+                .record_outcome(EgressEffectOutcome::Replied {
+                    accepted_bytes: 10,
+                    status: 200,
+                })
+                .expect("the reply records");
+        };
+
+        let plain = tls_only_history();
+        exchange(&plain, false);
+        plain
+            .intercept(&request(false))
+            .expect("a plain-HTTP response records intercepted: false, so the forbid stays unarmed")
+            .mark_indeterminate();
+
+        let tls = tls_only_history();
+        exchange(&tls, true);
+        assert!(
+            tls.intercept(&request(true)).is_err(),
+            "a TLS-intercepted response records intercepted: true, which arms the forbid"
         );
     }
 }
