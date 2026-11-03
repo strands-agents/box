@@ -78,15 +78,39 @@ may hold (`"`, `|`, `<`, `>`, `^`, a backquote, a brace), a `%` that starts no e
 IPv6 literal, a second `@`, and a port that is not digits. A path outside RFC 3986 §3.3 is refused
 the same way.
 
-**A port spelling is not folded yet, and for `http`/`https` that is a gap you must write around.** A
-URL parser reads a port as a number, so it treats `:0443` as `443` and drops it as the `https`
-default, and it drops a bare `:` the same way. The box keeps whichever the workload wrote. So
-`https://notes:0443/page`, `https://notes:08080/page`, and `https://notes:/page` each reach the same
-origin as a shorter spelling while reaching a rule as a different string, and a rule that names the
-shorter spelling does not match. Until this folds, name the host with a `like` pattern rather than
-matching a full `uri` that carries a port. The same applies to percent-escape hex case inside a
-query (`?a=%2e` against `?a=%2E`), and to a `file:` authority that carries userinfo or an empty
-port — though for `file:` both common parsers reject those outright.
+**The host is not folded to one spelling, only checked.** Checking the grammar is not IDNA, so every
+form the grammar allows is kept as the workload wrote it, and two spellings of one host still reach
+a rule as two strings. This is the gap the check does not close, and it has four parts, each measured
+in Node, Python `urlsplit`, and the Rust `url` crate:
+
+| What stays unfolded | One origin, two strings |
+|---|---|
+| An ignorable code point spelled as an escape, which the grammar allows | `file://localhost%C2%AD/home/op/.env` opens `/home/op/.env`; `https://notes%E2%80%8Bx/page` reaches `notesx` |
+| A non-ASCII host, including its case, because the box lowercases ASCII only | a parser resolves each to one punycode label |
+| An IPv4 literal in any form but dotted-quad | `https://127.1/page` and `https://2130706433/page` each reach `127.0.0.1` |
+| An IPv6 literal that compresses its zeros or maps an IPv4 address | `https://[::0001]/page` reaches `[::1]`; `https://[::FFFF:127.0.0.1]/page` reaches `[::ffff:7f00:1]` |
+
+**A port spelling and an empty userinfo are not folded either, and under `http`/`https` both are a
+gap you must write around.** A URL parser reads a port as a number, so it treats `:0443` as `443`
+and drops it as the `https` default, and it drops a bare `:` the same way. It drops an empty
+userinfo and an empty password with it. The box keeps whichever the workload wrote. So
+`https://notes:0443/page`, `https://notes:08080/page`, `https://notes:/page`, `https://@notes/page`,
+and `https://user:@notes/page` each reach the same origin as a shorter spelling while reaching a rule
+as a different string, and a rule that names the shorter spelling does not match. All three parsers
+accept every one of them. A `file:` URI carrying either is the same residual with a smaller cost:
+Node and the Rust `url` crate reject all of those spellings outright, so reaching the file needs a
+server on Python's lenient `urlsplit`. Percent-escape hex case inside a query (`?a=%2e` against
+`?a=%2E`) is unfolded the same way.
+
+**No `uri` pattern names one origin and only that origin while those spellings are unfolded.** A
+pattern that keeps the path separator, `uri like "https://notes/*"`, matches none of them, because
+the canonical form puts the port and the userinfo before the `/`. A pattern that ends at the host's
+last character, `uri like "https://notes*"`, matches every port spelling — and also every host that
+starts with those characters, such as `notes.example.com` and `notes-staging`, which is a rule wider
+than the one you wrote. Neither reaches an empty userinfo. So write the longest host prefix you can,
+check what else that prefix reaches, and use a rule on `context.input.server` or
+`context.input.method` where you need a boundary that does not depend on the host's spelling.
+`admission.rs::a_uri_like_pattern_cannot_name_one_origin_and_only_that_origin` pins each half.
 
 **A query is treated by scheme, because only one scheme sends it anywhere.** Under `http` or
 `https` the query is part of the request the origin server receives, so it is part of what the URI

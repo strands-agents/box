@@ -465,6 +465,72 @@ mod tests {
         }
     }
 
+    /// **No `uri` pattern names one origin and only that origin, while a port spelling is unfolded.**
+    ///
+    /// `docs/design/mcp.md` states this, and nothing pinned it. A pattern that keeps the path
+    /// separator matches no port spelling, because the canonical form puts the port before the
+    /// `/`. A pattern that ends at the host's last character matches every port spelling and
+    /// every host that starts with those characters. Neither reaches an empty userinfo.
+    #[test]
+    fn a_uri_like_pattern_cannot_name_one_origin_and_only_that_origin() {
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        let forbids = |pattern: &str| {
+            policy(&format!(
+                r#"permit (principal, action == Box::Action::"mcp:call", resource)
+                   when {{ context.input.server == "issues-mcp" }};
+                   @id("forbid_notes")
+                   forbid (principal, action == Box::Action::"mcp:call", resource)
+                   when {{ context.input has uri && context.input.uri like "{pattern}" }};"#
+            ))
+        };
+
+        // The pattern the page used to recommend. It matches the plain spelling and nothing else.
+        let with_separator = forbids("https://notes/*");
+        assert!(call(&with_separator, &read("https://notes/page")).is_err());
+        for reaches_the_same_origin in [
+            "https://notes:0443/page",
+            "https://notes:08080/page",
+            "https://notes:/page",
+            "https://@notes/page",
+        ] {
+            assert!(
+                call(&with_separator, &read(reaches_the_same_origin)).is_ok(),
+                "a pattern holding the path separator matches no port spelling: \
+                 {reaches_the_same_origin}"
+            );
+        }
+
+        // The pattern that does reach them, and what else it reaches with them.
+        let host_prefix = forbids("https://notes*");
+        for port_spelling in [
+            "https://notes/page",
+            "https://notes:0443/page",
+            "https://notes:08080/page",
+            "https://notes:/page",
+        ] {
+            assert!(
+                call(&host_prefix, &read(port_spelling)).is_err(),
+                "a host-prefix pattern matches every port spelling: {port_spelling}"
+            );
+        }
+        for another_host in [
+            "https://notes.example.com/page",
+            "https://notes-staging/page",
+        ] {
+            assert!(
+                call(&host_prefix, &read(another_host)).is_err(),
+                "and every host that starts with those characters: {another_host}"
+            );
+        }
+
+        // Neither pattern reaches an empty userinfo, which both reference parsers drop.
+        assert!(call(&host_prefix, &read("https://@notes/page")).is_ok());
+    }
+
     const SEARCH: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"SearchIssues","arguments":{"query":"x"}}}"#;
     const COMMENT: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call",
