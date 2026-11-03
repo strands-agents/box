@@ -92,11 +92,17 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
         );
     };
 
+    // Normalize before the check, so the refusal judges the authority this function would emit
+    // rather than the authored spelling. `https://./x` normalizes to an empty authority, and judging
+    // the raw `.` let it through and emitted `https:///x` — a form this same check refuses, so the
+    // output was not its own fixed point.
+    let normalized_authority = authority.map(|auth| normalize_authority(auth, &scheme));
+
     // RFC 9110 §4.2.1 requires `"//" authority` and forbids an empty host, and a URL parser that
     // meets neither reads the first path segment as the host: `http:/etc/passwd` becomes host `etc`,
     // and `https:///notes/page` becomes host `notes`. `file:` is the exception the grammar states —
     // RFC 8089 makes an absent or empty authority the local one, which folds to `file:///`.
-    if scheme != "file" && matches!(authority, None | Some("")) {
+    if scheme != "file" && matches!(normalized_authority.as_deref(), None | Some("")) {
         return Err(
             "an http or https URI with no authority is refused: RFC 9110 requires \"//\" and a \
                     host, and a URL parser reads the first path segment as the host instead"
@@ -125,19 +131,15 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     // no-authority form (`file:/x`) is the empty local authority (RFC 8089) — so it canonicalizes to
     // `file:///x`. http/https with NO authority (`http:/etc/passwd`) must stay path-only: fabricating
     // `http:///etc/passwd` invents an empty authority and changes the URI's meaning.
-    let has_authority = match authority {
-        // Normalize first, unconditionally; decide the local-authority case on the normalized
-        // form, not the raw string. Catches the spellings of "this machine" that normalization
-        // folds (case, trailing dot, percent-encoding, loopback IP literals), not just the one
-        // exact string `localhost`. A spelling normalization leaves alone, such as an empty port
-        // or `[::0001]`, is a residual.
-        Some(auth) => {
-            let normalized = normalize_authority(auth, &scheme);
-            if scheme == "file" && is_local_file_authority(&normalized) {
-                out.push_str("//");
-            } else {
-                out.push_str("//");
-                out.push_str(&normalized);
+    let has_authority = match normalized_authority.as_deref() {
+        // The local-authority case is decided on the normalized form, not the raw string, so it
+        // catches the spellings of "this machine" that normalization folds (case, trailing dot,
+        // percent-encoding, loopback IP literals) and not just the exact string `localhost`. A
+        // spelling normalization leaves alone, such as an empty port or `[::0001]`, is a residual.
+        Some(normalized) => {
+            out.push_str("//");
+            if !(scheme == "file" && is_local_file_authority(normalized)) {
+                out.push_str(normalized);
             }
             true
         }
@@ -399,6 +401,11 @@ mod tests {
             "file:/",
             "file:",
             "FILE:",
+            // Put a generated spelling in the AUTHORITY position. Without these no prefix could
+            // produce an authority that normalizes to empty, which is how `https://./x` emitted a
+            // canonical form that was not its own fixed point.
+            "https://",
+            "file://",
         ] {
             for spelling in generated_spellings() {
                 if let Ok(once) = super::canonicalize_resource_uri(&format!("{prefix}{spelling}")) {
@@ -869,6 +876,12 @@ mod tests {
             "https:///notes/page",
             "http://",
             "https://",
+            // An authority that NORMALIZES to empty. Judging the authored spelling let these
+            // through and emitted `https:///x`, which this same refusal rejects — so the output
+            // was not its own fixed point.
+            "https://./notes/page",
+            "https://.../x",
+            "http://%2e/x",
         ] {
             let refusal = super::canonicalize_resource_uri(uri)
                 .expect_err("an http or https URI must spell an authority");
@@ -885,6 +898,13 @@ mod tests {
         );
         assert_eq!(canonicalize_resource_uri("file:///etc/x"), "file:///etc/x");
         assert_eq!(canonicalize_resource_uri("file://"), "file:///");
+        assert_eq!(
+            canonicalize_resource_uri("file://./x"),
+            "file:///x",
+            "`file:` folds an authority that normalizes to empty, rather than refusing it"
+        );
+        // An `http` authority that normalizes to something non-empty still canonicalizes.
+        assert_eq!(canonicalize_resource_uri("https://a./x"), "https://a/x");
     }
 
     /// Only `resources/read` has its `uri` rewritten. A method that carries `params.uri` for another
