@@ -24,8 +24,9 @@ socket derivation; policy actions, attributes, and temporal observations; each m
 `pub use` set; and the composed environment, including `reserved_workload_environment`.
 Read [the box contract](crates/box/AGENTS.md#the-box-contract) before changing any of these.
 
-`docs/site-manifest.json` is a separate frozen external publication surface. Its schema, field
-meanings, stable page identities and routes, and compatibility rules are in
+`docs/site-manifest.json` is a separate frozen external publication surface, and
+`docs/site-manifest-retirements.json` permanently reserves removed identities and routes. Their
+schema, field meanings, stable page identities and routes, and compatibility rules are in
 [the site manifest contract](docs/dev/site-manifest.md).
 
 After approval, bump `RECORD_VERSION`, `LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes.
@@ -159,8 +160,8 @@ Owned clippy warnings must be zero; vendored warnings must not increase. Check w
 against `crates/<changed-crate>/`. Use `just --list` for workspace gates and
 [README.md](README.md) for prerequisites.
 
-For a change to `docs/site-manifest.json`, a publishable page under `docs/user/`, or the manifest
-validator and its CI wiring, run:
+For a change to `docs/site-manifest.json`, `docs/site-manifest-retirements.json`, a publishable page
+under `docs/user/`, or the manifest validator and its CI wiring, run:
 
 ```sh
 cargo test -p strands-box --test site_manifest --locked --all-features

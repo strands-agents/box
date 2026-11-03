@@ -23,6 +23,12 @@ reserved for cross-revision page identity; it does not determine the route. The 
 stable route suffix. Do not reuse either value for a different page. A route removal or move needs
 a coordinated consumer change and a redirect before it merges.
 
+`docs/site-manifest-retirements.json` is the producer-only, append-only registry of retired page
+identities and routes. Consumers do not read it. To remove a page after coordinating its redirect,
+add its `id` to `pageIds` and its `slug` to `slugs`. To move a route, keep the page `id` and add only
+the old `slug` to `slugs`. Never remove a registry entry. Current pages cannot use a retired page ID
+or slug.
+
 The `source` can change when a Markdown file moves. Keep the existing `id` and `slug` when that
 move does not create a new page.
 
@@ -46,8 +52,8 @@ move does not create a new page.
 The manifest test refuses an absent page, an extra page, an unsafe source or slug, a duplicate
 identity or navigation position, an unknown field or status, and a title that differs from the
 source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
-a removed page ID, a changed slug for an existing ID, or an existing slug assigned to a different
-ID.
+a page removal or route move without the required retirement, an existing slug assigned to a
+different ID, reuse of a retired value, or removal of a retirement.
 
 ## Publication status
 
@@ -75,7 +81,8 @@ Run:
 cargo test -p strands-box --test site_manifest --all-features
 ```
 
-Run the test after a change to the manifest or a publishable user page.
+Run the test after a change to the manifest, retirement registry, or a publishable user page.
 Pull-request CI runs this focused test on Ubuntu for those changes. It does not start the full Rust
 matrix for a documentation-only pull request. When the base revision has a manifest, CI supplies it
-to the test for the compatibility checks.
+to the test for the compatibility checks. CI also supplies the base retirement registry when one
+exists so retirement history remains append-only.

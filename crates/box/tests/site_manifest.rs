@@ -9,7 +9,10 @@ use std::process::Command;
 use serde::Deserialize;
 
 const MANIFEST: &str = "docs/site-manifest.json";
+const RETIREMENTS: &str = "docs/site-manifest-retirements.json";
+const RETIREMENTS_ENV: &str = "SITE_MANIFEST_RETIREMENTS";
 const BASE_MANIFEST_ENV: &str = "SITE_MANIFEST_BASE";
+const BASE_RETIREMENTS_ENV: &str = "SITE_MANIFEST_RETIREMENTS_BASE";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -53,6 +56,37 @@ struct Navigation {
     order: u32,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct BaseManifest {
+    product: BaseProduct,
+    pages: Vec<BasePage>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct BaseProduct {
+    id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct BasePage {
+    id: String,
+    slug: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Retirements {
+    page_ids: Vec<String>,
+    slugs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaseRetirements {
+    page_ids: Vec<String>,
+    slugs: Vec<String>,
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -68,11 +102,46 @@ fn load_manifest(root: &Path) -> Result<SiteManifest, String> {
     load_manifest_path(&root.join(MANIFEST))
 }
 
-fn load_base_manifest() -> Result<Option<SiteManifest>, String> {
+fn load_base_manifest_path(path: &Path) -> Result<BaseManifest, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    serde_json::from_str(&source)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))
+}
+
+fn load_base_manifest() -> Result<Option<BaseManifest>, String> {
     let Some(path) = env::var_os(BASE_MANIFEST_ENV).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    load_manifest_path(Path::new(&path)).map(Some)
+    load_base_manifest_path(Path::new(&path)).map(Some)
+}
+
+fn load_retirements_path(path: &Path) -> Result<Retirements, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    serde_json::from_str(&source)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))
+}
+
+fn load_retirements(root: &Path) -> Result<Retirements, String> {
+    if let Some(path) = env::var_os(RETIREMENTS_ENV).filter(|value| !value.is_empty()) {
+        return load_retirements_path(Path::new(&path));
+    }
+    load_retirements_path(&root.join(RETIREMENTS))
+}
+
+fn load_base_retirements_path(path: &Path) -> Result<BaseRetirements, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    serde_json::from_str(&source)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))
+}
+
+fn load_base_retirements() -> Result<BaseRetirements, String> {
+    let Some(path) = env::var_os(BASE_RETIREMENTS_ENV).filter(|value| !value.is_empty()) else {
+        return Ok(BaseRetirements::default());
+    };
+    load_base_retirements_path(Path::new(&path))
 }
 
 fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
@@ -307,7 +376,104 @@ fn validate_manifest(root: &Path, manifest: &SiteManifest) -> Result<(), String>
     validate_coverage(root, &sources)
 }
 
-fn validate_compatibility(base: &SiteManifest, current: &SiteManifest) -> Result<(), String> {
+fn validate_retirement_values(page_ids: &[String], slugs: &[String]) -> Result<(), String> {
+    let mut seen_page_ids = HashSet::new();
+    for (index, id) in page_ids.iter().enumerate() {
+        let location = format!("retirements.pageIds[{index}]");
+        validate_text(id, &location)?;
+        require(
+            is_kebab_case(id),
+            format!("{location} must be lowercase kebab case"),
+        )?;
+        require(
+            seen_page_ids.insert(id.as_str()),
+            format!("{location} duplicates {id}"),
+        )?;
+    }
+
+    let mut seen_slugs = HashSet::new();
+    for (index, slug) in slugs.iter().enumerate() {
+        let location = format!("retirements.slugs[{index}]");
+        validate_text(slug, &location)?;
+        require(
+            is_safe_slug(slug),
+            format!("{location} must be a safe relative URL path"),
+        )?;
+        require(
+            seen_slugs.insert(slug.as_str()),
+            format!("{location} duplicates {slug}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_retirement_registry(retirements: &Retirements) -> Result<(), String> {
+    validate_retirement_values(&retirements.page_ids, &retirements.slugs)
+}
+
+fn validate_retirements(current: &SiteManifest, retirements: &Retirements) -> Result<(), String> {
+    validate_retirement_registry(retirements)?;
+    let page_ids = retirements
+        .page_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let slugs = retirements
+        .slugs
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    for page in &current.pages {
+        require(
+            !page_ids.contains(page.id.as_str()),
+            format!("current page id {} is retired", page.id),
+        )?;
+        require(
+            !slugs.contains(page.slug.as_str()),
+            format!("current page slug {} is retired", page.slug),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_retirement_history(
+    base: &BaseRetirements,
+    current: &Retirements,
+) -> Result<(), String> {
+    validate_retirement_values(&base.page_ids, &base.slugs)?;
+    validate_retirement_registry(current)?;
+    let current_page_ids = current
+        .page_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let current_slugs = current
+        .slugs
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    for id in &base.page_ids {
+        require(
+            current_page_ids.contains(id.as_str()),
+            format!("retired page id {id} must remain reserved"),
+        )?;
+    }
+    for slug in &base.slugs {
+        require(
+            current_slugs.contains(slug.as_str()),
+            format!("retired slug {slug} must remain reserved"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_compatibility(
+    base: &BaseManifest,
+    current: &SiteManifest,
+    retirements: &Retirements,
+) -> Result<(), String> {
     require(
         current.product.id == base.product.id,
         format!("base product id {} must remain unchanged", base.product.id),
@@ -335,18 +501,41 @@ fn validate_compatibility(base: &SiteManifest, current: &SiteManifest) -> Result
             )?;
         }
 
-        let current_page = current_by_id
-            .get(base_page.id.as_str())
-            .ok_or_else(|| format!("base page id {} must remain declared", base_page.id))?;
-        require(
-            current_page.slug == base_page.slug,
-            format!(
-                "base page id {} must keep slug {}",
-                base_page.id, base_page.slug
-            ),
-        )?;
+        match current_by_id.get(base_page.id.as_str()) {
+            Some(current_page) => require(
+                current_page.slug == base_page.slug || retirements.slugs.contains(&base_page.slug),
+                format!(
+                    "base page id {} may change slug {} only after that slug is retired",
+                    base_page.id, base_page.slug
+                ),
+            )?,
+            None => require(
+                retirements.page_ids.contains(&base_page.id)
+                    && retirements.slugs.contains(&base_page.slug),
+                format!(
+                    "base page id {} may disappear only after its id and slug {} are retired",
+                    base_page.id, base_page.slug
+                ),
+            )?,
+        }
     }
     Ok(())
+}
+
+fn compatibility_manifest(manifest: &SiteManifest) -> BaseManifest {
+    BaseManifest {
+        product: BaseProduct {
+            id: manifest.product.id.clone(),
+        },
+        pages: manifest
+            .pages
+            .iter()
+            .map(|page| BasePage {
+                id: page.id.clone(),
+                slug: page.slug.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn manifest_value(root: &Path) -> serde_json::Value {
@@ -358,9 +547,15 @@ fn manifest_value(root: &Path) -> serde_json::Value {
 fn repository_manifest_is_valid() {
     let root = repository_root();
     let manifest = load_manifest(&root).expect("load manifest");
+    let retirements = load_retirements(&root).expect("load retirements");
     validate_manifest(&root, &manifest).expect("validate manifest");
+    validate_retirements(&manifest, &retirements).expect("validate retirements");
+    let base_retirements = load_base_retirements().expect("load base retirements");
+    validate_retirement_history(&base_retirements, &retirements)
+        .expect("validate retirement history");
     if let Some(base) = load_base_manifest().expect("load base manifest") {
-        validate_compatibility(&base, &manifest).expect("validate manifest compatibility");
+        validate_compatibility(&base, &manifest, &retirements)
+            .expect("validate manifest compatibility");
     }
 }
 
@@ -378,7 +573,11 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
         .and_then(|(_, remainder)| remainder.split_once("            containment:\n"))
         .map(|(filter, _)| filter)
         .expect("site manifest path filter");
-    for path in ["docs/site-manifest.json", "docs/user/**/*.md"] {
+    for path in [
+        "docs/site-manifest.json",
+        "docs/site-manifest-retirements.json",
+        "docs/user/**/*.md",
+    ] {
         assert!(
             site_manifest_filter.contains(&format!("- '{path}'")),
             "site manifest CI must run for {path}"
@@ -410,13 +609,25 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
     assert!(
         base_step.contains("BASE_SHA: ${{ github.event.pull_request.base.sha }}")
             && base_step.contains("BASE_MANIFEST: ${{ runner.temp }}/base-site-manifest.json")
+            && base_step.contains(
+                "BASE_RETIREMENTS: ${{ runner.temp }}/base-site-manifest-retirements.json",
+            )
             && base_step.contains("git fetch --no-tags --depth=1 origin \"$BASE_SHA\"")
             && base_step.contains(
                 "if git cat-file -e \"$BASE_SHA:docs/site-manifest.json\" 2>/dev/null; then",
             )
             && base_step
                 .contains("git show \"$BASE_SHA:docs/site-manifest.json\" > \"$BASE_MANIFEST\"",)
-            && base_step.contains("echo \"SITE_MANIFEST_BASE=$BASE_MANIFEST\" >> \"$GITHUB_ENV\""),
+            && base_step.contains("echo \"SITE_MANIFEST_BASE=$BASE_MANIFEST\" >> \"$GITHUB_ENV\"")
+            && base_step.contains(
+                "if git cat-file -e \"$BASE_SHA:docs/site-manifest-retirements.json\" 2>/dev/null; then",
+            )
+            && base_step.contains(
+                "git show \"$BASE_SHA:docs/site-manifest-retirements.json\" > \"$BASE_RETIREMENTS\"",
+            )
+            && base_step.contains(
+                "echo \"SITE_MANIFEST_RETIREMENTS_BASE=$BASE_RETIREMENTS\" >> \"$GITHUB_ENV\"",
+            ),
         "pull-request CI must compare the manifest with its base revision"
     );
 }
@@ -455,6 +666,83 @@ fn repository_validation_uses_supplied_base_manifest() {
 }
 
 #[test]
+fn repository_validation_uses_supplied_base_retirements() {
+    let base_retirements = Retirements {
+        page_ids: vec!["retired-page".to_string()],
+        slugs: vec!["retired-route".to_string()],
+    };
+    let base_file = tempfile::NamedTempFile::new().expect("temporary base retirements");
+    fs::write(
+        base_file.path(),
+        serde_json::to_vec(&serde_json::json!({
+            "pageIds": base_retirements.page_ids,
+            "slugs": base_retirements.slugs,
+        }))
+        .expect("serialize base retirements"),
+    )
+    .expect("write base retirements");
+
+    let output = Command::new(env::current_exe().expect("site manifest test executable"))
+        .args(["--exact", "repository_manifest_is_valid", "--nocapture"])
+        .env(BASE_RETIREMENTS_ENV, base_file.path())
+        .output()
+        .expect("run repository retirement validation");
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "repository validation ignored supplied base retirements"
+    );
+    assert!(
+        diagnostics.contains("retired page id retired-page must remain reserved"),
+        "repository validation failed for an unexpected reason: {diagnostics}"
+    );
+}
+
+#[test]
+fn repository_validation_enforces_supplied_current_retirements() {
+    let root = repository_root();
+    let manifest = load_manifest(&root).expect("load manifest");
+    let active_id = manifest.pages[0].id.clone();
+    let current_file = tempfile::NamedTempFile::new().expect("temporary current retirements");
+    fs::write(
+        current_file.path(),
+        serde_json::to_vec(&serde_json::json!({
+            "pageIds": [active_id.clone()],
+            "slugs": [],
+        }))
+        .expect("serialize current retirements"),
+    )
+    .expect("write current retirements");
+
+    let output = Command::new(env::current_exe().expect("site manifest test executable"))
+        .args(["--exact", "repository_manifest_is_valid", "--nocapture"])
+        .env(RETIREMENTS_ENV, current_file.path())
+        .env_remove(BASE_MANIFEST_ENV)
+        .env_remove(BASE_RETIREMENTS_ENV)
+        .output()
+        .expect("run repository retirement validation");
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "repository validation ignored supplied current retirements"
+    );
+    assert!(
+        diagnostics.contains(&format!("current page id {active_id} is retired")),
+        "repository validation failed for an unexpected reason: {diagnostics}"
+    );
+}
+
+#[test]
 fn duplicate_ids_and_slugs_are_refused() {
     let root = repository_root();
     let manifest = load_manifest(&root).expect("load manifest");
@@ -481,12 +769,12 @@ fn duplicate_ids_and_slugs_are_refused() {
 #[test]
 fn a_base_product_id_cannot_change() {
     let root = repository_root();
-    let base = load_manifest(&root).expect("load manifest");
-    let mut current = base.clone();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
     current.product.id = "replacement-product".to_string();
 
     assert!(
-        validate_compatibility(&base, &current)
+        validate_compatibility(&base, &current, &Retirements::default())
             .expect_err("changed base product id must fail")
             .contains("base product id strands-box must remain unchanged")
     );
@@ -495,47 +783,257 @@ fn a_base_product_id_cannot_change() {
 #[test]
 fn a_base_page_id_cannot_disappear() {
     let root = repository_root();
-    let base = load_manifest(&root).expect("load manifest");
-    let mut current = base.clone();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
     let removed = current.pages.remove(0);
 
-    assert!(
-        validate_compatibility(&base, &current)
-            .expect_err("removed base id must fail")
-            .contains(&format!("base page id {} must remain declared", removed.id))
-    );
+    for retirements in [
+        Retirements::default(),
+        Retirements {
+            page_ids: vec![removed.id.clone()],
+            ..Retirements::default()
+        },
+        Retirements {
+            slugs: vec![removed.slug.clone()],
+            ..Retirements::default()
+        },
+    ] {
+        assert!(
+            validate_compatibility(&base, &current, &retirements)
+                .expect_err("removed base id without both retirements must fail")
+                .contains(&format!(
+                    "base page id {} may disappear only after its id and slug {} are retired",
+                    removed.id, removed.slug
+                ))
+        );
+    }
+}
+
+#[test]
+fn a_base_page_can_be_retired() {
+    let root = repository_root();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
+    let removed = current.pages.remove(0);
+    let retirements = Retirements {
+        page_ids: vec![removed.id],
+        slugs: vec![removed.slug],
+    };
+
+    validate_compatibility(&base, &current, &retirements)
+        .expect("an explicitly retired page may disappear");
 }
 
 #[test]
 fn a_base_page_slug_cannot_change() {
     let root = repository_root();
-    let base = load_manifest(&root).expect("load manifest");
-    let mut current = base.clone();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
     let id = current.pages[0].id.clone();
     let slug = current.pages[0].slug.clone();
     current.pages[0].slug = "replacement-route".to_string();
 
     assert!(
-        validate_compatibility(&base, &current)
+        validate_compatibility(&base, &current, &Retirements::default())
             .expect_err("changed base slug must fail")
-            .contains(&format!("base page id {id} must keep slug {slug}"))
+            .contains(&format!(
+                "base page id {id} may change slug {slug} only after that slug is retired"
+            ))
     );
+}
+
+#[test]
+fn a_base_page_slug_can_be_retired() {
+    let root = repository_root();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
+    let slug = current.pages[0].slug.clone();
+    current.pages[0].slug = "replacement-route".to_string();
+    let retirements = Retirements {
+        slugs: vec![slug],
+        ..Retirements::default()
+    };
+
+    validate_compatibility(&base, &current, &retirements)
+        .expect("an explicitly retired slug may move");
 }
 
 #[test]
 fn a_base_slug_cannot_move_to_another_id() {
     let root = repository_root();
-    let base = load_manifest(&root).expect("load manifest");
-    let mut current = base.clone();
+    let mut current = load_manifest(&root).expect("load manifest");
+    let base = compatibility_manifest(&current);
     let id = current.pages[0].id.clone();
     let slug = current.pages[0].slug.clone();
     current.pages[0].id = "replacement-page".to_string();
 
     assert!(
-        validate_compatibility(&base, &current)
+        validate_compatibility(&base, &current, &Retirements::default())
             .expect_err("reassigned base slug must fail")
             .contains(&format!("base slug {slug} must remain assigned to id {id}"))
     );
+}
+
+#[test]
+fn retired_values_cannot_be_reused() {
+    let root = repository_root();
+    let current = load_manifest(&root).expect("load manifest");
+    let page = &current.pages[0];
+
+    let retired_id = Retirements {
+        page_ids: vec![page.id.clone()],
+        ..Retirements::default()
+    };
+    assert!(
+        validate_retirements(&current, &retired_id)
+            .expect_err("active retired id must fail")
+            .contains(&format!("current page id {} is retired", page.id))
+    );
+
+    let retired_slug = Retirements {
+        slugs: vec![page.slug.clone()],
+        ..Retirements::default()
+    };
+    assert!(
+        validate_retirements(&current, &retired_slug)
+            .expect_err("active retired slug must fail")
+            .contains(&format!("current page slug {} is retired", page.slug))
+    );
+}
+
+#[test]
+fn retirement_history_is_append_only() {
+    let base = BaseRetirements {
+        page_ids: vec!["retired-page".to_string()],
+        slugs: vec!["retired-route".to_string()],
+    };
+
+    assert!(
+        validate_retirement_history(&base, &Retirements::default())
+            .expect_err("removed retirement must fail")
+            .contains("retired page id retired-page must remain reserved")
+    );
+    assert!(
+        validate_retirement_history(
+            &BaseRetirements {
+                slugs: base.slugs.clone(),
+                ..BaseRetirements::default()
+            },
+            &Retirements::default(),
+        )
+        .expect_err("removed slug retirement must fail")
+        .contains("retired slug retired-route must remain reserved")
+    );
+}
+
+#[test]
+fn invalid_retirements_are_refused() {
+    let root = repository_root();
+    let current = load_manifest(&root).expect("load manifest");
+
+    for retirements in [
+        Retirements {
+            page_ids: vec!["retired-page".to_string(), "retired-page".to_string()],
+            ..Retirements::default()
+        },
+        Retirements {
+            page_ids: vec!["Unsafe Page".to_string()],
+            ..Retirements::default()
+        },
+        Retirements {
+            slugs: vec!["retired-route".to_string(), "retired-route".to_string()],
+            ..Retirements::default()
+        },
+        Retirements {
+            slugs: vec!["Unsafe Route".to_string()],
+            ..Retirements::default()
+        },
+    ] {
+        assert!(validate_retirements(&current, &retirements).is_err());
+    }
+}
+
+#[test]
+fn base_retirement_parsing_is_schema_shape_agnostic() {
+    let value = serde_json::json!({
+        "pageIds": ["retired-page"],
+        "slugs": ["retired-route"],
+        "legacyField": {"shape": "ignored"},
+    });
+    assert!(
+        serde_json::from_value::<Retirements>(value.clone()).is_err(),
+        "the current retirement registry must remain strict"
+    );
+
+    let base =
+        serde_json::from_value::<BaseRetirements>(value).expect("parse compatibility-only base");
+    let current = Retirements {
+        page_ids: base.page_ids.clone(),
+        slugs: base.slugs.clone(),
+    };
+    validate_retirement_history(&base, &current)
+        .expect("base retirement schema shape must not affect history checks");
+}
+
+#[test]
+fn base_manifest_parsing_is_schema_shape_agnostic() {
+    let root = repository_root();
+    let current = load_manifest(&root).expect("load manifest");
+    let mut value = manifest_value(&root);
+    value["schemaVersion"] = 0.into();
+    value
+        .as_object_mut()
+        .expect("manifest object")
+        .insert("legacyField".to_string(), true.into());
+    let product = value["product"].as_object_mut().expect("product object");
+    product.remove("name");
+    product.remove("status");
+    product.insert("legacyField".to_string(), true.into());
+    let page = value["pages"][0].as_object_mut().expect("page object");
+    for field in ["source", "title", "description", "nav"] {
+        page.remove(field);
+    }
+    page.insert("legacyField".to_string(), true.into());
+
+    let base =
+        serde_json::from_value::<BaseManifest>(value).expect("parse compatibility-only base");
+    validate_compatibility(&base, &current, &Retirements::default())
+        .expect("base schema shape must not affect compatibility checks");
+}
+
+#[test]
+fn base_manifest_requires_compatibility_fields() {
+    let root = repository_root();
+    for path in [
+        vec!["product", "id"],
+        vec!["pages", "0", "id"],
+        vec!["pages", "0", "slug"],
+    ] {
+        let mut value = manifest_value(&root);
+        let mut parent = &mut value;
+        for segment in &path[..path.len() - 1] {
+            parent = match parent {
+                serde_json::Value::Object(object) => {
+                    object.get_mut(*segment).expect("object field")
+                }
+                serde_json::Value::Array(array) => {
+                    &mut array[segment.parse::<usize>().expect("array index")]
+                }
+                _ => panic!("compatibility field parent must be a container"),
+            };
+        }
+        parent
+            .as_object_mut()
+            .expect("compatibility field object")
+            .remove(*path.last().expect("field name"));
+
+        assert!(
+            serde_json::from_value::<BaseManifest>(value)
+                .expect_err("missing compatibility field must fail")
+                .to_string()
+                .contains("missing field")
+        );
+    }
 }
 
 #[test]

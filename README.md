@@ -242,9 +242,11 @@ just test-all      # workspace tests and box example checks
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
 
-In pull-request CI, changes to `docs/site-manifest.json` or a publishable page under `docs/user/`
-run the focused site-manifest contract test instead of the full Rust test matrix. The test compares
-the base manifest to keep the product ID, existing page IDs, and route slugs stable.
+In pull-request CI, changes to `docs/site-manifest.json`,
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+site-manifest contract test instead of the full Rust test matrix. The test compares the base
+contract to keep the product ID stable and require an append-only retirement before a page or route
+is removed.
 
 ## Documentation
 
