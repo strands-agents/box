@@ -125,13 +125,13 @@ three kinds of event:
 - **`::error`** for an operation that definitely didn't happen.
 
 A metadata read is an operation that happened once the workload has its answer, so a Shell
-`test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file is
-a `::response`, not a `::error`, and so is one the host refuses for permission. A check that Box
-itself refuses stays a `::error`, so it can't satisfy a precondition keyed on `::response`: the
-reach floor refuses it, or a guard refuses it because a path changed between the decision and the
-check (in the Shell, any change to the namespace; in Python, a symbolic link swapped into the
-path). The reach floor also refuses a Python path whose parent folder doesn't exist. A cap on
-attempts counts `::request` instead, because that counts denied attempts too.
+`test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
+an existing folder is a `::response`, not a `::error`, and so is one of a file in a folder the host
+won't let it search. A check that Box itself refuses stays a `::error`, so it can't satisfy a
+precondition keyed on `::response`: the reach floor refuses it, or a guard refuses it because a path
+changed between the decision and the check (in the Shell, any change to the namespace; in Python, a
+symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
+counts denied attempts too.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can

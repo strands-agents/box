@@ -386,6 +386,14 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
         held.stat()
             .is_ok_and(|metadata| metadata.st_mode & libc::S_IFMT == kind)
     };
+    // Approval admits no symbolic link at the leaf, so one found here was swapped in afterwards.
+    let leaf_answered = || {
+        if is_kind(libc::S_IFLNK) {
+            FsResult::Failed
+        } else {
+            FsResult::Completed
+        }
+    };
     match call {
         OsFunctionCall::ReadText(_) => match read(&held) {
             Ok(bytes) => match String::from_utf8(bytes) {
@@ -439,15 +447,15 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
             }
         }
         OsFunctionCall::Exists(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(held.stat().is_ok())),
         ),
         OsFunctionCall::IsFile(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFREG))),
         ),
         OsFunctionCall::IsDir(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFDIR))),
         ),
         // `create_dir`, never `create_dir_all`: the recursive form would create ancestors
@@ -509,14 +517,14 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
         // The leaf's own metadata, so this answers the question about the link itself. A missing
         // path is not a symlink, matching `os.path.islink`.
         OsFunctionCall::IsSymlink(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFLNK))),
         ),
         // `Stat` returns the fields the Shell's `FileStat` carries, and **normalizes**
         // `uid`/`gid`/`nlink` to a fixed value so no host identity leaks.
         OsFunctionCall::Stat(_) => match held.stat() {
             Ok(metadata) => (
-                FsResult::Completed,
+                leaf_answered(),
                 ExtFunctionResult::Return(normalized_stat(&metadata)),
             ),
             Err(error)
@@ -2154,17 +2162,13 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
         (approved, resolved.join("outside"))
     }
 
-    /// A stat whose path does not exist, at the leaf or above it, raises and records `Completed`.
+    /// A stat of a missing file, or of a path under a regular file, raises and records `Completed`.
     #[test]
     fn a_stat_of_a_missing_path_records_completed() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let base = dir.path().canonicalize().expect("the scratch dir resolves");
         std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
-        for missing in [
-            base.join("absent.txt"),
-            base.join("absent-dir/f.txt"),
-            base.join("notes.txt/child"),
-        ] {
+        for missing in [base.join("absent.txt"), base.join("notes.txt/child")] {
             let (result, returned) = perform(
                 &OsFunctionCall::Stat(MontyPath::new(missing.to_string_lossy().into_owned())),
                 &missing,
@@ -2193,7 +2197,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
         std::fs::create_dir(&locked).expect("a directory");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .expect("lock the directory");
-        let target = locked.join("inner/f.txt");
+        let target = locked.join("f.txt");
         let (result, _) = perform(
             &OsFunctionCall::Stat(MontyPath::new(target.to_string_lossy().into_owned())),
             &target,
@@ -2230,7 +2234,8 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
     fn a_predicate_of_a_missing_path_records_completed() {
         let dir = tempfile::tempdir().expect("a scratch dir");
         let base = dir.path().canonicalize().expect("the scratch dir resolves");
-        for missing in [base.join("absent.txt"), base.join("absent-dir/f.txt")] {
+        std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
+        for missing in [base.join("absent.txt"), base.join("notes.txt/child")] {
             let call =
                 OsFunctionCall::Exists(MontyPath::new(missing.to_string_lossy().into_owned()));
             let (result, resumed) = perform(&call, &missing);
@@ -2291,6 +2296,122 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
             read().is_err(),
             "three answered stats spend a budget of three"
         );
+    }
+
+    /// A policy that permits every read and refuses a content read once `cap` metadata reads answered.
+    fn metadata_budget(cap: usize) -> PolicyEngine {
+        open_policy(vec![Policy {
+            origin: PathBuf::from("<test>"),
+            text: format!(
+                r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                @id("metadata-budget")
+                forbid(principal, action == Box::Action::"fs:read", resource)
+                when {{ context.input.operation == Box::FsReadOperation::"read_content" }}
+                when temporal {{
+                    exists (total: Long). (
+                        (count for (t: Timepoint). where (
+                            formerly within 3600s (
+                                Box::Action::"fs:read"::response{{ input.path: _, input.operation: Box::FsReadOperation::"read_metadata" }} && tp(t)
+                            )
+                        )) == total
+                        && total >= {cap}
+                    )
+                }};
+            "#
+            ),
+        }])
+    }
+
+    /// Whether `calls` spend a metadata budget of their own count, so a read of `kept` is refused.
+    fn calls_spend_the_budget(reach: &Reach, kept: &Path, calls: Vec<OsFunctionCall>) -> bool {
+        let policy = metadata_budget(calls.len());
+        let interceptor = interceptor(&policy);
+        for call in calls {
+            let _ = admit_and_perform(&interceptor, call, reach);
+        }
+        admit_and_perform(
+            &interceptor,
+            OsFunctionCall::ReadText(MontyPath::new(kept.to_string_lossy().into_owned())),
+            reach,
+        )
+        .is_err()
+    }
+
+    fn stat(path: &str) -> OsFunctionCall {
+        OsFunctionCall::Stat(MontyPath::new(path.to_string()))
+    }
+
+    /// A stat of a path beneath this box's own state spends nothing, however it is spelled.
+    #[test]
+    fn a_stat_beneath_the_box_state_spends_nothing() {
+        let root = tempfile::tempdir().expect("a fixture root");
+        let shared = root.path().canonicalize().expect("the root resolves");
+        let box_root = shared.join("boxes/codex");
+        std::fs::create_dir_all(box_root.join("private")).expect("this box's private directory");
+        std::os::unix::fs::symlink(box_root.join("private"), shared.join("link"))
+            .expect("a link into the private directory");
+        let kept = shared.join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let reach = crate::test_support::with_operator_home(&shared, || {
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+                .expect("the reachable set is usable")
+        });
+        std::fs::write(box_root.join("private/x"), "state").expect("a file in box state");
+        for probe in [
+            box_root.join("private/x"),
+            box_root.join("private/nodir/x"),
+            shared.join("link/nodir/x"),
+        ] {
+            assert!(
+                !calls_spend_the_budget(&reach, &kept, vec![stat(probe.to_str().expect("UTF-8"))]),
+                "{} must not spend the budget",
+                probe.display()
+            );
+        }
+    }
+
+    /// A stat outside the reachable set spends nothing.
+    #[test]
+    fn a_stat_outside_the_reachable_set_spends_nothing() {
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let outside = root
+            .path()
+            .canonicalize()
+            .expect("the root resolves")
+            .join("outside-dir/x");
+        assert!(!calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![stat(outside.to_str().expect("UTF-8"))],
+        ));
+    }
+
+    /// A metadata read whose leaf was swapped for a link after approval records `Failed`.
+    #[test]
+    fn a_metadata_read_of_a_leaf_swapped_for_a_link_records_failed() {
+        let path = || MontyPath::new("f.txt".to_string());
+        for call in [
+            OsFunctionCall::Stat(path()),
+            OsFunctionCall::Exists(path()),
+            OsFunctionCall::IsFile(path()),
+            OsFunctionCall::IsDir(path()),
+            OsFunctionCall::IsSymlink(path()),
+        ] {
+            let (root, reach) = fixture();
+            let leaf = home(&root).join("f.txt");
+            std::fs::write(&leaf, "inside").expect("a file in the home");
+            let approved = reach
+                .approve(&leaf, "f.txt")
+                .expect("the floor approves the path before the swap");
+            std::fs::remove_file(&leaf).expect("remove the file");
+            std::os::unix::fs::symlink(home(&root).join("elsewhere"), &leaf)
+                .expect("a link in its place");
+            let (result, _) = perform(&call, &approved);
+            assert_eq!(result, FsResult::Failed, "{}", call.name());
+        }
     }
 
     /// No effect follows a directory that a workload swapped for a link after approval.
