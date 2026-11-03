@@ -1,9 +1,12 @@
 //! One command line that a pack read, as the `context.input` record its pack action decides.
 
-use super::Pack;
+use std::path::Path;
+
 use super::grammar::{BASE_FIELDS, FieldValue, Parsed};
 use super::model::UNMODELED_ACTION;
+use super::{Pack, ProgramFile};
 use crate::Decision;
+use crate::path::ApprovedPath;
 use crate::schema::ActionIdentity;
 
 /// One spawn of a pack-bound program, and what its pack reads the command line as.
@@ -11,7 +14,7 @@ pub(crate) struct PackInvocation<'a> {
     pack: &'a Pack,
     parsed: Parsed,
     program: &'a str,
-    program_path: &'a str,
+    program_path: String,
     cwd: &'a str,
     args: &'a [String],
     credential_reads: &'a [String],
@@ -72,11 +75,13 @@ impl PackRequest {
 }
 
 impl<'a> PackInvocation<'a> {
-    /// Read `args`, the words after `program`, with the shell grammar of `pack`.
+    /// Read `args`, the words after `program`, with the shell grammar of `pack`, for a spawn of
+    /// `program_file` that a rule reads home-relative under `home`.
     pub(crate) fn new(
         pack: &'a Pack,
         program: &'a str,
-        program_path: &'a str,
+        program_file: &ProgramFile,
+        home: Option<&Path>,
         cwd: &'a str,
         args: &'a [String],
         credential_reads: &'a [String],
@@ -85,7 +90,9 @@ impl<'a> PackInvocation<'a> {
             pack,
             parsed: pack.grammar().parse(args),
             program,
-            program_path,
+            program_path: ApprovedPath::under_home(program_file.path(), home)
+                .reported()
+                .into_owned(),
             cwd,
             args,
             credential_reads,
@@ -121,7 +128,7 @@ impl<'a> PackInvocation<'a> {
         sorted.dedup();
         let mut record = serde_json::Map::new();
         record.insert(program.to_string(), self.program.into());
-        record.insert(program_path.to_string(), self.program_path.into());
+        record.insert(program_path.to_string(), self.program_path.as_str().into());
         record.insert(cwd.to_string(), self.cwd.into());
         record.insert(args.to_string(), sorted.into());
         if !self.credential_reads.is_empty() {
@@ -159,7 +166,7 @@ impl<'a> PackInvocation<'a> {
         PackRequest {
             identity: self.identity(),
             input: self.input(),
-            program_path: self.program_path.to_string(),
+            program_path: self.program_path.clone(),
         }
     }
 }
@@ -266,7 +273,8 @@ mod tests {
         )
         .expect("the engine opens");
         let args = argv(&["push", "--force", "origin", "main"]);
-        let invocation = PackInvocation::new(&git, "git", "/usr/bin/git", "/work", &args, &[]);
+        let git_file = ProgramFile::fixed("/usr/bin/git", 1);
+        let invocation = PackInvocation::new(&git, "git", &git_file, None, "/work", &args, &[]);
 
         let (decision, pending) = engine.engine().decide_pack_action(
             &GovernedBox::assigned("test-box"),
