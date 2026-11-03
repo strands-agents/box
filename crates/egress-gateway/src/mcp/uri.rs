@@ -150,38 +150,24 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     let mut out = String::with_capacity(uri.len());
     out.push_str(&scheme);
     out.push(':');
-    // Emit `//` where an authority belongs: when one is present, or for `file:`, whose no-authority
-    // form (`file:/x`) is the empty local authority (RFC 8089), so it canonicalizes to `file:///x`.
-    // An `http`/`https` URI reaches here only with an authority, because the refusal above takes the
-    // absent and the empty cases.
-    let has_authority = match normalized_authority.as_deref() {
-        // The local-authority case is decided on the normalized form, not the raw string, so it
-        // catches the spellings of "this machine" that normalization folds (case, trailing dot,
-        // percent-encoding, loopback IP literals) and not just the exact string `localhost`. A port
-        // spelling normalization leaves alone — an empty port, a leading zero, or `[::0001]` — is a
-        // residual, and for `http`/`https` a live one: a URL parser reads `:0443` as the default
-        // port and drops it, so two spellings reach one origin and the box reports two.
-        Some(normalized) => {
-            out.push_str("//");
-            if !(scheme == "file" && is_local_file_authority(normalized)) {
-                out.push_str(normalized);
-            }
-            true
-        }
-        // No authority: `file:` gets the empty local authority RFC 8089 states.
-        None if scheme == "file" => {
-            out.push_str("//");
-            true
-        }
-        // Unreachable, and here for exhaustiveness: the only other scheme with no authority is
-        // `http`/`https`, which the refusal above takes. A parser reads the first path segment of
-        // `http:/etc/passwd` as the host, so the path-only form this arm once emitted was never a
-        // shape the box could keep.
-        None => false,
-    };
+    // Every URI reaching here carries the `//` of an authority. One with none is `file:`, whose
+    // no-authority form is the empty local authority RFC 8089 states, so `file:/x` becomes
+    // `file:///x`; for every other scheme the refusal above took the absent and the empty cases.
+    out.push_str("//");
+    // The local-authority case is decided on the normalized form, not the raw string, so it catches
+    // the spellings of "this machine" that normalization folds (case, trailing dot,
+    // percent-encoding, loopback IP literals) and not just the exact string `localhost`. A port
+    // spelling normalization leaves alone — an empty port, a leading zero, or `[::0001]` — is a
+    // residual, and for `http`/`https` a live one: a URL parser reads `:0443` as the default port
+    // and drops it, so two spellings reach one origin and the box reports two.
+    if let Some(normalized) = normalized_authority.as_deref()
+        && !(scheme == "file" && is_local_file_authority(normalized))
+    {
+        out.push_str(normalized);
+    }
     // RFC 3986 §6.2.3: an authority with an empty path normalizes to a path of `/`, so
     // `http://example.com` cannot dodge a `uri like "http://example.com/*"` by omitting the path.
-    if canonical_path.is_empty() && has_authority {
+    if canonical_path.is_empty() {
         out.push('/');
     } else {
         out.push_str(&canonical_path);
