@@ -61,10 +61,17 @@ any other spelling never matches.
 `https` the query is part of the request the origin server receives, so it is part of what the URI
 names and is kept as written — a credential can live there. A `file:` URI has no query at all: RFC
 8089 spells `file-URI = file-scheme ":" file-hier-part`, and a resolver opens the hier-part and
-ignores anything after a `?`. Such a URI names no resource the box can name, so the box **refuses
-the request** rather than give it a canonical form that the resolver would not agree with. That
+ignores anything after a `?`. So the box cannot say which resource such a URI asks for, and it
+**refuses the request** rather than give it a canonical form the resolver would not agree with. That
 keeps a rule on `file:///home/op/.env` holding for `file:///home/op/.env?x`, which otherwise reads
 the same file under a string no rule matches.
+
+**A space or a control character is refused**, anywhere in a URI under these three schemes. RFC
+3986 allows neither, and a URL parser trims or removes both before it reads anything — so a single
+URI would name two things. The box reads a tab inside `file` as part of a custom scheme and leaves
+the URI alone, while the server reads `file:` and opens the path. A space the box keeps on the end
+of a query is one the server drops. Each would let the two ends disagree about which resource a rule
+judged, so the box refuses the request instead.
 
 **A per-tool action is generated** for each tool a server lists. It's decided only for a
 `tools/call`, after `mcp:call` allows the call. A rule on it can refuse the whole tool, or only the

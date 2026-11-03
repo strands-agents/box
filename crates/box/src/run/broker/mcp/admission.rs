@@ -843,6 +843,15 @@ mod tests {
             "file:///home/op/.env?a=1#",
             "file:///home/op/.env?a=#b",
             "file:/home/op/.env?x",
+            // A space or a control character is removed by a URL parser before it reads the
+            // scheme, so these name a custom scheme to the box and `file:` to the server.
+            " file:///home/op/.env",
+            "\\tfile:///home/op/.env",
+            "\\u0001file:///home/op/.env",
+            "fi\\tle:///home/op/.env",
+            // The authored scheme already reads as `file` here, so a check that only compares the
+            // scheme before and after preparation would miss it.
+            "file:\\t///home/op/.env",
         ] {
             assert!(
                 call(&guards_env, &read(spelling)).is_err(),
