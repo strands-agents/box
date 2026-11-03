@@ -865,6 +865,384 @@ unless temporal {
     );
 }
 
+/// A rule whose head is the coarse `mcp:call` action, and whose condition pins one server and one
+/// tool to literals, decides exactly that call. The only typed names it spells sit in a
+/// `when temporal` precondition over two servers. The hold must cover the tool the condition
+/// decides while one of those servers never discovers, because otherwise the call rides the coarse
+/// permit with the precondition unenforced.
+#[test]
+fn accepted_tool_waits_for_a_valid_cross_server_approval_rule() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged_engine(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+@id("approve-needs-both")
+forbid(principal, action == Box::Action::"mcp:call", resource)
+when {
+    context.input.server == "svc"
+    && context.input has tool
+    && context.input.tool == "approve"
+}
+unless temporal {
+    formerly within 600s ( svc::Action::"approve"::response{ input.id: _ } )
+    && formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } )
+};
+"#,
+        &history.path().join("dogwood.redb"),
+    );
+
+    let call = |server: &str, tool: &str, arguments: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &arguments,
+        )
+    };
+
+    assert_eq!(
+        authority
+            .stage_mcp_schema("svc", generated("svc", "approve", "id", "string"))
+            .expect("svc stages"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        },
+        "svc's catalog arrives, and the rule still waits for beta's"
+    );
+
+    assert!(
+        matches!(
+            call("svc", "approve", json!({"id": "x"})),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "the tool the pending condition pins must be held while beta discovers"
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["beta".to_string()],
+        "only the server whose catalog never arrived reaches the warning"
+    );
+    assert!(
+        matches!(
+            call("svc", "approve", json!({"id": "x"})),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the tool the condition decides must stay denied fail-closed, not ride the coarse permit"
+    );
+}
+
+/// What the reader of a condition's pins may and may not claim. A pin states a tool the rule
+/// decides only when it sits in a plain conjunction of `when`: a disjunction, a negation, or an
+/// `unless` leaves the decided set somewhere other than the pins, so reading one out would hold a
+/// tool no rule decides. Each rule here waits on `beta`, which never discovers.
+#[test]
+fn a_condition_pins_a_held_tool_only_when_it_decides_that_tool_alone() {
+    // `condition` narrows the coarse head; `call` is the tool asked for; `held` is whether the box
+    // must hold that call back while the rule is pending.
+    for (condition, server, tool, held) in [
+        // The pinned pair, in both operand orders the render can give.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        (
+            r#"when { "svc" == context.input.server && "approve" == context.input.tool }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        // The same pins, spread over two `when` blocks, which the rule conjoins.
+        (
+            r#"when { context.input.server == "svc" } when { context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        // A pinned name that carries a quote: the hold must cover the name the operator wrote.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "app\"rove" }"#,
+            "svc",
+            "app\"rove",
+            true,
+        ),
+        // A server name that is not a Cedar identifier reaches the hold set normalized.
+        (
+            r#"when { context.input.server == "my-srv" && context.input.tool == "approve" }"#,
+            "my-srv",
+            "approve",
+            true,
+        ),
+        // A negation, spelled as an inequality: the rule decides every tool except the pinned one,
+        // so holding the pinned one would refuse the single tool no rule decides.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool != "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A negation, spelled over a whole comparison. The pin it holds is the server the rule
+        // explicitly does not decide.
+        (
+            r#"when { !(context.input.server == "svc") && context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A string literal may itself spell a condition. The reader must not read a pin out of one.
+        (
+            r#"unless { context.input.method == "when { context.input.server == \"other\" && context.input.tool == \"fetch\" }" }"#,
+            "other",
+            "fetch",
+            false,
+        ),
+        // An `if`: this one reads as `server != "svc" && tool == "approve"`, so the pinned pair is
+        // the one pair the rule does not decide.
+        (
+            r#"when { if context.input.server == "svc" then false else context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A second guard beside the pins. A conjunction only narrows, so each pin still has to
+        // hold, and an operator writes `!=` as readily as `>`. These two rows differ only in which
+        // `when` block holds the guard, so they must agree.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve" && context.input.method != "x" }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve" } when { context.input.method != "x" }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        // A guard that is itself a disjunction, beside intact pins. Same reasoning: the pins hold.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve"
+&& (context.input.method == "tools/call" || context.input.method == "tools/list") }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        // A tool's own arguments reach `context.input`, so a rule can compare one whose name
+        // starts with `server` or `tool`. An argument is not the server and not the tool, so the
+        // pair these two spell is a call no rule decides.
+        (
+            r#"when { "other" == context.input.server_id && "fetch" == context.input.tool_name }"#,
+            "other",
+            "fetch",
+            false,
+        ),
+        // A comparison of a comparison, which renders with no `!` at all. The pinned pair is the
+        // one pair this rule excludes, so reading a pin out of it would refuse exactly the wrong
+        // call.
+        (
+            r#"when { (context.input.server == "svc") == false && context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A disjunction over the pins themselves. This rule does decide `svc/approve`, but it also
+        // decides every tool on `svc` and every tool named `approve` anywhere, and that set cannot
+        // be enumerated. Box holds none of it rather than part of it.
+        (
+            r#"when { context.input.server == "svc" || context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // An `unless` block states what stops the rule, so its pins are not a decided tool.
+        (
+            r#"unless { context.input.server == "svc" && context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // One pin alone leaves a set the box cannot enumerate: every tool on one server, or one
+        // tool name on every server.
+        (
+            r#"when { context.input.server == "svc" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        (
+            r#"when { context.input.tool == "approve" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A `when temporal` block beside the pins renders a negation of its own. That negation
+        // belongs to the history predicate, so it must not disqualify the pins.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve" }
+when temporal { !( formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } ) ) }"#,
+            "svc",
+            "approve",
+            true,
+        ),
+        // Two pins on one attribute cannot both hold, so neither states a decided tool.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool == "approve" && context.input.tool == "deploy" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+    ] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged_engine(
+            &format!(
+                r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == Box::Action::"mcp:call", resource)
+{condition}
+unless temporal {{
+    formerly within 600s ( beta::Action::"approve"::response{{ input.id: _ }} )
+}};
+"#
+            ),
+            &history.path().join("dogwood.redb"),
+        );
+        let decision = authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &json!({"id": "x"}),
+        );
+        assert_eq!(
+            matches!(
+                decision,
+                Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }
+            ),
+            held,
+            "the hold over {server}/{tool} must read {held} for: {condition}"
+        );
+    }
+}
+
+/// A rule's head states its whole reach, so a pin beside a typed head can only contradict it. Box
+/// must not read such a pin: the pinned pair names a server that is answering correctly, and
+/// holding it would refuse a healthy, fully discovered tool on behalf of a rule that can never
+/// decide it ([a server whose discovery a policy denies degrades
+/// alone](../../../docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).
+#[test]
+fn a_pin_beside_a_typed_head_holds_no_other_servers_tool() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged_engine(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == alpha::Action::"deploy", resource)
+when { context.input.server == "svc" && context.input.tool == "approve" };
+"#,
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("svc", generated("svc", "approve", "id", "string"))
+        .expect("svc stages");
+
+    let call = |server: &str, tool: &str| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &json!({"id": "x"}),
+        )
+    };
+
+    assert!(
+        call("svc", "approve").is_allow(),
+        "the healthy server's declared tool must not be held for a rule headed on another server"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["alpha".to_string()],
+        "only the server whose catalog never arrived reaches the warning"
+    );
+    assert!(
+        call("svc", "approve").is_allow(),
+        "the healthy server's tool must not be refused once discovery completes"
+    );
+}
+
+/// Which calls Box holds and which servers it names are different questions. A pinned tool is a
+/// hold, never a wait: a rule compares `context.input.server` against a plain string, which needs
+/// no catalog, so the pinned server is not a server the rule waits for. Feeding the pins into the
+/// warning would name a server the operator cannot act on.
+#[test]
+fn a_pinned_server_is_held_and_is_not_named_on_stderr() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged_engine(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "ghost" && context.input.tool == "wipe" }
+unless temporal {
+    formerly within 600s ( beta::Action::"approve"::response{ input.id: _ } )
+};
+"#,
+        &history.path().join("dogwood.redb"),
+    );
+
+    let call = || {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "ghost",
+            "wipe",
+            &json!({"id": "x"}),
+        )
+    };
+
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "the pinned tool must be held while the rule is pending"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes"),
+        vec!["beta".to_string()],
+        "stderr must name the server the rule waits for, and not the server a pin spells"
+    );
+    assert!(
+        matches!(
+            call(),
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the pinned tool must stay denied fail-closed"
+    );
+}
+
 /// The hold above is transient: once the schema stages, an argument-constrained rule over a
 /// quote-bearing tool name decides the call itself.
 #[test]

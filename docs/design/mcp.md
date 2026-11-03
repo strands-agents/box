@@ -255,9 +255,29 @@ mentions. That is a weaker statement — one of those servers may be answering c
 the deliberate trade, because the alternative is a rule that never loads and says nothing. Box
 parks a rule only when it names at least one tool, so no inert rule is silent.
 
-One limit remains. A rule that constrains every tool call, because its head is the coarse
-`mcp:call` or it names no action at all, cannot be expressed as a set of tools. stderr names the
-server it waits for, so the operator learns the rule is inert, but no call is held on its behalf.
+A rule's head is not the only place it can say which tool it decides. A head can be the coarse
+`mcp:call` while a condition pins `context.input.server` and `context.input.tool` to one name each,
+and such a rule decides exactly that one call. Box reads those pins and holds that tool, so the
+narrowing an operator wrote in a condition counts for as much as one written in the head.
+
+A pin counts when the rule cannot fire without it. Box reads a `when` condition as the list of
+tests it joins with `&&`, because every one of those has to hold, and takes a pin from any test
+that is exactly `context.input.server` or `context.input.tool` against a quoted name. Other tests
+in the same condition make no difference, so a second guard beside the pins — `&&
+context.input.method != "tools/list"`, or a choice between two methods — leaves the pins standing.
+What does not count is a pin *inside* something else: under a `||`, under a negation, under an `if`,
+or compared against another comparison. There the pinned pair may be the one pair the rule does not
+decide, and holding it would refuse exactly the wrong call. An `unless` condition gives no pin
+either, because it says what stops the rule rather than what the rule reaches.
+
+A head that already names a tool gives no pin either. Such a head states that rule's whole reach, so
+a pin beside it can only disagree with it, and reading one would hold a tool on a server the rule
+can never decide a call to.
+
+One limit remains. A rule that constrains every tool call, and pins no single server and tool —
+because its head is the coarse `mcp:call`, or it names no action at all, and its condition narrows
+in some other way or not at all — cannot be expressed as a set of tools. stderr names the server it
+waits for, so the operator learns the rule is inert, but no call is held on its behalf.
 
 ## How Box decides a tool call
 

@@ -196,6 +196,19 @@ per-tool rule also clears the warning.
 The warning names every server the rule was waiting for, so when a rule reads one server's tool from
 history it names that server too, even when that server is answering correctly.
 
+Box works out which calls to refuse in two ways: from the tool the rule names in its head, and from
+a `when` condition that pins `context.input.server` and `context.input.tool` to one quoted name
+each. A pin still counts when other tests sit beside it, as in `context.input.server == "svc" &&
+context.input.tool == "approve" && context.input.method != "tools/list"`, because each test joined
+by `&&` has to hold. A pin does not count when it sits inside a `||`, a negation, or an `if`, or in
+an `unless` condition, because there the rule may reach some other tool instead.
+
+One shape escapes both ways. A rule on `Box::Action::"mcp:call"` that narrows by something other
+than those two pins, or does not narrow at all, reaches every tool call, so there is no set of tools
+to refuse — the calls run on the `mcp:call` permit while the rule is inert. Read the startup warning
+as the signal that this happened. To get the refusal, name the tool in the rule's head, or pin the
+server and the tool in a `when` condition.
+
 ## See also
 
 - [The `[mcp.<name>]` table](./mcp.md): the keys for a `stdio` and an `http` server.
