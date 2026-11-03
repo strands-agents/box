@@ -107,6 +107,19 @@ fresh `DET_BOX_ROOT` in `~/.det-harness-boxes/` and removes it after the suite. 
 `cargo test` leaves its boxes in `~/.det-harness-boxes/`; remove that directory when no suite
 is running.
 
+### Extend shared helpers
+
+Keep each integration case in its category folder, with its own identifier and platform declaration.
+Use `src/scenarios.rs` for setup and expected results that several execution routes share.
+Keep commands, interpreter checks, and route-specific refusal checks in each case.
+`MoveReplacement` shows this pattern for Shell and Monty.
+
+`src/process.rs` owns concurrent workload execution and child cleanup.
+Cleanup first requests normal shutdown, so Box can stop its workload groups.
+After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
+Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.
+These are harness unit tests, not integration evidence for Box containment.
+
 ### The fixture API (`b: &BoxFixture`)
 
 The workspace and its `out/` directory stay writable. Configured tool commands use separate
