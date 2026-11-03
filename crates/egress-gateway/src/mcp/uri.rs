@@ -20,16 +20,19 @@ pub(crate) fn canonicalize_frame_uri(frame: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
-    // RFC 3986 allows no C0 control and no space anywhere in a URI, and a URL parser trims or
-    // removes each one before it reads anything. So one of those characters lets a single URI name
-    // two things: the box reads `fi<tab>le:` as a custom scheme it never touches while the server
-    // reads `file:`, and a space the box keeps on the end of a query is one the server drops. Then
-    // the two ends cannot read one identity, so the URI is refused. The scheme comes from the
-    // prepared form, because that is the scheme the server acts on.
-    if scheme_of(&whatwg_prepared(uri)).is_some() && uri.chars().any(|ch| ch <= ' ') {
+    // RFC 3986 allows no C0 control, no space, and no bare `\` anywhere in a URI, and a URL parser
+    // gives each one a meaning of its own under these schemes: it trims or removes the first two,
+    // and it reads a `\` as a path separator. So one of them lets a single URI name two things. The
+    // box reads `fi<tab>le:` as a custom scheme it never touches while the server reads `file:`; a
+    // space the box keeps on the end of a query is one the server drops; and a `\` the box reads as
+    // one more character of a name is a separator to the server. Then the two ends cannot read one
+    // identity, so the URI is refused. The scheme comes from the prepared form, because that is the
+    // scheme the server acts on.
+    if scheme_of(&whatwg_prepared(uri)).is_some() && uri.chars().any(|ch| ch <= ' ' || ch == '\\') {
         return Err(
-            "a resource URI that holds a space or a control character is refused: a URL \
-                    parser removes it, so the box and the server would not read one identity"
+            "a resource URI that holds a space, a control character, or a backslash is refused: a \
+                    URL parser gives each one its own meaning, so the box and the server would not \
+                    read one identity"
                 .to_string(),
         );
     }
@@ -316,7 +319,7 @@ pub(crate) fn normalize_path(path: &str) -> Result<String, String> {
 pub(crate) fn generated_spellings() -> Vec<String> {
     const ALPHABET: &[&str] = &[
         "%", "2", "5", "e", "E", "3", "6", "7", "f", "g", "/", ".", "a", "é", "#", "?", ":", "\t",
-        " ",
+        " ", "\\",
     ];
     let mut spellings = vec![String::new()];
     let mut frontier = vec![String::new()];
@@ -545,11 +548,11 @@ mod tests {
         );
     }
 
-    /// A URL parser removes a space or a control character before it reads the scheme, so such a
-    /// URI names one scheme to the box and another to the server. It is refused on every branch,
-    /// including the one where the authored scheme already reads as `file`.
+    /// A URL parser gives a space, a control character, and a `\` each a meaning of its own, so
+    /// such a URI names one resource to the box and another to the server. It is refused on every
+    /// branch, including the one where the authored scheme already reads as `file`.
     #[test]
-    fn a_resource_uri_whose_scheme_a_url_parser_rewrites_is_refused() {
+    fn a_resource_uri_a_url_parser_reads_differently_is_refused() {
         for uri in [
             " file:///home/op/.env",
             "\tfile:///home/op/.env",
@@ -568,11 +571,19 @@ mod tests {
             "http://h/a?b=1 ",
             "http://h/a?b=1 #f",
             "http://h/a?b\t=1",
+            // A `\` is a path separator to a URL parser under these schemes. The path position was
+            // already refused, but the authority and the opaque hier-part let one through. Both of
+            // the first two resolve to `/home/op/.env` in Node and in Rust's `url` crate.
+            r"file://localhost\home\op\.env",
+            r"file://localhost\home/op/.env",
+            r"file:\\\localhost\home\op\.env",
+            r"file:///home/op\.env",
+            r"http://h/a\b",
         ] {
             let refusal = super::canonicalize_resource_uri(uri)
                 .expect_err("the box and a URL parser must not read two identities");
             assert!(
-                refusal.contains("space or a control character"),
+                refusal.contains("space, a control character, or a backslash"),
                 "{uri:?}: {refusal}"
             );
         }
@@ -638,8 +649,8 @@ mod tests {
                 let carries_query = before_fragment
                     .split_once('?')
                     .is_some_and(|(_, query)| !query.is_empty());
-                // A space or a control character is refused ahead of the query, by its own rule.
-                if !carries_query || uri.chars().any(|ch| ch <= ' ') {
+                // A space, a control character, or a `\` is refused ahead of the query.
+                if !carries_query || uri.chars().any(|ch| ch <= ' ' || ch == '\\') {
                     continue;
                 }
                 refused += 1;

@@ -66,12 +66,14 @@ ignores anything after a `?`. So the box cannot say which resource such a URI as
 keeps a rule on `file:///home/op/.env` holding for `file:///home/op/.env?x`, which otherwise reads
 the same file under a string no rule matches.
 
-**A space or a control character is refused**, anywhere in a URI under these three schemes. RFC
-3986 allows neither, and a URL parser trims or removes both before it reads anything — so a single
-URI would name two things. The box reads a tab inside `file` as part of a custom scheme and leaves
-the URI alone, while the server reads `file:` and opens the path. A space the box keeps on the end
-of a query is one the server drops. Each would let the two ends disagree about which resource a rule
-judged, so the box refuses the request instead.
+**A space, a control character, or a backslash is refused**, anywhere in a URI under these three
+schemes. RFC 3986 allows none of them, and a URL parser gives each one a meaning of its own — so a
+single URI would name two things. The box reads a tab inside `file` as part of a custom scheme and
+leaves the URI alone, while the server reads `file:` and opens the path. A space the box keeps on
+the end of a query is one the server drops. And a backslash, which the box reads as one more
+character of a name, is a path separator to the server, so `file://localhost\home\op\.env` opens
+`/home/op/.env`. Each would let the two ends disagree about which resource a rule judged, so the box
+refuses the request instead.
 
 **A per-tool action is generated** for each tool a server lists. It's decided only for a
 `tools/call`, after `mcp:call` allows the call. A rule on it can refuse the whole tool, or only the

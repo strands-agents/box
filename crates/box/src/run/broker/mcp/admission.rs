@@ -852,6 +852,9 @@ mod tests {
             // The authored scheme already reads as `file` here, so a check that only compares the
             // scheme before and after preparation would miss it.
             "file:\\t///home/op/.env",
+            // A URL parser reads a `\\` as a path separator, so these name the guarded file too.
+            "file://localhost\\\\home\\\\op\\\\.env",
+            "file:///home/op\\\\.env",
         ] {
             assert!(
                 call(&guards_env, &read(spelling)).is_err(),
