@@ -12,7 +12,7 @@ each tool call.
 |---|---|---|
 | Declared as | `[mcp.<name>]` with `type = "stdio"` | `[mcp.<name>]` with `type = "http"` |
 | Runs in | Its own sandbox, which Box starts | Somewhere else. Box checks its requests, not the server. |
-| Reached through | The server's alias, then the MCP broker, then the server's stdin | The egress gateway |
+| Reached through | The alias for the server's program, then the MCP broker, then the server's stdin | The egress gateway |
 | Starting or connecting | `shell:spawn` | `net:connect` and `http:request` |
 | Each MCP request | `mcp:call` | `mcp:call` |
 
@@ -103,10 +103,23 @@ flowchart TD
 
 ### Starting the server
 
-**A stdio server starts on demand.** It starts when the agent's harness opens the server's alias in
-the box's `bin/`, not when `box run` starts. The broker decides `shell:spawn` on the program and
-arguments from `box.toml`, before the process exists. If it's allowed, the server starts in its own
-sandbox.
+**A stdio server starts on demand.** It starts when the agent's harness runs the server's full
+command through the alias in the box's `bin/`, not when `box run` starts. The alias is named for
+the program, so servers that share a program, such as `npx`, share one alias. The alias sends its
+name and its arguments to the broker, and the broker picks the one server whose `command` in
+`box.toml` is those words, in that order, with each argument as written in `box.toml` or as the
+leaf starts it, each `${OTEL_EXPORTER_OTLP_*}` token expanded (`McpLeafLauncher::launched_arguments`).
+A harness with a fixed configuration relies on the written form, because an endpoint token expands to
+a port that is new on each run. When
+no `command` matches, the broker refuses the launch and starts no server, so a launch never reaches
+a server it didn't name. The refusal names the servers on that program and never their commands,
+because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
+denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
+records. The arguments only select
+among the servers the operator declared: the agent could already start any of them.
+
+The broker then decides `shell:spawn` on the program and arguments from `box.toml`, before the
+process exists. If it's allowed, the server starts in its own sandbox.
 
 **An http server is already running.** The gateway decides `net:connect` before DNS, again for
 each resolved address, and `http:request` for each request. Each MCP request to the server is one
@@ -216,10 +229,63 @@ Each server is then in one of four states:
 |---|---|---|
 | Ready | Its tool list was accepted, and its tools are callable. | Enforced from the moment its schema staged. |
 | No tools | Policy refused its `tools/list`, so it has zero tools. | It has none. |
-| Degraded | Policy refused its `tools/list`, so it has zero tools, and each call to one of its tools is refused. | A rule names its tools, and it can never load. stderr names the server ([a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
+| Degraded | Policy refused its `tools/list`, so it has zero tools, and a call to a tool that one of those rules decides is refused. | A rule decides one of its tools, and it can never load. stderr names the server ([a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
 | Failed | Box couldn't read or stage its tool list. | Never enforced. stderr names the step that failed. |
 
 The engine is then `Ready` for the rest of the run, and every rule that can load has.
+
+The refusal on a degraded server is per tool, not per server. Box holds back exactly the tools that
+an inert rule decides, so a call to another tool of the same server is still decided by the rules
+that did load — usually the coarse `mcp:call` permit. A rule that only reads a tool from history
+decides no call to it, so that tool is not held.
+
+**Which tools are held and which servers are named are different questions, and Box answers them
+separately.** It holds the tools an inert rule decides. It names, per rule, the servers that rule
+still waits for. One rule can therefore hold a tool on one server and name a different server, and
+that is the honest pair.
+
+A rule waits for every tool it mentions — in its head, in a condition, or in a history reference —
+to be declared, so an undeclared tool names its own server. That covers a catalog that never
+arrived, because a rule refused the server's `tools/list` and it declares nothing, and a catalog
+that arrived without that tool, because the rule misspells the name or the server dropped it.
+
+A rule can also stay pending while every tool it mentions is declared, when it compares an argument
+the server names differently or declares with another type. Then Box names every server that rule
+mentions. That is a weaker statement — one of those servers may be answering correctly — and it is
+the deliberate trade, because the alternative is a rule that never loads and says nothing. Box
+parks a rule only when it names at least one tool, so no inert rule is silent.
+
+A rule's head is not the only place it can say which tool it decides. A head can be the coarse
+`mcp:call` while a condition pins `context.input.server` and `context.input.tool` to one name each,
+and such a rule decides exactly that one call. Box reads those pins and holds that tool, so the
+narrowing an operator wrote in a condition counts for as much as one written in the head.
+
+A pin counts when the rule cannot fire without it. Box reads a `when` condition as the list of
+tests it joins with `&&`, because every one of those has to hold, and takes a pin from any test
+that is exactly `context.input.server` or `context.input.tool` against a quoted name. Other tests
+in the same condition make no difference, so a second guard beside the pins — `&&
+context.input.method != "tools/list"`, or a choice between two methods — leaves the pins standing.
+What does not count is a pin *inside* something else: under a `||`, under a negation, under an `if`,
+or compared against another comparison. There the pinned pair may be the one pair the rule does not
+decide, and holding it would refuse exactly the wrong call. An `unless` condition gives no pin
+either, because it says what stops the rule rather than what the rule reaches.
+
+A head that already names a tool gives no pin either. Such a head states that rule's whole reach, so
+a pin beside it can only disagree with it, and reading one would hold a tool on a server the rule
+can never decide a call to.
+
+One limit remains. A rule whose head names no tool, and whose condition does not pin one server and
+one tool, holds no call. stderr names the server it waits for, so the operator learns the rule is
+inert, but no call is held on its behalf.
+
+The reason differs by shape, and only one of them is a real impossibility. A condition that narrows
+on something unbounded — `context.input.method`, or an argument value — or that does not narrow at
+all, reaches tools whose names the rule never spells, so there is no set of tools to refuse. The
+other two shapes do name a refusable set, and Box still does not read them: a condition that pins
+the server alone decides every call to that server, and the box knows a call's server when it
+decides it; and `["a", "b"].contains(context.input.tool)` names a fixed set of pairs. Reading either
+needs a hold that is coarser than a `(server, tool)` pair, or one that expands a set, so each is a
+widening of this mechanism rather than a correction to it.
 
 ## How Box decides a tool call
 

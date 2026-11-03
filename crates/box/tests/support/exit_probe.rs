@@ -130,6 +130,8 @@ fn call_server(directory: &std::path::Path) -> ! {
         .map(|bin| std::path::Path::new(bin).join("box-exit-probe"))
         .unwrap();
     let mut child = Command::new(alias)
+        .arg("serve-tree")
+        .arg(directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

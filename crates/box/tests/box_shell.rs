@@ -2192,6 +2192,26 @@ const PROBE_WRITER_TOOL: &str = "[tool.probe]\ncommand = [\"box-egress-probe\"]\
                                  [tool.probe.filesystem]\nread = [\"{workspace}\"]\n\
                                  write = [\"{workspace}\"]\n";
 
+// Cargo can hard-link build outputs, so each configured probe gets an independent file.
+fn copied_cargo_probe(request: Request, source: &std::path::Path) -> (Request, std::path::PathBuf) {
+    let programs = request.operator_home().join("programs");
+    std::fs::create_dir(&programs).expect("create the fixture program directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&programs, std::fs::Permissions::from_mode(0o700))
+            .expect("make the fixture program directory private");
+    }
+    let probe = programs.join(source.file_name().expect("the probe has a file name"));
+    std::fs::copy(source, &probe).expect("copy the probe to one fixture-owned filesystem name");
+    let path = format!(
+        "{}:{}",
+        programs.display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+    );
+    (request.env("PATH", &path), probe)
+}
+
 /// A policy permitting the Shell's own programs and **no** host binary.
 ///
 /// The control for the pair below: the same command, the same `PATH`, one rule different.
@@ -2270,11 +2290,13 @@ fn a_spawn_rule_keyed_on_a_prior_spawn_response_lifts_only_after_the_test_run_co
     let request = Request::with_config(
         "spawn-test-before-commit",
         TEST_BEFORE_COMMIT_POLICY,
-        &toolchain,
+        &toolchain.replace("{box_home}/probe-bin", "~/probe-bin"),
     );
-    // Under the agent home the fixture declares, so the tool tables above can name it.
-    let bin = request.operator_home().join("agent-home/probe-bin");
-    std::fs::create_dir_all(&bin).expect("the probe directory");
+    // The operator owns the probes outside the agent's writable home.
+    let bin = request.operator_home().join("probe-bin");
+    std::fs::create_dir(&bin).expect("the probe directory");
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .expect("make the probe directory private");
     install_probe_program(&bin, "git");
     install_probe_program(&bin, "cargo");
     // The probes are not on the system PATH; put their directory first so `shell:spawn` resolves
@@ -2581,23 +2603,16 @@ fn a_leaf_boxs_egress_is_judged_by_the_gateway() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    // The probe is not on the system PATH; put its directory first so `shell:spawn` resolves it by
-    // bare name against the operator's real host PATH.
-    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe"));
-    let probe_dir = probe.parent().expect("the probe has a parent directory");
-    let path = format!(
-        "{}:{}",
-        probe_dir.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-    );
     const POLICY: &str = r#"
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "box-egress-probe" };
 "#;
-    let box_ = Request::with_config("leaf-egress-judged", POLICY, PROBE_TOOL)
-        .env("PATH", &path)
-        .expect();
+    let (request, _) = copied_cargo_probe(
+        Request::with_config("leaf-egress-judged", POLICY, PROBE_TOOL),
+        std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe")),
+    );
+    let box_ = request.expect();
 
     // `localhost:9` resolves (so DNS does not 502 before the decision) and is not SSRF-floored, so
     // the CONNECT reaches the Cedar `net:connect` check — which default-denies, since the policy
@@ -2620,21 +2635,18 @@ const EXIT_PROBE_TOOL: &str = "[tool.exit-probe]\ncommand = [\"box-exit-probe\"]
 ///
 /// The probe resolves by bare name on the host `PATH`, and each gate pins its `program_path`.
 fn exit_probe_box(name: &str, gates: &[(&str, i32)]) -> Configured {
-    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_box-exit-probe"))
-        .canonicalize()
-        .expect("the exit probe resolves");
-    let probe_dir = probe.parent().expect("the probe has a parent directory");
-    let path = format!(
-        "{}:{}",
-        probe_dir.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-    );
     let mut policy = r#"
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "box-exit-probe" };
 "#
     .to_string();
+    let (request, probe) = copied_cargo_probe(
+        Request::with_config(name, &policy, EXIT_PROBE_TOOL),
+        std::path::Path::new(env!("CARGO_BIN_EXE_box-exit-probe")),
+    );
+    let reported_probe =
+        fixture::reported_under_home(&probe.display().to_string(), request.operator_home());
     for (gate, status) in gates {
         policy.push_str(&format!(
             r#"
@@ -2646,12 +2658,12 @@ unless temporal {{
     Box::Action::"shell:spawn"::response{{ input.program_path: "{probe}", output.status: {status} }}
 }};
 "#,
-            probe = probe.display()
+            probe = reported_probe
         ));
     }
-    Request::with_config(name, &policy, EXIT_PROBE_TOOL)
-        .env("PATH", &path)
-        .expect()
+    std::fs::write(request.operator_home().join("policy.dw"), policy)
+        .expect("write the policy for the copied probe");
+    request.expect()
 }
 
 #[test]
@@ -2733,21 +2745,16 @@ fn a_contained_host_binary_cannot_change_loaded_authority_sources() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe"));
-    let probe_dir = probe.parent().expect("the probe has a parent directory");
-    let path = format!(
-        "{}:{}",
-        probe_dir.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-    );
     const POLICY: &str = r#"
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "box-egress-probe" };
 "#;
-    let box_ = Request::with_config("leaf-authority-protected", POLICY, PROBE_WRITER_TOOL)
-        .env("PATH", &path)
-        .expect();
+    let (request, _) = copied_cargo_probe(
+        Request::with_config("leaf-authority-protected", POLICY, PROBE_WRITER_TOOL),
+        std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe")),
+    );
+    let box_ = request.expect();
     box_.write_command("/bin/bash");
     let config = box_.config().to_path_buf();
     let policy = box_.workspace().join(".strands-box/policy.dw");
@@ -2791,21 +2798,24 @@ fn a_contained_host_binary_cannot_move_an_authority_sources_parent() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe"));
-    let probe_dir = probe.parent().expect("the probe has a parent directory");
-    let path = format!(
-        "{}:{}",
-        probe_dir.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-    );
     const POLICY: &str = r#"
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "box-egress-probe" };
 "#;
-    let box_ = Request::with_config("leaf-auth-parent", POLICY, PROBE_WRITER_TOOL)
-        .env("PATH", &path)
-        .expect();
+    let (request, probe) = copied_cargo_probe(
+        Request::with_config("leaf-auth-parent", POLICY, PROBE_WRITER_TOOL),
+        std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe")),
+    );
+    let path = format!(
+        "{}:{}",
+        probe
+            .parent()
+            .expect("the copied probe has a parent")
+            .display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
+    );
+    let box_ = request.expect();
     let source = box_.workspace().join("authority");
     let destination = box_.workspace().join("authority-moved");
     std::fs::create_dir(&source).expect("authority directory");
@@ -3014,22 +3024,17 @@ fn a_host_binary_cannot_use_the_broker_to_move_an_authority_sources_parent() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe"));
-    let probe_dir = probe.parent().expect("the probe has a parent directory");
-    let path = format!(
-        "{}:{}",
-        probe_dir.display(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-    );
     const POLICY: &str = r#"
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "box-egress-probe" };
 permit(principal, action == Box::Action::"fs:move", resource);
 "#;
-    let box_ = Request::with_config("broker-auth-parent", POLICY, PROBE_WRITER_TOOL)
-        .env("PATH", &path)
-        .expect();
+    let (request, _) = copied_cargo_probe(
+        Request::with_config("broker-auth-parent", POLICY, PROBE_WRITER_TOOL),
+        std::path::Path::new(env!("CARGO_BIN_EXE_box-egress-probe")),
+    );
+    let box_ = request.expect();
     let source = box_.workspace().join(".strands-box");
     let destination = box_.workspace().join(".strands-box-moved");
     let moved_config = destination.join("box.toml");
@@ -3143,5 +3148,410 @@ fn a_loaded_authority_source_is_immutable_and_unreadable() {
             .expect("the config still reads on the host")
             .contains("[agent]"),
         "the config bytes were changed: {output:?}"
+    );
+}
+
+fn install_command_integrity_probe(path: &std::path::Path, label: &str) {
+    let source = format!(
+        r#"fn main() {{
+    let path = std::env::args().nth(1).expect("marker argument");
+    let marker = std::fs::read_to_string(path).expect("tool reads its marker grant");
+    println!("{label}:{{}}", marker.trim());
+}}
+"#
+    );
+    compile_command_integrity_probe(path, &source);
+}
+
+fn compile_command_integrity_probe(path: &std::path::Path, source: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut compiler = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args([
+            "--edition=2024",
+            "--crate-name",
+            "configured_command_probe",
+            "-",
+        ])
+        .arg("-o")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the native probe compiler");
+    compiler
+        .stdin
+        .take()
+        .expect("compiler input")
+        .write_all(source.as_bytes())
+        .expect("write the native probe source");
+    let output = compiler
+        .wait_with_output()
+        .expect("compile the native probe");
+    assert!(
+        output.status.success(),
+        "native probe compilation: {output:?}"
+    );
+}
+
+fn configured_command_mutation_is_refused(operation: &str) {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/tool-only-marker" };
+"#;
+    let table = r#"
+[tool.protected]
+command = ["{workspace}/configured-command"]
+[tool.protected.filesystem]
+read_file = ["~/tool-only-marker"]
+"#;
+    let request = Request::with_config(&format!("configured-command-{operation}"), POLICY, table)
+        .without_agent_home();
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the tool workspace");
+    let command = workspace.join("configured-command");
+    let replacement = workspace.join("replacement-command");
+    let marker = request.operator_home().join("tool-only-marker");
+    let control = workspace.join("ordinary-output");
+    std::fs::write(&marker, "TOOL_ONLY_BYTES\n").expect("the tool-only marker");
+    install_command_integrity_probe(&command, "ORIGINAL_TOOL");
+    install_command_integrity_probe(&replacement, "ATTACKER_TOOL");
+    let original = std::fs::read(&command).expect("the original program bytes");
+    let box_ = request.expect();
+    let output = box_.bash(&format!(
+        r#"printf 'AGENT_ENTERED\n'
+if IFS= read -r value < '{marker}'; then
+    printf 'AGENT_READ_MARKER:%s\n' "$value"
+else
+    printf 'AGENT_MARKER_REFUSED\n'
+fi
+zsh -lc "cat '{marker}'" 2>&1 || printf 'BROKER_MARKER_REFUSED\n'
+zsh -lc "'{command}' '{marker}'"
+zsh -lc "printf CONTROL_WRITTEN > '{control}'"
+zsh -lc "{operation} -- '{replacement}' '{command}'" 2>&1 && printf 'MUTATION_LANDED\n' || printf 'MUTATION_REFUSED\n'
+zsh -lc "'{command}' '{marker}'"
+"#,
+        marker = marker.display(),
+        command = command.display(),
+        control = control.display(),
+        replacement = replacement.display(),
+    ));
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        seen.contains("AGENT_ENTERED"),
+        "the agent must run: {output:?}"
+    );
+    assert!(
+        seen.contains("AGENT_MARKER_REFUSED") && seen.contains("BROKER_MARKER_REFUSED"),
+        "only the configured tool may read the scratch marker: {output:?}"
+    );
+    assert!(
+        seen.contains("ORIGINAL_TOOL:TOOL_ONLY_BYTES"),
+        "the unchanged tool must run with its declared marker grant: {output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(control).expect("the permitted write must land"),
+        "CONTROL_WRITTEN",
+        "unrelated hosted writes must succeed: {output:?}"
+    );
+    assert!(
+        !seen.contains("ATTACKER_TOOL:TOOL_ONLY_BYTES"),
+        "replacement bytes received the configured tool's marker grant: {output:?}"
+    );
+    assert!(
+        seen.contains("MUTATION_REFUSED") && !seen.contains("MUTATION_LANDED"),
+        "the hosted mutation must refuse the configured command: {output:?}"
+    );
+    assert_eq!(
+        seen.matches("ORIGINAL_TOOL:TOOL_ONLY_BYTES").count(),
+        2,
+        "the same original tool must run before and after the refused mutation: {output:?}"
+    );
+    assert_eq!(
+        std::fs::read(command).expect("the configured command remains"),
+        original,
+        "the configured program bytes must remain unchanged"
+    );
+}
+
+#[test]
+fn a_configured_command_cannot_be_overwritten_through_the_hosted_shell() {
+    configured_command_mutation_is_refused("cp");
+}
+
+#[test]
+fn a_configured_command_cannot_be_replaced_through_the_hosted_shell() {
+    configured_command_mutation_is_refused("mv");
+}
+
+#[test]
+fn monty_cannot_change_a_configured_command() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "monty-command-integrity",
+        "permit(principal, action, resource);",
+        r#"
+[tool.protected]
+command = ["{workspace}/configured-command"]
+"#,
+    )
+    .without_agent_home();
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the configured command workspace");
+    let command = workspace.join("configured-command");
+    compile_command_integrity_probe(&command, "fn main() { println!(\"CONFIGURED_TOOL_OK\"); }");
+    let original = std::fs::read(&command).expect("the configured command bytes");
+    let control = workspace.join("ordinary-output");
+    let moved = workspace.join("moved-output");
+    let other = workspace.join("other-output");
+    let quoted = |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let box_ = request.expect();
+
+    for operation in [
+        "command.write_text('CHANGED')",
+        "command.unlink()",
+        "command.rename(other)",
+        "other.rename(command)",
+    ] {
+        let script = format!(
+            r#"from pathlib import Path
+command = Path({command})
+control = Path({control})
+moved = Path({moved})
+other = Path({other})
+control.write_text('CONTROL')
+control.rename(moved)
+assert moved.read_text() == 'CONTROL'
+moved.unlink()
+other.write_text('OTHER')
+print('MONTY_CONTROL_OK')
+try:
+    {operation}
+    print('MUTATION_LANDED')
+except PermissionError as error:
+    print('MUTATION_REFUSED:' + str(error))
+"#,
+            command = quoted(&command),
+            control = quoted(&control),
+            moved = quoted(&moved),
+            other = quoted(&other),
+        );
+        let output = box_.bash(&format!("python3 -c '{}'", script.replace('\'', "'\\''")));
+        let seen = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(output.status.success(), "{operation}: {output:?}");
+        assert!(seen.contains("MONTY_CONTROL_OK"), "{operation}: {output:?}");
+        assert!(
+            seen.contains("MUTATION_REFUSED:") && seen.contains("configured"),
+            "{operation} must meet the configured-command refusal: {output:?}"
+        );
+        assert!(!seen.contains("MUTATION_LANDED"), "{operation}: {output:?}");
+        assert_eq!(std::fs::read(&command).unwrap(), original, "{operation}");
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            "OTHER",
+            "{operation}"
+        );
+        assert!(!control.exists() && !moved.exists(), "{operation}");
+    }
+}
+
+const COMMAND_INTEGRITY_TOOL: &str = r#"
+[tool.protected]
+command = ["{workspace}/configured-command"]
+[tool.protected.filesystem]
+read_file = ["~/tool-only-marker"]
+"#;
+
+fn prepare_command_integrity_tool(request: &Request) -> std::path::PathBuf {
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the configured command workspace");
+    let command = workspace.join("configured-command");
+    std::fs::write(
+        request.operator_home().join("tool-only-marker"),
+        "TOOL_ONLY_BYTES\n",
+    )
+    .expect("the tool-only marker");
+    install_command_integrity_probe(&command, "ORIGINAL_TOOL");
+    command
+}
+
+#[test]
+fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "cmd-hard-link",
+        "permit(principal, action, resource);",
+        COMMAND_INTEGRITY_TOOL,
+    )
+    .without_agent_home();
+    let command = prepare_command_integrity_tool(&request);
+    let alias = command.with_file_name("command-hard-link");
+    std::fs::hard_link(&command, &alias).expect("the configured command hard link");
+    let original = std::fs::read(&command).expect("the original command");
+    let (box_, _) = request.attempt();
+    let output = box_.bash("printf AGENT_ENTERED");
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        !output.status.success(),
+        "hard-linked command must refuse: {output:?}"
+    );
+    assert!(
+        !seen.contains("AGENT_ENTERED"),
+        "the agent must not start: {output:?}"
+    );
+    assert!(
+        seen.contains("configured-command")
+            && (seen.contains("filesystem name") || seen.contains("hard link")),
+        "the refusal must name the command's multiple file names: {output:?}"
+    );
+    assert_eq!(std::fs::read(command).unwrap(), original);
+    assert_eq!(std::fs::read(alias).unwrap(), original);
+}
+
+#[test]
+fn native_write_grants_cannot_reach_a_configured_command() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for route in ["agent-tree", "agent-file", "other-tool"] {
+        let tables = if route == "other-tool" {
+            format!(
+                "{COMMAND_INTEGRITY_TOOL}\n[tool.writer]\ncommand = [{:?}]\n\
+                 [tool.writer.filesystem]\nread = [\"{{workspace}}\"]\n\
+                 write = [\"{{workspace}}\"]\n",
+                fixture::no_op_program()
+            )
+        } else {
+            COMMAND_INTEGRITY_TOOL.to_string()
+        };
+        let request = Request::with_config(
+            &format!("cmd-{route}"),
+            "permit(principal, action, resource);",
+            &tables,
+        )
+        .without_agent_home();
+        let command = prepare_command_integrity_tool(&request);
+        let original = std::fs::read(&command).expect("the original command");
+        let request = match route {
+            "agent-tree" => request
+                .agent_list("read", &["{workspace}"])
+                .agent_list("write", &["{workspace}"]),
+            "agent-file" => request
+                .agent_list("read_file", &["{workspace}/configured-command"])
+                .agent_list("write_file", &["{workspace}/configured-command"]),
+            _ => request,
+        };
+        let (box_, _) = request.attempt();
+        let output = box_.bash("printf AGENT_ENTERED");
+        let seen = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(!output.status.success(), "{route} must refuse: {output:?}");
+        assert!(
+            !seen.contains("AGENT_ENTERED"),
+            "{route}: agent started: {output:?}"
+        );
+        assert!(
+            seen.contains("configured-command") && seen.contains("writ"),
+            "{route}: refusal must name the writable command: {output:?}"
+        );
+        assert_eq!(std::fs::read(command).unwrap(), original);
+    }
+}
+
+#[test]
+fn an_operator_can_update_a_configured_command_between_runs() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "cmd-operator-update",
+        "permit(principal, action, resource);",
+        COMMAND_INTEGRITY_TOOL,
+    )
+    .without_agent_home();
+    let command = prepare_command_integrity_tool(&request);
+    let marker = request.operator_home().join("tool-only-marker");
+    let replacement = command.with_file_name("operator-update");
+    install_command_integrity_probe(&replacement, "UPDATED_TOOL");
+    let box_ = request.expect();
+    let script = format!("zsh -lc \"'{}' '{}'\"", command.display(), marker.display());
+    let before = box_.bash(&script);
+    assert!(before.status.success(), "original tool run: {before:?}");
+    assert!(
+        stdout(&before).contains("ORIGINAL_TOOL:TOOL_ONLY_BYTES"),
+        "{before:?}"
+    );
+    std::fs::rename(replacement, &command)
+        .expect("operator installs the updated command between runs");
+    let after = box_.bash(&script);
+    assert!(after.status.success(), "updated tool run: {after:?}");
+    assert!(
+        stdout(&after).contains("UPDATED_TOOL:TOOL_ONLY_BYTES"),
+        "{after:?}"
+    );
+    assert!(
+        !stdout(&after).contains("ORIGINAL_TOOL"),
+        "the old command must not run: {after:?}"
+    );
+}
+
+#[test]
+fn a_configured_linked_script_keeps_its_invocation_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let sh = std::path::Path::new("/bin/sh")
+            .canonicalize()
+            .expect("resolve the script interpreter");
+        format!(", {sh:?}")
+    } else {
+        String::new()
+    };
+    let request = Request::with_config(
+        "cmd-script-path",
+        "permit(principal, action, resource);",
+        &r#"
+[tool.script]
+command = ["{workspace}/linked-script"]
+
+[tool.script.filesystem]
+read_file = ["{workspace}/script-target"{interpreter_grant}]
+"#
+        .replace("{interpreter_grant}", &interpreter_grant),
+    )
+    .without_agent_home();
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the script workspace");
+    let target = workspace.join("script-target");
+    let invoked = workspace.join("linked-script");
+    std::fs::write(&target, "#!/bin/sh\nprintf 'SCRIPT_PATH:%s\\n' \"$0\"\n")
+        .expect("the path-reporting script");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable script");
+    std::os::unix::fs::symlink(&target, &invoked).expect("the installed script link");
+    let box_ = request.expect();
+    let output = box_.bash(&format!("zsh -lc \"'{}'\"", invoked.display()));
+    assert!(
+        output.status.success(),
+        "the linked script must run: {output:?}"
+    );
+    assert!(
+        stdout(&output).contains(&format!("SCRIPT_PATH:{}", invoked.display())),
+        "the script must retain the configured invocation path: {output:?}"
+    );
+    assert!(
+        !stdout(&output).contains(&format!("SCRIPT_PATH:{}", target.display())),
+        "the script must not receive the canonical target as its script path: {output:?}"
     );
 }

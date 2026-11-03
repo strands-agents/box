@@ -168,7 +168,7 @@ fn a_script_changed_by_an_earlier_workload_cannot_add_an_interpreter_grant() {
 }
 
 #[test]
-fn a_tool_changed_during_a_run_cannot_add_an_interpreter_grant() {
+fn a_tool_interpreter_changed_during_a_run_cannot_add_an_interpreter_grant() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -179,26 +179,32 @@ fn a_tool_changed_during_a_run_cannot_add_an_interpreter_grant() {
         } else {
             ""
         };
+        let installed = fixture::short_temporary_home();
+        let script = installed.path().join("protected-script");
         let tool = format!(
             r#"
 [tool.mutable]
-command = ["{{box_home}}/mutable-script"]
+command = [{script:?}]
 [tool.mutable.filesystem]
-read_file = [{bash:?}, "~/fixture-env/env"{extra}]
+read_file = [{bash:?}, "{{box_home}}/mutable-interpreter", "~/fixture-env/env"{extra}]
 "#
         );
         let request = Request::with_config("script-same-run-tool", TOOL_POLICY, &tool);
         let (env, marker) = outside_fixtures(&request);
-        let script = request.operator_home().join("agent-home/mutable-script");
-        std::fs::create_dir_all(script.parent().unwrap())
-            .expect("create the writable script directory");
-        executable(&script, &original_script(&bash, &marker));
+        let interpreter = request
+            .operator_home()
+            .join("agent-home/mutable-interpreter");
+        std::fs::create_dir_all(interpreter.parent().unwrap())
+            .expect("create the writable interpreter directory");
+        executable(&interpreter, &original_script(&bash, &marker));
+        executable(&script, &format!("#!{}\n", interpreter.display()));
         let box_ = request.expect();
         let changed = format!("#!{} {}\n", env.display(), marker.display());
         let invocation = quoted(script.to_str().unwrap());
         let workload = format!(
-            "zsh -c {invocation} || exit 90\nprintf '%s' {} > {invocation} || exit 91\nprintf 'SCRIPT_CHANGED\\n'\nzsh -c {invocation}",
-            quoted(&changed)
+            "zsh -c {invocation} || exit 90\nprintf '%s' {} > {} || exit 91\nprintf 'INTERPRETER_CHANGED\\n'\nzsh -c {invocation}",
+            quoted(&changed),
+            quoted(interpreter.to_str().unwrap())
         );
 
         let output = run(&box_, &bash, &["-c", &workload]);
@@ -209,12 +215,16 @@ read_file = [{bash:?}, "~/fixture-env/env"{extra}]
             text(&output)
         );
         assert!(
-            stdout.contains("SCRIPT_CHANGED"),
+            stdout.contains("INTERPRETER_CHANGED"),
             "the contained writer must run: {}",
             text(&output)
         );
         assert_direct_read(&output, granted);
-        assert_eq!(std::fs::read_to_string(&script).unwrap(), changed);
+        assert_eq!(std::fs::read_to_string(&interpreter).unwrap(), changed);
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            format!("#!{}\n", interpreter.display())
+        );
         assert_read_result(&output, &marker, granted);
     }
 }

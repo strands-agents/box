@@ -9,20 +9,71 @@ use serde_json::Value;
 use crate::record::config::mcp::McpServer;
 use crate::run::telemetry::{EffectiveDecision, capture_policy_action};
 
-/// Resolve this alias to the server the operator declared, and answer with what to start.
+/// Resolve this launch to the server whose command, as Box starts it, the launch spells.
 pub(crate) fn admit_server<'a>(
     declared: &'a [McpServer],
-    alias: &str,
+    program: &str,
+    arguments: &[String],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
 ) -> io::Result<&'a McpServer> {
-    crate::record::config::mcp::for_alias(declared, alias).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "no MCP server declares the program {alias:?} in box.toml, so the box placed no \
-                 alias for it"
-            ),
+    use crate::record::config::mcp::{for_command, on_program};
+
+    if let Some(server) = for_command(declared, program, arguments, &launched) {
+        return Ok(server);
+    }
+    let received = std::iter::once(program.to_string())
+        .chain(arguments.iter().cloned())
+        .collect::<Vec<_>>();
+    let received = bounded(&received);
+    let named = bounded(std::slice::from_ref(&program.to_string()));
+    let servers = on_program(declared, program)
+        .map(|server| match launched(server) {
+            Some(_) => server.name.clone(),
+            None => format!("{} (its `command` does not expand)", server.name),
+        })
+        .collect::<Vec<_>>();
+    let reason = if servers.is_empty() {
+        format!(
+            "no MCP server declares \"{received}\"; no `[mcp.<name>]` table in box.toml declares \
+             the program \"{named}\", so the box placed no alias for it"
         )
-    })
+    } else {
+        format!(
+            "no MCP server declares \"{received}\"; servers on {named}: {}",
+            servers.join(", ")
+        )
+    };
+    Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+}
+
+/// The most characters of a received command a refusal prints.
+const RECEIVED_LIMIT: usize = 256;
+
+/// `words` cut to [`RECEIVED_LIMIT`] characters, then spelled, then marked with `...` when cut.
+fn bounded(words: &[String]) -> String {
+    use crate::record::config::mcp::spelled;
+
+    let mut budget = RECEIVED_LIMIT;
+    let mut kept = Vec::new();
+    let mut cut = false;
+    for word in words {
+        if budget == 0 {
+            cut = true;
+            break;
+        }
+        if word.chars().nth(budget).is_some() {
+            kept.push(word.chars().take(budget).collect::<String>());
+            cut = true;
+            break;
+        }
+        budget -= word.chars().count();
+        kept.push(word.clone());
+    }
+    let mut text = spelled(&kept);
+    if cut {
+        text.push_str("...");
+    }
+    text
 }
 
 /// Decide one frame, if it asks the server to do anything.
@@ -173,6 +224,10 @@ mod tests {
                 name: "aws-mcp".to_string(),
                 command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
             },
+            McpServer {
+                name: "fetch".to_string(),
+                command: vec!["uvx".to_string(), "mcp-server-fetch".to_string()],
+            },
         ];
         crate::record::config::mcp::validate_authored(&servers)
             .expect("the fixture is a valid authored array");
@@ -199,9 +254,16 @@ mod tests {
         .observed_by(Arc::new(crate::run::telemetry::PolicyDecisionObserver))
     }
 
-    /// Admit through an **alias**, which is named for the declared `program`.
-    fn admit(alias: &str) -> io::Result<McpServer> {
-        admit_server(&declared(), alias).cloned()
+    /// Admit through an **alias**, named for the declared program, with the arguments it received.
+    fn admit(program: &str, arguments: &[&str]) -> io::Result<McpServer> {
+        let arguments = arguments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        admit_server(&declared(), program, &arguments, |server| {
+            Some(server.arguments().to_vec())
+        })
+        .cloned()
     }
 
     const TOOLS: &str = r#"
@@ -234,7 +296,7 @@ mod tests {
     #[test]
     fn a_declared_server_resolves_to_the_files_own_argv() {
         // Through `uvx`, because that is the alias the harness executes for this server.
-        let admitted = admit("uvx").expect("uvx is declared");
+        let admitted = admit("uvx", &["mcp-proxy-for-aws@latest"]).expect("uvx is declared");
         assert_eq!(admitted.program(), "uvx");
         assert_eq!(
             admitted.name, "aws-mcp",
@@ -245,22 +307,145 @@ mod tests {
             ["mcp-proxy-for-aws@latest"],
             "the argv comes from box.toml, never from the agent"
         );
+        assert_eq!(
+            admit("uvx", &["mcp-server-fetch"])
+                .expect("the second server on uvx is declared")
+                .name,
+            "fetch",
+            "the arguments select the server among those on one program"
+        );
     }
 
     /// **An undeclared program is refused, and that refusal is the whole floor.**
     ///
-    /// The box places one alias per declared server, so an undeclared program names nothing the box
+    /// The box places one alias per declared program, so an undeclared program names nothing the box
     #[test]
     fn an_undeclared_program_is_refused() {
         for undeclared in ["not-in-the-file", "aws-mcp"] {
-            let refusal = admit(undeclared)
+            let refusal = admit(undeclared, &[])
                 .expect_err("a program the file does not declare must be refused")
                 .to_string();
             assert!(
-                refusal.contains("no MCP server declares the program"),
+                refusal.contains(&format!("no MCP server declares \"{undeclared}\"")),
                 "{undeclared:?} must be refused as undeclared: {refusal}"
             );
+            assert!(
+                refusal.contains("no alias"),
+                "the refusal must say the box placed no alias for it: {refusal}"
+            );
         }
+    }
+
+    /// A launch that matches no declared command is refused with the servers on its program.
+    #[test]
+    fn a_launch_matching_no_declared_command_is_refused_and_names_the_servers_on_its_program() {
+        for arguments in [
+            &["-y", "some-other-server"][..],
+            &[],
+            &["mcp-proxy-for-aws@latest", "--extra"],
+        ] {
+            let refusal = admit("uvx", arguments)
+                .expect_err("a launch matching no declared command must be refused");
+            assert_eq!(refusal.kind(), io::ErrorKind::PermissionDenied);
+            let text = refusal.to_string();
+            let received = std::iter::once("uvx")
+                .chain(arguments.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                text.contains(&format!("no MCP server declares \"{received}\"")),
+                "the refusal must name the received command: {text}"
+            );
+            assert!(
+                text.ends_with("; servers on uvx: aws-mcp, fetch"),
+                "the refusal must name the servers on the program: {text}"
+            );
+            assert!(
+                !text.contains("mcp-server-fetch"),
+                "the refusal must not print a declared command: {text}"
+            );
+        }
+    }
+
+    /// A launch by the program alone is refused when the declared command has arguments.
+    #[test]
+    fn a_launch_by_the_program_alone_is_refused_when_the_command_has_arguments() {
+        let servers = vec![McpServer {
+            name: "aws-mcp".to_string(),
+            command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
+        }];
+        let refusal = admit_server(&servers, "uvx", &[], |server| {
+            Some(server.arguments().to_vec())
+        })
+        .expect_err("the program alone is not the declared command");
+        assert_eq!(
+            refusal.to_string(),
+            "no MCP server declares \"uvx\"; servers on uvx: aws-mcp"
+        );
+    }
+
+    /// A server whose command does not expand never matches, and the refusal names it.
+    #[test]
+    fn a_server_whose_command_does_not_expand_is_named_and_never_matches() {
+        let refusal = admit_server(
+            &declared(),
+            "uvx",
+            &words(&["mcp-server-fetch"]),
+            |server| (server.name != "fetch").then(|| server.arguments().to_vec()),
+        )
+        .expect_err("a command that does not expand matches nothing")
+        .to_string();
+        assert!(
+            refusal.ends_with("; servers on uvx: aws-mcp, fetch (its `command` does not expand)"),
+            "{refusal}"
+        );
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    /// A refusal quotes and escapes each received word.
+    #[test]
+    fn a_refusal_spells_each_word_unambiguously() {
+        let text = admit("uvx", &["a b", "", "c\u{1b}[2J", "it's"])
+            .expect_err("undeclared")
+            .to_string();
+        assert!(
+            text.contains(r#""uvx 'a b' '' c\u{1b}[2J it\'s""#),
+            "{text}"
+        );
+    }
+
+    /// A long received command is cut short.
+    #[test]
+    fn a_long_received_command_is_cut_short() {
+        let long = "x".repeat(crate::run::broker::protocol::MAX_FRAME_BYTES);
+        let text = admit("uvx", &[long.as_str()])
+            .expect_err("undeclared")
+            .to_string();
+        assert!(text.len() < 1024, "{} bytes", text.len());
+        assert!(text.contains("..."), "{text}");
+    }
+
+    /// A long undeclared program is cut short.
+    #[test]
+    fn a_long_undeclared_program_is_cut_short() {
+        let long = "p".repeat(crate::run::broker::protocol::MAX_FRAME_BYTES);
+        let text = admit(&long, &[]).expect_err("undeclared").to_string();
+        assert!(text.len() < 1024, "{} bytes", text.len());
+        assert_eq!(text.matches("...").count(), 2, "{text}");
+    }
+
+    /// A cut command keeps each escape whole.
+    #[test]
+    fn a_cut_command_keeps_each_escape_whole() {
+        let control = "\u{1b}".repeat(RECEIVED_LIMIT);
+        let text = admit("uvx", &[control.as_str()])
+            .expect_err("undeclared")
+            .to_string();
+        let printed = format!("\"uvx {}...\"", r"\u{1b}".repeat(RECEIVED_LIMIT - 3));
+        assert!(text.contains(&printed), "{text}");
     }
 
     fn call(policy: &PolicyEngine, frame: &str) -> io::Result<Option<String>> {
