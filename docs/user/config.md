@@ -201,6 +201,16 @@ their place.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
+changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
+owner or group, or requesting either special bit during creation, remains forbidden. These requests fail with `EPERM` (operation not permitted).
+Opening an existing file without creation flags does not use its supplied creation mode.
+Existing shared-group directories retain Linux's normal group inheritance for new subdirectories.
+A permission change also fails if its requested mode keeps a set-user-ID or set-group-ID bit
+that the file or directory already has. The request must clear both bits to succeed.
+This includes directories that inherited their group bit: GNU `chmod g+w` and even
+`chmod 755` preserve that bit and fail. A refused request leaves the existing permissions unchanged.
+
 ### Direct access by operating system
 
 The read and write lists state separate permissions. These rules also apply to local servers
@@ -384,9 +394,10 @@ reads the table's name as `context.input.server`. The current reference for this
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
 The example box declares no MCP server. To give the Strands CLI one, declare it here, and name the
-same program under `mcpServers` in the file the CLI reads through its `--mcp-config` option. The
-box places an alias with the program's name on the agent's `PATH`, so when the CLI starts
-`mcp-server-fetch`, the box runs this table's `command` in a separate sandbox:
+same full command under `mcpServers` in the file the CLI reads through its `--mcp-config` option:
+the same program and the same arguments, in the same order. The box places an alias with the
+program's name on the agent's `PATH`, so when the CLI starts `mcp-server-fetch`, the box runs this
+table's `command` in a separate sandbox:
 
 ```toml
 [mcp.fetch]
@@ -400,7 +411,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | Key | Type | Meaning |
 |---|---|---|
 | `type` | string | `stdio` or `http`. |
-| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/`; the rest are its arguments, fixed here. |
+| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/`; the rest are its arguments, fixed here. The harness runs the full command to reach the server. Two tables can share a program when their full commands differ. |
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
