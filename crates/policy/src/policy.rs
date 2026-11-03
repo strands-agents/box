@@ -129,20 +129,28 @@ impl PolicyEngine {
         })
     }
 
-    /// Open durable history with the schema fragment of each tool pack in `packs`.
+    /// Open durable history with the schema fragment of each tool grammar in `grammars`.
     #[cfg(test)]
-    pub(crate) fn open_with_packs(
+    pub(crate) fn open_with_grammars(
         sources: Vec<Policy>,
-        packs: &[crate::pack::Pack],
+        grammars: &[crate::grammar::Grammar],
         history: &Path,
     ) -> Result<Self, PolicyError> {
         let effective = EffectivePolicy {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        let pack_schemas: Vec<String> = packs.iter().map(crate::pack::Pack::schema).collect();
+        let grammar_schemas: Vec<String> = grammars
+            .iter()
+            .map(crate::grammar::Grammar::schema)
+            .collect();
         Ok(Self {
-            authority: Authority::open_complete_with_packs(sources, &pack_schemas, &[], history)?,
+            authority: Authority::open_complete_with_grammars(
+                sources,
+                &grammar_schemas,
+                &[],
+                history,
+            )?,
             effective,
             observer: None,
         })
@@ -318,33 +326,36 @@ impl PolicyEngine {
         self.conclude(&request.identity(), request.resource(), decision)
     }
 
-    /// Decide one parsed command line as its pack action, in the box's one history
-    /// (docs/design/decisions.md#a-pack-action-names-no-enforcement-point,
+    /// Decide one parsed command line as its grammar action, in the box's one history
+    /// (docs/design/decisions.md#a-grammar-action-names-no-enforcement-point,
     /// docs/design/decisions.md#an-unmodeled-command-is-denied-by-default).
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter decides a pack action")
+        expect(dead_code, reason = "only the shell adapter decides a grammar action")
     )]
-    pub(crate) fn decide_pack_action(
+    pub(crate) fn decide_grammar_action(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        invocation: &crate::pack::PackInvocation<'_>,
-    ) -> (Decision, Option<crate::pack::PendingPackResponse>) {
+        invocation: &crate::grammar::GrammarInvocation<'_>,
+    ) -> (Decision, Option<crate::grammar::PendingGrammarResponse>) {
         let request = invocation.request();
-        let decision = self.decide_request(governed, principal, ActionRequest::Pack(&request));
+        let decision = self.decide_request(governed, principal, ActionRequest::Grammar(&request));
         let pending = request.allowed_by(&decision);
         (decision, pending)
     }
 
-    /// Record the `::response` that an allowed pack action owes, with the program's exit status.
+    /// Record the `::response` that an allowed grammar action owes, with the program's exit status.
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter records a pack response")
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
     )]
-    pub(crate) fn record_pack_response(
+    pub(crate) fn record_grammar_response(
         &self,
-        response: crate::pack::PendingPackResponse,
+        response: crate::grammar::PendingGrammarResponse,
         status: i32,
     ) -> Result<(), PolicyError> {
         response.complete(|identity, input| self.authority.record_response(identity, input, status))
