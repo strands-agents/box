@@ -53,6 +53,8 @@ pub(super) struct Reach {
     /// The exact authority-source identities that this run loaded.
     forbidden_exactly: Vec<AuthoritySource>,
 
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
 
@@ -194,11 +196,20 @@ impl Reach {
                 .collect(),
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
+            commands: std::sync::Arc::default(),
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
         })
+    }
+
+    pub(super) fn with_commands(
+        mut self,
+        commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    ) -> Self {
+        self.commands = commands;
+        self
     }
 
     /// The directory a relative path means, and what the interpreters report as `PWD`.
@@ -282,6 +293,9 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
+        if mutates && self.commands.refuses_mutation(named) {
+            return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
+        }
         if !self.is_inside_the_set(named) {
             return Err(Refused::new(reported_as, OUTSIDE_THE_SET));
         }
@@ -307,6 +321,9 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<(), Refused> {
+        if mutates && self.commands.refuses_mutation(approved) {
+            return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
+        }
         // The authority this run loaded is trusted Box state wherever it sits, so no operation
         // reaches it; changing its enclosing directory is refused too. It keeps its own reason, so
         // the operator learns which file the run loaded rather than which root refused it.
@@ -364,6 +381,9 @@ const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no polic
 
 const ENCLOSES_BOX_STATE: &str =
     "contains trusted Box state, so no policy may change this directory";
+
+const CONFIGURED_COMMAND: &str =
+    "is a configured tool command or its ancestor, which this run does not allow to change";
 
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";

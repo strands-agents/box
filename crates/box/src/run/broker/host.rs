@@ -160,6 +160,7 @@ impl BrokerHost {
         host_spawner: Option<strands_shell::os::HostSpawner>,
         mcp_leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
         protected_sources: &[AuthoritySource],
+        commands: Arc<crate::run::commands::ConfiguredCommands>,
     ) -> Result<Self, BoxError> {
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
@@ -171,7 +172,8 @@ impl BrokerHost {
                 layout.root(),
                 protected_sources,
             )
-            .map_err(|source| ShellError::Serve { source })?,
+            .map_err(|source| ShellError::Serve { source })?
+            .with_commands(commands),
         );
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());

@@ -1463,6 +1463,21 @@ impl BoxFixture {
         self.ws.with_file_name("listed")
     }
 
+    /// Install a separate tool image outside the writable workspace.
+    pub fn install_tool(&self, program: &Path) -> PathBuf {
+        install_tool(&self.ws, program)
+    }
+
+    /// The configured copy of the fixture's built binary.
+    pub fn configured_tool(&self) -> PathBuf {
+        self.ws.with_file_name("tools").join("built-hello")
+    }
+
+    /// The configured copy of the fixture's built script.
+    pub fn configured_script(&self) -> PathBuf {
+        self.ws.with_file_name("tools").join("built-tool.sh")
+    }
+
     /// The built tool under the workspace's `out/` exec tree: a binary `rustc` compiled there.
     pub fn built_tool(&self) -> PathBuf {
         self.ws.join("out/built-hello")
@@ -1473,8 +1488,7 @@ impl BoxFixture {
         self.ws.join("out/built-tool.sh")
     }
 
-    /// The canonical exec tree (`out/`) the fixture's tools live in, for a case that compiles a
-    /// probe beside them and runs it under the agent's own `exec` entry.
+    /// The writable build-output tree for programs under the agent's own `exec` entry.
     pub fn exec_tree(&self) -> PathBuf {
         self.built_tool()
             .parent()
@@ -1483,9 +1497,7 @@ impl BoxFixture {
             .expect("DET_ERROR: resolve the exec tree")
     }
 
-    /// Compile `source` with `rustc` to `<exec tree>/<name>` and answer the binary's path. A
-    /// native probe is built here, beside the declared tool, so the agent's `exec` entry on the
-    /// tree (see [`BoxFixture::with_exec_tree`]) can carry it.
+    /// Compile a native probe in the writable build-output tree.
     pub fn compile_probe(&self, name: &str, source: &str) -> PathBuf {
         let out = self.exec_tree();
         let probe = out.join(name);
@@ -2018,14 +2030,16 @@ pub fn git_only_spawn_policy(git: &Path) -> String {
     )
 }
 
+/// Copy a fixture program outside the workspace without sharing its writable file identity.
+fn install_tool(workspace: &Path, program: &Path) -> PathBuf {
+    let directory = workspace.with_file_name("tools");
+    std::fs::create_dir_all(&directory).expect("DET_ERROR: create the configured tool directory");
+    let destination = directory.join(program.file_name().expect("DET_ERROR: the tool has a name"));
+    std::fs::copy(program, &destination).expect("DET_ERROR: install the configured tool image");
+    destination
+}
+
 /// Write the box's configuration and policy, and answer with the configuration template.
-///
-/// The agent holds the workspace read and write, because `write` no longer implies `read`. The
-/// `out/` tree under it is a declared tool's exec tree holding a binary `rustc` compiles at fixture
-/// time, which is build output, for the case that runs a binary from an exec tree. On macOS the
-/// agent also lists `listed/`, a sibling of the workspace, without content, and denies `later.env`,
-/// a path that does not exist yet; Linux refuses both cells by name at load, so the cases that need
-/// them skip there.
 fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
     let config_directory = workspace.join(".strands-box");
     std::fs::create_dir_all(&config_directory).expect("DET_ERROR: create workspace");
@@ -2079,6 +2093,9 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
                 .expect("DET_ERROR: executable built tool");
         }
     }
+    let configured_tool = install_tool(&workspace, &tool);
+    let configured_script = install_tool(&workspace, &script);
+    let tools = workspace.with_file_name("tools");
     std::fs::write(workspace.join("readable.txt"), "LISTED_CONTENT\n")
         .expect("DET_ERROR: write a file the workspace grant covers");
     // Beside the workspace, so no `read` entry covers it and only the `list` cell decides.
@@ -2128,19 +2145,20 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
          [tool.built]\ncommand = [{}]\nworkspace = {}\n\n\
          [tool.built.filesystem]\nread = [{}]\n\n\
          [tool.built-script]\ncommand = [{}]\nworkspace = {}\n\n\
-         [tool.built-script.filesystem]\nread = [{}]\n",
+         [tool.built-script.filesystem]\nread = [{}, {}]\n",
         serde_json::to_string(name).unwrap(),
         quoted(&state),
         quoted(&workspace),
         quoted(&workspace),
         quoted(&workspace),
         quoted(&listed_file),
-        quoted(&tool),
+        quoted(&configured_tool),
         quoted(&workspace),
         quoted(&workspace),
-        quoted(&script),
+        quoted(&configured_script),
         quoted(&workspace),
         quoted(&workspace),
+        quoted(&tools),
     );
     std::fs::write(
         config_directory.join("box.toml"),
@@ -3314,7 +3332,7 @@ mod tests {
 
     #[test]
     fn the_probe_config_grants_only_the_runtime_directories_and_declares_the_search_path() {
-        let template = "name = \"t\"\nbox_dir = \"/b/state\"\n\n[agent]\ncommand = {command}\nworkspace = \"/b/ws\"\n\n[agent.filesystem]\nread = [\"/b/ws\"]\nwrite = [\"/b/ws\"]\nread_file = [\"/h/.det-listed-settings.json\"]\n\n[tool.built]\ncommand = [\"/b/ws/out/built-hello\"]\nworkspace = \"/b/ws\"\n\n[tool.built.filesystem]\nread = [\"/b/ws\"]\n";
+        let template = "name = \"t\"\nbox_dir = \"/b/state\"\n\n[agent]\ncommand = {command}\nworkspace = \"/b/ws\"\n\n[agent.filesystem]\nread = [\"/b/ws\"]\nwrite = [\"/b/ws\"]\nread_file = [\"/h/.det-listed-settings.json\"]\n\n[tool.built]\ncommand = [\"/b/tools/built-hello\"]\nworkspace = \"/b/ws\"\n\n[tool.built.filesystem]\nread = [\"/b/ws\"]\n";
         let python = NativePython {
             executable: PathBuf::from(
                 "/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
