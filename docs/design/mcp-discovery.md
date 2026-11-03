@@ -188,13 +188,15 @@ reports, the coordinator finishes discovery once. A per-tool rule that still has
 belongs to a server that hasn't staged, so that server is degraded, stderr names it, and the
 engine becomes `Ready` for the rest of the run.
 
-A degraded server isn't degraded for good. A listing can fail for a reason that doesn't repeat, so
-a later list can still arrive and stage its schema. If that list completes the whole policy, the
+A degraded server isn't degraded for good. A listing can fail for a reason that doesn't repeat, so a
+later list can still arrive and stage its schema. If that list completes the whole policy, the
 server's per-tool rules load, they enforce from that moment, and the server is no longer degraded.
-This works for one degraded server. When two or more are degraded, a later list from either one
-still leaves the other's per-tool rules unvalidated, so the whole policy doesn't validate, the list
-is refused, and the schema it carried is dropped with it. No order of later lists recovers them,
-and they stay degraded for the rest of the run.
+
+That recovers one degraded server, and not two. A later list is validated as a whole policy, so a
+list from one degraded server still leaves the other's per-tool rules unvalidated. The policy doesn't
+validate, the list is refused, and the schema it carried is dropped with it. The other server's own
+later list then fails the same way, so no order of lists recovers either, and both stay degraded for
+the rest of the run.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays
