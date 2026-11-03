@@ -151,11 +151,12 @@ pub use containment::ForbiddenClass;
 pub enum GrantRefusal {
     /// The path is neither absolute nor `~`-relative.
     NotAbsolute,
-    /// The path does not exist.
+    /// The path, or a directory on the way to it, does not exist.
     Absent,
     /// The path is a symbolic link.
     Link,
-    /// The path is not the canonical spelling, such as `/tmp` for `/private/tmp`.
+    /// The path is not the canonical spelling, such as `/etc/hosts` for `/private/etc/hosts` on
+    /// macOS, or a spelling with `.` or `..`.
     NotCanonical,
     /// A row of the floor beneath every grant refuses the path, and the class names what it protects.
     Forbidden(ForbiddenClass),
@@ -207,7 +208,8 @@ pub enum EnvRefusal {
     InvalidName,
     /// The box sets the name itself: proxy routing, CA trust, the OTLP exporter, `PWD`, or `USER`.
     SetByBox,
-    /// The name makes a runtime load code before the workload's first line.
+    /// The name is in a family that can make a runtime load code before the workload's first line,
+    /// such as `LD_*` or `PYTHON*`. A member of the family need not load code (`PYTHONUNBUFFERED`).
     LoadsCode,
     /// The name is `HOME` or `TMPDIR`, and the value is not an absolute path.
     NotAbsolute,

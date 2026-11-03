@@ -93,6 +93,35 @@ fn a_read_grant_on_a_path_that_is_not_there_is_refused() {
 }
 
 #[test]
+fn a_read_grant_through_a_file_is_refused_as_absent() {
+    let (_directory, path) = ordinary_directory();
+    std::fs::write(path.join("file"), "").expect("a file");
+    let refused =
+        strands_box::check_read_grant(&path.join("file/child")).expect_err("through a file");
+    assert_eq!(refused.kind(), GrantRefusal::Absent);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_grant_under_an_unreadable_directory_is_not_refused_as_absent() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: root reads a directory with no permissions");
+        return;
+    }
+    let (_directory, path) = ordinary_directory();
+    let locked = path.join("locked");
+    std::fs::create_dir(&locked).expect("a directory");
+    std::fs::write(locked.join("file"), "").expect("a file");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock");
+    let refused = strands_box::check_read_grant(&locked.join("file"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+    let refused = refused.expect_err("unreadable");
+    assert_eq!(refused.kind(), GrantRefusal::Other, "{refused}");
+    assert!(!refused.to_string().contains("is not there"), "{refused}");
+}
+
+#[test]
 fn a_read_grant_through_a_link_or_a_spelling_that_is_not_canonical_is_refused() {
     let (_directory, path) = ordinary_directory();
     let target = path.join("target");

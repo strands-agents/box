@@ -371,15 +371,16 @@ fn entry_grant(
 
     // **An authored grant on an absent path is refused, never skipped.** A grant that silently
     // does nothing is the defect class this repository has recorded twice.
-    let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| {
-        refused(
+    let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| match source.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => refused(
             GrantRefusal::Absent,
             &format!(
                 "{} is not there: {source}. A grant on a path that does not exist grants nothing \
                  and says so nowhere",
                 lexical.display()
             ),
-        )
+        ),
+        _ => other(&format!("cannot read {}: {source}", lexical.display())),
     })?;
     if metadata.is_symlink() {
         // Name the target so the operator can paste it into the grant. A missing target and a

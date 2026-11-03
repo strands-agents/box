@@ -92,6 +92,13 @@ fn a_name_that_makes_a_runtime_load_code_is_refused_as_loading_code() {
 }
 
 #[test]
+fn a_member_of_a_loader_family_that_loads_no_code_is_refused_as_loading_code() {
+    for name in ["PYTHONUNBUFFERED", "PYTHONIOENCODING", "LD_BIND_NOW"] {
+        assert_eq!(kind(name, "1"), Some(EnvRefusal::LoadsCode), "{name}");
+    }
+}
+
+#[test]
 fn a_name_that_is_not_a_variable_name_is_refused_as_invalid() {
     for name in INVALID {
         assert_eq!(kind(name, "x"), Some(EnvRefusal::InvalidName), "{name:?}");
