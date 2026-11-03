@@ -54,7 +54,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -75,7 +75,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -92,7 +92,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -110,7 +110,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 

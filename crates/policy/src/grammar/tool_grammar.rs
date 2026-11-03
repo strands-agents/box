@@ -60,6 +60,10 @@ impl ToolGrammar {
     pub fn program(&self) -> &str {
         &self.grammar.program
     }
+
+    pub(crate) fn grammar(&self) -> &Arc<Grammar> {
+        &self.grammar
+    }
 }
 
 /// The tool grammars of one box, no two with one name or one program.
@@ -90,6 +94,15 @@ impl ToolGrammars {
             }
         }
         Ok(Self(grammars))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ToolGrammar> {
+        self.0.iter()
+    }
+
+    /// The schema fragment of each grammar, in order.
+    pub(crate) fn schemas(&self) -> Vec<String> {
+        self.iter().map(|tool| tool.grammar.schema()).collect()
     }
 }
 
@@ -137,10 +150,12 @@ mod tests {
 
     #[test]
     fn grammars_with_distinct_names_and_programs_install() {
-        ToolGrammars::new(vec![
+        let grammars = ToolGrammars::new(vec![
             grammar("tool.git.grammar", "git", "git"),
             grammar("tool.cargo.grammar", "cargo", "cargo"),
         ])
         .expect("the set installs");
+
+        assert_eq!(grammars.schemas().len(), 2);
     }
 }
