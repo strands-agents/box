@@ -304,8 +304,15 @@ when { context.input.path == "/workspace/secret" };
         &json!({"path": "/workspace/secret"}),
     );
     assert!(
-        !forbidden.is_allow(),
-        "the installed forbid must refuse the path it names: {forbidden:?}"
+        matches!(
+            forbidden,
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the installed forbid must refuse the path it names, and the refusal must come from that \
+         forbid rather than from a stale degraded mark: {forbidden:?}"
     );
 
     let permitted = authority.refine_tool_call(
@@ -1804,5 +1811,77 @@ fn an_existing_store_deletes_obsolete_policies_before_replacing_the_schema() {
     assert!(
         !batches.is_empty(),
         "the transition must contain at least one durable batch"
+    );
+}
+
+/// The limit of the clear above. A relist is validated as a whole bundle, so when two servers
+/// degrade, a relist from either still names the other's typed action, which has no schema. The
+/// bundle does not validate, the stage is `Rejected`, and the fragment that did arrive is
+/// discarded with the proposal that held it. No ordering of later listings recovers either server.
+/// Recovery would have to retain an accepted fragment across a rejected bundle, which is the
+/// partial install that only `Discovering` allows, so it is not a change this test anticipates.
+#[test]
+fn two_degraded_servers_do_not_recover_from_a_relist() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "two-degraded.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+permit(principal, action == alpha::Action::"read", resource);
+permit(principal, action == beta::Action::"read", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["alpha".to_string(), "beta".to_string()],
+        "neither listing staged, so both servers degrade"
+    );
+
+    let staged_alpha = authority
+        .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+        .expect("the later listing is not a terminal fault");
+    assert!(
+        matches!(staged_alpha, SchemaStage::Rejected { .. }),
+        "the bundle still names beta's action, which has no schema, so alpha's relist is refused: \
+         {staged_alpha:?}"
+    );
+
+    let call = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({"path": "/workspace/input"}),
+    );
+    assert!(
+        !call.is_allow(),
+        "alpha's own tool stays refused although its schema arrived: {call:?}"
+    );
+
+    let staged_beta = authority
+        .stage_mcp_schema("beta", generated("beta", "read", "path", "string"))
+        .expect("the later listing is not a terminal fault");
+    assert!(
+        matches!(staged_beta, SchemaStage::Rejected { .. }),
+        "alpha's fragment was discarded with its rejected proposal, so beta's relist names an \
+         unknown alpha action and is refused in turn: {staged_beta:?}"
+    );
+    assert!(
+        !authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                "read",
+                &json!({"path": "/workspace/input"}),
+            )
+            .is_allow(),
+        "no ordering of later listings recovers either server"
     );
 }
