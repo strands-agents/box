@@ -576,9 +576,13 @@ mod tests {
             // the first two resolve to `/home/op/.env` in Node and in Rust's `url` crate.
             r"file://localhost\home\op\.env",
             r"file://localhost\home/op/.env",
-            r"file:\\\localhost\home\op\.env",
             r"file:///home/op\.env",
             r"http://h/a\b",
+            // The opaque hier-part, which carries no authority, under each count of leading `\`.
+            r"file:\\localhost\home\op\.env",
+            r"file:\\\localhost\home\op\.env",
+            r"file:\\\home\op\.env",
+            r"file:\home\op\.env",
         ] {
             let refusal = super::canonicalize_resource_uri(uri)
                 .expect_err("the box and a URL parser must not read two identities");
