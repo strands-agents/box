@@ -1,4 +1,4 @@
-//! The checked tool grammar that loading builds from the file.
+//! The checked tool grammar that loading builds from its table.
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -112,17 +112,32 @@ impl Grammar {
     /// Check `file` and build the grammar it describes.
     pub(super) fn read(file: GrammarFile) -> Result<Self, GrammarRefusal> {
         let version = match &file.version {
-            None => return Err(GrammarRefusal::MissingVersion),
+            None => {
+                return Err(GrammarRefusal::MissingVersion {
+                    place: Place::Version,
+                });
+            }
             Some(toml::Value::Integer(version)) if *version >= 1 => u32::try_from(*version)
-                .map_err(|_| GrammarRefusal::BadVersion(version.to_string()))?,
-            Some(other) => return Err(GrammarRefusal::BadVersion(other.to_string())),
+                .map_err(|_| GrammarRefusal::BadVersion {
+                    place: Place::Version,
+                    value: version.to_string(),
+                })?,
+            Some(other) => {
+                return Err(GrammarRefusal::BadVersion {
+                    place: Place::Version,
+                    value: other.to_string(),
+                });
+            }
         };
         identifier(Place::Name, &file.name)?;
         if file.program.is_empty()
             || file.program.contains('/')
             || file.program.chars().any(char::is_whitespace)
         {
-            return Err(GrammarRefusal::BadProgram(file.program));
+            return Err(GrammarRefusal::BadProgram {
+                place: Place::Program,
+                program: file.program,
+            });
         }
         let mut effects = BTreeMap::new();
         for (effect, description) in file.effects {
@@ -186,7 +201,7 @@ impl ShellAction {
         let first = spec.usage.split_whitespace().next().unwrap_or_default();
         if first != program {
             return Err(GrammarRefusal::UsageDisagrees {
-                place,
+                place: Place::ActionUsage(name.to_string()),
                 first: first.to_string(),
                 program: program.to_string(),
             });

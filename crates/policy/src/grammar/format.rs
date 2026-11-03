@@ -1,14 +1,14 @@
-//! The tool grammar file as its author writes it.
+//! The tool grammar table as its author writes it.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer};
 
-/// One `*.grammar.toml` document.
+/// One `[tool.<name>.grammar]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GrammarFile {
-    /// Read by `Grammar::parse` before the document deserializes.
+    /// Read by `Grammar::from_table` before the table deserializes.
     #[serde(rename = "format")]
     pub(crate) _format: serde::de::IgnoredAny,
     #[serde(default)]

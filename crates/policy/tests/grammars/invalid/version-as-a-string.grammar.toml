@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `version = "2"` must be a positive integer
+# expect: `<grammar>.version` is "2", and it must be a positive integer
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"
