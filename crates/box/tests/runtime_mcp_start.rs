@@ -368,6 +368,45 @@ fn a_launch_matching_no_declared_command_starts_no_server() {
     );
 }
 
+/// **An `[agent] env` runtime option does not reach a stdio MCP server.**
+#[test]
+fn an_agent_runtime_option_does_not_reach_an_mcp_server() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let mut box_ = RuntimeMcpBox::new("mcp-agent-runtime-option");
+    box_.set_agent_env("NODE_OPTIONS", "--agent-only");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let workload =
+        format!("printf %s \"$NODE_OPTIONS\" > \"$HOME/node-options\"\n{BLOCKING_WORKLOAD}");
+    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], &workload);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    assert_eq!(
+        std::fs::read_to_string(box_.workload_path("node-options"))
+            .expect("read the agent's value"),
+        "--agent-only",
+        "the agent's own `env` must reach it"
+    );
+    let mut client = box_.open_client("alpha-mcp");
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    client.initialize_and_activate(json!("init"), STARTUP);
+    let environment: serde_json::Value =
+        serde_json::from_str(&box_.trace("alpha-mcp", "environment"))
+            .expect("parse the server's environment");
+    assert!(
+        environment.get("NODE_OPTIONS").is_none(),
+        "the agent's `env` must not reach an MCP server: {environment}"
+    );
+
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}
+
 #[test]
 fn a_launch_by_the_program_name_alone_is_refused() {
     if !fixture::namespace_launcher_is_usable() {

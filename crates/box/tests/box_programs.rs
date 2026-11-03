@@ -239,6 +239,56 @@ fn an_env_key_sets_is_sandbox_for_the_workload() {
     );
 }
 
+/// **An `[agent] env` runtime option reaches the agent and no tool.**
+#[test]
+fn an_agent_runtime_option_reaches_the_agent_and_no_tool() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    std::os::unix::fs::symlink(&bash, links.path().join("probe")).expect("a link to bash");
+    let directory = links.path().display();
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/probe" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-env-runtime-option",
+        &policy,
+        &format!(
+            "[tool.probe]\ncommand = [\"{directory}/probe\"]\n\
+             [tool.probe.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_env("NODE_OPTIONS", "--agent-only")
+    .agent_read(&[links.path()])
+    .expect();
+
+    let agent = box_.bash(r#"printf "agent=[%s]" "$NODE_OPTIONS""#);
+    assert_workload_launched(&agent, "the agent");
+    assert!(
+        stdout(&agent).contains("agent=[--agent-only]"),
+        "the agent's own `env` must reach it: {agent:?}"
+    );
+
+    let tool = box_.bash(&format!(
+        r#"zsh -c '{directory}/probe -c "printf tool=[%s] \"\$NODE_OPTIONS\""'"#
+    ));
+    assert_workload_launched(&tool, "the tool");
+    assert!(
+        stdout(&tool).contains("tool=[]"),
+        "the agent's `env` must not reach a tool: {tool:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // The CALL level — Unix semantics within one submission
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -371,6 +371,47 @@ mod tests {
         }
     }
 
+    /// **A runtime's own option variables are the operator's to set in `env`.**
+    #[test]
+    fn env_accepts_a_runtime_option_variable() {
+        for name in [
+            "NODE_OPTIONS",
+            "BASH_ENV",
+            "ENV",
+            "RUBYOPT",
+            "PERL5LIB",
+            "PERL5OPT",
+            "GEM_PATH",
+            "CLASSPATH",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "PYTHONPATH",
+            "PYTHONUNBUFFERED",
+        ] {
+            for table in ["[agent]", "[tool.x]", "[mcp.x]"] {
+                spec(&format!("command = [\"x\"]\nenv = {{ {name} = \"v\" }}"))
+                    .validate(table)
+                    .unwrap_or_else(|error| panic!("{table} env.{name} must load: {error}"));
+            }
+        }
+    }
+
+    /// **`LD_*` and `DYLD_*` stay refused in `env`, and the message names the dynamic loader.**
+    #[test]
+    fn env_refuses_a_dynamic_loader_variable_and_says_why() {
+        for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"] {
+            let message = refusal(&format!("command = [\"x\"]\nenv = {{ {name} = \"v\" }}"));
+            assert!(
+                message.contains(name) && message.contains("dynamic loader"),
+                "{name} must be refused for the dynamic loader: {message}"
+            );
+            assert!(
+                !message.contains("set by the box itself"),
+                "the box does not set {name}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn a_tool_network_table_selects_native_egress() {
         let native = spec("command = [\"sso-cli\"]\n[network]\ncontain_egress = false\n");
