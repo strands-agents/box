@@ -1177,6 +1177,14 @@ mod tests {
             "https://NOT\\u00c9S./page",
             // A second unescaped `@`: both parsers escape it into the userinfo.
             "https://a@b@notes/page",
+            // The same bytes written as an escape. The URI grammar allows an escape in a host, so
+            // the grammar check does not reach these — a parser decodes the host first, so each one
+            // opens the guarded file or the guarded page just the same.
+            "file://localhost%C2%AD/home/op/.env",
+            "file://LOCALHOST%c2%ad/home/op/.env",
+            "file://loc%C2%ADalhost/home/op/.env",
+            "https://no%E2%80%8Btes/page",
+            "https://no%C2%ADtes/page",
         ] {
             assert!(
                 call(&guards_both, &read(spelling)).is_err(),
@@ -1191,6 +1199,7 @@ mod tests {
             ("https://@notes.example/page", "https://@notes.example/page"),
             ("https://notes.example:/page", "https://notes.example:/page"),
             ("https://%6Eotes.example/page", "https://notes.example/page"),
+            ("https://notes%2Eexample/page", "https://notes.example/page"),
             ("https://127.0.0.1/page", "https://127.0.0.1/page"),
             ("https://[::1]/page", "https://[::1]/page"),
             (

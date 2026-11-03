@@ -78,15 +78,23 @@ may hold (`"`, `|`, `<`, `>`, `^`, a backquote, a brace), a `%` that starts no e
 IPv6 literal, a second `@`, and a port that is not digits. A path outside RFC 3986 §3.3 is refused
 the same way.
 
+**A host written as an escape is refused too, except where the escape decodes away.** The grammar
+allows a percent-escape in a host, so §3.2 alone reaches
+`file://localhost<soft hyphen>/home/op/.env` and not `file://localhost%C2%AD/home/op/.env`, which
+opens the same file because a parser decodes the host before it resolves it. The box decodes the
+escapes of unreserved characters first, which is what makes `file://%6C%6Fcalhost/x` and
+`https://%6Eotes/page` fold. Every escape still left after that decodes to a reserved character or
+to a non-ASCII byte, and a host name holds neither, so the box refuses it. Write a non-ASCII host as
+its `xn--` form.
+
 **The host is not folded to one spelling, only checked.** Checking the grammar is not IDNA, so every
 form the grammar allows is kept as the workload wrote it, and two spellings of one host still reach
-a rule as two strings. This is the gap the check does not close, and it has four parts, each measured
-in Node, Python `urlsplit`, and the Rust `url` crate:
+a rule as two strings. This is the gap the check does not close, and it has three parts, each
+measured in Node, Python `urlsplit`, and the Rust `url` crate:
 
 | What stays unfolded | One origin, two strings |
 |---|---|
-| An ignorable code point spelled as an escape, which the grammar allows | `file://localhost%C2%AD/home/op/.env` opens `/home/op/.env`; `https://notes%E2%80%8Bx/page` reaches `notesx` |
-| A non-ASCII host, including its case, because the box lowercases ASCII only | a parser resolves each to one punycode label |
+| A non-ASCII host written as its `xn--` form against the same name written in Unicode | the Unicode spelling is refused rather than folded, so a rule must name the `xn--` form |
 | An IPv4 literal in any form but dotted-quad | `https://127.1/page` and `https://2130706433/page` each reach `127.0.0.1` |
 | An IPv6 literal that compresses its zeros or maps an IPv4 address | `https://[::0001]/page` reaches `[::1]`; `https://[::FFFF:127.0.0.1]/page` reaches `[::ffff:7f00:1]` |
 

@@ -117,7 +117,9 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
     // would emit rather than the authored spelling. `https://./x` normalizes to an empty authority,
     // and judging the raw `.` let it through and emitted `https:///x` — a form this same check
     // refuses, so the output was not its own fixed point.
-    let normalized_authority = authority.map(|auth| normalize_authority(auth, &scheme));
+    let normalized_authority = authority
+        .map(|auth| normalize_authority(auth, &scheme))
+        .transpose()?;
 
     // RFC 9110 §4.2.1 requires `"//" authority` and forbids an empty host, and a URL parser that
     // meets neither reads the first path segment as the host: `http:/etc/passwd` becomes host `etc`,
@@ -166,11 +168,15 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
             }
             true
         }
-        // No authority: `file:` gets the empty local authority; http/https keep the path-only form.
+        // No authority: `file:` gets the empty local authority RFC 8089 states.
         None if scheme == "file" => {
             out.push_str("//");
             true
         }
+        // Unreachable, and here for exhaustiveness: the only other scheme with no authority is
+        // `http`/`https`, which the refusal above takes. A parser reads the first path segment of
+        // `http:/etc/passwd` as the host, so the path-only form this arm once emitted was never a
+        // shape the box could keep.
         None => false,
     };
     // RFC 3986 §6.2.3: an authority with an empty path normalizes to a path of `/`, so
@@ -222,7 +228,7 @@ fn is_loopback_v4(host: &str) -> bool {
 }
 
 /// Fully canonicalize an authority per RFC 3986 §6.2, so equivalent respellings of the host/port are one identity and cannot dodge a host-based `uri` forbid: - **host** — percent-decode its unreserved octets (§6.2.2.2, so `%65xample.com` == `example.com`), strip a trailing dot (a fully-qualified `host.` is the same host), and lowercase (§6.2.2.1, case-insensitive).
-fn normalize_authority(auth: &str, scheme: &str) -> String {
+fn normalize_authority(auth: &str, scheme: &str) -> Result<String, String> {
     let (userinfo, hostport) = match auth.rsplit_once('@') {
         Some((user, rest)) => (Some(user), rest),
         None => (None, auth),
@@ -246,7 +252,20 @@ fn normalize_authority(auth: &str, scheme: &str) -> String {
         host // IPv6 literal — not percent-decoded or re-cased.
     } else {
         let decoded = decode_unreserved(&host);
-        lowercase_host(decoded.trim_end_matches('.'))
+        // Every escape still here decodes to a reserved octet or to a non-ASCII byte, because
+        // `decode_unreserved` took the rest. A name holds neither: a URL parser percent-decodes the
+        // host and then either refuses the octet or maps the byte through IDNA, which this function
+        // does not implement. So the two ends read two hosts, and `%C2%AD` inside `localhost` opened
+        // the file a rule named. An escape of an unreserved octet decoded above and still folds.
+        if decoded.contains('%') {
+            return Err(
+                "a resource URI whose host holds a percent-escape of a reserved or non-ASCII \
+                        octet is refused: a URL parser decodes the host and then maps that octet \
+                        through IDNA, so the box and the server would not read one identity"
+                    .to_string(),
+            );
+        }
+        decoded.trim_end_matches('.').to_ascii_lowercase()
     };
     let port = port.filter(|port| !is_default_port(scheme, port));
     let mut out = String::with_capacity(auth.len());
@@ -259,26 +278,7 @@ fn normalize_authority(auth: &str, scheme: &str) -> String {
         out.push(':');
         out.push_str(&port);
     }
-    out
-}
-
-/// `host` lowercased (RFC 3986 §6.2.2.1), except the hex digits of a percent-escape, which the same section asks to be uppercase.
-fn lowercase_host(host: &str) -> String {
-    let bytes = host.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            out.push(b'%');
-            out.push(bytes[index + 1].to_ascii_uppercase());
-            out.push(bytes[index + 2].to_ascii_uppercase());
-            index += 3;
-        } else {
-            out.push(bytes[index].to_ascii_lowercase());
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    Ok(out)
 }
 
 /// Whether `authority` is an RFC 3986 §3.2 authority, which the grammar spells `[ userinfo "@" ] host [ ":" port ]`.
@@ -1115,6 +1115,68 @@ mod tests {
         }
     }
 
+    /// The grammar allows a percent-escape in a host, so the §3.2 check reaches the raw spelling of
+    /// an ignorable code point and not the escaped one. Both reach the resource a rule names: a
+    /// parser decodes the host first, so `%C2%AD` inside `localhost` opens the guarded file and
+    /// `%E2%80%8B` inside a name reaches the plain name. Every escape left after the unreserved
+    /// decode is a reserved octet or a non-ASCII byte, and a name holds neither.
+    #[test]
+    fn a_host_holding_an_escape_of_a_reserved_or_non_ascii_octet_is_refused() {
+        for uri in [
+            // A non-ASCII byte. Node and the Rust `url` crate map each through IDNA and reach the
+            // plain host, so each opens the file or the page a rule names.
+            "file://localhost%C2%AD/home/op/.env",
+            "file://LOCALHOST%c2%ad/home/op/.env",
+            "file://loc%C2%ADalhost/home/op/.env",
+            "https://no%E2%80%8Btes/page",
+            "https://no%C2%ADtes/page",
+            "https://not%C3%A9s/page",
+            // A reserved octet. Both parsers refuse `%2F`, `%3A`, `%40`, `%7C`, and a `%25`, so
+            // refusing them costs nothing. An escaped sub-delim is the one both parsers accept, and
+            // they decode it while the box kept it encoded — so that was two strings for one host.
+            "https://no%2Ftes/page",
+            "https://no%3Ates/page",
+            "https://no%40tes/page",
+            "https://no%7Ctes/page",
+            "https://a%25b/page",
+            "https://no%21tes/page",
+            "https://no%2Btes/page",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("a host holding such an escape has no canonical form");
+            assert!(
+                refusal.contains("host holds a percent-escape"),
+                "{uri:?}: {refusal}"
+            );
+        }
+
+        // An escape of an UNRESERVED octet decodes before the check, so it still folds — which is
+        // the whole reason the earlier percent-encoding fold exists.
+        assert_eq!(
+            canonicalize_resource_uri("file://%6C%6Fcalhost/home/op/.env"),
+            "file:///home/op/.env"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("https://notes%2Eexample/page"),
+            "https://notes.example/page"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("http://%65xample.com/x"),
+            "http://example.com/x"
+        );
+        // The userinfo is passed through verbatim, so an escape there is not a host escape and
+        // still rides: a parser keeps it too, so the two ends read one string.
+        assert_eq!(
+            canonicalize_resource_uri("https://US%45R@notes/page"),
+            "https://US%45R@notes/page"
+        );
+        // An IPv6 literal is never percent-decoded, so the check does not reach inside one.
+        assert_eq!(
+            canonicalize_resource_uri("https://[::1]/page"),
+            "https://[::1]/page"
+        );
+    }
+
     /// The check reads the WHOLE string as an authority. A `/`, a `?`, or a `#` ends an authority
     /// early and leaves the tail as a path, and an authority this module splits off holds none of
     /// the three — so this is what the guard is for, and no URI reaches it.
@@ -1152,12 +1214,12 @@ mod tests {
             "https://no,tes/page",
             "https://no;tes/page",
             "https://no=tes/page",
-            // `pct-encoded`, including an escape of a character the raw form may not hold.
+            // `pct-encoded` of an UNRESERVED octet, which decodes here and so still folds. An
+            // escape of a reserved or non-ASCII octet conforms to §3.2 and is refused one step
+            // later, by `a_host_holding_an_escape_of_a_reserved_or_non_ascii_octet_is_refused`.
             "https://%41b/page",
-            "https://no%2Ftes/page",
-            "https://no%7Ctes/page",
-            "https://no%00tes/page",
-            "https://notes%C2%ADexample/page",
+            "https://%6Eotes/page",
+            "https://notes%2Eexample/page",
             // `IPv4address`, and a `reg-name` that is not one — `256.1.1.1` has no `dec-octet`
             // over 255, so the grammar reads it as a name and the box may not refuse it.
             "https://127.0.0.1/page",
@@ -1258,29 +1320,41 @@ mod tests {
         assert!(judged > 1_000, "only {judged} canonical forms were judged");
     }
 
-    /// RFC 3986 §6.2.2.1 asks for uppercase escape hex, and the path already emits it. The host
-    /// emitted lowercase, because lowercasing the host ran after the decode that uppercases a
-    /// reserved escape. So two spellings of one host stayed two strings.
+    /// The host emits no percent-escape at all, so the hex-case question the path answers with
+    /// uppercase (RFC 3986 §6.2.2.1) cannot arise there: an escape of an unreserved octet decodes,
+    /// and every other escape is refused. The path still emits uppercase.
     #[test]
-    fn the_host_emits_uppercase_escape_hex_like_the_path() {
+    fn the_host_emits_no_percent_escape() {
+        let mut judged = 0usize;
+        for prefix in ["https://", "file://", "http://"] {
+            for spelling in generated_spellings() {
+                let Ok(canonical) =
+                    super::canonicalize_resource_uri(&format!("{prefix}{spelling}"))
+                else {
+                    continue;
+                };
+                let Some((_, rest)) = canonical.split_once("://") else {
+                    continue;
+                };
+                let authority = rest
+                    .split_once('/')
+                    .map_or(rest, |(authority, _)| authority);
+                // The userinfo rides through verbatim, so only the host is judged.
+                let host = authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host);
+                assert!(
+                    !host.contains('%'),
+                    "{prefix}{spelling:?} emitted {canonical:?}, whose host {host:?} holds an escape"
+                );
+                judged += 1;
+            }
+        }
+        assert!(judged > 1_000, "only {judged} canonical forms were judged");
+        // The path keeps its uppercase hex, which is where the question is still live.
         assert_eq!(
-            canonicalize_resource_uri("https://no%2ftes/page"),
-            "https://no%2Ftes/page"
-        );
-        assert_eq!(
-            canonicalize_resource_uri("https://notes%3a443/page"),
-            canonicalize_resource_uri("https://notes%3A443/page"),
-            "one host, one string"
-        );
-        // The characters outside an escape still lowercase, and an escape of an unreserved octet
-        // still decodes and lowercases with them.
-        assert_eq!(
-            canonicalize_resource_uri("https://NO%2FTES/page"),
-            "https://no%2Ftes/page"
-        );
-        assert_eq!(
-            canonicalize_resource_uri("https://A%41B%2Fc/page"),
-            "https://aab%2Fc/page"
+            canonicalize_resource_uri("https://notes/a%2fb"),
+            "https://notes/a%2Fb"
         );
     }
 
