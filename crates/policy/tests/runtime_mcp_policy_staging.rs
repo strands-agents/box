@@ -1232,6 +1232,24 @@ fn a_condition_pins_a_held_tool_only_when_it_decides_that_tool_alone() {
             "approve",
             false,
         ),
+        // A disjunction beside an intact server pin. The server pin is read, because it still has
+        // to hold; the tool is not, because the disjunction states two of them. One pin alone
+        // leaves no pair, so nothing is held.
+        (
+            r#"when { context.input.server == "svc"
+&& (context.input.tool == "approve" || context.input.tool == "reject") }"#,
+            "svc",
+            "approve",
+            false,
+        ),
+        // A pattern match names no tool, although it bounds them. `like` is not an equality, so it
+        // states no pin.
+        (
+            r#"when { context.input.server == "svc" && context.input.tool like "appro*" }"#,
+            "svc",
+            "approve",
+            false,
+        ),
         // An `unless` block states what stops the rule, so its pins are not a decided tool.
         (
             r#"unless { context.input.server == "svc" && context.input.tool == "approve" }"#,

@@ -190,7 +190,10 @@ belongs to a server that will never stage, so that server is degraded, stderr na
 engine becomes `Ready` for the rest of the run.
 
 Box names those servers from a different set than the one it holds calls for, and it works one rule
-at a time. It holds the tools an inert rule decides. It names the servers that rule still waits for.
+at a time. It holds the tools it can tell an inert rule decides — the tool its head names, and the
+one its condition pins to a server and a tool. It names the servers that rule still waits for. A
+rule that reaches tools it never names holds nothing, and
+[mcp.md](mcp.md#when-startup-is-complete) states that limit.
 
 A rule waits for every tool it mentions — in its head, in a condition, or in a history reference —
 to be declared, so an undeclared tool names its own server. A server whose `tools/list` a rule

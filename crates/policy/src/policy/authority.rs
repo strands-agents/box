@@ -13,7 +13,7 @@ use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
-    refuse_input_reads_before_discovery, validate_canonical_policy_set,
+    refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
 };
 use crate::request::ActionRequest;
 use crate::schema::{ActionIdentity, GovernedBox, mcp_action_namespace, mcp_tool_action};
@@ -738,123 +738,92 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     out
 }
 
-/// The one `(namespace, tool)` a rule's `when` conditions pin to string literals, through
-/// `context.input.server` and `context.input.tool`. Such a rule decides exactly that call, so the
-/// hold covers it. `None` for a rule whose head already names a typed tool, because the head states
-/// that rule's whole reach and a pin beside it can only contradict it. `None` too unless one server
-/// and one tool survive, because any other count leaves the set of calls the rule decides wider
-/// than the pins state.
+/// The one `(namespace, tool)` a rule's conditions pin to literals, through `context.input.server`
+/// and `context.input.tool`. Such a rule decides exactly that call, so the hold covers it. `None`
+/// for a rule whose head already names a typed tool, because the head states that rule's whole
+/// reach and a pin beside it can only contradict it. `None` too unless one server and one tool
+/// survive, because any other count leaves the set of calls the rule decides wider than the pins
+/// state.
 fn pinned_tool_action(candidate: &CandidatePolicy) -> Option<(String, String)> {
     if !candidate.head_tools.is_empty() {
         return None;
     }
     let mut servers = BTreeSet::new();
     let mut tools = BTreeSet::new();
-    for body in when_bodies(&candidate.expanded_source) {
-        for atom in conjuncts(body) {
-            if let Some(literal) = pinned_literal(atom, "context.input.server") {
-                servers.insert(literal.to_string());
+    for condition in rule_conditions(&candidate.expanded_source) {
+        for atom in conjuncts(&condition) {
+            if let Some(name) = pinned_literal(atom, "server") {
+                servers.insert(name.to_string());
             }
-            if let Some(literal) = pinned_literal(atom, "context.input.tool") {
-                tools.insert(literal.to_string());
+            if let Some(name) = pinned_literal(atom, "tool") {
+                tools.insert(name.to_string());
             }
         }
     }
-    let namespace = mcp_action_namespace(&decoded_literal(single(&servers)?)?);
-    decoded_tool_action(&namespace, single(&tools)?)
+    Some((
+        mcp_action_namespace(single(&servers)?),
+        single(&tools)?.to_string(),
+    ))
 }
 
-/// Each atom a rendered condition conjoins, so that every one of them has to hold and a pin read
-/// out of one is a pin the rule requires. A subexpression under any other operator stays whole and
-/// reads as one atom, which `pinned_literal` then declines.
-fn conjuncts(text: &str) -> Vec<&str> {
-    let text = unwrapped(text);
-    match split_once_unnested(text, "&&") {
-        Some((left, right)) => {
-            let mut out = conjuncts(left);
-            out.extend(conjuncts(right));
+/// Each node a condition joins with `&&`, so that every one of them has to hold and a pin read out
+/// of one is a pin the rule requires. A node under any other operator stays whole, and
+/// `pinned_literal` then declines it.
+fn conjuncts(condition: &serde_json::Value) -> Vec<&serde_json::Value> {
+    match condition.get("&&") {
+        Some(both) => {
+            let mut out = Vec::new();
+            for side in ["left", "right"] {
+                if let Some(operand) = both.get(side) {
+                    out.extend(conjuncts(operand));
+                }
+            }
             out
         }
-        None => vec![text],
+        None => vec![condition],
     }
 }
 
-/// The string literal an atom compares `read` to with `==`, in either operand order. `None` for any
-/// other atom, so a negation, a disjunction, an `if`, and a comparison of comparisons each state no
-/// pin: the rendered form puts their operands inside brackets, where no `==` reads as the atom's
-/// own.
-fn pinned_literal<'a>(atom: &'a str, read: &str) -> Option<&'a str> {
-    let (left, right) = split_once_unnested(atom, "==")?;
-    let (left, right) = (unwrapped(left), unwrapped(right));
-    if left == read {
-        whole_literal(right)
-    } else if right == read {
-        whole_literal(left)
+/// The string literal an atom compares `context.input.<attribute>` to with `==`, in either operand
+/// order. `None` for every other node, so a negation, a disjunction, an `if`, a `like`, a set
+/// membership, and a comparison of comparisons each state no pin. An `unless` condition reaches
+/// here as a negation, so it states none either.
+fn pinned_literal<'a>(atom: &'a serde_json::Value, attribute: &str) -> Option<&'a str> {
+    let equality = atom.get("==")?;
+    let (left, right) = (equality.get("left")?, equality.get("right")?);
+    if reads_input(left, attribute) {
+        literal(right)
+    } else if reads_input(right, attribute) {
+        literal(left)
     } else {
         None
     }
 }
 
-/// `text` trimmed, and without each bracket pair that encloses the whole of it.
-fn unwrapped(text: &str) -> &str {
-    let mut text = text.trim();
-    while text.starts_with('(') && closing_bracket(text) == Some(text.len() - 1) {
-        text = text[1..text.len() - 1].trim();
-    }
-    text
+/// Whether a node is exactly the read `context.input.<attribute>`.
+fn reads_input(node: &serde_json::Value, attribute: &str) -> bool {
+    let outer = node.get(".");
+    let names = |access: Option<&serde_json::Value>, attr: &str| {
+        access.is_some_and(|access| access.get("attr").and_then(|a| a.as_str()) == Some(attr))
+    };
+    names(outer, attribute)
+        && outer
+            .and_then(|access| access.get("left"))
+            .map(|input| {
+                names(input.get("."), "input")
+                    && input
+                        .get(".")
+                        .and_then(|access| access.get("left"))
+                        .and_then(|root| root.get("Var"))
+                        .and_then(|var| var.as_str())
+                        == Some("context")
+            })
+            .unwrap_or(false)
 }
 
-/// `text` split at the first `operator` that no bracket pair and no string literal encloses.
-fn split_once_unnested<'a>(text: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
-    let mut depth = 0usize;
-    let mut index = 0;
-    while let Some(character) = text[index..].chars().next() {
-        if character == '"' {
-            index += 1 + closing_quote(&text[index + 1..])? + 1;
-            continue;
-        }
-        if depth == 0 && text[index..].starts_with(operator) {
-            return Some((&text[..index], &text[index + operator.len()..]));
-        }
-        match character {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.checked_sub(1)?,
-            _ => {}
-        }
-        index += character.len_utf8();
-    }
-    None
-}
-
-/// The offset of the bracket that closes the one `text` opens with.
-fn closing_bracket(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut index = 0;
-    while let Some(character) = text[index..].chars().next() {
-        if character == '"' {
-            index += 1 + closing_quote(&text[index + 1..])? + 1;
-            continue;
-        }
-        match character {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-        index += character.len_utf8();
-    }
-    None
-}
-
-/// The content of the string literal that is the whole of `text`.
-fn whole_literal(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix('"')?;
-    let end = closing_quote(rest)?;
-    (end == rest.len() - 1).then_some(&rest[..end])
+/// The string a literal node carries, already decoded by the parse.
+fn literal(node: &serde_json::Value) -> Option<&str> {
+    node.get("Value")?.as_str()
 }
 
 /// The only name in `names`, or `None` when it holds none or several.
@@ -863,86 +832,6 @@ fn single(names: &BTreeSet<String>) -> Option<&str> {
         Some(name) if names.len() == 1 => Some(name.as_str()),
         _ => None,
     }
-}
-
-/// What a rendered Cedar string literal spells, through the decoder a parsed head uses.
-fn decoded_literal(literal: &str) -> Option<String> {
-    decoded_tool_action("ns", literal).map(|(_, decoded)| decoded)
-}
-
-/// The body of each `when { … }` block in a rendered rule, which that rule conjoins. An `unless`
-/// block is left out, because it states what stops the rule rather than what the rule decides.
-fn when_bodies(source: &str) -> Vec<&str> {
-    const KEYWORD: &str = "when";
-    let mut out = Vec::new();
-    let mut index = 0;
-    while let Some(character) = source[index..].chars().next() {
-        if character == '"' {
-            match closing_quote(&source[index + 1..]) {
-                Some(end) => index += 1 + end + 1,
-                None => break,
-            }
-            continue;
-        }
-        if starts_word(source, index)
-            && source[index..].starts_with(KEYWORD)
-            && let Some(open) = block_start(source, index + KEYWORD.len())
-            && let Some(close) = block_end(source, open)
-        {
-            out.push(&source[open + 1..close]);
-            index = close + 1;
-            continue;
-        }
-        index += character.len_utf8();
-    }
-    out
-}
-
-/// The offset of the `{` that `text` holds at `index` or after whitespace from it.
-fn block_start(text: &str, index: usize) -> Option<usize> {
-    let open = index
-        + text[index..]
-            .bytes()
-            .take_while(u8::is_ascii_whitespace)
-            .count();
-    (text.as_bytes().get(open) == Some(&b'{')).then_some(open)
-}
-
-/// The offset of the `}` that closes the block the `{` at `open` starts, where a brace inside a
-/// string literal counts for nothing.
-fn block_end(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut index = open;
-    while let Some(character) = text[index..].chars().next() {
-        match character {
-            '"' => {
-                index += 1 + closing_quote(&text[index + 1..])? + 1;
-                continue;
-            }
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-        index += character.len_utf8();
-    }
-    None
-}
-
-/// Whether the token at `index` begins a word rather than continuing a longer name.
-fn starts_word(text: &str, index: usize) -> bool {
-    text[..index]
-        .chars()
-        .next_back()
-        .is_none_or(|character| !is_word_character(character) && character != '.')
-}
-
-fn is_word_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
 }
 
 /// Every `(namespace, tool)` one candidate names, in its head, in a condition, or through a

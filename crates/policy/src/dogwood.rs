@@ -619,6 +619,42 @@ pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
     refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
 }
 
+/// The conditions of one macro-expanded rule, as the engine's own parsed tree rather than its
+/// rendered text, with each `temporal { … }` expression replaced by `true`. Empty when the rule
+/// cannot lower without an MCP action schema, which is the case for a rule that names a typed
+/// action outside a history clause. An `unless` condition arrives as a negated `when`, which is
+/// how Cedar states it.
+pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
+    let Ok(policy_schema) = action_schema(&[])
+        .and_then(|schema| {
+            PolicySchema::from_cedarschema_str(&schema.source)
+                .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))
+        })
+        .map_err(drop)
+    else {
+        return Vec::new();
+    };
+    let Ok(service) = service_schema() else {
+        return Vec::new();
+    };
+    let Ok(parsed) =
+        dogwood_language::ParsedPolicySet::parse(&without_temporal(expanded), &service)
+    else {
+        return Vec::new();
+    };
+    let Ok(lowered) = parsed.lower(&policy_schema) else {
+        return Vec::new();
+    };
+    lowered
+        .as_cedar()
+        .policies()
+        .filter_map(|policy| policy.to_json().ok())
+        .filter_map(|json| json.get("conditions")?.as_array().cloned())
+        .flatten()
+        .filter_map(|condition| condition.get("body").cloned())
+        .collect()
+}
+
 /// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
 /// without one action family, before an MCP action schema stages.
 pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
