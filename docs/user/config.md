@@ -1,4 +1,4 @@
-# The `box.toml` reference
+# box.toml configuration reference
 
 `box.toml` is the complete run configuration for one box. Pass its path through
 `strands-box run --config FILE`; the tutorial's download names the binary `box`. Box reads the
