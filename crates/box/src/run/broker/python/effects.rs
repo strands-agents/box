@@ -170,8 +170,16 @@ pub(super) fn admit_and_perform(
                     ));
             }
             // Refused by the floor, *after* policy allowed it — which is the point: policy
-            // cannot widen this. Recorded as failed rather than dropped, because the attempt
-            record(permit, FsResult::Failed);
+            // cannot widen this. A metadata read of a path the host cannot resolve is an answer
+            // (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
+            record(
+                permit,
+                if refused.is_unresolved() && is_metadata_read(&call) {
+                    FsResult::Completed
+                } else {
+                    FsResult::Failed
+                },
+            );
             return Err(MontyException::new(
                 ExcType::PermissionError,
                 Some(refused.to_string()),
@@ -558,6 +566,10 @@ fn answered(unreached: &Unreached) -> FsResult {
         Unreached::Answered(_) => FsResult::Completed,
         Unreached::Refused(_) => FsResult::Failed,
     }
+}
+
+fn is_metadata_read(call: &OsFunctionCall) -> bool {
+    is_predicate(call) || matches!(call, OsFunctionCall::Stat(_))
 }
 
 fn is_predicate(call: &OsFunctionCall) -> bool {
@@ -2358,10 +2370,14 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
                 .expect("the reachable set is usable")
         });
         std::fs::write(box_root.join("private/x"), "state").expect("a file in box state");
+        std::os::unix::fs::symlink(box_root.join("private/nodir"), shared.join("dangle"))
+            .expect("a dangling link into box state");
         for probe in [
             box_root.join("private/x"),
             box_root.join("private/nodir/x"),
             shared.join("link/nodir/x"),
+            shared.join("dangle"),
+            shared.join("dangle/x"),
         ] {
             assert!(
                 !calls_spend_the_budget(&reach, &kept, vec![stat(probe.to_str().expect("UTF-8"))]),
@@ -2387,6 +2403,113 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
             &kept,
             vec![stat(outside.to_str().expect("UTF-8"))],
         ));
+    }
+
+    /// A metadata read under a folder that does not exist spends the budget.
+    #[test]
+    fn a_metadata_read_under_a_missing_folder_spends_the_budget() {
+        let path = |leaf: &str| MontyPath::new(format!("absent-dir/{leaf}"));
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        assert!(calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![
+                OsFunctionCall::Stat(path("1")),
+                OsFunctionCall::Stat(path("2")),
+                OsFunctionCall::Stat(path("3")),
+            ],
+        ));
+        assert!(calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![
+                OsFunctionCall::Exists(path("x")),
+                OsFunctionCall::IsFile(path("x")),
+                OsFunctionCall::IsDir(path("x")),
+                OsFunctionCall::IsSymlink(path("x")),
+            ],
+        ));
+    }
+
+    /// A metadata read under a folder the host cannot search spends the budget.
+    #[test]
+    fn a_metadata_read_under_an_unsearchable_folder_spends_the_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: root searches every folder");
+            return;
+        }
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let locked = home(&root).join("locked");
+        std::fs::create_dir_all(locked.join("inner")).expect("a folder to lock");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the folder");
+        let spent = calls_spend_the_budget(&reach, &kept, vec![stat("locked/inner/f.txt")]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("unlock the folder");
+        assert!(spent);
+    }
+
+    /// A metadata read through a symbolic link inside the home spends nothing.
+    #[test]
+    fn a_metadata_read_through_a_link_in_the_home_spends_nothing() {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        let kept = home.join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        std::fs::create_dir(home.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(home.join("real"), home.join("link"))
+            .expect("a link to the folder");
+        std::os::unix::fs::symlink(home.join("nowhere"), home.join("dangle"))
+            .expect("a dangling link");
+        for probe in ["link/x", "link/nodir/x", "dangle", "dangle/x"] {
+            assert!(
+                !calls_spend_the_budget(&reach, &kept, vec![stat(probe)]),
+                "{probe} must not spend the budget"
+            );
+        }
+    }
+
+    /// A content read under a folder that does not exist records an error.
+    #[test]
+    fn a_content_read_under_a_missing_folder_records_an_error() {
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<test>"),
+            text: r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                @id("content-budget")
+                forbid(principal, action == Box::Action::"fs:read", resource)
+                when { context.input.path like "*/ok.txt" }
+                when temporal {
+                    formerly within 3600s (
+                        Box::Action::"fs:read"::response{ input.path: _, input.operation: Box::FsReadOperation::"read_content" }
+                    )
+                };
+            "#
+            .to_string(),
+        }]);
+        let interceptor = interceptor(&policy);
+        let _ = admit_and_perform(
+            &interceptor,
+            OsFunctionCall::ReadText(MontyPath::new("absent-dir/x".to_string())),
+            &reach,
+        );
+        assert!(
+            admit_and_perform(
+                &interceptor,
+                OsFunctionCall::ReadText(MontyPath::new(kept.to_string_lossy().into_owned())),
+                &reach,
+            )
+            .is_ok()
+        );
     }
 
     /// A metadata read whose leaf was swapped for a link after approval records `Failed`.

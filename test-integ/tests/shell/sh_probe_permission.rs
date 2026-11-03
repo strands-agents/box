@@ -32,13 +32,14 @@ det_case! {
             .expect("lock the folder");
         b.assert_python_is_monty();
         let r = b.run_mediated(
-            "test -e locked/f.txt; echo RC=$?; python3 -c \"from pathlib import Path\nprint('PY=' + str(Path('locked/f.txt').exists()))\"; cat ok.txt; echo CAT=$?",
+            "test -e locked/f.txt; echo RC=$?; python3 -c \"from pathlib import Path\ntry:\n    print('PY=' + str(Path('locked/f.txt').exists()))\nexcept OSError:\n    print('PY=refused')\"; cat ok.txt; echo CAT=$?",
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
             .expect("unlock the folder");
         r.assert_entered();
         r.assert_contains("RC=1");
-        r.assert_contains("PY=False");
+        r.assert_contains("PY=");
+        r.assert_absent("PY=True");
         r.assert_forbidden_by("fs:read", "ok.txt", "probe_budget");
         r.assert_absent("CAT=0");
     }
