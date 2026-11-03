@@ -274,10 +274,14 @@ A head that already names a tool gives no pin either. Such a head states that ru
 a pin beside it can only disagree with it, and reading one would hold a tool on a server the rule
 can never decide a call to.
 
-One limit remains. A rule that constrains every tool call, and pins no single server and tool —
-because its head is the coarse `mcp:call`, or it names no action at all, and its condition narrows
-in some other way or not at all — cannot be expressed as a set of tools. stderr names the server it
-waits for, so the operator learns the rule is inert, but no call is held on its behalf.
+One limit remains. A rule whose head names no tool, and whose condition does not pin one server and
+one tool, cannot be expressed as a set of tools. stderr names the server it waits for, so the
+operator learns the rule is inert, but no call is held on its behalf. Two of those shapes are
+enumerable and Box still does not read them: a condition that pins the server alone decides every
+call to that server, and the box knows a call's server when it decides it; and
+`["a", "b"].contains(context.input.tool)` names a finite set of pairs. Reading either one needs a
+hold that is coarser than a `(server, tool)` pair, or one that expands a set, so each is a widening
+of this mechanism rather than a correction to it.
 
 ## How Box decides a tool call
 

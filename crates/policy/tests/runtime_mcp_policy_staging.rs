@@ -1239,8 +1239,18 @@ fn a_condition_pins_a_held_tool_only_when_it_decides_that_tool_alone() {
             "approve",
             false,
         ),
+        // A set membership names a finite set of tools, and Box does not read it. The set is
+        // enumerable, so this is a limit rather than a necessity.
+        (
+            r#"when { context.input.server == "svc" && context.input has tool
+&& ["approve", "reject"].contains(context.input.tool) }"#,
+            "svc",
+            "approve",
+            false,
+        ),
         // One pin alone leaves a set the box cannot enumerate: every tool on one server, or one
-        // tool name on every server.
+        // tool name on every server. The server-only case is enumerable at decision time, because
+        // the call carries its server, so it too is a limit rather than a necessity.
         (
             r#"when { context.input.server == "svc" }"#,
             "svc",

@@ -203,11 +203,13 @@ context.input.tool == "approve" && context.input.method != "tools/list"`, becaus
 by `&&` has to hold. A pin does not count when it sits inside a `||`, a negation, or an `if`, or in
 an `unless` condition, because there the rule may reach some other tool instead.
 
-One shape escapes both ways. A rule on `Box::Action::"mcp:call"` that narrows by something other
-than those two pins, or does not narrow at all, reaches every tool call, so there is no set of tools
-to refuse — the calls run on the `mcp:call` permit while the rule is inert. Read the startup warning
-as the signal that this happened. To get the refusal, name the tool in the rule's head, or pin the
-server and the tool in a `when` condition.
+It takes **both** pins. A rule on `Box::Action::"mcp:call"` that pins the server alone, that picks
+its tools with `["approve", "reject"].contains(context.input.tool)`, that narrows on
+`context.input.method`, or that does not narrow at all, gives Box no single tool to refuse — so
+those calls run on the `mcp:call` permit while the rule is inert. Read the startup warning as the
+signal that this happened. To get the refusal, name the tool in the rule's head, or pin the server
+and the tool to one name each in a `when` condition, writing one rule per tool where you need
+several.
 
 ## See also
 
