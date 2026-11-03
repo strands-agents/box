@@ -124,6 +124,18 @@ jobs:
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Prepare the base publication contract
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_MANIFEST: ${{ runner.temp }}/base-site-manifest.json
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:docs/site-manifest.json" 2>/dev/null; then
+            git show "$BASE_SHA:docs/site-manifest.json" > "$BASE_MANIFEST"
+            echo "SITE_MANIFEST_BASE=$BASE_MANIFEST" >> "$GITHUB_ENV"
+          fi
+
       - name: Validate the external publication contract
         run: cargo test -p strands-box --test site_manifest --locked --all-features
 

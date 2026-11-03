@@ -159,6 +159,13 @@ Owned clippy warnings must be zero; vendored warnings must not increase. Check w
 against `crates/<changed-crate>/`. Use `just --list` for workspace gates and
 [README.md](README.md) for prerequisites.
 
+For a change to `docs/site-manifest.json`, a publishable page under `docs/user/`, or the manifest
+validator and its CI wiring, run:
+
+```sh
+cargo test -p strands-box --test site_manifest --locked --all-features
+```
+
 **For code changes, run [feature-critic](.agents/agents/feature-critic.md) once, immediately before
 commit**, after implementation is complete. It reviews code, runs the required gates, and checks
 docs against [What a change updates](#what-a-change-updates).

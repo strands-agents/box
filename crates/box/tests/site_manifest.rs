@@ -1,12 +1,15 @@
 //! Validates the external documentation publication manifest.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 
 const MANIFEST: &str = "docs/site-manifest.json";
+const BASE_MANIFEST_ENV: &str = "SITE_MANIFEST_BASE";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -54,12 +57,22 @@ fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn load_manifest(root: &Path) -> Result<SiteManifest, String> {
-    let path = root.join(MANIFEST);
-    let source = fs::read_to_string(&path)
+fn load_manifest_path(path: &Path) -> Result<SiteManifest, String> {
+    let source = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     serde_json::from_str(&source)
         .map_err(|error| format!("cannot parse {}: {error}", path.display()))
+}
+
+fn load_manifest(root: &Path) -> Result<SiteManifest, String> {
+    load_manifest_path(&root.join(MANIFEST))
+}
+
+fn load_base_manifest() -> Result<Option<SiteManifest>, String> {
+    let Some(path) = env::var_os(BASE_MANIFEST_ENV).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    load_manifest_path(Path::new(&path)).map(Some)
 }
 
 fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
@@ -294,6 +307,48 @@ fn validate_manifest(root: &Path, manifest: &SiteManifest) -> Result<(), String>
     validate_coverage(root, &sources)
 }
 
+fn validate_compatibility(base: &SiteManifest, current: &SiteManifest) -> Result<(), String> {
+    require(
+        current.product.id == base.product.id,
+        format!("base product id {} must remain unchanged", base.product.id),
+    )?;
+
+    let current_by_id = current
+        .pages
+        .iter()
+        .map(|page| (page.id.as_str(), page))
+        .collect::<HashMap<_, _>>();
+    let current_by_slug = current
+        .pages
+        .iter()
+        .map(|page| (page.slug.as_str(), page))
+        .collect::<HashMap<_, _>>();
+
+    for base_page in &base.pages {
+        if let Some(current_page) = current_by_slug.get(base_page.slug.as_str()) {
+            require(
+                current_page.id == base_page.id,
+                format!(
+                    "base slug {} must remain assigned to id {}",
+                    base_page.slug, base_page.id
+                ),
+            )?;
+        }
+
+        let current_page = current_by_id
+            .get(base_page.id.as_str())
+            .ok_or_else(|| format!("base page id {} must remain declared", base_page.id))?;
+        require(
+            current_page.slug == base_page.slug,
+            format!(
+                "base page id {} must keep slug {}",
+                base_page.id, base_page.slug
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn manifest_value(root: &Path) -> serde_json::Value {
     let source = fs::read_to_string(root.join(MANIFEST)).expect("read manifest");
     serde_json::from_str(&source).expect("parse manifest as JSON")
@@ -304,6 +359,9 @@ fn repository_manifest_is_valid() {
     let root = repository_root();
     let manifest = load_manifest(&root).expect("load manifest");
     validate_manifest(&root, &manifest).expect("validate manifest");
+    if let Some(base) = load_base_manifest().expect("load base manifest") {
+        validate_compatibility(&base, &manifest).expect("validate manifest compatibility");
+    }
 }
 
 #[test]
@@ -338,6 +396,62 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
         workflow.contains("cargo test -p strands-box --test site_manifest --locked --all-features"),
         "site manifest CI must run the contract test"
     );
+    let base_step = workflow
+        .split_once("      - name: Prepare the base publication contract\n")
+        .and_then(|(_, remainder)| {
+            remainder.split_once("      - name: Validate the external publication contract\n")
+        })
+        .map(|(step, _)| step)
+        .expect("base publication contract step");
+    assert!(
+        base_step.contains("        if: github.event_name == 'pull_request'\n"),
+        "base publication contract preparation must run only for pull requests"
+    );
+    assert!(
+        base_step.contains("BASE_SHA: ${{ github.event.pull_request.base.sha }}")
+            && base_step.contains("BASE_MANIFEST: ${{ runner.temp }}/base-site-manifest.json")
+            && base_step.contains("git fetch --no-tags --depth=1 origin \"$BASE_SHA\"")
+            && base_step.contains(
+                "if git cat-file -e \"$BASE_SHA:docs/site-manifest.json\" 2>/dev/null; then",
+            )
+            && base_step
+                .contains("git show \"$BASE_SHA:docs/site-manifest.json\" > \"$BASE_MANIFEST\"",)
+            && base_step.contains("echo \"SITE_MANIFEST_BASE=$BASE_MANIFEST\" >> \"$GITHUB_ENV\""),
+        "pull-request CI must compare the manifest with its base revision"
+    );
+}
+
+#[test]
+fn repository_validation_uses_supplied_base_manifest() {
+    let root = repository_root();
+    let mut base = manifest_value(&root);
+    base["product"]["id"] = serde_json::Value::String("previous-product".to_string());
+    let base_file = tempfile::NamedTempFile::new().expect("temporary base manifest");
+    fs::write(
+        base_file.path(),
+        serde_json::to_vec(&base).expect("serialize base manifest"),
+    )
+    .expect("write base manifest");
+
+    let output = Command::new(env::current_exe().expect("site manifest test executable"))
+        .args(["--exact", "repository_manifest_is_valid", "--nocapture"])
+        .env(BASE_MANIFEST_ENV, base_file.path())
+        .output()
+        .expect("run repository manifest validation");
+    let diagnostics = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "repository validation ignored the supplied incompatible base manifest"
+    );
+    assert!(
+        diagnostics.contains("base product id previous-product must remain unchanged"),
+        "repository validation failed for an unexpected reason: {diagnostics}"
+    );
 }
 
 #[test]
@@ -361,6 +475,110 @@ fn duplicate_ids_and_slugs_are_refused() {
         validate_manifest(&root, &duplicate_slug)
             .expect_err("duplicate slug must fail")
             .contains("slug duplicates")
+    );
+}
+
+#[test]
+fn a_base_product_id_cannot_change() {
+    let root = repository_root();
+    let base = load_manifest(&root).expect("load manifest");
+    let mut current = base.clone();
+    current.product.id = "replacement-product".to_string();
+
+    assert!(
+        validate_compatibility(&base, &current)
+            .expect_err("changed base product id must fail")
+            .contains("base product id strands-box must remain unchanged")
+    );
+}
+
+#[test]
+fn a_base_page_id_cannot_disappear() {
+    let root = repository_root();
+    let base = load_manifest(&root).expect("load manifest");
+    let mut current = base.clone();
+    let removed = current.pages.remove(0);
+
+    assert!(
+        validate_compatibility(&base, &current)
+            .expect_err("removed base id must fail")
+            .contains(&format!("base page id {} must remain declared", removed.id))
+    );
+}
+
+#[test]
+fn a_base_page_slug_cannot_change() {
+    let root = repository_root();
+    let base = load_manifest(&root).expect("load manifest");
+    let mut current = base.clone();
+    let id = current.pages[0].id.clone();
+    let slug = current.pages[0].slug.clone();
+    current.pages[0].slug = "replacement-route".to_string();
+
+    assert!(
+        validate_compatibility(&base, &current)
+            .expect_err("changed base slug must fail")
+            .contains(&format!("base page id {id} must keep slug {slug}"))
+    );
+}
+
+#[test]
+fn a_base_slug_cannot_move_to_another_id() {
+    let root = repository_root();
+    let base = load_manifest(&root).expect("load manifest");
+    let mut current = base.clone();
+    let id = current.pages[0].id.clone();
+    let slug = current.pages[0].slug.clone();
+    current.pages[0].id = "replacement-page".to_string();
+
+    assert!(
+        validate_compatibility(&base, &current)
+            .expect_err("reassigned base slug must fail")
+            .contains(&format!("base slug {slug} must remain assigned to id {id}"))
+    );
+}
+
+#[test]
+fn unsupported_schema_versions_are_refused() {
+    let root = repository_root();
+    let mut manifest = load_manifest(&root).expect("load manifest");
+    manifest.schema_version = 2;
+
+    assert!(
+        validate_manifest(&root, &manifest)
+            .expect_err("unsupported schema version must fail")
+            .contains("schemaVersion must be 1")
+    );
+}
+
+#[test]
+fn invalid_navigation_is_refused() {
+    let root = repository_root();
+    let manifest = load_manifest(&root).expect("load manifest");
+
+    let mut zero_order = manifest.clone();
+    zero_order.pages[0].nav.order = 0;
+    assert!(
+        validate_manifest(&root, &zero_order)
+            .expect_err("zero navigation order must fail")
+            .contains("must be a positive integer")
+    );
+
+    let mut duplicate_position = manifest.clone();
+    duplicate_position.pages[1].nav.group = duplicate_position.pages[0].nav.group.clone();
+    duplicate_position.pages[1].nav.order = duplicate_position.pages[0].nav.order;
+    assert!(
+        validate_manifest(&root, &duplicate_position)
+            .expect_err("duplicate navigation position must fail")
+            .contains("nav duplicates")
+    );
+
+    let mut split_group = manifest;
+    split_group.pages[2].nav.group = split_group.pages[0].nav.group.clone();
+    assert!(
+        validate_manifest(&root, &split_group)
+            .expect_err("split navigation group must fail")
+            .contains("must use one contiguous block")
     );
 }
 

@@ -243,7 +243,8 @@ just test-all      # workspace tests and box example checks
 the `test-support` feature.
 
 In pull-request CI, changes to `docs/site-manifest.json` or a publishable page under `docs/user/`
-run the focused site-manifest contract test instead of the full Rust test matrix.
+run the focused site-manifest contract test instead of the full Rust test matrix. The test compares
+the base manifest to keep the product ID, existing page IDs, and route slugs stable.
 
 ## Documentation
 

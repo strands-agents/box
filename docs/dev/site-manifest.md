@@ -45,7 +45,9 @@ move does not create a new page.
 
 The manifest test refuses an absent page, an extra page, an unsafe source or slug, a duplicate
 identity or navigation position, an unknown field or status, and a title that differs from the
-source H1.
+source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
+a removed page ID, a changed slug for an existing ID, or an existing slug assigned to a different
+ID.
 
 ## Publication status
 
@@ -75,4 +77,5 @@ cargo test -p strands-box --test site_manifest --all-features
 
 Run the test after a change to the manifest or a publishable user page.
 Pull-request CI runs this focused test on Ubuntu for those changes. It does not start the full Rust
-matrix for a documentation-only pull request.
+matrix for a documentation-only pull request. When the base revision has a manifest, CI supplies it
+to the test for the compatibility checks.
