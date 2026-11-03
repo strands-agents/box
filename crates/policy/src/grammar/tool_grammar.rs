@@ -4,9 +4,6 @@ use std::sync::Arc;
 
 use super::{Grammar, GrammarRefusal};
 
-/// The largest tool grammar Box loads, in bytes of the grammar's table written out as TOML.
-pub(crate) const MAXIMUM_TOOL_GRAMMAR_BYTES: usize = 64 * 1024;
-
 /// One checked tool grammar.
 #[derive(Debug, Clone)]
 pub struct ToolGrammar {

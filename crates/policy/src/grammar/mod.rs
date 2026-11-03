@@ -37,7 +37,6 @@ pub(crate) use bindings::{CoverageRefusal, GrammarBindings, GrammarCoverage};
 pub(crate) use invocation::{GrammarInvocation, GrammarRequest, PendingGrammarResponse};
 pub(crate) use model::Grammar;
 pub(crate) use schema::TOOL_NAMESPACE;
-use tool_grammar::MAXIMUM_TOOL_GRAMMAR_BYTES;
 pub use tool_grammar::{ToolGrammar, ToolGrammarError, ToolGrammars};
 use usage::UsageFault;
 
@@ -49,12 +48,6 @@ const KNOWN_FORMATS: &[i64] = &[1];
 pub(crate) enum GrammarRefusal {
     #[error("{place}: {message}")]
     Malformed { place: Place, message: String },
-    #[error("{place} is {bytes} bytes, over the {limit}-byte limit for a tool grammar")]
-    TooLarge {
-        place: Place,
-        bytes: usize,
-        limit: usize,
-    },
     #[error("{place} is required: write `format = 1`")]
     MissingFormat { place: Place },
     #[error("{place} is {value}, which is not a grammar format this Box reads (it reads 1)")]
@@ -220,7 +213,6 @@ impl GrammarRefusal {
                 other.under(table);
             }
             Self::Malformed { place, .. }
-            | Self::TooLarge { place, .. }
             | Self::MissingFormat { place }
             | Self::UnknownFormat { place, .. }
             | Self::MissingVersion { place }
@@ -271,19 +263,6 @@ impl Grammar {
     }
 
     fn read_table(table: toml::Table) -> Result<Self, GrammarRefusal> {
-        let bytes = toml::to_string(&table)
-            .map_err(|error| GrammarRefusal::Malformed {
-                place: Place::Grammar,
-                message: error.to_string(),
-            })?
-            .len();
-        if bytes > MAXIMUM_TOOL_GRAMMAR_BYTES {
-            return Err(GrammarRefusal::TooLarge {
-                place: Place::Grammar,
-                bytes,
-                limit: MAXIMUM_TOOL_GRAMMAR_BYTES,
-            });
-        }
         match table.get("format") {
             None => {
                 return Err(GrammarRefusal::MissingFormat {
@@ -407,38 +386,6 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
-    }
-
-    #[test]
-    fn a_grammar_over_the_size_limit_is_refused_at_its_table() {
-        let mut text =
-            String::from("format = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n[effects]\n");
-        while text.len() <= MAXIMUM_TOOL_GRAMMAR_BYTES {
-            text.push_str(&format!("e{} = \"an effect\"\n", text.len()));
-        }
-        let table: toml::Table = toml::from_str(&text).expect("the document parses");
-
-        let refusal =
-            Grammar::from_table(table, "tool.git.grammar").expect_err("the grammar is refused");
-
-        assert!(
-            matches!(&refusal, GrammarRefusal::TooLarge { bytes, .. } if *bytes > MAXIMUM_TOOL_GRAMMAR_BYTES),
-            "{refusal}"
-        );
-        assert!(
-            refusal.to_string().starts_with("`tool.git.grammar` is "),
-            "{refusal}"
-        );
-    }
-
-    #[test]
-    fn the_largest_corpus_grammar_is_well_under_the_size_limit() {
-        let text = std::fs::read_to_string(Path::new(CORPUS).join("valid/git.grammar.toml"))
-            .expect("the git grammar reads");
-        let table: toml::Table = toml::from_str(&text).expect("the git grammar parses");
-        let bytes = toml::to_string(&table).expect("the table writes").len();
-
-        assert!(bytes * 2 < MAXIMUM_TOOL_GRAMMAR_BYTES, "{bytes}");
     }
 
     #[test]
