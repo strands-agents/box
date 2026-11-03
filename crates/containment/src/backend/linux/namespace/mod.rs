@@ -209,6 +209,7 @@ impl ContainmentBackend for NamespaceBackend {
         // The PID namespace must exist *before* the view is built, because mounting a fresh `/proc`
         // requires the caller to be inside the PID namespace that procfs will describe.
         let mut keep = vec![0, 1, 2];
+        keep.extend(confirm_fd);
         {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
@@ -369,17 +370,12 @@ fn enter_namespaces_using(
     Ok(())
 }
 
-/// Enter a PID namespace as its second process, with a reaper at PID 1.
-/// The status byte the reaper writes to `confirm_fd` once the mount view is up and the workload is
-/// about to run — the explicit "reached exec" signal for a long-lived leaf whose status pipe never
-/// EOFs during setup. Must match the supervisor's `SETUP_SUCCESS_BYTE`, and stay distinct from every
-/// `SetupStage` failure byte (`1..=5`).
-const EXEC_CONFIRM_BYTE: u8 = 0;
-/// The failure byte for a mount-view build failure, matching the supervisor's `SetupStage::Apply`.
+/// The setup failure byte for namespace construction.
 const APPLY_FAILURE_BYTE: u8 = 3;
+/// The namespace reaper completed its own setup.
+const REAPER_READY_BYTE: u8 = 6;
 
-/// Write one status byte to `confirm_fd`, ignoring `EINTR`. Best-effort: a lost byte only costs the
-/// supervisor its early signal, and the process's own exit still reports the outcome.
+/// Report setup status through the inherited descriptor.
 fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
     let Some(fd) = confirm_fd else { return };
     loop {
@@ -391,6 +387,20 @@ fn write_confirm_byte(confirm_fd: Option<std::os::fd::RawFd>, byte: u8) {
             continue;
         }
         return;
+    }
+}
+
+/// Release a supervisor's copy while the workload retains the failure channel.
+fn close_confirm_descriptor(descriptor: Option<std::os::fd::RawFd>) {
+    if let Some(descriptor) = descriptor {
+        // SAFETY: this process owns its inherited copy of the descriptor.
+        if unsafe { libc::close(descriptor) } == -1
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+        {
+            write_confirm_byte(Some(descriptor), APPLY_FAILURE_BYTE);
+            // SAFETY: an unclosed setup writer must not survive into the wait loop.
+            unsafe { libc::_exit(127) };
+        }
     }
 }
 
@@ -439,10 +449,12 @@ fn establish_pid_namespace_and_reaper(
     if reaper > 0 {
         drop(reaper_control);
         if !reaper::confirm_parent_death(&parent_control) {
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             // SAFETY: the identifier names this process's unreaped child.
             unsafe { libc::kill(reaper, libc::SIGKILL) };
         }
         drop(parent_control);
+        close_confirm_descriptor(confirm_fd);
         // The original caller.
         let code = reaper_exit_code(|status| {
             // SAFETY: waiting on this process's own child.
@@ -459,6 +471,7 @@ fn establish_pid_namespace_and_reaper(
     // Namespace PID 1.
     drop(parent_control);
     if !reaper::arm_parent_death(&reaper_control) {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: no workload can start without a live launcher.
         unsafe { libc::_exit(127) };
     }
@@ -467,30 +480,35 @@ fn establish_pid_namespace_and_reaper(
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
         eprintln!("strands-box: namespace reaper could not build the view: {error}");
-        // Signal the failure to the supervisor rather than leaving it to read a bare EOF, which it
-        // treats as success. Best-effort, before PID 1 exits and tears down the namespace.
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.
         unsafe { libc::_exit(127) };
     }
 
-    // The mount view is up and the workload is about to run: signal "reached exec" now. A long-lived
-    // leaf (a streaming MCP server) never lets the status pipe EOF during its life — the reaper and
-    // the waiter both hold the writer — so the supervisor must be told explicitly, not by EOF.
-    write_confirm_byte(confirm_fd, EXEC_CONFIRM_BYTE);
-
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
     if let Err(error) = authority::close_inherited_descriptors(keep) {
         eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: as above.
+        unsafe { libc::_exit(127) };
+    }
+    if let Err(error) = authority::refuse_process_memory_access() {
+        eprintln!(
+            "strands-box: namespace reaper could not refuse process-memory access \
+             ({error:?}); killing the namespace rather than starting a workload \
+             from a reachable PID 1"
+        );
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
         unsafe { libc::_exit(127) };
     }
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };
     if workload == -1 {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the correct
         // response to being unable to start the workload at all.
         unsafe { libc::_exit(126) };
@@ -501,6 +519,7 @@ fn establish_pid_namespace_and_reaper(
         let dropped = authority::drop_all_capabilities();
         let locked = authority::set_no_new_privileges();
         if dropped.is_err() || locked.is_err() {
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             eprintln!(
                 "strands-box: namespace reaper could not drop its own authority \
                  ({dropped:?}, {locked:?}); killing the namespace rather than \
@@ -510,6 +529,9 @@ fn establish_pid_namespace_and_reaper(
             // the exact escape this closes.
             unsafe { libc::_exit(127) };
         }
+
+        write_confirm_byte(confirm_fd, REAPER_READY_BYTE);
+        close_confirm_descriptor(confirm_fd);
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
@@ -532,6 +554,8 @@ fn apply_failure(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod terminal;
+
     use super::*;
 
     /// The most `/proc` entries a fresh PID namespace shows before host processes count as visible.
@@ -1279,139 +1303,33 @@ mod tests {
         );
     }
 
-    /// Run `probe` in a forked child with `filter` installed, and answer its exit code.
+    /// Run `probe` in a forked child with `filters` installed, and answer its exit code.
     fn in_filtered_child(filters: &syscall::SyscallFilters, probe: impl FnOnce() -> i32) -> i32 {
-        // SAFETY: the child installs a filter, runs the probe, and `_exit`s; it never
-        // returns into test-harness code.
+        in_child(|| {
+            if install_syscall_filters(filters).is_err() {
+                return 40;
+            }
+            probe()
+        })
+    }
+
+    fn in_child(probe: impl FnOnce() -> i32) -> i32 {
+        // SAFETY: the child runs the probe and exits without returning to the test harness.
         let child = unsafe { libc::fork() };
         assert_ne!(child, -1, "fork failed");
-
         if child == 0 {
-            if install_syscall_filters(filters).is_err() {
-                // SAFETY: terminating the child.
-                unsafe { libc::_exit(40) };
-            }
             let code = probe();
             // SAFETY: terminating the child with the verdict.
             unsafe { libc::_exit(code) };
         }
-
         let mut status = 0;
         // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
         assert!(
             libc::WIFEXITED(status),
-            "the probe child must exit normally rather than be signalled"
+            "the probe child must exit normally rather than be signalled: {status}"
         );
         libc::WEXITSTATUS(status)
-    }
-
-    #[test]
-    fn terminal_input_injection_is_refused_before_descriptor_lookup() {
-        // An invalid descriptor cannot inject input, even if the filter regresses.
-        // The unfiltered control proves that the kernel would return EBADF.
-        let request = u64::from(libc::TIOCSTI as u32);
-        let requests = [
-            request,
-            (1_u64 << 32) | request,
-            0xffff_ffff_0000_0000 | request,
-        ];
-        for request in requests {
-            // SAFETY: descriptor -1 is invalid, and no pointer can be dereferenced.
-            let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
-            assert_eq!(result, -1);
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::EBADF),
-                "the unfiltered control must reach descriptor lookup"
-            );
-        }
-
-        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
-            .compile()
-            .expect("the filters compile");
-        let outcome = in_filtered_child(&filters, || {
-            for request in requests {
-                // SAFETY: descriptor -1 stays invalid if the filter fails to refuse.
-                let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
-                if result != -1
-                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
-                {
-                    return 10;
-                }
-            }
-            0
-        });
-        assert_eq!(
-            outcome, 0,
-            "10 = TIOCSTI reached descriptor lookup, 40 = installing the filters failed"
-        );
-    }
-
-    #[test]
-    fn terminal_queries_still_work_under_the_filters() {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-        let mut master = -1;
-        let mut slave = -1;
-        let size = libc::winsize {
-            ws_row: 37,
-            ws_col: 101,
-            ws_xpixel: 808,
-            ws_ypixel: 592,
-        };
-        // SAFETY: all output pointers are valid. This creates a private terminal
-        // pair without making it the caller's controlling terminal.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
-                )
-            },
-            0,
-            "the private terminal pair must open"
-        );
-        // SAFETY: openpty returned two newly owned descriptors.
-        let (_master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
-            .compile()
-            .expect("the filters compile");
-        let outcome = in_filtered_child(&filters, || {
-            let mut observed = std::mem::MaybeUninit::<libc::winsize>::uninit();
-            // SAFETY: the descriptor is open and the output has the required size.
-            if unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, observed.as_mut_ptr()) }
-                != 0
-            {
-                return 10;
-            }
-            // SAFETY: the successful ioctl initialized the output.
-            let observed = unsafe { observed.assume_init() };
-            if (
-                observed.ws_row,
-                observed.ws_col,
-                observed.ws_xpixel,
-                observed.ws_ypixel,
-            ) != (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
-            {
-                return 11;
-            }
-            let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
-            // SAFETY: the descriptor is open and the output has the required size.
-            if unsafe { libc::tcgetattr(slave.as_raw_fd(), settings.as_mut_ptr()) } != 0 {
-                return 12;
-            }
-            0
-        });
-        assert_eq!(
-            outcome, 0,
-            "10 = window query refused, 11 = wrong window size, 12 = terminal settings query \
-             refused, 40 = installing the filters failed"
-        );
     }
 
     #[test]
@@ -2495,14 +2413,13 @@ mod tests {
             .expect("the leaf filters compile from the network alone");
     }
 
-    /// The reaper writes the exec-confirm byte before the workload runs, and the apply-failure byte when the view fails.
+    /// The workload retains the status writer, and the reaper reports view failures.
     #[test]
-    fn the_reaper_writes_the_exec_confirm_byte_and_a_failure_byte() {
+    fn the_workload_retains_the_status_writer_and_the_reaper_reports_failures() {
         if !the_host_can_build_a_view() {
             println!("skipping: this host cannot build a namespace mount view");
             return;
         }
-        assert_eq!(EXEC_CONFIRM_BYTE, 0, "this crate's exec-confirm byte value");
         assert_eq!(
             APPLY_FAILURE_BYTE, 3,
             "this crate's apply-failure byte value"
@@ -2525,7 +2442,7 @@ mod tests {
             .expect("write protection");
 
         for (label, config, expected_bytes, expected_status) in [
-            ("view built", &builds, vec![EXEC_CONFIRM_BYTE], 0),
+            ("view built", &builds, vec![REAPER_READY_BYTE, 42], 0),
             ("view failed", &fails, vec![APPLY_FAILURE_BYTE], 127),
         ] {
             let mut pipe = [-1; 2];
@@ -2551,6 +2468,7 @@ mod tests {
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };
                 }
+                write_confirm_byte(Some(writer), 42);
                 // SAFETY: the workload exits at once.
                 unsafe { libc::_exit(0) };
             }
@@ -2579,7 +2497,75 @@ mod tests {
                 expected_status,
                 "{label}: wrong exit status (50 = apply returned an error before the reaper ran)"
             );
+            received.sort_unstable();
             assert_eq!(received, expected_bytes, "{label}: wrong status bytes");
         }
+    }
+
+    #[test]
+    fn the_workload_retains_the_setup_writer_until_executable_launch() {
+        if !the_host_can_build_a_view() {
+            println!("skipping: this host cannot build a namespace mount view");
+            return;
+        }
+
+        let mut pipe = [-1; 2];
+        // SAFETY: a plain pipe for this test's own status byte.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0,
+            "pipe2"
+        );
+        let [reader, writer] = pipe;
+
+        // SAFETY: the child applies containment. Only the contained workload returns.
+        let child = unsafe { libc::fork() };
+        assert_ne!(child, -1, "fork failed");
+
+        if child == 0 {
+            // SAFETY: closing the child's copy of the read end.
+            unsafe { libc::close(reader) };
+            let backend = NamespaceBackend::with_probe_result(true);
+            if let Err(error) = backend.apply(&ContainmentConfig::new(), None, Some(writer), None) {
+                eprintln!("apply failed: {error}");
+                // SAFETY: terminating the child.
+                unsafe { libc::_exit(50) };
+            }
+            // SAFETY: `F_GETFD` reads the inherited descriptor flags.
+            let flags = unsafe { libc::fcntl(writer, libc::F_GETFD) };
+            if flags == -1 || flags & libc::FD_CLOEXEC == 0 {
+                // SAFETY: terminating the child after an invalid descriptor lifetime.
+                unsafe { libc::_exit(70) };
+            }
+            write_confirm_byte(Some(writer), APPLY_FAILURE_BYTE);
+            // SAFETY: the workload exits after reporting its simulated preparation failure.
+            unsafe { libc::_exit(0) };
+        }
+
+        // SAFETY: closing the parent's copy of the write end.
+        unsafe { libc::close(writer) };
+        {
+            use std::io::Read as _;
+            use std::os::fd::FromRawFd as _;
+
+            // SAFETY: `reader` is this test's own read end, and the `File` takes ownership.
+            let mut reader = unsafe { std::fs::File::from_raw_fd(reader) };
+            let mut received = Vec::new();
+            reader
+                .read_to_end(&mut received)
+                .expect("read setup status");
+            received.sort_unstable();
+            assert_eq!(received, [APPLY_FAILURE_BYTE, REAPER_READY_BYTE]);
+        }
+
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(libc::WIFEXITED(status), "the child must exit normally");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "70 means the workload lost its close-on-exec setup writer"
+        );
     }
 }

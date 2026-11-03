@@ -50,6 +50,21 @@ the file on disk afterwards changes nothing, and it checks the digest before it 
 Then it locks itself down and turns into the target program, keeping only the environment that
 `strands-box` built for it. The target starts already contained and can't undo it.
 
+The setup-status channel separates setup failures from workload exit codes. The trampoline reports
+completed preparation only after the sandbox, target environment, and working directory are ready.
+It keeps the failure channel open through the executable launch attempt. Box waits for channel
+closure and reports any failure stage, including a launch failure after the preparation marker.
+On Linux, the namespace reaper sends a separate completion marker after its own setup.
+Box requires both markers. The launcher and reaper close their copies before they wait for workload exit.
+A long-lived workload therefore cannot keep the setup reader blocked through those copies.
+
+Channel closure before all required preparation markers is incomplete setup. Buffered and streaming
+execution report it as an error. If the agent launcher dies from a signal, Box preserves its signal exit
+status. A reported setup failure or malformed marker still takes priority over that status. Closure after that marker
+means preparation completed without a reported launch failure. It does not prove application readiness
+or successful executable launch: abrupt death between the marker and the launch closes the channel too.
+The same status reader serves buffered and streaming execution. It rejects the obsolete completion marker immediately, so an old helper cannot retain a streaming setup wait.
+
 The trampoline doesn't decide anything itself. Whether a process gets the agent's rules or the rules
 for a tool's or local MCP server's sandbox is written in the configuration, and `strands-box` writes
 that.
@@ -67,11 +82,13 @@ only Box program inside the box, and it has no power of its own: it can't open t
 can't serve requests.
 
 `strands-box` puts the alias in the box directory's `bin/` under the names `zsh`, `bash`, `sh`,
-`python3`, and `python` (`INTERPRETER_ALIASES` in the library), plus the program name of each MCP
-server the box declares, so no MCP server can take one of those five names. `bin/`
+`python3`, and `python` (`INTERPRETER_ALIASES` in the library), plus each program name that a
+declared MCP server starts from, once however many servers share it, so no MCP server can take one
+of those five names. `bin/`
 comes first on the agent's `PATH`, so when the harness runs `zsh`, it gets the alias. The sandbox for a
-tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter or MCP server the
-request is for. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the
+tool or a local MCP server gets no alias and no `bin/` on its `PATH`. The alias uses the name it was run under to tell `strands-box` which interpreter the
+request is for. As an MCP program name, it also sends its arguments, and `strands-box` starts the
+declared server whose full command is that name and those arguments, or refuses the launch. It connects to `run/box.sock`, a path it works out from where it lives, and nothing the
 caller passes can point it anywhere else. The broker inside `strands-box` takes it from there
 ([an interpreter runs beside the workload](decisions.md#interpreters-are-brokered-aliases)).
 

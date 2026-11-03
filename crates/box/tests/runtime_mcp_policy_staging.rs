@@ -1774,7 +1774,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["missing"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["missing"]"#),
         "{stderr}"
     );
     drop(client);
@@ -2176,22 +2176,22 @@ fn trusted_launch_path_falls_back_when_the_run_path_is_absent() {
     let mut run = box_.spawn_without_trusted_path();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let client = box_.open_client("env");
-    run.wait_for_through_alias(box_.server_started("env"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("fallback-mcp"), STARTUP);
 
     assert_eq!(
-        box_.trace("env", "path"),
+        box_.trace("fallback-mcp", "path"),
         "/usr/bin:/bin",
         "an absent trusted PATH must use the fixed MCP fallback, with no box bin"
     );
     let environment: serde_json::Map<String, Value> =
-        serde_json::from_str(&box_.trace("env", "environment"))
+        serde_json::from_str(&box_.trace("fallback-mcp", "environment"))
             .expect("parse the fallback child environment");
     assert_eq!(
         environment.get("PATH").and_then(Value::as_str),
         Some("/usr/bin:/bin")
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&box_.trace("env", "argv"))
+        serde_json::from_str::<Value>(&box_.trace("fallback-mcp", "argv"))
             .expect("parse the fallback command arguments"),
         json!(["--declared", "trace"]),
         "the PATH fallback must still start the declared command"
@@ -2263,7 +2263,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["stale"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the stale-only action must degrade rather than adopt a stored schema: {stderr}"
     );
     assert!(
@@ -2290,7 +2290,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     assert!(
         String::from_utf8_lossy(&second_output.stderr)
-            .contains(r#"discovery denied tools/list for ["stale"]"#),
+            .contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the second run must also degrade the stale-only action: {}",
         String::from_utf8_lossy(&second_output.stderr)
     );
@@ -2333,9 +2333,14 @@ fn one_locked_run_keeps_its_record_policy_and_mcp_snapshot() {
 
     let beta = Server::new("beta", "beta-mcp", "write", DiscoveryBehavior::Ready);
     box_.install_server(&beta);
+    let renamed = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through(
+            "alpha-mcp",
+            vec!["--declared".to_string(), "alpha-second".to_string()],
+        );
     box_.write_workspace(
         &policy_for("beta", "write"),
-        &[beta],
+        &[beta, renamed],
         r#"
 set -eu
 : > "$HOME/second-workload.started"

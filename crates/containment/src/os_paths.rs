@@ -151,10 +151,12 @@ pub(crate) enum Match {
     AnyOverlap,
 }
 
-/// What a forbidden row protects, which decides its message and whether a caller may exempt it.
+/// What a forbidden row protects, which decides its message, whether a caller may exempt it, and
+/// the class that `ContainmentError::forbidden_class` reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ForbiddenClass {
+#[non_exhaustive]
+pub enum ForbiddenClass {
     /// The whole filesystem.
     WholeFilesystem,
     /// The directory every home sits in.
@@ -174,12 +176,24 @@ pub(crate) enum ForbiddenClass {
 }
 
 impl ForbiddenClass {
+    /// Every class, in declaration order.
+    pub(crate) const ALL: [Self; 8] = [
+        Self::WholeFilesystem,
+        Self::HomeNamespace,
+        Self::SystemTree,
+        Self::LoaderDirectory,
+        Self::CredentialStore,
+        Self::PasswordDatabase,
+        Self::MachineCredential,
+        Self::PrivilegeConfiguration,
+    ];
+
     /// Whether `allow_credential_store` may punch a hole in a row of this class.
     pub(crate) const fn is_exemptible(self) -> bool {
         matches!(self, Self::CredentialStore)
     }
 
-    /// Why this class refuses a grant. The text, not the class, is what a caller reads.
+    /// Why this class refuses a grant. Each class has its own text, which `forbidden_class` reads back.
     pub(crate) const fn reason(self) -> &'static str {
         match self {
             Self::WholeFilesystem => "the whole filesystem is never a grantable tree",
