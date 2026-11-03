@@ -98,15 +98,17 @@ measured in Node, Python `urlsplit`, and the Rust `url` crate:
 | An IPv4 literal in any form but dotted-quad | `https://127.1/page` and `https://2130706433/page` each reach `127.0.0.1` |
 | An IPv6 literal under `http`/`https` that compresses its zeros or maps an IPv4 address | `https://[::0001]/page` reaches `[::1]`; `https://[::FFFF:127.0.0.1]/page` reaches `[::ffff:7f00:1]`. A loopback literal under `file:` does fold, because the local authority is parsed rather than compared as text |
 
-**A port spelling and an empty userinfo are not folded either, and under `http`/`https` both are a
-gap you must write around.** A URL parser reads a port as a number, so it treats `:0443` as `443`
-and drops it as the `https` default, and it drops a bare `:` the same way. It drops an empty
-userinfo and an empty password with it. The box keeps whichever the workload wrote. So
-`https://notes:0443/page`, `https://notes:08080/page`, `https://notes:/page`, `https://@notes/page`,
-and `https://user:@notes/page` each reach the same origin as a shorter spelling while reaching a rule
-as a different string, and a rule that names the shorter spelling does not match. All three parsers
-accept every one of them. Percent-escape hex case inside a query (`?a=%2e` against `?a=%2E`) is
-unfolded the same way.
+**A port spelling is not folded, and under `http`/`https` that is a gap you must write around.** A
+URL parser reads a port as a number, so it treats `:0443` as `443` and drops it as the `https`
+default, and it drops a bare `:` the same way. It drops an empty
+userinfo with it, though the box now refuses a userinfo outright. The box keeps whichever port the
+workload wrote. So `https://notes:0443/page`, `https://notes:08080/page`, and `https://notes:/page`
+each reach the same origin as a shorter spelling while reaching a rule as a different string, and a
+rule that names the shorter spelling does not match. All three parsers accept every one of them.
+Percent-escape hex case inside a query (`?a=%2e` against `?a=%2E`) is unfolded the same way. A
+`file:` URI carrying a userinfo or an empty port is the same residual with a smaller cost: Node and
+the Rust `url` crate reject such a URI outright, so reaching the file needs a server on Python's
+lenient `urlsplit`.
 
 **Under `file:` the authority is not load-bearing, and on one resolver any host reaches the local
 path.** None of the three implements a remote `file:` URI. Node's `fileURLToPath` and the Rust `url`
@@ -135,22 +137,22 @@ The loopback fold above is therefore a narrowing and not a claim about which hos
 folding `[::0001]` to the empty authority makes a path-anchored rule match more spellings, never
 fewer.
 
-**Any userinfo, not only an empty one, puts the host out of a pattern's reach.** The canonical form
-spells the userinfo before the host, so `https://user@notes/page` and `https://user:pass@notes/page`
-begin with characters no host pattern can anticipate. All three parsers read the host as `notes` and
-the path as `/page`, so each fetches the page a rule names while matching no rule written against
-the host. The empty userinfo is the sharper half, because a parser also drops it and the box does
-not, so the two ends read two strings; a non-empty one both ends agree on, and it still walks past
-the rule.
+**An `http` or `https` URI that carries userinfo is refused.** RFC 9110 §4.2.4 deprecates it: a
+sender may not generate one, and a recipient of a URI from an untrusted source is asked to treat its
+presence as an error, because it obscures the authority. The workload is that untrusted source, and
+the obscuring was measurable here — the canonical form spells the userinfo before the host, so no
+rule written against a host reached `https://user@notes/page`, while all three parsers read it as
+host `notes` and path `/page`. An empty one was worse again, because a parser drops it and the box
+did not. **A `file:` URI keeps its userinfo**, because RFC 9110 does not govern that scheme, and it
+stays the residual below.
 
 **No `uri` pattern names one origin and only that origin while those spellings are unfolded.** A
 pattern that keeps the path separator, `uri like "https://notes/*"`, matches none of them, because
 the canonical form puts the port and the userinfo before the `/`. A pattern that ends at the host's
 last character, `uri like "https://notes*"`, matches every port spelling — and also every host that
 starts with those characters, such as `notes.example.com` and `notes-staging`, which is a rule wider
-than the one you wrote. **Neither reaches any userinfo**, empty or not, because the userinfo comes
-first in the canonical form. So a host pattern cannot carry this on its own: write the longest host
-prefix you can, check what else that prefix reaches, and use a rule on `context.input.server` or
+than the one you wrote. A userinfo no longer needs a pattern at all, because one is refused. So
+write the longest host prefix you can, check what else that prefix reaches, and use a rule on `context.input.server` or
 `context.input.method` where you need a boundary that does not depend on the host's spelling.
 `admission.rs::a_uri_like_pattern_cannot_name_one_origin_and_only_that_origin` pins each half.
 

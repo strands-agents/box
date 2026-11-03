@@ -495,7 +495,6 @@ mod tests {
             "https://notes:0443/page",
             "https://notes:08080/page",
             "https://notes:/page",
-            "https://@notes/page",
         ] {
             assert!(
                 call(&with_separator, &read(reaches_the_same_origin)).is_ok(),
@@ -527,9 +526,9 @@ mod tests {
             );
         }
 
-        // Neither pattern reaches ANY userinfo, empty or not, because the canonical form spells the
-        // userinfo before the host. All three parsers read the host as `notes` and the path as
-        // `/page`, so each of these fetches the page the rule names and matches no rule.
+        // A userinfo put the host out of BOTH patterns' reach, because the canonical form spells
+        // it before the host. That is refused at the door under these schemes now (RFC 9110
+        // §4.2.4), so no pattern has to reach it and the request never gets a decision.
         for carries_userinfo in [
             "https://@notes/page",
             "https://user@notes/page",
@@ -538,12 +537,12 @@ mod tests {
             "https://user:@notes/page",
         ] {
             assert!(
-                call(&with_separator, &read(carries_userinfo)).is_ok(),
-                "a pattern holding the path separator reaches no userinfo: {carries_userinfo}"
+                call(&with_separator, &read(carries_userinfo)).is_err(),
+                "a userinfo is refused, so no pattern has to reach it: {carries_userinfo}"
             );
             assert!(
-                call(&host_prefix, &read(carries_userinfo)).is_ok(),
-                "a host-prefix pattern reaches no userinfo either: {carries_userinfo}"
+                call(&host_prefix, &read(carries_userinfo)).is_err(),
+                "and the same under the host-prefix pattern: {carries_userinfo}"
             );
         }
     }
@@ -1295,7 +1294,7 @@ mod tests {
         // percent-escape, an IPv4 literal, and an IPv6 literal.
         for (spelling, canonical) in [
             ("https://notes.example/page", "https://notes.example/page"),
-            ("https://@notes.example/page", "https://@notes.example/page"),
+            ("file://user@localhost/x", "file://user@localhost/x"),
             ("https://notes.example:/page", "https://notes.example:/page"),
             ("https://%6Eotes.example/page", "https://notes.example/page"),
             ("https://notes%2Eexample/page", "https://notes.example/page"),

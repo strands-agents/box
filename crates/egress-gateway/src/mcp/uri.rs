@@ -243,6 +243,22 @@ fn normalize_authority(auth: &str, scheme: &str) -> Result<String, String> {
         Some((user, rest)) => (Some(user), rest),
         None => (None, auth),
     };
+
+    // RFC 9110 §4.2.4 deprecates the userinfo under these two schemes: a sender may not generate
+    // one, and a recipient of a URI from an untrusted source is asked to treat its presence as an
+    // error, because it obscures the authority. The workload is the untrusted source here, and the
+    // obscuring is measurable: the canonical form spells the userinfo before the host, so no rule
+    // written against a host reaches a URI that carries one, while all three reference parsers
+    // resolve it to that host. An empty one is worse again, because a parser drops it and this
+    // function does not, so the two ends read two strings.
+    if userinfo.is_some() && scheme != "file" {
+        return Err(
+            "an http or https URI that carries userinfo is refused: RFC 9110 §4.2.4 asks a \
+                    recipient to treat it as an error, because it obscures the host the URI \
+                    reaches"
+                .to_string(),
+        );
+    }
     let (host, port) = if let Some(rest) = hostport.strip_prefix('[') {
         // IPv6 literal `[..]` (optionally `:port`); the literal is left as written.
         match rest.split_once(']') {
@@ -911,10 +927,12 @@ mod tests {
             "host lowercased + trailing dot stripped, path still canonicalized"
         );
         assert_eq!(
-            canonicalize_resource_uri("http://user@HOST:8080/x"),
-            "http://user@host:8080/x",
-            "host lowercased; userinfo and non-default port preserved"
+            canonicalize_resource_uri("http://HOST:8080/x"),
+            "http://host:8080/x",
+            "host lowercased; non-default port preserved"
         );
+        // A userinfo is refused under these schemes, so it is never lowercased with the host.
+        assert!(super::canonicalize_resource_uri("http://user@HOST:8080/x").is_err());
     }
 
     #[test]
@@ -1053,9 +1071,10 @@ mod tests {
             "https://example.com/b"
         );
         assert_eq!(
-            canonicalize_resource_uri("http://user@HOST:8080/x"),
-            "http://user@host:8080/x"
+            canonicalize_resource_uri("http://HOST:8080/x"),
+            "http://host:8080/x"
         );
+        assert!(super::canonicalize_resource_uri("http://user@HOST:8080/x").is_err());
     }
 
     /// Full RFC 3986 §6.2 authority canonicalization on the remote door, matching the broker copy:
@@ -1203,10 +1222,11 @@ mod tests {
             "http://example.com/x"
         );
         // The userinfo is passed through verbatim, so an escape there is not a host escape and
-        // still rides: a parser keeps it too, so the two ends read one string.
+        // still rides. `file:` is where that is observable, because RFC 9110 §4.2.4 refuses a
+        // userinfo under the other two schemes.
         assert_eq!(
-            canonicalize_resource_uri("https://US%45R@notes/page"),
-            "https://US%45R@notes/page"
+            canonicalize_resource_uri("file://US%45R@localhost/home/op/.env"),
+            "file://US%45R@localhost/home/op/.env"
         );
         // An IPv6 literal is never percent-decoded, so the check does not reach inside one.
         assert_eq!(
@@ -1274,6 +1294,62 @@ mod tests {
         );
     }
 
+    /// **An `http`/`https` URI carrying userinfo is refused, and `file:` keeps it.**
+    ///
+    /// RFC 9110 §4.2.4 asks a recipient of a URI from an untrusted source to treat a userinfo as an
+    /// error, because it obscures the authority. The workload is that untrusted source, and the
+    /// obscuring was measurable: the canonical form spells the userinfo first, so no rule written
+    /// against a host reached a URI carrying one, while all three parsers resolved it to that host.
+    /// An empty one also made the two ends read two strings, because a parser drops it.
+    #[test]
+    fn an_http_uri_carrying_userinfo_is_refused() {
+        for uri in [
+            "https://@notes/page",
+            "https://:@notes/page",
+            "https://user@notes/page",
+            "https://user:@notes/page",
+            "https://:pass@notes/page",
+            "https://user:pass@notes/page",
+            "https://US%45R@notes/page",
+            "https://user@notes:8080/page",
+            "http://user@notes/page",
+            "HTTP://user@notes/page",
+            "https://user@notes",
+            "https://user@[::1]/page",
+        ] {
+            let refusal = super::canonicalize_resource_uri(uri)
+                .expect_err("RFC 9110 §4.2.4 asks a recipient to treat userinfo as an error");
+            assert!(refusal.contains("carries userinfo"), "{uri}: {refusal}");
+        }
+
+        // `file:` is outside RFC 9110, so a userinfo there is kept and stays the documented
+        // residual: Node and the Rust `url` crate refuse such a URI, and Python ignores both the
+        // userinfo and the host.
+        assert_eq!(
+            canonicalize_resource_uri("file://user@localhost/home/op/.env"),
+            "file://user@localhost/home/op/.env"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("file://@localhost/home/op/.env"),
+            "file://@localhost/home/op/.env"
+        );
+
+        // An authority with no userinfo is untouched, so the refusal reaches only the `@` form.
+        assert_eq!(
+            canonicalize_resource_uri("https://notes/page"),
+            "https://notes/page"
+        );
+        assert_eq!(
+            canonicalize_resource_uri("https://notes:8080/page"),
+            "https://notes:8080/page"
+        );
+        // A `%40` is not an `@`: it stays encoded in the path and names no userinfo.
+        assert_eq!(
+            canonicalize_resource_uri("https://notes/a%40b"),
+            "https://notes/a%40b"
+        );
+    }
+
     /// The check reads the WHOLE string as an authority. A `/`, a `?`, or a `#` ends an authority
     /// early and leaves the tail as a path, and an authority this module splits off holds none of
     /// the three — so this is what the guard is for, and no URI reaches it.
@@ -1330,11 +1406,13 @@ mod tests {
             "https://[::ffff:127.0.0.1]/page",
             "https://[v1.x]/page",
             // `userinfo = *( unreserved / pct-encoded / sub-delims / ":" )`, so empty conforms.
-            "https://@notes/page",
-            "https://:@notes/page",
-            "https://user@notes/page",
-            "https://user:pass@notes/page",
-            "https://US%45R@notes/page",
+            // RFC 9110 §4.2.4 refuses one under `http`/`https`, so `file:` is where the grammar
+            // control for it lives — the check under test must accept all five either way.
+            "file://@localhost/home/op/.env",
+            "file://:@localhost/home/op/.env",
+            "file://user@localhost/home/op/.env",
+            "file://user:pass@localhost/home/op/.env",
+            "file://US%45R@localhost/home/op/.env",
             // `port = *DIGIT`, so empty and a leading zero both conform.
             "https://notes:/page",
             "https://notes:0443/page",
