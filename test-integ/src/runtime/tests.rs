@@ -312,7 +312,7 @@ fn a_candidate_that_executes_as_a_usr_bin_image_or_is_not_cpython_is_rejected() 
 
 #[test]
 fn the_probe_config_grants_only_the_runtime_directories_and_declares_the_search_path() {
-    let template = "name = \"t\"\nbox_dir = \"/b/state\"\n\n[agent]\ncommand = {command}\nworkspace = \"/b/ws\"\n\n[agent.filesystem]\nread = [\"/b/ws\"]\nwrite = [\"/b/ws\"]\nread_file = [\"/h/.det-listed-settings.json\"]\n\n[tool.built]\ncommand = [\"/b/ws/out/built-hello\"]\nworkspace = \"/b/ws\"\n\n[tool.built.filesystem]\nread = [\"/b/ws\"]\n";
+    let template = "name = \"t\"\nbox_dir = \"/b/state\"\n\n[agent]\ncommand = {command}\nworkspace = \"/b/ws\"\n\n[agent.filesystem]\nread = [\"/b/ws\"]\nwrite = [\"/b/ws\"]\nread_file = [\"/h/.det-listed-settings.json\"]\n\n[tool.built]\ncommand = [\"/b/tools/built-hello\"]\nworkspace = \"/b/ws\"\n\n[tool.built.filesystem]\nread = [\"/b/ws\"]\n";
     let python = NativePython {
         executable: PathBuf::from(
             "/opt/clt/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",

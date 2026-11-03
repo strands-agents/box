@@ -56,6 +56,7 @@ when { ["fetch", "github"].contains(context.input.server) };
 | `shell:spawn` | `context.input.program` | Element 0 of the server's `command`. |
 | | `context.input.program_path` | The program's file, with every link resolved. `~` is the operator's home. |
 | | `context.input.arg1`, `arg2`, `arg_count` | The server's arguments. |
+| | `context.input.command` | The server's full `command` as written in `box.toml`: the program and its arguments, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
 | `mcp:call` | `context.input.server` | The `[mcp.<name>]` table's name. |
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
@@ -64,13 +65,32 @@ when { ["fetch", "github"].contains(context.input.server) };
 
 Add each server to the harness's own MCP configuration.
 
-- **A `stdio` server:** set its command to the program, the first element of `command`. The
-  harness runs the alias, and the box starts the server.
+- **A `stdio` server:** set its command to the server's full `command` from `box.toml`: the
+  program, then every argument, in the same order. The harness runs the alias with those arguments,
+  and the box starts the server whose `command` matches.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.
 
-Use your client's configuration format for these settings. The server command or URL must match the
-server declared in `box.toml`.
+Use your client's configuration format for these settings. For this `box.toml` table:
+
+```toml
+[mcp.playwright]
+type    = "stdio"
+command = ["npx", "-y", "@playwright/mcp"]
+```
+
+a client that takes a command and its arguments apart gets:
+
+```json
+{ "mcpServers": { "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] } } }
+```
+
+A harness entry that sets only the program, `"command": "npx"` with no `args`, is refused for this
+server with `no MCP server declares "npx"; servers on npx: playwright`. Add the
+arguments to the harness entry. The same applies to every `stdio` server whose `command` has
+arguments.
+
+The server URL must match the server declared in `box.toml`.
 
 ## Step 3. Find the tool and argument names
 
@@ -155,16 +175,59 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | Refusal | Cause |
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
+| `no MCP server declares "<command>"` | The harness's command or arguments differ from every `command` on that program. Copy the `command` of one of the listed servers from `box.toml` into the harness, as in [step 2](#step-2-connect-the-harness). The run's records hold the same refusal, as a `shell:spawn` denial with the rule `enforcement:mcp-command`. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
+| A refusal that says `[default-deny]`, and the startup warning `a per-tool rule never loaded` printed | A per-tool rule never loaded, so each call it decides is refused — for a rule that names its tool in the head, or pins one server and one tool in a `when` condition ([which rules get refused](#when-a-rule-cannot-load)). The permit is there; the rule is the problem. Do not expect the refused tool's server to be one the warning names — the warning names the servers the rule waits for, and a rule can wait for one server while deciding a tool on another. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |
 
-When a rule refuses `tools/list` for a server that a per-tool rule names, the box starts and that
-server has no tools. Each call to its tools is refused, and stderr names the server:
-`discovery denied tools/list for ["<server>"]`. Permit the server's `tools/list`, or remove its
-per-tool rule.
+### When a rule cannot load
+
+When a per-tool rule cannot load, the box starts and that rule never takes effect. Where Box can
+work out which calls that rule would have decided, it refuses each of them with `[default-deny]`,
+so an unenforceable rule costs the agent that tool rather than letting the call through. Where it
+cannot, those calls run on the `mcp:call` permit — [which rules Box can refuse
+for](#which-rules-box-can-refuse-for) says which is which, and it is worth reading, because the
+difference decides whether your rule fails closed or open. stderr names the servers the rule was
+waiting for in either case: `a per-tool rule never loaded for ["<server>"]`. Three things cause it.
+A rule refuses `tools/list` for the server, so the server has no tools at all — permit its
+`tools/list`. Or the server's catalog does not offer the tool the rule names, because the name is
+misspelled or the server dropped it — correct the tool name. Or the rule reads an argument the
+server names differently, or compares it against another type — correct the argument. Removing the
+per-tool rule also clears the warning.
+
+The warning names every server the rule was waiting for, so when a rule reads one server's tool from
+history it names that server too, even when that server is answering correctly.
+
+### Which rules Box can refuse for
+
+Box works out which calls an inert rule would have decided in two ways: from the tool the rule names
+in its head, and from a `when` condition that pins `context.input.server` and `context.input.tool`
+to one quoted name each. Those two rules **fail closed** — their calls get refused.
+
+A pin still counts when other tests sit beside it, as in `context.input.server == "svc" &&
+context.input.tool == "approve" && context.input.method != "tools/list"`, because each test joined
+by `&&` has to hold. A pin does not count when it sits inside a `||`, a negation, or an `if`, or in
+an `unless` condition, because there the rule may reach some other tool instead.
+
+Every other rule **fails open**: its calls run on the `mcp:call` permit while the rule enforces
+nothing. These are the shapes, and each is worth checking your own policy against:
+
+| An inert rule on `mcp:call` whose condition … | Why Box holds nothing |
+|---|---|
+| pins the server alone | Every tool on that server is in reach, and the rule names none of them. |
+| picks tools with `["approve", "reject"].contains(context.input.tool)` | A set membership is not an equality, so neither name is a pin. |
+| matches with `context.input.tool like "appro*"` | A pattern is not an equality. |
+| offers a choice, as in `context.input.server == "svc" && (context.input.tool == "a" \|\| context.input.tool == "b")` | The server pin counts, because it still has to hold; the two tool names do not, because only one of them need hold. One pin alone names no tool. |
+| narrows on `context.input.method`, or on an argument | Those reach tools the rule never names. |
+| does not narrow at all | Every tool call is in reach. |
+
+Read the startup warning as the signal that a rule went inert, then check it against the table
+above to learn whether its calls are being refused or allowed. To get the refusal, name the tool in
+the rule's head, or pin the server and the tool to one name each in a `when` condition — writing one
+rule per tool where you need several.
 
 ## See also
 

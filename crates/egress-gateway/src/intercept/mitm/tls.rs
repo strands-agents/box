@@ -1,5 +1,6 @@
 //! Selective TLS termination for the MITM adapter.
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
@@ -50,25 +51,9 @@ pub(super) fn upstream_client_config(extra_ca_pems: &[String]) -> Result<ClientC
 
 /// Parse PEM-encoded certificates into DER, for the additive trust bundle.
 fn parse_pem_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let mut certs = Vec::new();
-    let mut in_cert = false;
-    let mut b64 = String::new();
-    for line in pem.lines() {
-        if line.contains("BEGIN CERTIFICATE") {
-            in_cert = true;
-            b64.clear();
-        } else if line.contains("END CERTIFICATE") {
-            in_cert = false;
-            use base64::Engine;
-            let der = base64::engine::general_purpose::STANDARD
-                .decode(b64.trim())
-                .map_err(|e| ProxyError::Intercept(format!("bad PEM base64: {e}")))?;
-            certs.push(CertificateDer::from(der));
-        } else if in_cert {
-            b64.push_str(line.trim());
-        }
-    }
-    Ok(certs)
+    CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| ProxyError::Intercept(format!("bad PEM certificate: {e}")))
 }
 
 #[cfg(test)]

@@ -69,10 +69,13 @@
 //! Assertions panic on failure, so a case is ordinary `#[test]` code: run it with
 //! `cargo test` in your editor, or the whole suite with `./run.sh`.
 
+mod process;
+
 pub mod egress;
 pub mod mcp_fixture;
 pub mod mcp_origin;
 pub mod quarantine;
+pub mod scenarios;
 pub mod telemetry;
 pub mod verdict;
 
@@ -839,17 +842,6 @@ pub fn judge_ssrf_probe(out: &str) -> Result<SsrfFloor, String> {
     }
 }
 
-/// Read a child's pipe to completion on its own thread, so the child never blocks on a full pipe.
-fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut bytes);
-        }
-        bytes
-    })
-}
-
 /// One isolated box workspace. Its directory outlives the fixture, and `run.sh` removes it after the
 /// suite.
 pub struct BoxFixture {
@@ -1282,147 +1274,6 @@ impl BoxFixture {
         }
     }
 
-    /// Run a command in the native bash inside the box, and perform `meanwhile` on the HOST
-    /// while the workload is live.
-    ///
-    /// The workload script must touch the `ready` marker (see [`BoxFixture::ready_marker`]) once
-    /// the box is running, then wait for the `go` marker (see [`BoxFixture::go_marker`]) before
-    /// the part of the script that depends on `meanwhile`. This is how a case measures what the
-    /// box does about a path that changes AFTER startup, which no single in-box command can
-    /// arrange: a write the box denies never creates the file, so a read of it afterwards proves
-    /// only the write denial.
-    pub fn run_sh_meanwhile<F: FnOnce()>(&self, cmd: &str, meanwhile: F) -> RunResult {
-        self.write_command("bash");
-        self.spawn_meanwhile(cmd, &[], meanwhile)
-    }
-
-    /// [`BoxFixture::run_sh_meanwhile`] against a configuration `edit` derives from the fixture's
-    /// template, restored afterwards as [`BoxFixture::run_sh_with_config`] restores it.
-    pub fn run_sh_with_config_meanwhile<E: FnOnce(String) -> String, F: FnOnce()>(
-        &self,
-        edit: E,
-        cmd: &str,
-        meanwhile: F,
-    ) -> RunResult {
-        self.install_config(edit(self.template.replace("{command}", "[\"bash\"]")));
-        let result = self.spawn_meanwhile(cmd, &[], meanwhile);
-        self.write_command("bash");
-        result
-    }
-
-    /// [`BoxFixture::run_sh_with_config_meanwhile`] with extra environment on the box process — used
-    /// when the box must resolve something on its own `PATH` (e.g. a declared MCP server's program).
-    pub fn run_sh_with_config_meanwhile_env<E: FnOnce(String) -> String, F: FnOnce()>(
-        &self,
-        edit: E,
-        cmd: &str,
-        env: &[(&str, &str)],
-        meanwhile: F,
-    ) -> RunResult {
-        self.install_config(edit(self.template.replace("{command}", "[\"bash\"]")));
-        let result = self.spawn_meanwhile(cmd, env, meanwhile);
-        self.write_command("bash");
-        result
-    }
-
-    fn spawn_meanwhile<F: FnOnce()>(
-        &self,
-        cmd: &str,
-        env: &[(&str, &str)],
-        meanwhile: F,
-    ) -> RunResult {
-        let _ = std::fs::remove_file(self.ready_marker());
-        let _ = std::fs::remove_file(self.go_marker());
-        count_launch();
-        let before = self.decisions().len();
-        let mut command = Command::new(&self.box_bin);
-        command
-            .arg("run")
-            .arg("--config")
-            .arg(&self.config)
-            .arg("--")
-            .arg("-c")
-            .arg(native(cmd))
-            .current_dir(&self.ws)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                return RunResult::bare(format!("strands-box spawn error: {e}"), -1);
-            }
-        };
-        // Drain both pipes on their own threads from the start. The box writes its startup
-        // disclosures before the workload runs; left undrained past the pipe buffer, that write
-        // would block the box before it ever touched the ready marker.
-        let stdout = drain(child.stdout.take());
-        let stderr = drain(child.stderr.take());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut exited_early = None;
-        while !self.ready_marker().exists() {
-            if let Ok(Some(status)) = child.try_wait() {
-                exited_early = Some(status);
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "DET_ERROR: the workload never touched the ready marker {}",
-                self.ready_marker().display()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if exited_early.is_none() {
-            meanwhile();
-            std::fs::write(self.go_marker(), "go\n").expect("DET_ERROR: write the go marker");
-        }
-        // Bound the wait: a box that will not exit (e.g. a contained-MCP teardown hang on Linux)
-        // must fail observably with its captured output, not hang the whole suite forever. On the
-        // deadline, kill the box — which closes its pipes so the drain threads below can join.
-        let mut hung = false;
-        let status = match exited_early {
-            Some(status) => Ok(status),
-            None => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Ok(status),
-                        Ok(None) if std::time::Instant::now() >= deadline => {
-                            hung = true;
-                            let _ = child.kill();
-                            break child.wait();
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(e) => break Err(e),
-                    }
-                }
-            }
-        };
-        let mut out =
-            String::from_utf8_lossy(&stdout.join().expect("DET_ERROR: join stdout")).into_owned();
-        out.push_str(&String::from_utf8_lossy(
-            &stderr.join().expect("DET_ERROR: join stderr"),
-        ));
-        let decisions = self.decisions().into_iter().skip(before).collect();
-        match status {
-            Ok(status) => RunResult {
-                out: if exited_early.is_some() {
-                    format!("workload exited before the ready marker: {out}")
-                } else if hung {
-                    format!("box did not exit within 45s (killed; likely a teardown hang): {out}")
-                } else {
-                    out
-                },
-                rc: status.code().unwrap_or(-1),
-                decisions,
-                route: Route::Native,
-            },
-            Err(e) => RunResult::bare(format!("strands-box wait error: {e}"), -1),
-        }
-    }
-
     /// The file a [`BoxFixture::run_sh_meanwhile`] workload touches once it is running. Under the
     /// workspace, which the agent holds read and write.
     pub fn ready_marker(&self) -> PathBuf {
@@ -1471,6 +1322,21 @@ impl BoxFixture {
         self.ws.with_file_name("listed")
     }
 
+    /// Install a separate tool image outside the writable workspace.
+    pub fn install_tool(&self, program: &Path) -> PathBuf {
+        install_tool(&self.ws, program)
+    }
+
+    /// The configured copy of the fixture's built binary.
+    pub fn configured_tool(&self) -> PathBuf {
+        self.ws.with_file_name("tools").join("built-hello")
+    }
+
+    /// The configured copy of the fixture's built script.
+    pub fn configured_script(&self) -> PathBuf {
+        self.ws.with_file_name("tools").join("built-tool.sh")
+    }
+
     /// The built tool under the workspace's `out/` exec tree: a binary `rustc` compiled there.
     pub fn built_tool(&self) -> PathBuf {
         self.ws.join("out/built-hello")
@@ -1481,8 +1347,7 @@ impl BoxFixture {
         self.ws.join("out/built-tool.sh")
     }
 
-    /// The canonical exec tree (`out/`) the fixture's tools live in, for a case that compiles a
-    /// probe beside them and runs it under the agent's own `exec` entry.
+    /// The writable build-output tree for programs under the agent's own `exec` entry.
     pub fn exec_tree(&self) -> PathBuf {
         self.built_tool()
             .parent()
@@ -1491,9 +1356,7 @@ impl BoxFixture {
             .expect("DET_ERROR: resolve the exec tree")
     }
 
-    /// Compile `source` with `rustc` to `<exec tree>/<name>` and answer the binary's path. A
-    /// native probe is built here, beside the declared tool, so the agent's `exec` entry on the
-    /// tree (see [`BoxFixture::with_exec_tree`]) can carry it.
+    /// Compile a native probe in the writable build-output tree.
     pub fn compile_probe(&self, name: &str, source: &str) -> PathBuf {
         let out = self.exec_tree();
         let probe = out.join(name);
@@ -1561,14 +1424,16 @@ impl BoxFixture {
     }
 }
 
+/// Copy a fixture program outside the workspace without sharing its writable file identity.
+fn install_tool(workspace: &Path, program: &Path) -> PathBuf {
+    let directory = workspace.with_file_name("tools");
+    std::fs::create_dir_all(&directory).expect("DET_ERROR: create the configured tool directory");
+    let destination = directory.join(program.file_name().expect("DET_ERROR: the tool has a name"));
+    std::fs::copy(program, &destination).expect("DET_ERROR: install the configured tool image");
+    destination
+}
+
 /// Write the box's configuration and policy, and answer with the configuration template.
-///
-/// The agent holds the workspace read and write, because `write` no longer implies `read`. The
-/// `out/` tree under it is a declared tool's exec tree holding a binary `rustc` compiles at fixture
-/// time, which is build output, for the case that runs a binary from an exec tree. On macOS the
-/// agent also lists `listed/`, a sibling of the workspace, without content, and denies `later.env`,
-/// a path that does not exist yet; Linux refuses both cells by name at load, so the cases that need
-/// them skip there.
 fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
     let config_directory = workspace.join(".strands-box");
     std::fs::create_dir_all(&config_directory).expect("DET_ERROR: create workspace");
@@ -1622,6 +1487,9 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
                 .expect("DET_ERROR: executable built tool");
         }
     }
+    let configured_tool = install_tool(&workspace, &tool);
+    let configured_script = install_tool(&workspace, &script);
+    let tools = workspace.with_file_name("tools");
     std::fs::write(workspace.join("readable.txt"), "LISTED_CONTENT\n")
         .expect("DET_ERROR: write a file the workspace grant covers");
     // Beside the workspace, so no `read` entry covers it and only the `list` cell decides.
@@ -1671,19 +1539,20 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
          [tool.built]\ncommand = [{}]\nworkspace = {}\n\n\
          [tool.built.filesystem]\nread = [{}]\n\n\
          [tool.built-script]\ncommand = [{}]\nworkspace = {}\n\n\
-         [tool.built-script.filesystem]\nread = [{}]\n",
+         [tool.built-script.filesystem]\nread = [{}, {}]\n",
         serde_json::to_string(name).unwrap(),
         quoted(&state),
         quoted(&workspace),
         quoted(&workspace),
         quoted(&workspace),
         quoted(&listed_file),
-        quoted(&tool),
+        quoted(&configured_tool),
         quoted(&workspace),
         quoted(&workspace),
-        quoted(&script),
+        quoted(&configured_script),
         quoted(&workspace),
         quoted(&workspace),
+        quoted(&tools),
     );
     std::fs::write(
         config_directory.join("box.toml"),
