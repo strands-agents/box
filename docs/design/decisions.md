@@ -1846,13 +1846,15 @@ changes the policy facade to buy something the box already owns.
 For an `env://` binding the box mints a random phantom token and places that value, and never the real
 secret, in the workload's environment. The gateway holds the real secret and swaps the phantom for it
 only on a request to the destination the binding names. The phantom is a 256-bit random value, unique
-across the vault. At the bound destination the gateway clears the harness's own credential location
+to one credential across the vault. At the bound destination the gateway clears the harness's own credential location
 before it writes the real secret, so the phantom does not ride out beside it. A phantom sent anywhere
 else is not rewritten, and needs no rewrite, because it is random and authenticates nothing: an
-upstream that receives one receives a useless value. The box opens one vault for each route, so an
-ambiguous match inside a vault is refused, and an overlap between two routes is caught at the gateway
-instead: a mutation collision is denied, and a strict phantom check refuses a mismatch. The workload
-can read the phantom and learn that a credential exists.
+upstream that receives one receives a useless value. The box opens one vault for each provisioned
+variable, and every route that names the variable shares that vault's one phantom, because the
+workload's variable can hold only one value. An ambiguous match inside a vault is refused, and an
+overlap between two vaults is caught at the gateway instead: a mutation collision is denied, and a
+strict phantom check refuses a mismatch. The workload can read the phantom and learn that a
+credential exists.
 
 <a id="the-box-is-the-credential-boundary"></a>
 ### The box is the credential boundary, so every process in a box gets every route

@@ -92,7 +92,8 @@ impl Opened {
         }
     }
 
-    /// One phantom per opaque route the vault resolved, in declaration order.
+    /// One phantom per opaque route the vault resolved, in declaration order. Routes that name one
+    /// credential with one prefix carry the same token.
     pub fn phantoms(&self) -> &[Phantom] {
         &self.phantoms
     }

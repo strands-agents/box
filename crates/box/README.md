@@ -300,7 +300,8 @@ unambiguous credential.
 
 An `env://` credential mints one phantom and places it in the workload's
 environment under that name; the real secret is read by the box and never crosses
-the boundary, and the proxy swaps the phantom back at the edge.
+the boundary, and the proxy swaps the phantom back at the edge. Every destination that names
+one variable, in one route or in several, shares that one phantom.
 
 **Every process in the box gets every route.** The agent, each tool, and each MCP server receive
 every phantom and every signing placeholder the box provisions. No table selects a subset, because
