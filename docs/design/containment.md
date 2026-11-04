@@ -278,6 +278,23 @@ when changing ordinary permissions, so those commands can fail even when they ad
 `permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
 existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
 
+### What a process sees of other processes on macOS
+
+Every macOS sandbox hides other processes. The agent, each tool, and each local MCP server get the
+same two rules:
+
+- **Itself:** a process can read all of its own process information.
+- **Its direct children:** a process can read the `proc_pidinfo` information of a process it
+  started. Only that one operation is allowed. A harness such as Kiro CLI uses it to watch the
+  programs it runs.
+
+A process still can't read the information of its parent, a sibling, or any other process on the
+machine. That includes the `strands-box run` process that started the box.
+The rules are in
+[`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
+`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
+control outside the box shows the refusal comes from the sandbox.
+
 ### How you check a box's reach
 
 A filesystem grant is reach that no policy decision covers, and no record of each access exists
@@ -464,7 +481,7 @@ That's also why a `[tool.<name>.filesystem]` table holds six lists: `read`, `wri
 `write_file`, `list`, and `deny`. Box refuses `exec` and `metadata` there, because the tool's sandbox
 already has both.
 
-A tool's sandbox has no route back to Box. Box takes the alias directory off its `PATH`, hides the
+A tool's sandbox has no route back to its own box. Box takes the alias directory off its `PATH`, hides the
 box directory that holds the aliases, and gives it no connect rule for the broker's socket. A tool
 can't ask Box to start another program in a sandbox of its own, or ask Strands Shell to act for the
 agent. What comes back is its output and its exit status. Its network traffic goes through the egress gateway, unless its
@@ -472,6 +489,9 @@ agent. What comes back is its output and its exit status. Its network traffic go
 access with the arguments the agent passes, and removes gateway checks, credential injection, and
 traffic records for it
 ([native egress is an operator-declared exception to the gateway](decisions.md#native-egress-is-an-operator-declared-leaf-escape)).
+
+Another box's broker socket can remain reachable beneath a writable directory.
+Apply the [placement and access guidance](../user/config.md#protect-other-boxes) to other boxes.
 
 <a id="local-mcp-servers"></a>
 ### A local MCP server's sandbox
@@ -527,7 +547,7 @@ argument skips the two things that make a tool's sandbox safe to widen:
 - **Policy admits each tool and each local MCP server:** the operator's `shell:spawn` permits
   decide which programs can start, and each decision admits one launch of one program. The agent's
   sandbox exists from the start of the run and runs model output for all of it.
-- **A tool's or server's sandbox has no route back to Box:** it holds no alias and no route to the
+- **A tool's or server's sandbox has no route back to its own box:** it holds no alias and no route to that
   broker. The agent holds both, so whatever it can do with its own system calls, it can combine with every request it makes
   through Strands Shell, Monty, and the MCP servers.
 

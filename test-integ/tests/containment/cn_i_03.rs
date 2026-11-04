@@ -14,6 +14,21 @@ det_case! {
             linux_signals(b);
             return;
         }
+        // Uncontained control: an unsandboxed process of the same user reads the pidinfo of a
+        // same-user process that is not its child. So a refusal of the box's parent below can only
+        // come from the profile, and not from the kernel's same-user check.
+        let control = Command::new(&native_python().executable)
+            .args(["-c", "import ctypes, ctypes.util, os\n\
+                 libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n\
+                 buffer = ctypes.create_string_buffer(512)\n\
+                 rc = libc.proc_pidinfo(os.getppid(), 3, ctypes.c_uint64(0), buffer, 512)\n\
+                 print('HOST_PIDINFO', rc > 0)"])
+            .output()
+            .expect("DET_ERROR: run the host pidinfo control");
+        assert!(
+            support::text(control).contains("HOST_PIDINFO True"),
+            "DET_ERROR: the host control must read a same-user process, or the arm below proves nothing"
+        );
         let r = b.probe_py(
             r#"
 import signal, time
@@ -27,6 +42,13 @@ time.sleep(0.5)
 print("child_pid_nonzero", pid > 0)
 t("signal_own_child", lambda: os.kill(pid, 0))
 t("priority_own_child", lambda: os.setpriority(os.PRIO_PROCESS, pid, 5))
+import ctypes
+def pidinfo(target):
+    buffer = ctypes.create_string_buffer(512)
+    _, rc, _, errno = raw("proc_pidinfo", target, 3, ctypes.c_uint64(0), buffer, 512)
+    return "allowed" if rc > 0 else f"denied errno {errno}"
+t("pidinfo_own_child", lambda: pidinfo(pid))
+t("pidinfo_parent", lambda: pidinfo(os.getppid()))
 try:
     os.kill(pid, signal.SIGKILL)
 except OSError as e:
@@ -43,6 +65,10 @@ except OSError as e:
         r.assert_errno("signal_own_child", 1);
         // Changing that child's priority is refused too.
         r.assert_errno("priority_own_child", 1);
+        // Reading the child's process information is allowed. The parent is the unsandboxed
+        // `strands-box run` process of the same user, and the profile alone hides it.
+        r.assert_ok("pidinfo_own_child", "allowed");
+        r.assert_ok("pidinfo_parent", "denied errno 1");
     }
 }
 

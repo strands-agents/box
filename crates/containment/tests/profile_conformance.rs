@@ -242,6 +242,7 @@ fn renderer_only_replaces_the_checked_in_placeholders() {
     ));
     assert!(profile.contains("(deny process-info*)"));
     assert!(profile.contains("(allow process-info* (target self))"));
+    assert!(profile.contains("(allow process-info-pidinfo (target children))"));
     assert!(!profile.contains("(allow process-info* (target same-sandbox))"));
     assert!(profile.contains(&format!(
         "(allow process-exec (literal \"{}\"))",
@@ -1730,6 +1731,7 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
     let mut expected = vec![
         "mach-lookup",
         "process-info*", // self-inspection only; paired with (deny process-info*)
+        "process-info-pidinfo", // pidinfo on the workload's own children
         "process-exec",  // the one execute grant
         "file-read-metadata", // that literal, so a PATH search can stat it
         "process-fork",  // unscoped; SBPL has no argv/child-count filter

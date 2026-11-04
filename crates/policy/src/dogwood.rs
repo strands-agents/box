@@ -758,24 +758,51 @@ fn block_end(bytes: &[u8], open: usize) -> Option<usize> {
 /// are the authored rules in order.
 pub(crate) fn validate_canonical_policy_set(
     canonical_policies: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_canonical_policy_set(canonical_policies, mcp_schemas, operator, positions)
-        .map_err(Refused::into_error)
+    check_canonical_policy_set(
+        canonical_policies,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        positions,
+    )
+    .map_err(Refused::into_error)
 }
 
 /// Strict-validate canonical policy statements, keeping the findings of a refusal.
 pub(crate) fn check_canonical_policy_set(
     canonical_policies: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), Refused> {
     let source = canonical_policies.join("\n");
-    check_and_expand(&source, mcp_schemas, operator, false, positions)
-        .map(|(_, schema, warnings)| (schema, warnings))
+    check_and_expand(
+        &source,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        false,
+        positions,
+    )
+    .map(|(_, schema, warnings)| (schema, warnings))
+}
+
+/// Strict-validate authored `source` against the canonical, tool grammar, and MCP schemas.
+pub(crate) fn validate_with_schemas(
+    source: &str,
+    grammar_schemas: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+) -> Result<Vec<PolicyWarning>, PolicyError> {
+    check_and_expand(source, grammar_schemas, mcp_schemas, operator, true, &[])
+        .map(|(_, _, warnings)| warnings)
+        .map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle before the durable engine installs it.
@@ -784,12 +811,13 @@ fn validate_and_expand(
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_and_expand(source, mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
+    check_and_expand(source, &[], mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle, keeping the findings of a refusal, located when `source` is authored.
 pub(crate) fn check_and_expand(
     source: &str,
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     authored: bool,
@@ -800,7 +828,7 @@ pub(crate) fn check_and_expand(
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
-    let effective_schema = action_schema(mcp_schemas)?;
+    let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
     check_against(source, effective_schema, operator, authored, positions)
 }
 
@@ -2991,7 +3019,7 @@ mod authored_positions {
                 .to_string(),
         ];
         let Err(refused) =
-            check_canonical_policy_set(&subset, &[], &Operator::unanchored(), &[3, 7])
+            check_canonical_policy_set(&subset, &[], &[], &Operator::unanchored(), &[3, 7])
         else {
             panic!("one @id on two rules must refuse");
         };
