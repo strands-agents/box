@@ -1,4 +1,4 @@
-# The action vocabulary
+# Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
 ships ten actions, and generates one more for each MCP tool it discovers.
@@ -106,11 +106,17 @@ Each outbound call is two decisions, both of which must permit.
 |---|---|---|
 | `host` | String | The destination host. |
 | `port` | Long | The destination port. |
-| `ip?` | String | The IP address the gateway connects to, as text, such as `"203.0.113.7"`. |
+| `ip4?` | String | The IPv4 address the gateway connects to, as a dotted quad, such as `"203.0.113.7"`. Present for an IPv4 destination, and for an IPv6 destination that carries an IPv4 address in a wrapping Box recognises. |
+| `ip6?` | String | The IPv6 address the gateway connects to, as text, compressed and in lowercase, such as `"64:ff9b::cb00:7107"`. Present for every IPv6 destination, and absent for an IPv4 one. |
 
-Compare `ip` as a String behind a guard, as
-`context.input has ip && context.input.ip == "203.0.113.7"`. An `ipaddr` comparison refuses to load
-with `the types String and ipaddr are not compatible`.
+Both are absent before resolution, on the decision for the host. A destination that arrives wrapped
+carries both: dialling `64:ff9b::cb00:7107` gives `ip4 = "203.0.113.7"` and
+`ip6 = "64:ff9b::cb00:7107"`. A plain IPv4 destination carries `ip4` alone, because one IPv4 address
+has many IPv6 encodings and there is no single IPv6 form to report.
+
+Compare either as a String behind its own guard, as
+`context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to load
+with `expected ipaddr but saw String`.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 
@@ -229,7 +235,7 @@ What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends. A Shell `test -e`, `test -L`, or `test -r` that got an answer is a response even when the answer is "no", such as one of a missing path. A Shell check that Box itself refuses, at the reach floor or because the filesystem changed during the check, is an error. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |

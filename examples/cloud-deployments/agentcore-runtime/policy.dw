@@ -1,0 +1,76 @@
+// The controller binds each port field to the fixture's allocated TCP port.
+// This policy governs one synthetic order during a 300-second demonstration.
+
+@id("shipment_fixture_connect")
+permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource)
+when { context.input.host == "127.0.0.1" && context.input.port == 0 };
+
+@id("shipment_fixture_reads")
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "GET" &&
+    ["/orders/42", "/orders/42/eligibility", "/orders/42/eligibility-failed",
+     "/orders/43/eligibility"].contains(context.input.path)
+};
+
+@id("shipment_fixture_mutations")
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" &&
+    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+};
+
+@id("dispatch_requires_eligibility")
+@description("Check eligibility for this order before dispatch.")
+forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" && context.input.path == "/orders/42/dispatch"
+}
+unless temporal {
+    formerly within 300s (
+        Box::Action::"http:request"::response{
+            input.host: "127.0.0.1", input.port: 0,
+            input.method: "GET", input.path: "/orders/42/eligibility",
+            output.status: 200
+        }
+    )
+};
+
+@id("dispatch_closes_mutations")
+@description("This order already received a dispatch response.")
+forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" &&
+    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+}
+when temporal {
+    formerly within 300s (
+        Box::Action::"http:request"::response{
+            input.host: "127.0.0.1", input.port: 0,
+            input.method: "POST", input.path: "/orders/42/dispatch",
+            output.status: 201
+        }
+    )
+};
+
+@id("refund_closes_mutations")
+@description("This order already received a refund response.")
+forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" &&
+    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+}
+when temporal {
+    formerly within 300s (
+        Box::Action::"http:request"::response{
+            input.host: "127.0.0.1", input.port: 0,
+            input.method: "POST", input.path: "/orders/42/refund",
+            output.status: 201
+        }
+    )
+};

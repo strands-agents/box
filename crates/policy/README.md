@@ -220,11 +220,14 @@ forbids, unmatched requests, representation faults, and evaluation faults return
 `RuleId::as_str` returns the determining rule identifier. Default denials use
 `RuleId::DEFAULT_DENY`.
 
-`context.input.ip` is the pinned address after resolution, as a string, and it is absent before
-resolution. An IPv6 address that carries an IPv4 address reads as that IPv4 address, and other IPv6
-uses its compressed lowercase form. Match it with `==` or `like`, for example
-`context.input.ip like "169.254.*"`, and guard it with `context.input has ip`. Permit on `host` and
-`port`, and use `ip` in a `forbid`: an `ip`-only permit never passes the decision before resolution.
+`context.input.ip4` and `context.input.ip6` are the pinned address after resolution, each as a
+string, and both are absent before resolution. `ip4` is the dotted quad, present for an IPv4
+destination and for an IPv6 destination that carries an IPv4 address in a recognized wrapping. `ip6`
+is the compressed lowercase wire form, present for every IPv6 destination and absent for an IPv4
+one. Match either with `==` or
+`like`, for example `context.input.ip4 like "169.254.*"`, and guard each with its own
+`context.input has ip4` or `context.input has ip6`. Permit on `host` and `port`, and use an address
+in a `forbid`: an address-only permit never passes the decision before resolution.
 
 ### Shell actions
 
@@ -319,9 +322,12 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
-a `::error`. A Shell `read_metadata` that got an answer has happened, even when the answer
-is "no", so it records a `::response`; one that the reach floor or the admission-window guard
-refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
+a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even
+when the answer is "no", so it records a `::response`. So does one of a path inside the reachable set that cannot be
+resolved, such as one under a missing folder, with no `.` or `..` component, no symbolic link, and
+nothing beneath the deny floor, although the reach check refuses it, because the workload has its
+answer; any other one that the reach floor or
+a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
 without reporting). A rule that counts certain completions matches

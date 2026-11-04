@@ -11,3 +11,9 @@ Two guides. For any page, ask whether the reader needs it to **use** Box, or to
 Technical does not mean design. The reference an operator needs to run Box, the
 `box.toml` keys, the CLI, and the policy vocabulary, belongs in the user guide. The
 reasoning behind those same topics belongs in the design guide.
+
+## External site publication
+
+[`site-manifest.json`](./site-manifest.json) selects the user pages that an external
+documentation site publishes. The [site manifest contract](./dev/site-manifest.md) defines its
+fields, compatibility rules, stable identities and routes, and link handling.

@@ -1,0 +1,11 @@
+// The controller binds each port field to the fixture's allocated TCP port.
+@id("research_fixture_connect")
+permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource)
+when { context.input.host == "127.0.0.1" && context.input.port == 0 };
+
+@id("research_enrichment")
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" && context.input.path == "/research/enrich"
+};

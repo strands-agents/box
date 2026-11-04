@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-use super::env::{reserved_workload_environment, valid_environment_name};
+use super::env::{refusal_reason, refused_name, refused_value};
 
 /// One process declaration, shared by `[agent]` and every `[tool.<name>]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,24 +259,13 @@ impl ProcessSpec {
             )));
         }
         for name in self.env.keys() {
-            if name.is_empty() || !valid_environment_name(name) {
-                return Err(refuse(format!(
-                    "`env` name {name:?} is not a valid environment-variable name"
-                )));
-            }
-            if reserved_workload_environment(name) {
-                return Err(refuse(format!(
-                    "`env` name {name:?} is set by the box itself, so a table cannot claim it"
-                )));
+            if let Some(kind) = refused_name(name) {
+                return Err(refuse(refusal_reason(kind, name, "")));
             }
         }
-        for name in ["HOME", "TMPDIR"] {
-            if let Some(value) = self.env.get(name)
-                && !Path::new(value).is_absolute()
-            {
-                return Err(refuse(format!(
-                    "`env.{name}` must be an absolute path: {value:?}"
-                )));
+        for (name, value) in &self.env {
+            if let Some(kind) = refused_value(name, value) {
+                return Err(refuse(refusal_reason(kind, name, value)));
             }
         }
         for kind in Grant::ALL {

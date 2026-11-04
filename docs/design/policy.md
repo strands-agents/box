@@ -67,7 +67,9 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority)):
 
 - **The reachable paths check** runs in the Shell and Monty after the engine. It refuses the box directory,
   the `box.toml` and policy this run loaded, and anything outside the operator's home and the
-  workspace. Policy decides first, so a counting rule still sees the attempt, and the refusal is
+  workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
+  configured tool programs. Reads of those programs remain subject to policy.
+  Policy decides first, so a counting rule still sees the attempt, and the refusal is
   recorded beside policy's verdict.
 
 Cloud metadata protection comes from the operator's policy. The gateway asks policy about
@@ -124,11 +126,18 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
-In the Shell, a metadata read is an operation that happened once the workload has its answer, so a
-`test -e`, `test -L`, or `test -r` of a missing path is a `::response`, not a `::error`. A Shell check that Box
-itself refuses, at the reach floor or because the filesystem changed between the decision and the
-check, stays a `::error`, so it can't satisfy a precondition keyed on `::response`. A cap on
-attempts counts `::request` instead, because that counts denied attempts too.
+A metadata read is an operation that happened once the workload has its answer, so a Shell
+`test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
+an existing folder is a `::response`, not a `::error`. A check of a path that can't be resolved,
+such as one under a missing folder or under a folder the surrounding OS won't let Box search, is
+also a `::response`, although the reachable paths check refuses it. Box records it as a
+`::response` only when the path is inside the reachable paths, has no `.` or `..` component,
+crosses no symbolic link in a folder Box can see, and isn't in Box's own state. Any other check that Box itself refuses stays a
+`::error`, so it can't satisfy a precondition keyed on `::response`: the reach floor refuses it, or
+a guard refuses it because a path
+changed between the decision and the check (in the Shell, any change to the namespace; in Python, a
+symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
+counts denied attempts too.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
@@ -213,14 +222,23 @@ and their `@id`, the line and column when the engine reports a span, and the val
 as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
-[durable history](#durable-history) lists them.
+[durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
+tool programs with multiple hard links or overlap with direct writable grants.
+[Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
 
 The inert-rule check sorts each rule into one of three classes:
 
 - **Refused:** anything the load can prove inert. An action or field the schema doesn't declare, a
-  path literal no reported path can match, a host literal no destination host can equal, one `@id`
-  on two rules, and a cap written as a `permit` beside an unconditioned `permit` for the same
-  action, which can't narrow it.
+  read of `context.input.ip` under a network action, a path literal no reported path can match, a
+  host literal no destination host can equal, an address literal no pinned destination can equal or
+  that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
+  `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
+  unconditioned `permit` for the same action, which can't narrow it.
+
+  The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing
+  rather than cosmetic. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has ip`
+  is statically false; the validator then never typechecks the comparison behind that guard, and the
+  rule would load and enforce nothing. The refusal names both replacements.
 - **Warned:** a rule that might be inert, such as a `program` literal spelled as a path, or that cap
   beside a conditioned `permit`.
 - **Loads anyway:** two shapes the validator can't prove inert, a comparison between two different

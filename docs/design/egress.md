@@ -100,10 +100,27 @@ flowchart TD
    the address. A deny stops the request. The first permitted address that answers is the one the
    gateway uses, and it decides no later address.
 
-**An address is one spelling.** The gateway gives policy the address as a string, in one canonical
-form: an IPv6 spelling of an IPv4 address, such as `::ffff:169.254.169.254`, becomes the IPv4
-address, and other IPv6 addresses are compressed and lowercase. A rule matches it with `==` or
-`like`.
+**An address is two fields, one per family.** The gateway gives policy `ip4` for the IPv4 address,
+as a dotted quad, and `ip6` for the IPv6 address, compressed and lowercase. An IPv6 destination that
+carries an IPv4 address — `::ffff:169.254.169.254`, a 6to4 or Teredo address, or an address on the
+well-known NAT64 prefix — populates both, so a rule can pin the endpoint without losing the route it
+arrived by. An IPv4 destination populates `ip4` alone: the extraction is deterministic given the
+prefix, but one IPv4 address has many IPv6 encodings, so the gateway never computes an IPv6 form.
+Where Box does not recognise the wrapping, `ip4` is absent and an `ip4` rule does not fire.
+
+A rule matches either field with `==` or `like`, behind its own `has` guard. An address literal that
+a `when` or `unless` condition compares is held to its field's form at load, as a host literal is,
+and the refusal names the form to write, or the other field when the literal belongs to the other
+family ([a rule that cannot fire is refused at
+load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). A read of
+`context.input.ip` is refused outright, because no action carries it. Two shapes are not held to a
+whole address: a `like` pattern that holds a wildcard, because the addresses the wildcard admits
+cannot be listed, and a `when temporal` clause, because history keeps the spelling each event was
+recorded with. A wildcard pattern is still held to the characters its field holds, so a case slip
+or a literal of the other family refuses, as it does for a host. One shape of a wildcard pattern is
+held further: the IPv4-mapped form is the one IPv6 wire form written with a dotted quad, and it is
+exactly `::ffff:` and the quad, so an `ip6` pattern that holds a dotted quad anywhere else is
+refused, unless the pattern opens with a wildcard and the addresses it admits cannot be listed.
 
 **The host is one spelling too.** The gateway lowercases it and removes a trailing dot, so a request
 for `API.GitHub.com.` and a request for `api.github.com` reach policy as the same host. A rule

@@ -106,6 +106,16 @@ pub(super) fn workload_writable(
     image: &Path,
     backend: &str,
 ) -> Result<bool, ContainmentError> {
+    workload_writable_with_alias_check(config, image, backend, None, |_| true)
+}
+
+pub(super) fn workload_writable_with_alias_check(
+    config: &ContainmentConfig,
+    image: &Path,
+    backend: &str,
+    opened_identity: Option<&std::fs::Metadata>,
+    mut hard_link_alias_may_be_writable: impl FnMut(&PathGrant) -> bool,
+) -> Result<bool, ContainmentError> {
     if !config
         .authorizations()
         .iter()
@@ -125,14 +135,19 @@ pub(super) fn workload_writable(
                 )
             })
         };
-        let identity = metadata(&path.resolved)?;
+        let identity = match opened_identity {
+            Some(identity) => identity.clone(),
+            None => metadata(&path.resolved)?,
+        };
         for grant in config.authorizations() {
             if grant.operation != Operation::Write {
                 continue;
             }
             match grant.scope {
                 // A directory scan cannot exclude an alias added during discovery.
-                Scope::Root if identity.nlink() > 1 => return Ok(true),
+                Scope::Root if identity.nlink() > 1 && hard_link_alias_may_be_writable(grant) => {
+                    return Ok(true);
+                }
                 Scope::File => {
                     let writable = metadata(&grant.resolved)?;
                     if identity.dev() == writable.dev() && identity.ino() == writable.ino() {
@@ -312,5 +327,51 @@ mod tests {
             .unwrap();
         assert!(!workload_writable(&config, &image, "test").unwrap());
         assert!(!workload_writable(&ContainmentConfig::new(), &image, "test").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retained_dependency_identity_keeps_its_writable_alias_after_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let image = root.join("library");
+        let alias = root.join("writable-alias");
+        std::fs::write(&image, b"original library").unwrap();
+        std::fs::hard_link(&image, &alias).unwrap();
+        let opened = std::fs::File::open(&image).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&alias, Operation::Write, Scope::File)
+            .unwrap();
+        std::fs::rename(&image, root.join("saved-library")).unwrap();
+        std::fs::write(&image, b"replacement library").unwrap();
+        assert!(
+            workload_writable_with_alias_check(
+                &config,
+                &image,
+                "test",
+                Some(&opened.metadata().unwrap()),
+                |_| false,
+            )
+            .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excluding_an_uncertain_alias_keeps_derived_read_restrictions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let image = root.join("library");
+        std::fs::write(&image, b"library").unwrap();
+        std::fs::hard_link(&image, root.join("library-alias")).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let config = ContainmentConfig::new()
+            .allow(&workspace, Operation::Write, Scope::Root)
+            .unwrap();
+        assert!(workload_writable(&config, &image, "test").unwrap());
+        assert!(
+            !workload_writable_with_alias_check(&config, &image, "test", None, |_| false).unwrap()
+        );
     }
 }

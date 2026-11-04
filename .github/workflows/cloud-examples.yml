@@ -1,0 +1,44 @@
+name: Cloud examples
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/cloud-deployments/**'
+      - '.github/workflows/cloud-examples.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/cloud-deployments/**'
+      - '.github/workflows/cloud-examples.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Offline cloud example tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install pinned test dependencies
+        working-directory: examples/cloud-deployments/agentcore-runtime
+        run: |
+          python -m pip install -r requirements-deploy.txt
+          python -c 'import prepare; prepare.install_framework("langchain")'
+      - name: Test Runtime adapters, packaging, and failure handling
+        working-directory: examples/cloud-deployments/agentcore-runtime
+        run: python run-tests.py
+      - name: Test EKS Job receipts without a cluster
+        run: python examples/cloud-deployments/eks/test_run.py

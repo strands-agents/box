@@ -5,8 +5,9 @@ Follow [repository guidance](../../AGENTS.md).
 Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
-on-disk records (`Record` at `RECORD_VERSION`, `BoxLive` at
-`LIVE_VERSION`), the broker wire protocol, the alias names and their socket derivation, the
+on-disk records (`Record` at `RECORD_VERSION` and each later record version through
+`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
 current interface needs no approval and is almost always the right move. Even a *narrowing*
@@ -250,7 +251,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   are **not** among them: they belong to `Record`.
 
   **The box is the credential boundary. No process table selects what it reaches.** The agent gets
-  every declared `[tool.<label>]`, every `[mcp.<name>]` alias, and every egress route. Each tool and
+  every declared `[tool.<label>]`, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
   each MCP leaf gets every egress route, and no alias and no broker socket, so it starts no tool.
   [The box is the credential boundary](../../docs/design/decisions.md#the-box-is-the-credential-boundary)
   owns why. **Do not add a per-process selection**: the gateway and the broker cannot tell
@@ -293,7 +294,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   authorities — `box`'s `Cargo.toml` enables all three policy features for that reason. The
   proxy's `CapabilitySet` carries credential injection only. **Never add a destination allowlist
   beside the policy, and never expose an upstream-CA knob.** A metadata address is refused by a
-  policy `forbid` on `context.input.ip`, not by the proxy.
+  policy `forbid` on `context.input.ip4` or `context.input.ip6`, not by the proxy.
 
   **The Shell's binds are writable, and its mount set is not a floor.** Read-only
   protected nothing and cost parity: under one identical `permit fs:write`, Monty wrote to the box
@@ -831,6 +832,13 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
+- **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
+  walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
+  atomic, and the walk stops at the first component it cannot see. A link removed between them, or
+  one behind a folder Box cannot search, can let the read record `::response`. That event is the
+  one a plain probe of the same reported path already records, and the refusal message does not
+  change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
+
 Do not treat any of these as settled by the code existing.
 
 - **A sibling box's stored state is reachable, and this is the sharpest one.** `Reach`'s `forbidden`
@@ -890,8 +898,9 @@ Do not treat any of these as settled by the code existing.
   in that window can show names and metadata outside the set. And the descriptor walk refuses
   symlinks, not a swap of two real directories (`RENAME_SWAP`, `RENAME_EXCHANGE`), by the workload or
   by a permitted `fs:move`. That effect stays inside the bind, and reaches only what those renames
-  followed by a permitted Shell effect already reach. It is not limited to native write reach: on
-  Linux a `deny` overmount moves with a renamed ancestor. **Do not** "simplify" `approve_one` into a bare `approve` call:
+  followed by a permitted Shell effect already reach. It is not limited to native write reach.
+  On Linux, a permitted Shell move outside the workload's mount namespace can still move a `deny`
+  overmount with its ancestor. **Do not** "simplify" `approve_one` into a bare `approve` call:
   `PathRefusal::Unreachable` and the outside-the-set case share one message, so a path whose
   spelling is inside a root but whose identity is not would silently become a pass.
 - **The alias image is readable by the workload on Linux, and execute-only breaks the launcher.**

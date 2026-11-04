@@ -17,7 +17,7 @@
 //! | `denied` | d→c | `kind` ([`DeniedKind`]), `reason` | 1, terminal | boundary REFUSED (transport only) |
 //!
 //! Discriminants (`frame_type`, `mode`, `stream`, `kind`) are closed `deny_unknown_fields` enums;
-//! `reason`/`source`/`data`/`server` are free strings.
+//! `reason`/`source`/`data`/`server` are free strings, and `arguments` is a list of free strings.
 
 #![allow(dead_code)]
 
@@ -40,7 +40,7 @@ pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 pub(crate) const BOUNDARY_FAILURE_STATUS: i32 = 125;
 
 /// The one protocol version either end speaks.
-pub(crate) const PROTOCOL_VERSION: u8 = 6;
+pub(crate) const PROTOCOL_VERSION: u8 = 7;
 
 /// Every name the box materializes its Shell alias under.
 pub(crate) const BROKER_SOCKET: &str = "box.sock";
@@ -94,10 +94,12 @@ pub(crate) enum Interpreter {
     Shell,
     /// Python — what every `python3`/`python` alias reaches.
     Python,
-    /// One MCP server, named by the alias the agent executed.
+    /// One MCP server, selected by the command the agent executed through its alias.
     Mcp {
-        /// The server name, from the alias's own filename.
+        /// The program, from the alias's own filename.
         server: String,
+        /// The alias's arguments, in order.
+        arguments: Vec<String>,
     },
 }
 
@@ -608,18 +610,36 @@ mod tests {
         assert_eq!(close["frame_type"], "close");
         assert!(close.get("body").is_none(), "a bodyless kind omits body");
 
-        // An MCP `open` carries its server name in `mode`, and round-trips.
+        // An MCP `open` carries the alias's name and its arguments in `mode`, and round-trips.
         let mcp = frame(Body::Open {
             mode: Interpreter::Mcp {
-                server: "agentcore".to_string(),
+                server: "npx".to_string(),
+                arguments: vec!["-y".to_string(), "@playwright/mcp".to_string()],
             },
         });
+        let wire = serde_json::to_value(&mcp).unwrap();
+        assert_eq!(
+            wire["body"]["mode"],
+            json!({ "mcp": { "server": "npx", "arguments": ["-y", "@playwright/mcp"] } })
+        );
         let bytes = serde_json::to_vec(&mcp).unwrap();
         let back: Frame = serde_json::from_slice(&bytes).unwrap();
         assert!(matches!(
             back.body,
-            Body::Open { mode: Interpreter::Mcp { server } } if server == "agentcore"
+            Body::Open { mode: Interpreter::Mcp { server, arguments } }
+                if server == "npx" && arguments == ["-y", "@playwright/mcp"]
         ));
+    }
+
+    /// An MCP `open` without `arguments` is refused.
+    #[test]
+    fn an_mcp_open_without_its_arguments_is_refused() {
+        let payload = format!(
+            r#"{{"version":{PROTOCOL_VERSION},"program":1,"frame_type":"open","body":{{"mode":{{"mcp":{{"server":"npx"}}}}}}}}"#
+        );
+        let error = serde_json::from_str::<Frame>(&payload)
+            .expect_err("an MCP open must carry its arguments");
+        assert!(error.to_string().contains("arguments"), "{error}");
     }
 
     /// The pre-version-4-shape layout — the tag placed *inside* `body` — is refused, because the
