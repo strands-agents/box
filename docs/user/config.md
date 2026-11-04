@@ -122,14 +122,20 @@ It does not automatically discover and protect every other box's files.
 A directory name such as `.strands-box` alone provides no protection for another box.
 If a workload changes another box's configuration or policy, that box reads the changes on its next run.
 
+Write access that includes another running box's `box_dir` can also expose its broker socket, `run/box.sock`.
+Requests through that socket use the receiving box's policy.
+
 The startup output lists each filesystem grant, including a broad grant that encloses another box's directory.
 Inspect these paths for access to other boxes' files.
 The output reports the granted access and does not remove another box's files from it.
 The workload starts without waiting for you to approve that output.
 
-Restrict file operations through Strands Shell and Monty separately in [policy](policy.md#when-the-box-asks-policy).
-Limit filesystem permits to the workload's intended files.
-Exclude other boxes' configuration, policy, and generated state from those permits.
+Restrict file operations through Strands Shell and Monty separately with [policy `forbid` rules](policy.md#common-rules).
+Protect each other box's `box_dir` and the directories that hold its configuration and policy.
+Cover each directory and its descendants for [`fs:read`, `fs:write`, `fs:delete`, and `fs:move`](policy/actions.md#filesystem).
+Also forbid `fs:move` on enclosing directories that could relocate these protected paths.
+
+A `forbid` overrides matching permits. Adding a narrower permit leaves any broader permit active.
 A native `filesystem.deny` entry does not restrict these requests through the box's trusted process.
 
 ## `[experimental-features]`
