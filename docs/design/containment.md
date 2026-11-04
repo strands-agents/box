@@ -209,6 +209,11 @@ include:
 - **Configured tool programs:** Box refuses direct writable grants that can overwrite a configured
   command or replace its path, including its symbolic-link route and enclosing directories.
   The check covers the agent, every tool, and every local MCP server.
+- **Installed trusted programs:** Box refuses writable grants that can change its executable, containment
+  launcher, socket-alias image, or the macOS package launcher when present.
+  This includes hard-link names, mounted aliases, and enclosing directories.
+  The check covers every process's grants
+  ([installation integrity](binaries.md#trampoline---strands-box-contain-trampoline)).
 
 The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
@@ -515,9 +520,9 @@ Strands Shell and Monty run in Box's trusted process, outside every box. We run 
 policy engine decides for the whole box
 ([the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
 Each one asks policy before it touches a file, then applies the reachable paths check.
-This check also refuses writes, deletion, replacement, and enclosing-path changes for configured
-tool programs. Their read access remains subject to policy. These checks are separate from the
-agent's own grants.
+This check also refuses changes to configured tool programs and the installed trusted binaries,
+including changes to their enclosing paths. Reads remain subject to policy. These checks are
+separate from the agent's own grants.
 
 No credential floor sits beneath them. A broad `fs:read` permit lets Strands Shell read `~/.aws`,
 even though no grant could give the agent that path

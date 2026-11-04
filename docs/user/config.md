@@ -250,6 +250,10 @@ Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
 
+Every process's writable grants must exclude the installed Box programs, their hard-link names,
+mounted aliases, and enclosing directories.
+[Installation integrity](#installation-integrity) describes the checks and refusals.
+
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
@@ -365,6 +369,7 @@ happen after the box directory is created and before the workload starts.
 | A grant wholly inside a `deny` entry or the directory that holds `box.toml` and `policy.dw` | `<path> is at or inside <path>, which no grant reaches. The grant would render and reach nothing, so it is refused rather than left enforcing nothing` |
 | A writable grant that reaches the policy file without subtracting it | ``` `write` reaches this box's policy file, <path>. A grant may enclose it only when it is subtracted, and nothing subtracts it here``` |
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against. That program starts outside containment at the operator's identity, so a writable directory there is a program the workload chooses` |
+| A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
 Create the path first, or name the existing directory above it. The same rule holds for a
@@ -446,6 +451,35 @@ Build output covered by the agent's own grants remains writable when no tool tab
 
 To update a configured tool, end the current run. Update the program from the surrounding OS.
 Start a new run to resolve and validate the updated program.
+
+### Installation integrity
+
+Before the workload starts, Box checks its installed executable, containment launcher, and socket-alias image against every process's writable grants.
+The socket-alias image routes shell and Python commands to Box's policy checks.
+The check covers `[agent]`, every `[tool.<name>]`, and every local `[mcp.<name>]` table.
+
+For the macOS package layout, Box protects an executable regular file named `box` beside `Box.app` as the package launcher.
+A standalone application bundle does not require that wrapper. A nearby directory, symbolic link, or non-executable file named `box` does not prevent startup.
+Operator-created launch scripts and additional symbolic-link names are outside this installation inventory.
+Keep those launch paths and their containing directories outside workload write grants.
+
+Box accepts hard links only when it finds every name in the installation directory or its immediate
+`deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
+original file identities and hard-link counts.
+Linux also checks the files through existing mounts. On macOS, Box checks verified Data-volume spellings.
+A writable grant must exclude these aliases and their enclosing directories.
+
+| Condition | Refusal text | Next action |
+|---|---|---|
+| Box cannot account for every hard-link name. | `has hard links outside the installation inventory. Install an independent copy` | Install independent copies of the Box programs. |
+| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table and mapped files, then retry after mount changes finish. |
+| A recorded file name points to another file, or the hard-link count changes during the run. | `changed after this run loaded it. Stop Box before updating its installation` | End the run before installation updates. |
+
+Strands Shell and Monty also refuse changes to these files and their enclosing paths, even when
+policy permits the operation. Reads still require the applicable policy permission.
+
+End every active run before installation updates. Update the installation from the surrounding OS.
+Start a new run to validate the updated files.
 
 ## `[egress.<name>]`
 

@@ -1211,6 +1211,21 @@ descriptors, and then the command. It is process-agnostic, so nothing about a pa
 inside it. Its exit codes separate three failures: a setup error before the sandbox applies, a failed apply,
 and a contained process whose environment decode or exec failed.
 
+<a id="installed-box-programs-resist-workload-writes"></a>
+### Installed Box programs resist workload writes
+
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
+`TrustedInstallation` retains their identities and refuses grants and broker mutations that can
+replace the files or their paths. The cost is that writable development trees must exclude the
+running installation and its verified alternative names. The operator owns initial contents and
+updates between runs, and the public build marker identifies artifact kind rather than authenticating
+contents. `every_process_table_refuses_writes_to_installed_executables_and_their_ancestors` and
+`the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors` pin the direct-grant and
+broker checks.
+
 <a id="the-configuration-crosses-exec-as-digest-bound-json"></a>
 ### The configuration crosses the exec boundary as an inherited descriptor, bound by a digest
 
@@ -1296,6 +1311,7 @@ code-level enforcement of no-escalation for an exec grant.
 <a id="write-plus-execute-warns-and-does-not-refuse"></a>
 ### Write plus execute on one path warns, and does not refuse
 
+This rule applies to workload programs outside the files Box protects from writes.
 An operator who names one directory in both a write list and an exec list gets a warning at startup,
 and the box still runs. A refusal was wrong for a real build, which loads and runs what it compiles.
 The warning names the executable and the write grant that reaches it. The cost is stated rather than
