@@ -426,6 +426,8 @@ mod tests {
                 .bind(&shim, "cargo", "cargo")
                 .expect("cargo binds the shim binary");
         }
+        let _original_shim = std::fs::File::open(host.path(RENAMED_MISE))
+            .expect("the replaced shim stays open so its file identity cannot be reused");
         host.replace(RENAMED_MISE);
         host.program(SECOND_MISE);
         std::fs::remove_file(host.path(LINKED_MISE)).expect("the old link is removed");

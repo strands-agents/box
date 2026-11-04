@@ -7,11 +7,10 @@ every system call the agent makes. Each tool and each local MCP server the agent
 what a box guarantees, where a box's reach comes from, how the agent's sandbox differs from the
 sandbox for a tool or a local MCP server, and what sits outside operating system enforcement.
 
-Box runs on macOS today, where Seatbelt enforces each sandbox. Where a property comes from the macOS
-backend, this page says so. [macOS enforcement](macos-enforcement.md) explains how Seatbelt does it.
+On macOS, Seatbelt enforces each sandbox. [macOS enforcement](macos-enforcement.md) explains that mechanism.
 
-> **Platform scope.** This page describes operating system enforcement on macOS. Its guarantees do not describe
-> Linux behavior.
+> **Platform scope.** Unless a section explicitly states Linux behavior, this page describes operating
+> system enforcement and guarantees on macOS.
 
 ## Two kinds of enforcement
 
@@ -146,6 +145,36 @@ the same four plus `network`. One translator turns each of them into a set of sa
   `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
+
+### Script interpreter grants on Linux
+
+Box reads a declared script's `#!` line before building its sandbox. It follows the named interpreter
+and repeats when that interpreter is itself a script. For `env`, it follows both `env` and the command
+that `env` selects.
+
+On Linux, discovery checks each interpreter against the process's original filesystem grants.
+An agent needs existing `exec` coverage. A declared tool or local server can use its own `read` or
+`read_file` coverage, because those grants permit execution in its sandbox.
+Existing writable grants also count where they permit execution and have the required read coverage.
+Tool and local-server tables still refuse an `exec` list.
+A missing grant prevents launch, including when the interpreter is under a system path.
+
+Each check uses the file identity resolved from the script's path spelling.
+Explicit denials, protected paths, and Box state remain outside the accepted grants.
+Discovery cannot use a grant added for an earlier interpreter to authorize a later interpreter.
+A required spelling can expose the same authorized file inside the sandbox without adding authority over another file.
+
+Box discovers shared-library dependencies from executable-file grants that existed before it inspected the script.
+Preserving an interpreter's spelling adds no new source for dependency discovery.
+A declared tool's readable interpreter can therefore need separate read grants for non-system libraries.
+Interpreter admission alone does not guarantee that the program can start or finish its work.
+
+On macOS, Box grants a declared command's interpreter chain automatically
+([one exec rule per grant](decisions.md#the-agent-gets-one-exec-rule-per-grant)).
+On either platform, a workload-selected program without a declared tool table needs existing `exec`
+coverage for its interpreter chain.
+The [configuration reference](../user/config.md#script-commands-on-linux) shows interpreter grants
+and the alternative of running a native interpreter with a readable script argument.
 
 ### The runtime minimum
 
