@@ -453,11 +453,22 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
 read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
-pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
-first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
-script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
-that runs a helper needs that helper's directory in its own `exec` list. Two residual risks are
-stated. Write and exec on one path is a warning and not a refusal, so a workload that can write a
+pins. On macOS, Box grants the interpreter chain of the one program it was told to run: it reads
+the program's first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter
+is itself a script, and grants exec at file scope on each hop.
+
+On Linux, every interpreter in a declared script's chain needs coverage from the process's original
+filesystem grants. An agent needs `exec` coverage. A declared tool or local server can use its own
+read or writable grants where those grants permit execution. System paths have no exemption.
+Discovery follows `env` and its selected command, and checks every nested script's interpreter.
+Script contents select the programs to check; they grant no authority to those programs.
+Box preserves required path spellings only for files already authorized, without adding a new source
+for library dependency discovery. A tool's readable interpreter can still need separate grants for non-system libraries.
+
+A workload-selected program without a declared tool table needs existing `exec` coverage for its
+interpreter chain on either platform. Box derives no wider exec closure, so a program that runs a
+helper needs that helper's directory in its own `exec` list. Two residual risks are stated.
+Write and exec on one path is a warning and not a refusal, so a workload that can write a
 path it can also run can run code it wrote there. And a granted shell can interpret workload-authored
 input inside its parent's boundary, because native descendants raise no new decision.
 
@@ -1200,6 +1211,21 @@ descriptors, and then the command. It is process-agnostic, so nothing about a pa
 inside it. Its exit codes separate three failures: a setup error before the sandbox applies, a failed apply,
 and a contained process whose environment decode or exec failed.
 
+<a id="installed-box-programs-resist-workload-writes"></a>
+### Installed Box programs resist workload writes
+
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
+`TrustedInstallation` retains their identities and refuses grants and broker mutations that can
+replace the files or their paths. The cost is that writable development trees must exclude the
+running installation and its verified alternative names. The operator owns initial contents and
+updates between runs, and the public build marker identifies artifact kind rather than authenticating
+contents. `every_process_table_refuses_writes_to_installed_executables_and_their_ancestors` and
+`the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors` pin the direct-grant and
+broker checks.
+
 <a id="the-configuration-crosses-exec-as-digest-bound-json"></a>
 ### The configuration crosses the exec boundary as an inherited descriptor, bound by a digest
 
@@ -1285,6 +1311,7 @@ code-level enforcement of no-escalation for an exec grant.
 <a id="write-plus-execute-warns-and-does-not-refuse"></a>
 ### Write plus execute on one path warns, and does not refuse
 
+This rule applies to workload programs outside the files Box protects from writes.
 An operator who names one directory in both a write list and an exec list gets a warning at startup,
 and the box still runs. A refusal was wrong for a real build, which loads and runs what it compiles.
 The warning names the executable and the write grant that reaches it. The cost is stated rather than

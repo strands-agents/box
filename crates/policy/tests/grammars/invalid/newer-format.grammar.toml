@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `format = 2` is not a grammar file format this Box reads (it reads 1)
+# expect: `<grammar>.format` is 2, which is not a grammar format this Box reads (it reads 1)
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

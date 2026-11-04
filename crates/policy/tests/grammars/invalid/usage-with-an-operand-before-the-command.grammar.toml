@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status]`: usage puts an operand or `--` before the command words
+# expect: `<grammar>.shell.status.usage` puts an operand or `--` before the command words
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

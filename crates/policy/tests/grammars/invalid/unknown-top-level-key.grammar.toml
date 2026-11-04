@@ -1,8 +1,4 @@
-# expect: tool grammar <file>: TOML parse error at line 12, column 1
-# expect: |
-# expect: 12 | policy  = "safe-coding"
-# expect: | ^^^^^^
-# expect: unknown field `policy`, expected one of `format`, `version`, `name`, `program`, `effects`, `global`, `shell`
+# expect: `<grammar>`: unknown field `policy`, expected one of `format`, `version`, `name`, `program`, `effects`, `global`, `shell`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

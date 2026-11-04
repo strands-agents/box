@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `format` is required: write `format = 1`
+# expect: `<grammar>.format` is required: write `format = 1`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"
