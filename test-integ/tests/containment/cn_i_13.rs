@@ -6,7 +6,7 @@ use strands_det_harness::det_case;
 // reports ESRCH for one that is not there, so the errno alone is the disclosure.
 //
 // It cannot be closed with the filters SBPL offers. `process-info*` is rendered `(target self)`
-// and does not cover this: the registration is a kqueue filter, not a process-info query.
+// and `process-info-pidinfo` is rendered `(target children)`; neither covers this: the registration is a kqueue filter, not a process-info query.
 // `(deny syscall-unix (syscall-number N))` closes `kevent` outright, and macOS has no
 // syscall-ARGUMENT filter, so the same deny refuses every other kqueue the workload needs —
 // which is every async runtime on the platform. CN-I-03 covers the signal route and finds it
