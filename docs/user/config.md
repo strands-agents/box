@@ -125,6 +125,12 @@ If a workload changes another box's configuration or policy, that box reads the 
 Write access that includes another running box's `box_dir` can also expose its broker socket, `run/box.sock`.
 Requests through that socket use the receiving box's policy.
 
+If a filesystem grant must enclose another box, add native exclusions through `filesystem.deny`.
+Exclude that box's `box_dir` and the directories that hold its configuration and policy.
+Apply these exclusions to the agent, each tool, and each local MCP server with the grant.
+These exclusions also block connections through the other box's `run/box.sock` path.
+On Linux, these directories must exist before startup.
+
 The startup output lists each filesystem grant, including a broad grant that encloses another box's directory.
 Inspect these paths for access to other boxes' files.
 The output reports the granted access and does not remove another box's files from it.
