@@ -139,6 +139,10 @@ changed between the decision and the check (in the Shell, any change to the name
 symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
 counts denied attempts too.
 
+On `shell:exec` and `shell:spawn`, `input.cwd` uses `~` for the operator's home and `~/…` for a
+directory below it. A directory outside that home stays absolute. The decision, request event, and
+outcome event use this same spelling, while execution uses the original directory.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -179,6 +183,10 @@ restart from resetting a budget. The contract has a few parts:
   after it. When recording an outcome fails, the caller warns on stderr and nothing retries it.
 - **The file stays bounded.** The engine checkpoints as events accumulate and prunes what falls
   outside the deepest window, so the file's size tracks that window, not the box's lifetime.
+
+Recovery preserves each event's path spelling. Older shell events can carry an absolute `cwd` below
+the operator's home. A temporal predicate on `~/project` does not match those events. Box does not
+translate those stored values.
 
 The contract leaves things out on purpose. The history has no tamper evidence and isn't an audit
 record. It has no rewind, and no box shares it. Nothing commits an operation and its recorded
@@ -233,7 +241,8 @@ The inert-rule check sorts each rule into one of three classes:
   host literal no destination host can equal, an address literal no pinned destination can equal or
   that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
   `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
-  unconditioned `permit` for the same action, which can't narrow it.
+  unconditioned `permit` for the same action, which can't narrow it. The path checks include `cwd` on
+  `shell:exec` and `shell:spawn`: an absolute literal below the operator's home must use `~/…` instead.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing
   rather than cosmetic. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has ip`

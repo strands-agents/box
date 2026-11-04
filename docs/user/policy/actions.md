@@ -149,7 +149,7 @@ a program. Each nested command, such as the one `find -exec` or `xargs` runs, is
 | `arg1?` | String | The first argument after the program. |
 | `arg2?` | String | The second argument. |
 | `arg_count` | Long | How many arguments follow the program. |
-| `cwd` | String | The working directory. |
+| `cwd` | String | The working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 
 **`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and two
 more:
@@ -158,6 +158,9 @@ more:
 |---|---|---|
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
+
+The request and outcome record the same `cwd` spelling. The command runs in the original filesystem
+directory.
 
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
