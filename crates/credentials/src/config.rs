@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::sources::{AmbientFallbackPolicy, AwsExecutionRoleResolver};
+use crate::sources::{AmbientFallbackPolicy, AwsChainResolver};
 use crate::{Backend, RouteSpec};
 
 /// How a route that cannot be resolved is treated at open.
@@ -33,10 +33,9 @@ pub struct VaultConfig {
     /// The `credsd` socket a `credsd://` route connects to. `None` means the default
     /// resolution: `CREDSD_SOCKET`, else the platform default path.
     credsd_socket: Option<PathBuf>,
-    /// The box-supplied resolver for the host execution-role tokens (`aws://@instance-role`,
-    /// `aws://@container-role`). `None` means a route naming such a token fails closed, rather than
-    /// substitute an ambient identity.
-    aws_execution_role_resolver: Option<AwsExecutionRoleResolver>,
+    /// The box-supplied resolver for a bare `aws://` route (the AWS default credential chain).
+    /// `None` means a bare `aws://` route fails closed, rather than substitute an ambient identity.
+    aws_chain_resolver: Option<AwsChainResolver>,
 }
 
 impl VaultConfig {
@@ -50,17 +49,16 @@ impl VaultConfig {
             missing: MissingRoutePolicy::Skip,
             ambient: AmbientFallbackPolicy::default(),
             credsd_socket: None,
-            aws_execution_role_resolver: None,
+            aws_chain_resolver: None,
         }
     }
 
-    /// Supply the resolver the box built from the AWS SDK for the host execution-role tokens.
+    /// Supply the resolver the box built from the AWS SDK default credential chain.
     ///
-    /// With no resolver, a route that names `aws://@instance-role` or `aws://@container-role` is a
-    /// hard failure, never an ambient substitute.
+    /// With no resolver, a bare `aws://` route is a hard failure, never an ambient substitute.
     #[must_use]
-    pub fn aws_execution_role_resolver(mut self, resolver: AwsExecutionRoleResolver) -> Self {
-        self.aws_execution_role_resolver = Some(resolver);
+    pub fn aws_chain_resolver(mut self, resolver: AwsChainResolver) -> Self {
+        self.aws_chain_resolver = Some(resolver);
         self
     }
 
@@ -113,7 +111,7 @@ impl VaultConfig {
             missing: self.missing,
             ambient: self.ambient,
             credsd_socket: self.credsd_socket,
-            aws_execution_role_resolver: self.aws_execution_role_resolver,
+            aws_chain_resolver: self.aws_chain_resolver,
         }
     }
 }
@@ -127,7 +125,7 @@ pub(crate) struct VaultParts {
     pub(crate) missing: MissingRoutePolicy,
     pub(crate) ambient: AmbientFallbackPolicy,
     pub(crate) credsd_socket: Option<PathBuf>,
-    pub(crate) aws_execution_role_resolver: Option<AwsExecutionRoleResolver>,
+    pub(crate) aws_chain_resolver: Option<AwsChainResolver>,
 }
 
 #[cfg(test)]
@@ -193,21 +191,21 @@ mod tests {
         );
     }
 
-    /// The execution-role resolver defaults to absent and the builder retains one.
+    /// The default-chain resolver defaults to absent and the builder retains one.
     #[test]
-    fn aws_execution_role_resolver_defaults_absent_and_is_retained_when_set() {
+    fn aws_chain_resolver_defaults_absent_and_is_retained_when_set() {
         let default = VaultConfig::new(Backend::local(), "t").into_parts();
         assert!(
-            default.aws_execution_role_resolver.is_none(),
-            "no resolver means an execution-role token fails closed"
+            default.aws_chain_resolver.is_none(),
+            "no resolver means a bare aws:// route fails closed"
         );
 
         let set = VaultConfig::new(Backend::local(), "t")
-            .aws_execution_role_resolver(crate::AwsExecutionRoleResolver::new(|_kind| {
+            .aws_chain_resolver(crate::AwsChainResolver::new(|| {
                 Err(crate::CredentialError::Credential("unused".into()))
             }))
             .into_parts();
-        assert!(set.aws_execution_role_resolver.is_some());
+        assert!(set.aws_chain_resolver.is_some());
     }
 
     /// `routes` is `route` in bulk — the two produce the same declaration.

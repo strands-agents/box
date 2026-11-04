@@ -419,16 +419,14 @@ pub(crate) enum AwsAcquisition {
     Credsd(String),
     /// No scoped `profile` was declared; the ambient provider chain was used (allowed-with-warning).
     AmbientFallback,
-    /// Credentials came from the host instance role, through `aws://@instance-role`.
-    InstanceRole,
-    /// Credentials came from the host container role, through `aws://@container-role`.
-    ContainerRole,
+    /// Credentials came from the AWS default credential provider chain, through a bare `aws://`.
+    DefaultChain,
 }
 
 impl AwsAcquisition {
     /// The operator-facing warning for this acquisition, if any. A scoped profile or a `credsd`
-    /// environment names its identity, so neither warns. Ambient fallback and the two host
-    /// execution-role tokens are host-provided identities, so each warns.
+    /// environment names its identity, so neither warns. Ambient fallback and the default chain are
+    /// host-provided identities, so each warns.
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
@@ -436,92 +434,32 @@ impl AwsAcquisition {
                 "AWS ambient credential chain used (no scoped profile declared); \
                  prefer a declared scoped identity to shrink blast radius",
             ),
-            AwsAcquisition::InstanceRole => Some(
-                "AWS instance execution-role credentials used (aws://@instance-role): a \
-                 host-provided ambient identity, usually broader than a scoped profile; scope the \
-                 signed route's destination as tightly as the role is broad",
-            ),
-            AwsAcquisition::ContainerRole => Some(
-                "AWS container execution-role credentials used (aws://@container-role): a \
-                 host-provided ambient identity, usually broader than a scoped profile; scope the \
-                 signed route's destination as tightly as the role is broad",
+            AwsAcquisition::DefaultChain => Some(
+                "AWS default credential provider chain used (aws://): the signing identity is \
+                 whatever the host provides (environment, profile, web identity, container, or \
+                 instance metadata), is not declared in box.toml, and may be broad; scope the \
+                 signed route's destination as tightly as the identity is broad",
             ),
         }
     }
 }
 
-/// One of the two reserved host execution-role tokens an `aws://` reference may name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExecutionRole {
-    /// `aws://@instance-role`: the EC2 instance role or the AgentCore MMDS identity.
-    Instance,
-    /// `aws://@container-role`: the ECS, Fargate, or EKS container role.
-    Container,
-}
-
-/// The reserved-token prefix. A character no AWS profile name may begin with, so a token and a
-/// profile never overlap.
-const RESERVED_TOKEN_PREFIX: char = '@';
-
-/// The `aws://` body that names the instance role.
-const INSTANCE_ROLE_TOKEN: &str = "@instance-role";
-
-/// The `aws://` body that names the container role.
-const CONTAINER_ROLE_TOKEN: &str = "@container-role";
-
-impl ExecutionRole {
-    /// The `aws://` body that spells this token.
-    pub(crate) fn token(self) -> &'static str {
-        match self {
-            ExecutionRole::Instance => INSTANCE_ROLE_TOKEN,
-            ExecutionRole::Container => CONTAINER_ROLE_TOKEN,
-        }
-    }
-
-    /// The acquisition this token records.
-    pub(crate) fn acquisition(self) -> AwsAcquisition {
-        match self {
-            ExecutionRole::Instance => AwsAcquisition::InstanceRole,
-            ExecutionRole::Container => AwsAcquisition::ContainerRole,
-        }
-    }
-
-    /// The public kind the box's injected resolver branches on.
-    pub(crate) fn kind(self) -> AwsExecutionRoleKind {
-        match self {
-            ExecutionRole::Instance => AwsExecutionRoleKind::Instance,
-            ExecutionRole::Container => AwsExecutionRoleKind::Container,
-        }
-    }
-}
-
-/// Which host execution role the box's injected resolver must resolve.
-///
-/// The resolver closure receives this, so the box branches on it without the crate exposing its
-/// private source types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AwsExecutionRoleKind {
-    /// The instance role (`aws://@instance-role`): EC2 IMDS or AgentCore MMDS.
-    Instance,
-    /// The container role (`aws://@container-role`): ECS, Fargate, or EKS.
-    Container,
-}
-
-/// The session credentials the box's resolver returns for a host execution-role token.
+/// The session credentials the box's resolver returns from the AWS default credential chain.
 ///
 /// The box fills this from the AWS SDK. The crate maps it onto its own session-credential shape,
 /// with the session token present and the region left to the route host. Every field is wiped on
-/// drop, and `Debug` redacts the material.
-pub struct AwsExecutionRoleCredentials {
+/// drop, and `Debug` redacts the material. A `session_token` may be empty for a long-lived IAM user
+/// key the chain finds, so the crate treats an empty token as "no token" rather than refusing it.
+pub struct AwsChainCredentials {
     /// The AWS access key id.
     pub access_key_id: String,
     /// The AWS secret access key.
     pub secret_access_key: String,
-    /// The AWS session token (always present for an execution role's temporary credentials).
+    /// The AWS session token. Empty when the chain resolved a long-lived key with none.
     pub session_token: String,
 }
 
-impl zeroize::Zeroize for AwsExecutionRoleCredentials {
+impl zeroize::Zeroize for AwsChainCredentials {
     fn zeroize(&mut self) {
         self.access_key_id.zeroize();
         self.secret_access_key.zeroize();
@@ -529,15 +467,15 @@ impl zeroize::Zeroize for AwsExecutionRoleCredentials {
     }
 }
 
-impl Drop for AwsExecutionRoleCredentials {
+impl Drop for AwsChainCredentials {
     fn drop(&mut self) {
         self.zeroize();
     }
 }
 
-impl std::fmt::Debug for AwsExecutionRoleCredentials {
+impl std::fmt::Debug for AwsChainCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsExecutionRoleCredentials")
+        f.debug_struct("AwsChainCredentials")
             .field("access_key_id", &"[REDACTED]")
             .field("secret_access_key", &"[REDACTED]")
             .field("session_token", &"[REDACTED]")
@@ -545,61 +483,56 @@ impl std::fmt::Debug for AwsExecutionRoleCredentials {
     }
 }
 
-/// The box-supplied resolver for the two host execution-role tokens.
+/// The box-supplied resolver for a bare `aws://` reference: the AWS default credential provider
+/// chain.
 ///
-/// Sealed: the box builds it with [`AwsExecutionRoleResolver::new`] from a closure that calls the
-/// AWS SDK, so the `credentials` crate links no HTTP client of its own. A vault with no resolver
-/// injected refuses an execution-role token, rather than substitute an ambient identity.
-pub struct AwsExecutionRoleResolver {
-    resolve: Box<dyn Fn(AwsExecutionRoleKind) -> Result<AwsExecutionRoleCredentials> + Send + Sync>,
+/// Sealed: the box builds it with [`AwsChainResolver::new`] from a closure that calls the AWS SDK,
+/// so the `credentials` crate links no HTTP client of its own. A vault with no resolver injected
+/// refuses a bare `aws://` route, rather than substitute an ambient identity.
+pub struct AwsChainResolver {
+    resolve: Box<dyn Fn() -> Result<AwsChainCredentials> + Send + Sync>,
 }
 
-impl AwsExecutionRoleResolver {
-    /// Build a resolver from a closure that resolves one execution-role kind to session credentials.
-    pub fn new(
-        resolve: impl Fn(AwsExecutionRoleKind) -> Result<AwsExecutionRoleCredentials>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
+impl AwsChainResolver {
+    /// Build a resolver from a closure that resolves the default chain to session credentials.
+    pub fn new(resolve: impl Fn() -> Result<AwsChainCredentials> + Send + Sync + 'static) -> Self {
         Self {
             resolve: Box::new(resolve),
         }
     }
 
-    /// Resolve one token to the crate's own session-credential shape.
+    /// Resolve the default chain to the crate's own session-credential shape.
     ///
-    /// A field the box left empty is refused, so the box never signs a malformed SigV4 request. The
-    /// session token is `Some` and the region is `None`: the signing region comes from the route
-    /// host, never from the credential.
-    pub(crate) fn resolve(&self, role: ExecutionRole) -> Result<AwsSessionCredentials> {
-        let mut material = (self.resolve)(role.kind())?;
-        if material.access_key_id.is_empty()
-            || material.secret_access_key.is_empty()
-            || material.session_token.is_empty()
-        {
-            return Err(CredentialError::Credential(format!(
-                "the {token} resolver returned session credentials with an empty access key id, \
-                 secret access key, or session token",
-                token = role.token(),
-            )));
+    /// An empty access key id or secret access key is refused, so the box never signs a malformed
+    /// SigV4 request. An empty session token maps to `None` (a long-lived key). The region is
+    /// `None`: the signing region comes from the route host, never from the credential.
+    pub(crate) fn resolve(&self) -> Result<AwsSessionCredentials> {
+        let mut material = (self.resolve)()?;
+        if material.access_key_id.is_empty() || material.secret_access_key.is_empty() {
+            return Err(CredentialError::Credential(
+                "the aws:// default-chain resolver returned credentials with an empty access key \
+                 id or secret access key"
+                    .to_string(),
+            ));
         }
+        let session_token = match std::mem::take(&mut material.session_token) {
+            token if token.is_empty() => None,
+            token => Some(token),
+        };
         // Move each field out rather than clone, so no transient second plaintext copy exists.
-        // `AwsExecutionRoleCredentials` implements `Drop`, so a direct field move will not compile;
-        // `mem::take` transfers the allocation and leaves an empty `String` its `Drop` still wipes.
         Ok(AwsSessionCredentials {
             access_key_id: std::mem::take(&mut material.access_key_id),
             secret_access_key: std::mem::take(&mut material.secret_access_key),
-            session_token: Some(std::mem::take(&mut material.session_token)),
+            session_token,
             region: None,
         })
     }
 }
 
-impl std::fmt::Debug for AwsExecutionRoleResolver {
+impl std::fmt::Debug for AwsChainResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The closure holds no state the crate can render; keep a stable, secret-free line.
-        f.debug_struct("AwsExecutionRoleResolver").finish()
+        f.debug_struct("AwsChainResolver").finish()
     }
 }
 
@@ -747,58 +680,15 @@ impl AwsSource {
         })
     }
 
-    /// The host execution-role token an `aws://` reference names, or `None` for a profile or
-    /// ambient reference.
+    /// Whether `loc` is a bare `aws://` reference, which names the AWS default credential chain.
     ///
-    /// A `@`-prefixed body that is neither reserved token is a hard refusal, so a typo never falls
-    /// through to the profile path. The structured form carries no token spelling, so it never
-    /// names one; a `@`-prefixed profile there is refused by [`parse_profile`](Self::parse_profile).
-    pub(crate) fn execution_role(loc: &Locator) -> Result<Option<ExecutionRole>> {
-        let body = match loc {
-            Locator::Uri(uri) => {
-                let (scheme, body) = uri.split_once("://").ok_or_else(|| {
-                    CredentialError::Credential(format!(
-                        "malformed aws credential reference {uri:?} (expected `aws://<profile>`)"
-                    ))
-                })?;
-                if scheme != AWS_SOURCE_TAG {
-                    return Err(CredentialError::Credential(format!(
-                        "an aws route needs an aws:// reference, not {scheme:?}"
-                    )));
-                }
-                body
-            }
-            Locator::Structured(fields) => {
-                match fields.get("source").map(String::as_str) {
-                    Some(AWS_SOURCE_TAG) => {}
-                    _ => {
-                        return Err(CredentialError::Credential(
-                            "the aws source config must set source = \"aws\"".to_string(),
-                        ));
-                    }
-                }
-                return Ok(None);
-            }
-        };
-        if !body.starts_with(RESERVED_TOKEN_PREFIX) {
-            return Ok(None);
-        }
-        match body {
-            INSTANCE_ROLE_TOKEN => Ok(Some(ExecutionRole::Instance)),
-            CONTAINER_ROLE_TOKEN => Ok(Some(ExecutionRole::Container)),
-            // The body is a reserved-token spelling the operator typed, not a secret, so it may
-            // appear. The only valid tokens are the two named above.
-            _ => Err(CredentialError::Credential(format!(
-                "unknown reserved aws token {body:?}; the only reserved tokens are \
-                 `aws://@instance-role` and `aws://@container-role`"
-            ))),
-        }
+    /// Only the URI form with an empty body is the chain. `aws://<profile>` and the structured form
+    /// are a scoped or ambient profile resolved by [`resolve`](Self::resolve).
+    pub(crate) fn is_default_chain(loc: &Locator) -> bool {
+        matches!(loc, Locator::Uri(uri) if uri.split_once("://") == Some((AWS_SOURCE_TAG, "")))
     }
 
     /// Extract the optional scoped `profile` from either locator form.
-    ///
-    /// A profile that begins with the reserved prefix is refused in both forms, so a token and a
-    /// profile never overlap.
     fn parse_profile(loc: &Locator) -> Result<Option<String>> {
         match loc {
             Locator::Uri(uri) => {
@@ -819,9 +709,6 @@ impl AwsSource {
                         "an aws route needs an aws:// reference, not {scheme:?}"
                     )));
                 }
-                if body.starts_with(RESERVED_TOKEN_PREFIX) {
-                    return Err(reserved_profile_refusal(body));
-                }
                 Ok(Some(body.to_string()).filter(|profile| !profile.is_empty()))
             }
             Locator::Structured(fields) => {
@@ -833,23 +720,10 @@ impl AwsSource {
                         ));
                     }
                 }
-                if let Some(profile) = fields.get("profile")
-                    && profile.starts_with(RESERVED_TOKEN_PREFIX)
-                {
-                    return Err(reserved_profile_refusal(profile));
-                }
                 Ok(fields.get("profile").filter(|p| !p.is_empty()).cloned())
             }
         }
     }
-}
-
-/// The refusal for a profile that begins with the reserved token prefix.
-fn reserved_profile_refusal(profile: &str) -> CredentialError {
-    CredentialError::Credential(format!(
-        "an aws profile cannot begin with {RESERVED_TOKEN_PREFIX:?} (reserved for tokens such as \
-         `aws://@instance-role`); got {profile:?}"
-    ))
 }
 
 impl Default for AwsSource {
@@ -1271,122 +1145,85 @@ mod tests {
         }
     }
 
-    // --- reserved execution-role tokens --------------------------------------
+    // --- bare aws:// default credential chain --------------------------------
 
-    /// The two reserved tokens parse to their roles, in URI form.
+    /// A bare `aws://` is the default chain; a profile and the structured form are not.
     #[test]
-    fn reserved_tokens_parse_to_their_roles() {
-        assert_eq!(
-            AwsSource::execution_role(&Locator::parse_uri("aws://@instance-role").unwrap())
-                .unwrap(),
-            Some(ExecutionRole::Instance)
-        );
-        assert_eq!(
-            AwsSource::execution_role(&Locator::parse_uri("aws://@container-role").unwrap())
-                .unwrap(),
-            Some(ExecutionRole::Container)
-        );
+    fn a_bare_aws_uri_is_the_default_chain() {
+        assert!(AwsSource::is_default_chain(
+            &Locator::parse_uri("aws://").unwrap()
+        ));
+        assert!(!AwsSource::is_default_chain(
+            &Locator::parse_uri("aws://prod").unwrap()
+        ));
+        assert!(!AwsSource::is_default_chain(&structured(&[(
+            "source", "aws"
+        )])));
     }
 
-    /// A profile reference and the structured form name no token.
+    /// The default-chain acquisition warns, and names the `aws://` surface.
     #[test]
-    fn a_profile_names_no_token() {
-        assert_eq!(
-            AwsSource::execution_role(&Locator::parse_uri("aws://prod").unwrap()).unwrap(),
-            None
-        );
-        assert_eq!(
-            AwsSource::execution_role(&structured(&[("source", "aws"), ("profile", "prod")]))
-                .unwrap(),
-            None
-        );
-    }
-
-    /// An unknown reserved token is a hard refusal, never a profile named with a leading `@`.
-    #[test]
-    fn an_unknown_reserved_token_is_refused() {
-        let err = AwsSource::execution_role(&Locator::parse_uri("aws://@imds").unwrap())
-            .expect_err("@imds is not a reserved token");
-        assert!(!err.is_soft());
-        assert!(err.to_string().contains("@imds"), "names the token: {err}");
-    }
-
-    /// A profile that begins with the reserved prefix is refused in both forms, so a token and a
-    /// profile never overlap.
-    #[test]
-    fn a_reserved_prefix_profile_is_refused() {
-        for locator in [
-            Locator::parse_uri("aws://@instance-role").unwrap(),
-            structured(&[("source", "aws"), ("profile", "@instance-role")]),
-        ] {
-            let err = AwsSource::parse_profile(&locator)
-                .expect_err("a profile cannot begin with the reserved prefix");
-            assert!(!err.is_soft(), "locator={locator:?}");
-        }
-    }
-
-    /// Each execution-role acquisition warns, and names its token.
-    #[test]
-    fn execution_role_acquisitions_warn() {
-        let instance = AwsAcquisition::InstanceRole
+    fn the_default_chain_acquisition_warns() {
+        let warning = AwsAcquisition::DefaultChain
             .warning()
-            .expect("instance warns");
-        assert!(instance.contains("@instance-role"), "{instance}");
-        let container = AwsAcquisition::ContainerRole
-            .warning()
-            .expect("container warns");
-        assert!(container.contains("@container-role"), "{container}");
+            .expect("the default chain warns");
+        assert!(warning.contains("aws://"), "{warning}");
     }
 
     /// The resolver maps the box's credentials onto the crate's shape: token present, region none.
     #[test]
     fn the_resolver_maps_credentials_token_present_region_none() {
-        let resolver = AwsExecutionRoleResolver::new(|kind| {
-            assert_eq!(kind, AwsExecutionRoleKind::Instance);
-            Ok(AwsExecutionRoleCredentials {
+        let resolver = AwsChainResolver::new(|| {
+            Ok(AwsChainCredentials {
                 access_key_id: "ASIAEXAMPLE".to_string(),
                 secret_access_key: "secret".to_string(),
                 session_token: "token".to_string(),
             })
         });
-        let creds = resolver
-            .resolve(ExecutionRole::Instance)
-            .expect("the fake resolver answers");
+        let creds = resolver.resolve().expect("the fake resolver answers");
         assert_eq!(creds.access_key_id, "ASIAEXAMPLE");
         assert_eq!(creds.session_token.as_deref(), Some("token"));
         assert_eq!(creds.region, None, "the signing region comes from the host");
     }
 
-    /// An empty field from the box's resolver is refused, so the box never signs a malformed request.
+    /// An empty session token maps to `None` (a long-lived key the chain found), not a refusal.
     #[test]
-    fn the_resolver_refuses_an_empty_field() {
-        for (id, secret, token) in [
-            ("", "secret", "token"),
-            ("ASIA", "", "token"),
-            ("ASIA", "secret", ""),
-        ] {
-            let resolver = AwsExecutionRoleResolver::new(move |_| {
-                Ok(AwsExecutionRoleCredentials {
+    fn the_resolver_maps_an_empty_session_token_to_none() {
+        let resolver = AwsChainResolver::new(|| {
+            Ok(AwsChainCredentials {
+                access_key_id: "AKIAEXAMPLE".to_string(),
+                secret_access_key: "secret".to_string(),
+                session_token: String::new(),
+            })
+        });
+        let creds = resolver.resolve().expect("a long-lived key resolves");
+        assert_eq!(creds.session_token, None);
+    }
+
+    /// An empty key id or secret from the box's resolver is refused, so the box never signs a
+    /// malformed request.
+    #[test]
+    fn the_resolver_refuses_an_empty_key_or_secret() {
+        for (id, secret) in [("", "secret"), ("ASIA", "")] {
+            let resolver = AwsChainResolver::new(move || {
+                Ok(AwsChainCredentials {
                     access_key_id: id.to_string(),
                     secret_access_key: secret.to_string(),
-                    session_token: token.to_string(),
+                    session_token: "token".to_string(),
                 })
             });
             let err = resolver
-                .resolve(ExecutionRole::Container)
+                .resolve()
                 .expect_err("an empty field must be refused");
             assert!(!err.is_soft());
-            assert!(
-                err.to_string().contains("@container-role"),
-                "names the token: {err}"
-            );
+            assert!(err.to_string().contains("empty access key"), "{err}");
         }
     }
 
     /// The box's credentials redact in `Debug`, so a log never carries the material.
     #[test]
-    fn execution_role_credentials_redact_in_debug() {
-        let creds = AwsExecutionRoleCredentials {
+    fn chain_credentials_redact_in_debug() {
+        let creds = AwsChainCredentials {
             access_key_id: "ASIAEXAMPLE".to_string(),
             secret_access_key: "topsecret".to_string(),
             session_token: "tok".to_string(),
@@ -1399,14 +1236,13 @@ mod tests {
         );
     }
 
-    /// Bare `aws://` cannot be written: `parse_uri` rejects an empty body, so the URI form has no
-    /// spelling for "use whatever credentials are ambient". Ambient stays reachable only
-    /// through the structured form, and only when the policy permits it.
+    /// A bare `aws://` parses now and names the default chain; the structured form still omits the
+    /// profile for the ambient-fallback path.
     #[test]
-    fn the_uri_form_cannot_request_ambient_credentials() {
+    fn the_uri_form_names_the_default_chain() {
         assert!(
-            Locator::parse_uri("aws://").is_err(),
-            "an empty profile body must not parse"
+            Locator::parse_uri("aws://").is_ok(),
+            "a bare aws:// now parses as the default chain"
         );
         // The structured form can omit the profile, which is what ambient fallback means.
         assert_eq!(

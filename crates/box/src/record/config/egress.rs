@@ -1619,16 +1619,15 @@ mod tests {
         }
     }
 
-    /// The deliverable schemes still load, including the two host execution-role tokens, which
-    /// ride the `aws://` scheme and sign in-boundary like any other aws reference.
+    /// The deliverable schemes still load, including a bare `aws://`, which names the AWS default
+    /// credential chain and signs in-boundary like any other aws reference.
     #[test]
     fn a_deliverable_credential_scheme_is_accepted() {
         let variable = present_variable();
         for locator in [
             format!("env://{variable}"),
             "aws://prod".to_string(),
-            "aws://@instance-role".to_string(),
-            "aws://@container-role".to_string(),
+            "aws://".to_string(),
         ] {
             load(&format!(
                 "[egress.a]\ndestinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = {locator:?}"
@@ -1637,20 +1636,18 @@ mod tests {
         }
     }
 
-    /// A host execution-role token signs in-boundary and mints no placeholder, so `secret.inject`
-    /// is refused beside it, exactly like a scoped `aws://` profile.
+    /// A bare `aws://` signs in-boundary and mints no placeholder, so `secret.inject` is refused
+    /// beside it, exactly like a scoped `aws://` profile.
     #[test]
-    fn an_execution_role_token_signs_in_boundary() {
-        for token in ["aws://@instance-role", "aws://@container-role"] {
-            let entry: EgressEntry = toml::from_str(&format!(
-                "destinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = {token:?}"
-            ))
-            .expect("the token entry parses");
-            assert!(
-                EgressEntry::signs_in_boundary(entry.secret.as_ref().unwrap()),
-                "{token} must sign in-boundary"
-            );
-        }
+    fn a_bare_aws_reference_signs_in_boundary() {
+        let entry: EgressEntry = toml::from_str(
+            "destinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = \"aws://\"",
+        )
+        .expect("the bare aws:// entry parses");
+        assert!(
+            EgressEntry::signs_in_boundary(entry.secret.as_ref().unwrap()),
+            "a bare aws:// must sign in-boundary"
+        );
     }
 
     /// A reserved or unset variable is refused when the binding is built, not when the

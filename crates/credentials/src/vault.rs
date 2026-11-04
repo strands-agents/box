@@ -6,8 +6,8 @@ use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
 use crate::sources::{
-    AmbientFallbackPolicy, AwsExecutionRoleResolver, AwsResolution, AwsSource, CREDSD_SCHEME,
-    ExecutionRole, resolve_credsd_socket,
+    AmbientFallbackPolicy, AwsAcquisition, AwsChainResolver, AwsResolution, AwsSource,
+    CREDSD_SCHEME, resolve_credsd_socket,
 };
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
@@ -109,10 +109,10 @@ pub struct Vault {
     /// The resolved absolute `credsd` socket a `credsd://` route connects to, retained because the
     /// resolve happens per request. `Some` only when a `credsd://` route was declared.
     credsd_socket: Option<PathBuf>,
-    /// The box-supplied resolver for the host execution-role tokens, retained because the resolve
-    /// happens per request and the SDK provider it wraps caches and refreshes on expiry. `None`
-    /// means an execution-role token fails closed.
-    aws_execution_role_resolver: Option<AwsExecutionRoleResolver>,
+    /// The box-supplied resolver for a bare `aws://` route (the AWS default credential chain),
+    /// retained because the resolve happens per request and the SDK provider it wraps caches and
+    /// refreshes on expiry. `None` means a bare `aws://` route fails closed.
+    aws_chain_resolver: Option<AwsChainResolver>,
 }
 
 impl Vault {
@@ -136,7 +136,7 @@ impl Vault {
             ambient_policy: parts.ambient,
             emitter,
             credsd_socket: None,
-            aws_execution_role_resolver: parts.aws_execution_role_resolver,
+            aws_chain_resolver: parts.aws_chain_resolver,
         };
         // A `credsd://` route needs a socket, resolved and validated absolute once here — a relative
         // path is a configuration error the vault refuses at open, not a runtime failure.
@@ -229,42 +229,30 @@ impl Vault {
             vault.credsd_socket = Some(resolve_credsd_socket(credsd_socket_config.as_deref())?);
         }
 
-        // A route that names a host execution-role token resolves once here, so a box on compute
-        // with no reachable endpoint or no attached role fails fast at open, not at the first
-        // request. Every other signed route still resolves nothing at open.
-        vault.preflight_execution_roles()?;
+        // A bare `aws://` route resolves the default chain once here, so a box off AWS or with no
+        // resolvable identity fails fast at open, not at the first request. Every other signed
+        // route still resolves nothing at open.
+        vault.preflight_default_chain()?;
 
         Ok(Opened::new(vault, phantoms, skipped))
     }
 
-    /// Resolve each distinct host execution-role token once, aborting the open on failure.
+    /// Resolve the default chain once at open when any bare `aws://` route is declared.
     ///
-    /// There are only two tokens, so the probe resolves each at most once even across many routes.
-    /// A token with no injected resolver, an unreachable endpoint, or a host with no attached role
-    /// is a hard failure that aborts the open.
-    fn preflight_execution_roles(&self) -> Result<()> {
-        let mut probed_instance = false;
-        let mut probed_container = false;
-        for (_, config) in &self.signed_aws {
-            // A `credsd://` route is not an aws reference, so it never names a token; skip it before
-            // the aws-only parse, which refuses a non-aws scheme.
-            if config.scheme() == CREDSD_SCHEME {
-                continue;
-            }
-            let Some(role) = AwsSource::execution_role(config)? else {
-                continue;
-            };
-            let already = match role {
-                ExecutionRole::Instance => std::mem::replace(&mut probed_instance, true),
-                ExecutionRole::Container => std::mem::replace(&mut probed_container, true),
-            };
-            if !already {
-                let resolution = self.resolve_execution_role(role)?;
-                // Surface the host-identity warning at startup, not only at the first request, so
-                // the operator sees the blast-radius note when the box comes up.
-                if let Some(warning) = resolution.acquisition.warning() {
-                    self.warn(warning);
-                }
+    /// A bare `aws://` route with no injected resolver, or an identity the chain cannot resolve, is
+    /// a hard failure that aborts the open. The chain resolves at most once however many routes
+    /// name it.
+    fn preflight_default_chain(&self) -> Result<()> {
+        let names_chain = self
+            .signed_aws
+            .iter()
+            .any(|(_, config)| AwsSource::is_default_chain(config));
+        if names_chain {
+            let resolution = self.resolve_default_chain()?;
+            // Surface the host-identity warning at startup, not only at the first request, so the
+            // operator sees the blast-radius note when the box comes up.
+            if let Some(warning) = resolution.acquisition.warning() {
+                self.warn(warning);
             }
         }
         Ok(())
@@ -326,32 +314,31 @@ impl Vault {
         self.credsd_socket.as_deref()
     }
 
-    /// Resolve a host execution-role token through the injected resolver.
+    /// Resolve a bare `aws://` route through the injected default-chain resolver.
     ///
-    /// A token with no injected resolver is a hard failure, never an ambient substitute. The
-    /// resolver wraps the SDK provider, which caches and refreshes on expiry, so a repeat resolve
-    /// inside the validity window makes no network call.
-    pub(crate) fn resolve_execution_role(&self, role: ExecutionRole) -> Result<AwsResolution> {
-        // A deployment that requires a scoped identity refuses a host execution-role token: it is
-        // not a scoped profile, so the same switch that forbids ambient fallback forbids it.
+    /// A bare `aws://` route with no injected resolver is a hard failure, never an ambient
+    /// substitute. A deployment that requires a scoped profile refuses the default chain, because
+    /// it is not a scoped identity. The resolver wraps the SDK provider, which caches and refreshes
+    /// on expiry, so a repeat resolve inside the validity window makes no network call.
+    pub(crate) fn resolve_default_chain(&self) -> Result<AwsResolution> {
         if self.ambient_policy == AmbientFallbackPolicy::Deny {
-            return Err(CredentialError::Credential(format!(
-                "the {token} token names a host identity, but this box requires a scoped AWS \
-                 profile, so a host execution role is refused",
-                token = role.token(),
-            )));
+            return Err(CredentialError::Credential(
+                "a bare aws:// route names the AWS default credential chain, but this box requires \
+                 a scoped AWS profile, so the default chain is refused"
+                    .to_string(),
+            ));
         }
-        let resolver = self.aws_execution_role_resolver.as_ref().ok_or_else(|| {
-            CredentialError::Credential(format!(
-                "a route names the {token} token, but this box injected no AWS execution-role \
-                 resolver, so it cannot resolve a host identity",
-                token = role.token(),
-            ))
+        let resolver = self.aws_chain_resolver.as_ref().ok_or_else(|| {
+            CredentialError::Credential(
+                "a bare aws:// route names the AWS default credential chain, but this box injected \
+                 no resolver, so it cannot resolve a host identity"
+                    .to_string(),
+            )
         })?;
-        let credentials = resolver.resolve(role)?;
+        let credentials = resolver.resolve()?;
         Ok(AwsResolution {
             credentials: zeroize::Zeroizing::new(credentials),
-            acquisition: role.acquisition(),
+            acquisition: AwsAcquisition::DefaultChain,
         })
     }
 
@@ -659,15 +646,15 @@ mod tests {
         assert!(opened.phantoms().is_empty());
     }
 
-    // --- host execution-role tokens ------------------------------------------
+    // --- bare aws:// default credential chain --------------------------------
 
     /// A resolver that answers with fixed credentials and counts its calls.
     fn counting_resolver(
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> crate::AwsExecutionRoleResolver {
-        crate::AwsExecutionRoleResolver::new(move |_kind| {
+    ) -> crate::AwsChainResolver {
+        crate::AwsChainResolver::new(move || {
             calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(crate::AwsExecutionRoleCredentials {
+            Ok(crate::AwsChainCredentials {
                 access_key_id: "ASIAEXAMPLE".to_string(),
                 secret_access_key: "secret".to_string(),
                 session_token: "token".to_string(),
@@ -675,80 +662,74 @@ mod tests {
         })
     }
 
-    fn token_route(dest: &str, token: &str) -> RouteSpec {
+    fn chain_route(dest: &str) -> RouteSpec {
         RouteSpec::signed_aws(
             DestinationPattern::parse(dest).unwrap(),
-            Locator::parse_uri(token).unwrap(),
+            Locator::parse_uri("aws://").unwrap(),
         )
     }
 
-    /// A token route resolves once at open through the injected resolver, so a box fails fast when
-    /// the host identity is unreachable rather than at the first request.
+    /// A bare `aws://` route resolves once at open through the injected resolver, so a box fails
+    /// fast when the host identity is unreachable rather than at the first request.
     #[test]
-    fn a_token_route_preflights_once_through_the_injected_resolver() {
+    fn a_chain_route_preflights_once_through_the_injected_resolver() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let _opened = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("x"))), "t")
-                .aws_execution_role_resolver(counting_resolver(calls.clone()))
-                .route(token_route("*.amazonaws.com", "aws://@instance-role"))
-                .route(token_route(
-                    "s3.us-east-1.amazonaws.com",
-                    "aws://@instance-role",
-                )),
+                .aws_chain_resolver(counting_resolver(calls.clone()))
+                .route(chain_route("*.amazonaws.com"))
+                .route(chain_route("s3.us-east-1.amazonaws.com")),
         )
         .expect("the injected resolver answers, so the open succeeds");
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::Relaxed),
             1,
-            "two routes name the same token, so it resolves once"
+            "two bare aws:// routes name one chain, so it resolves once"
         );
     }
 
-    /// A token route with no injected resolver fails the open closed, never an ambient substitute.
+    /// A bare `aws://` route with no injected resolver fails the open closed, never an ambient
+    /// substitute.
     #[test]
-    fn a_token_route_without_a_resolver_fails_closed() {
+    fn a_chain_route_without_a_resolver_fails_closed() {
         let err = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("x"))), "t")
-                .route(token_route("*.amazonaws.com", "aws://@container-role")),
+                .route(chain_route("*.amazonaws.com")),
         )
-        .expect_err("no resolver means the token cannot resolve");
+        .expect_err("no resolver means the chain cannot resolve");
         assert!(!err.is_soft());
         assert!(
-            err.to_string().contains("@container-role"),
-            "names the token: {err}"
-        );
-        assert!(
-            err.to_string().contains("no AWS execution-role resolver"),
+            err.to_string().contains("injected no resolver"),
             "says why: {err}"
         );
     }
 
     /// An unreachable endpoint at preflight aborts the open with a hard failure.
     #[test]
-    fn a_token_route_with_an_unreachable_resolver_aborts_open() {
-        let resolver = crate::AwsExecutionRoleResolver::new(|_| {
-            Err(CredentialError::KeystoreAccess("IMDS unreachable".into()))
+    fn a_chain_route_with_an_unreachable_resolver_aborts_open() {
+        let resolver = crate::AwsChainResolver::new(|| {
+            Err(CredentialError::KeystoreAccess("chain unreachable".into()))
         });
         let err = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("x"))), "t")
-                .aws_execution_role_resolver(resolver)
-                .route(token_route("*.amazonaws.com", "aws://@instance-role")),
+                .aws_chain_resolver(resolver)
+                .route(chain_route("*.amazonaws.com")),
         )
         .expect_err("an unreachable endpoint is hard at open");
         assert!(matches!(err, CredentialError::KeystoreAccess(_)));
     }
 
-    /// `require_scoped_aws_profile` refuses a token route at open: a host identity is not scoped.
+    /// `require_scoped_aws_profile` refuses a bare `aws://` route at open: the chain is not scoped.
     #[test]
-    fn require_scoped_aws_profile_refuses_a_token_route() {
+    fn require_scoped_aws_profile_refuses_a_chain_route() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let err = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("x"))), "t")
                 .require_scoped_aws_profile()
-                .aws_execution_role_resolver(counting_resolver(calls.clone()))
-                .route(token_route("*.amazonaws.com", "aws://@instance-role")),
+                .aws_chain_resolver(counting_resolver(calls.clone()))
+                .route(chain_route("*.amazonaws.com")),
         )
-        .expect_err("a host role is not a scoped profile");
+        .expect_err("the default chain is not a scoped profile");
         assert!(!err.is_soft());
         assert!(err.to_string().contains("scoped AWS profile"), "{err}");
         assert_eq!(

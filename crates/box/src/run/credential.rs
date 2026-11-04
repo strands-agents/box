@@ -66,15 +66,15 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
     for binding in bindings {
         // `require_every_route` is the box's fail-closed stance, now owned by the vault. The
-        // execution-role resolver is injected unconditionally; it spawns nothing until a route
-        // actually names `aws://@instance-role` or `aws://@container-role`.
+        // default-chain resolver is injected unconditionally; it spawns nothing until a route
+        // actually names a bare `aws://`.
         let opened = Vault::open(
             VaultConfig::new(
                 Backend::local(),
                 format!("strands-box-{}", std::process::id()),
             )
             .route(binding.to_route_spec()?)
-            .aws_execution_role_resolver(crate::run::aws_role::resolver())
+            .aws_chain_resolver(crate::run::aws_role::resolver())
             .require_every_route(),
         )
         .map_err(|source| {

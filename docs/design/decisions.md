@@ -785,10 +785,11 @@ as a bound name, and on a host bind a rename onto a symlink is refused beneath p
 There is no credential action in the schema. An operator declares a binding in `box.toml`, and that
 binding says only which secret is attached to a request the policy already permits. Reachability stays
 the policy's decision alone, so a binding never opens a destination, and the two must name the same
-host. There is no *silent* pickup of ambient credentials: an empty `aws://` body does not parse, and
-the only host-provided identities are the two reserved tokens the operator names explicitly
-([the execution-role tokens](#aws-execution-role-tokens)), which warn on every use and which a
-deployment can refuse. A secret rides TLS only; see [a secret rides only TLS](#a-secret-rides-only-tls).
+host. Ambient pickup is opt-in, not default: a bare `aws://` is an explicit operator declaration
+that resolves the AWS default credential chain ([a bare `aws://` resolves the default credential
+chain](#aws-resolves-the-default-credential-chain)); it warns on every use and a deployment can
+refuse it with `require_scoped_aws_profile`. A secret rides TLS only; see
+[a secret rides only TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 ### A temporal rule rides the same closed context as an ordinary rule
@@ -1797,24 +1798,29 @@ exception refused by name: `credential_process`. Honouring it would make the box
 a program that `~/.aws/config` names, and no floor defends that file, so it is the
 never-run-a-workload-named-program rule applied to credentials.
 
-<a id="aws-execution-role-tokens"></a>
-### Two reserved tokens sign with the compute host's execution role
+<a id="aws-resolves-the-default-credential-chain"></a>
+### A bare `aws://` resolves the AWS default credential provider chain
 
-`aws://@instance-role` and `aws://@container-role` sign with the identity the AWS compute host
-provides: the first reads EC2 instance metadata, which also serves the AgentCore microVM metadata
-service, and the second reads the ECS, Fargate, or EKS container-credentials endpoint. The box
-resolves both through the official AWS SDK's instance-metadata and container providers, and nothing
-else: it does not run the SDK default chain, which would also run `credential_process`, SSO, and
-assume-role, and would make the signing identity ambient and host-dependent rather than one the
-operator named. The SDK resolver runs in the `box` crate's trusted process and reaches the vault
-through a sealed `credentials` seam, so the `credentials` crate still links no HTTP client of its
-own. A reserved token rides the existing `aws://` vocabulary rather than a new scheme, and a profile
-name cannot begin with `@`, so a token and a profile never overlap; `aws://default` was rejected
-because `default` is a real profile and the overlap would be a silent identity substitution. The
-costs: the AWS SDK and an HTTP stack now link into the trusted process; the SDK caches and refreshes
-the temporary credentials, so plaintext session credentials live in that process's defended but
-un-wiped heap between requests; and the host role is usually broad, so an operator must scope the
-signed route's destination as tightly as the role allows.
+A bare `aws://` reference signs with whatever the AWS SDK default credential provider chain
+resolves: environment variables, then the profile files (including `credential_process`, SSO, and
+assume-role), then web identity, then the ECS or EKS container endpoint, then EC2 instance metadata
+(which also serves the AgentCore microVM metadata service). `aws://<profile>` still names one
+profile's static keys, and `credsd://` is unchanged. The box builds the chain with the AWS SDK in
+the `box` crate's trusted process and reaches the vault through a sealed `credentials` seam, so the
+`credentials` crate still links no HTTP client of its own; the resolver caches the credentials and
+refreshes them near expiry, because the chain does not cache when called directly. The Strands Box
+owners accepted the chain's risks, recorded in the threat model: the chief one is that
+`credential_process` executes a program from `~/.aws/config` in the trusted process, which is a
+full sandbox escape when a route or policy makes that file writable. Rejected alternatives: the two
+reserved tokens `aws://@instance-role` and `aws://@container-role`, which named only the instance
+and container providers and refused `credential_process`, SSO, and assume-role (dropped because the
+owners chose the full chain for one familiar spelling); and `aws://default`, because `default` is a
+real profile and the overlap would be a silent identity substitution. The further costs: the AWS SDK
+and an HTTP stack link into the trusted process; plaintext session credentials live in that
+process's defended but un-wiped heap between requests; the identity is ambient and host-dependent
+rather than declared, so it is not attestable from `box.toml`; and the host identity is usually
+broad, so an operator must scope the signed route's destination as tightly as the identity allows.
+A deployment that sets `require_scoped_aws_profile` refuses a bare `aws://`.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

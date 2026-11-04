@@ -276,7 +276,7 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME`, `aws://profile`, `aws://@instance-role`, or `aws://@container-role`. No other scheme. An `aws://` profile must carry **static keys**; the two `@`-tokens sign with the host's execution role; see below. |
+| `secret.ref` | required | `env://NAME`, `aws://profile`, or a bare `aws://`. No other scheme. An `aws://profile` must carry **static keys**; a bare `aws://` signs with the AWS default credential chain; see below. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
@@ -311,23 +311,22 @@ An `aws://` credential is a **signed route**. The box resolves the profile on th
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**An `aws://PROFILE` profile must carry static keys.** On the named-profile path `credential_process`
+is **refused**, and the refusal names the command it would have run. A profile that assumes a role or
+uses SSO is refused too, because resolving one needs an HTTP call to STS and that path carries no
+HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
-
-**`aws://@instance-role` and `aws://@container-role` sign with the compute host's execution role.**
-They are for a box deployed on AWS: `@instance-role` reads EC2 instance metadata (IMDS), which also
-serves the AgentCore microVM metadata service (MMDS), and `@container-role` reads the ECS, Fargate,
-or EKS container-credentials endpoint. The box resolves both through the official AWS SDK, which
-runs in the `run` process — not in the credentials crate, which still links no HTTP client — and
-caches and refreshes the temporary credentials on expiry. A route that names a token resolves it
-once at startup, so a box off AWS or with no attached role fails fast. These are host-provided
-identities, not named profiles, so the box warns on each use; a profile name cannot begin with
-`@`, and a deployment that requires a scoped profile refuses both tokens.
+**A bare `aws://` signs with the AWS default credential provider chain.** The box builds the chain
+with the official AWS SDK in the `run` process — not in the credentials crate, which still links no
+HTTP client — and caches and refreshes the credentials near expiry. The chain is environment, then
+the profile files, then web identity, then the ECS or EKS container endpoint, then EC2 instance
+metadata (which also serves AgentCore). A bare `aws://` route resolves once at startup, so a box the
+chain cannot resolve fails fast. The identity is ambient and host-chosen, not declared, so the box
+warns on each use and a deployment that sets `require_scoped_aws_profile` refuses it. **Unlike
+`aws://PROFILE`, the chain honors `credential_process`**, which runs a program named by
+`~/.aws/config` in the trusted `run` process, outside containment — a policy or grant that lets the
+workload write `~/.aws` turns that write into trusted-process code execution. The Strands Box owners
+accepted this risk; see the threat model.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.

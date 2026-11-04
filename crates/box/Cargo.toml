@@ -47,11 +47,11 @@ monty-types = "1.0.0"
 # proxy path. Same pin and features as `shell`, already in the lockfile via that crate, so
 # this adds no version the lockfile does not already hold.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-# The AWS SDK providers behind the host execution-role tokens: `aws://@instance-role` (EC2 IMDS and
-# AgentCore MMDS) and `aws://@container-role` (ECS, Fargate, and EKS). The box builds these and
-# injects a resolver into the vault through the `credentials` crate's sealed seam, so that crate
-# links no HTTP client of its own. Only the two metadata providers are wired — not the full default
-# credential chain, and not `credential_process` or SSO, which the box refuses.
+# The AWS SDK default credential provider chain, behind a bare `aws://` reference. The box builds
+# the chain and injects a resolver into the vault through the `credentials` crate's sealed seam, so
+# that crate links no HTTP client of its own. `credentials-process` is enabled so the chain's
+# profile provider honors `credential_process` (an accepted residual: see
+# docs/design/decisions.md#aws-resolves-the-default-credential-chain).
 #
 # `client-hyper`/`rustls` are NOT enabled: they pull `rustls-aws-lc`, and the whole workspace uses
 # `ring`, so two crypto providers would make rustls' process-default ambiguous and panic the first
@@ -59,6 +59,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # `aws-smithy-http-client`.
 aws-config = { version = "1", default-features = false, features = [
     "behavior-version-latest",
+    "credentials-process",
     "rt-tokio",
 ] }
 aws-credential-types = "1"

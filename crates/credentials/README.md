@@ -92,7 +92,7 @@ returned secret and its lifetime.
 | `file:///path` | File contents, trailing newline stripped. | soft when the file is missing or unreadable |
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
 | `aws://profile` | Structured AWS session credentials for SigV4 signing. Not a single secret, so `Backend::resolve` rejects it. | hard |
-| `aws://@instance-role`, `aws://@container-role` | The compute host's execution role, resolved by the resolver the box injects through `VaultConfig::aws_execution_role_resolver` (EC2 IMDS / AgentCore MMDS, or the ECS/EKS container endpoint). Session credentials for SigV4 signing, not a single secret. A profile name cannot begin with `@`. | hard |
+| `aws://` (bare) | The AWS default credential provider chain, resolved by the resolver the box injects through `VaultConfig::aws_chain_resolver` (environment, profiles, web identity, container endpoint, or instance metadata). Session credentials for SigV4 signing, not a single secret. | hard |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
