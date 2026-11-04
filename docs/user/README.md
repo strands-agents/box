@@ -3,7 +3,8 @@
 Box runs an agent, or another command, under an operator's policy, with operating system enforcement.
 
 - [`getting-started.md`](./getting-started.md): download Box, then write and run a box for an agent.
-  Start here.
+  Start here for macOS.
+- [`linux.md`](./linux.md): download Box on Linux ARM64 and verify a workload's filesystem access.
 - [`egress.md`](./egress.md): the `[egress.<name>]` table, which gives the agent a credential for a service.
 - [`mcp.md`](./mcp.md): the `[mcp.<name>]` table, for a stdio or an http MCP server.
 - [`mcp-policy.md`](./mcp-policy.md): write the rules that let the agent use an MCP server.

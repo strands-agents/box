@@ -46,7 +46,7 @@ Box's interpreters and gateways share an event history, so rules can use earlier
 actions and elapsed time to decide what is allowed next. For example, a file read
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
-**Preview:** Box currently supports local execution on macOS with Apple silicon.
+**Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -168,6 +168,9 @@ For each part, where it runs, what it decides, and how one request moves through
 [Box architecture](docs/design/architecture.md).
 
 ## Getting started
+
+For Linux ARM64, follow [Run Box on Linux](docs/user/linux.md).
+The commands below use macOS.
 
 Follow the [getting-started guide](docs/user/getting-started.md) to run
 Strands CLI with Box. To follow this guide, you need a Mac with Apple silicon and

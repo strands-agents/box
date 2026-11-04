@@ -15,6 +15,9 @@ For ownership of enforcement, configuration, and the surrounding environment, re
 [shared responsibility model](../design/security.md). This page covers the operator's
 configuration choices and policy limitations.
 
+For Linux, review the [platform comparison](../design/platform-differences.md) before reusing macOS grants.
+Filesystem access, runtime memory restrictions, and direct networking differ between platforms.
+
 ## The two tiers
 
 **`box.toml` governs the workload's own system calls, and the operating system enforces it.** The

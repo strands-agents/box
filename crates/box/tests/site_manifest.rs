@@ -1072,7 +1072,11 @@ fn invalid_navigation_is_refused() {
     );
 
     let mut split_group = manifest;
-    split_group.pages[2].nav.group = split_group.pages[0].nav.group.clone();
+    split_group.pages[0].nav.group = "Split group fixture".into();
+    split_group.pages[0].nav.order = 1;
+    split_group.pages[1].nav.group = "Intervening group fixture".into();
+    split_group.pages[2].nav.group = "Split group fixture".into();
+    split_group.pages[2].nav.order = 2;
     assert!(
         validate_manifest(&root, &split_group)
             .expect_err("split navigation group must fail")

@@ -1,8 +1,11 @@
 # Getting started with Box
 
-Box runs an agent on your Mac under a policy; the agent can only reach the files, programs, and
-network hosts you allow, and everything else is refused. You describe a box in two files:
+Box runs an agent on Linux or macOS under a policy.
+The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
+
+For Linux ARM64, start with [Run Box on Linux](linux.md).
+The steps below use macOS on Apple silicon.
 
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
 in a box. You'll give it one tool, a shell, so your policy decides every command it runs and every

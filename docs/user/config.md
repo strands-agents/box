@@ -13,7 +13,8 @@ Mac. Each section below annotates it. To write the policy the file points at, re
 
 ## Example
 
-This release runs on macOS. Getting started builds the example one file at a time, and the block is
+Box runs on Linux and macOS. The [Linux setup guide](linux.md) covers installation and platform requirements.
+Getting started builds the macOS example one file at a time, and the block is
 the tutorial's `my-box/box.toml`, with its one longer comment shortened to a line.
 
 ```toml
