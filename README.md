@@ -189,6 +189,10 @@ the destination. A release can contain macOS assets only; check its assets if a 
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
 Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
+The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Before replacing files, the downloader runs the candidate's `box --version` in a private directory beside the destination.
+The destination's parent directory must be writable and allow execution. Temporary download storage can prohibit execution (`noexec`).
+A failed version check reports the loader error and leaves existing destination files unchanged.
 The final extraction can partially update the destination if it fails. Use a fresh `BOX_DOWNLOAD_DIR`
 to retain a previous installation.
 
@@ -265,6 +269,8 @@ is removed.
 Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
 Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
 and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
+It creates a `noexec` temporary mount only inside the test process's private namespace.
 
 ## Documentation
 

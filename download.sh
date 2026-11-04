@@ -59,6 +59,8 @@ fi
 need tar
 need awk
 need mktemp
+need find
+need dirname
 
 if [ -z "$VERSION" ]; then
     log "Resolving latest release from ${REPO}..."
@@ -74,8 +76,9 @@ esac
 asset="box-${VERSION}-${triple}.tar.gz"
 base_url="https://github.com/${REPO}/releases/download/${VERSION}"
 
+staged=""
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; if [ -n "$staged" ]; then rm -rf "$staged"; fi' EXIT
 trap 'exit 130' INT
 trap 'exit 129' HUP
 trap 'exit 143' TERM
@@ -98,25 +101,45 @@ actual="$(sha256_of "${tmp}/${asset}")"
 log "Checksum verified."
 
 # Validate the extracted payload before writing into the destination.
-staged="${tmp}/unpacked"
-mkdir "$staged"
+if [ "$host_os" = Linux ]; then
+    download_parent="$(dirname "$DOWNLOAD_DIR")"
+    mkdir -p "$download_parent"
+    staged="$(mktemp -d "${download_parent}/.box-download.XXXXXX")"
+else
+    staged="${tmp}/unpacked"
+    mkdir "$staged"
+fi
 umask 022
 tar -C "$staged" -xzf "${tmp}/${asset}" \
     || die "could not unpack ${asset}"
-[ -f "${staged}/box" ] && [ -x "${staged}/box" ] \
+# File modes remain readable even when temporary storage prohibits execution.
+has_execute_mode() {
+    [ -n "$(find -L "$1" -prune -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print)" ]
+}
+has_execute_mode "${staged}/box" \
     || die "${asset} did not unpack an executable 'box'"
 if [ "$host_os" = Linux ]; then
     for name in box strands-box-sock-alias strands-box-contain-trampoline; do
         file="${staged}/${name}"
-        [ -f "$file" ] && [ ! -L "$file" ] && [ -x "$file" ] \
+        [ ! -L "$file" ] && has_execute_mode "$file" && [ -x "$file" ] \
             || die "${asset} is missing a regular executable: ${name}"
     done
+    "${staged}/box" --version >/dev/null \
+        || die "cannot run the Linux package. It requires glibc 2.34 or newer,
+the GCC runtime library, and execution permission in the destination's parent directory.
+The existing destination files were not changed. See the error above."
 fi
 
 mkdir -p "$DOWNLOAD_DIR"
 # Extract the verified archive to preserve the macOS bundle and its links.
 tar -C "$DOWNLOAD_DIR" -xzf "${tmp}/${asset}" \
     || die "could not unpack ${asset} into ${DOWNLOAD_DIR}; files may be partially updated"
+
+if [ "$host_os" = Linux ]; then
+    "${DOWNLOAD_DIR}/box" --version \
+        || die "cannot run box from ${DOWNLOAD_DIR}. Check library availability and execution permissions.
+Destination files have been extracted; use a fresh BOX_DOWNLOAD_DIR to retain a previous installation."
+fi
 
 log ""
 log "Downloaded box ${VERSION} (${triple}) into ${DOWNLOAD_DIR}."
@@ -125,4 +148,6 @@ log ""
 log "Write a box.toml and a policy, then run the box by path:"
 log "  ${DOWNLOAD_DIR}/box run --config ./box.toml"
 
-"${DOWNLOAD_DIR}/box" --version 2>/dev/null || true
+if [ "$host_os" = Darwin ]; then
+    "${DOWNLOAD_DIR}/box" --version 2>/dev/null || true
+fi

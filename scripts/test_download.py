@@ -55,7 +55,7 @@ class DownloaderTests(unittest.TestCase):
         self.tools = self.root / "tools"
         self.tools.mkdir()
         # Use real archive/checksum tools, but prevent access to real HTTP clients.
-        for command in ("sh", "tar", "gzip", "awk", "mktemp", "mkdir", "rm", "sha256sum", "shasum"):
+        for command in ("sh", "tar", "gzip", "awk", "mktemp", "mkdir", "rm", "sha256sum", "shasum", "find", "dirname", "mount", "chmod"):
             executable = shutil.which(command)
             if executable:
                 (self.tools / command).symlink_to(executable)
@@ -77,7 +77,7 @@ class DownloaderTests(unittest.TestCase):
                         BOX_DOWNLOAD_DIR=str(self.destination), TMPDIR=str(self.temp))
 
     def archive(self, version="v1.2.3", triple="aarch64-unknown-linux-gnu", omit=(),
-                non_executable=(), symlink=None, marker="", mac_bundle=False):
+                non_executable=(), symlink=None, marker="", mac_bundle=False, box_program=None, modes=None):
         folder = self.releases / version
         folder.mkdir(parents=True, exist_ok=True)
         asset = folder / f"box-{version}-{triple}.tar.gz"
@@ -96,6 +96,8 @@ class DownloaderTests(unittest.TestCase):
                 if name in omit:
                     continue
                 data = f"#!/bin/sh\nprintf '%s\\n' 'fixture {version} {name}'\n".encode()
+                if name == "box" and box_program is not None:
+                    data = box_program
                 if mac_bundle and name != "box":
                     target = "Box.app/Contents/MacOS/" + name
                     file(target, data)
@@ -104,17 +106,35 @@ class DownloaderTests(unittest.TestCase):
                     file("other-executable", data)
                     link(name, "other-executable")
                 else:
-                    file(name, data, 0o644 if name in non_executable else 0o755)
+                    file(name, data, (modes or {}).get(name, 0o644 if name in non_executable else 0o755))
             if mac_bundle:
                 file("Box.app/Contents/embedded.provisionprofile", b"fixture profile", 0o644)
         digest = hashlib.sha256(asset.read_bytes()).hexdigest()
         (folder / "SHA256SUMS.txt").write_text(f"{digest}  {marker}{asset.name}\n")
         return asset
 
-    def run_script(self):
-        result = subprocess.run([str(self.tools / "sh"), str(SCRIPT)], cwd=self.root,
+    def run_script(self, noexec_tmp=False):
+        command = [str(self.tools / "sh"), str(SCRIPT)]
+        if noexec_tmp:
+            # The mount exists only in this child namespace and disappears on exit.
+            self.assertIsNotNone(shutil.which("unshare"), "noexec tests require util-linux")
+            command = [shutil.which("unshare"), "--user", "--map-root-user", "--mount",
+                       str(self.tools / "sh"), "-c", r'''set -eu
+mount -t tmpfs -o noexec,size=16m tmpfs "$TMPDIR"
+printf '#!/bin/sh\nexit 0\n' > "$TMPDIR/exec-probe"
+chmod 0755 "$TMPDIR/exec-probe"
+if [ -x "$TMPDIR/exec-probe" ]; then
+    echo "test requires a noexec mount" >&2
+    exit 99
+fi
+rm "$TMPDIR/exec-probe"
+exec "$1" "$2"
+''', "noexec-test", *command]
+        result = subprocess.run(command, cwd=self.root,
                                 env=self.env, capture_output=True, text=True, timeout=20)
         self.assertEqual(list(self.temp.iterdir()), [], "temporary downloads must be cleaned up")
+        self.assertEqual(list(self.destination.parent.glob(".box-download.*")), [],
+                         "candidate packages must be cleaned up")
         return result
 
     def urls(self):
@@ -216,6 +236,13 @@ class DownloaderTests(unittest.TestCase):
                 self.archive(non_executable=(name,))
                 self.assert_refused("executable")
 
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses owner execute permissions")
+    def test_linux_helpers_must_be_executable_by_current_user(self):
+        for name in BINARIES[1:]:
+            with self.subTest(name=name):
+                self.archive(modes={name: 0o641})
+                self.assert_refused("regular executable")
+
     def test_linux_symlinks_cannot_substitute_for_executables(self):
         for name in BINARIES:
             with self.subTest(name=name):
@@ -244,6 +271,44 @@ class DownloaderTests(unittest.TestCase):
         self.env["BOX_DOWNLOAD_DIR"] = str(destination)
         self.assert_refused("regular executable")
         self.assertFalse(destination.exists())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mount test")
+    def test_noexec_download_storage_allows_valid_packages(self):
+        for system, triple in (("Linux", "aarch64-unknown-linux-gnu"),
+                               ("Darwin", "aarch64-apple-darwin")):
+            with self.subTest(platform=system):
+                self.archive(triple=triple, mac_bundle=system == "Darwin")
+                self.env["TEST_OS"] = system
+                result = self.run_script(noexec_tmp=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Downloaded box", result.stderr)
+
+    def test_linux_loader_failure_preserves_destination_and_is_visible(self):
+        self.archive(box_program=b"#!/bin/sh\necho 'GLIBC_2.34 not found' >&2\nexit 127\n")
+        result = self.assert_refused("GLIBC_2.34 not found")
+        self.assertIn("glibc 2.34", result.stderr)
+        self.assertNotIn("Downloaded box", result.stderr)
+
+    def test_linux_preflight_failure_does_not_create_destination(self):
+        self.archive(box_program=b"#!/bin/sh\necho 'libgcc_s.so.1 missing' >&2\nexit 127\n")
+        destination = self.root / "missing parent" / "new destination"
+        self.env["BOX_DOWNLOAD_DIR"] = str(destination)
+        self.assert_refused("libgcc_s.so.1 missing")
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(destination.parent.glob(".box-download.*")), [])
+
+    def test_linux_final_execution_failure_does_not_report_success(self):
+        self.archive(box_program=b'''#!/bin/sh
+case "$0" in
+    */.box-download.*/box) exit 0 ;;
+    *) echo 'destination execution refused' >&2; exit 126 ;;
+esac
+''')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("destination execution refused", result.stderr)
+        self.assertIn("Destination files have been extracted", result.stderr)
+        self.assertNotIn("Downloaded box", result.stderr)
 
     def test_signals_stop_without_changing_destination(self):
         self.archive()
