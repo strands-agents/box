@@ -2,7 +2,7 @@ name: Auto Close Issues
 
 on:
   schedule:
-    - cron: '0 14 * * 1-5'  # 9 AM EST (2 PM UTC) Monday through Friday
+    - cron: '23 14 * * 1-5'  # 9:23 AM EST (2:23 PM UTC) Monday through Friday
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,6 +19,7 @@ permissions:
 jobs:
   auto-close:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         include:

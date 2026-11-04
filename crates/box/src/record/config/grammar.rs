@@ -108,8 +108,17 @@ usage = "git push [<remote>]"
     fn a_grammar_loads_from_its_tool_table() {
         let grammars = tool_grammars(&tools(&[("git", tool("/usr/bin/git", Some(GIT)))]))
             .expect("the grammar loads");
+        let policy = policy::Policy {
+            origin: "policy.dw".into(),
+            text: r#"forbid (principal, action == Tool::git::Action::"push", resource);"#.into(),
+        };
 
-        assert!(!grammars.is_empty());
+        policy::PolicyEngine::validate_with_grammars(
+            &policy::Operator::unanchored(),
+            &[policy],
+            &grammars,
+        )
+        .expect("the grammar declares its action");
     }
 
     #[test]

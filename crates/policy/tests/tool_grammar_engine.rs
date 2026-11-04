@@ -93,6 +93,19 @@ fn a_grammar_action_rule_is_refused_rather_than_held_for_an_mcp_schema() {
     assert!(error.to_string().contains("Tool::git"), "{error}");
 }
 
+const MIXED: &str = r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+forbid(principal, action in [alpha::Action::"deploy", Tool::git::Action::"push"], resource);
+"#;
+
+#[test]
+fn a_rule_that_also_names_an_mcp_action_is_refused_when_no_grammar_declares_its_tool_action() {
+    let error = open(source(MIXED), ToolGrammars::default())
+        .expect_err("an MCP schema can never declare the tool grammar action");
+
+    assert!(error.to_string().contains("Tool::git"), "{error}");
+}
+
 #[test]
 fn an_mcp_schema_stages_over_the_grammar_schema() {
     let policy = format!(
@@ -133,35 +146,20 @@ fn validation_reads_the_grammar_schema() {
 }
 
 #[test]
-fn the_grammar_and_the_rule_the_configuration_page_shows_load() {
-    let page = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/user/config.md"
-    ))
-    .expect("the configuration page reads");
-    let section = page
-        .split_once("## `[tool.<name>.grammar]`")
-        .expect("the page has the grammar section")
-        .1;
-    let block = |fence: &str| {
-        section
-            .split_once(fence)
-            .and_then(|(_, rest)| rest.split_once("```"))
-            .map(|(body, _)| body.to_string())
-            .expect("the section shows the block")
-    };
-    let document: toml::Table = toml::from_str(&block("```toml\n")).expect("the example parses");
-    let table = document["tool"]["git"]["grammar"]
-        .as_table()
-        .expect("the example holds `[tool.git.grammar]`")
-        .clone();
-    let grammar = ToolGrammar::from_table(table, "tool.git.grammar").expect("the example loads");
-    let grammars = ToolGrammars::new(vec![grammar]).expect("one grammar installs");
+fn a_check_reads_the_grammar_schema_in_both_load_modes() {
+    let operator = Operator::unanchored();
 
-    PolicyEngine::validate_with_grammars(
-        &Operator::unanchored(),
-        &source(&block("```dw\n")),
-        &grammars,
-    )
-    .expect("the example rule validates against the example grammar");
+    for complete in [true, false] {
+        let with =
+            PolicyEngine::check_with_grammars(&operator, &source(FORBID_PUSH), complete, &git());
+        let without = PolicyEngine::check_with_grammars(
+            &operator,
+            &source(FORBID_PUSH),
+            complete,
+            &ToolGrammars::default(),
+        );
+
+        assert!(with.errors().is_empty(), "{:?}", with.errors());
+        assert!(!without.errors().is_empty(), "complete = {complete}");
+    }
 }

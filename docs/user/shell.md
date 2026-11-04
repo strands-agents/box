@@ -1,4 +1,4 @@
-# Strands Shell
+# Strands Shell reference
 
 Strands Shell is the shell that runs each command the agent sends to `zsh`, `bash`, or `sh` in a
 box. Policy decides each command, and each file operation the command makes. A program outside the
@@ -142,10 +142,14 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
 | `grammar` | table | none | Experimental. The tool grammar for the program. Your policy can name its actions, but the Shell still decides a spawn as `shell:spawn`. See [`[tool.<name>.grammar]`](config.md#toolnamegrammar). |
 
-A table matches a `shell:spawn` when its `command` resolves to the same file as `program_path`,
+A table matches a `shell:spawn` when `program_path` names the command file that Box resolved at startup,
 and its fixed arguments match the leading arguments of the command. When several tables match,
 the one with the longest `command` is used. When a table names the file and none matches the
 arguments, the program is refused.
+
+Configured tool programs remain protected from writes and replacement for the run.
+Box checks direct writable grants before startup and refuses changes through the Shell after policy permits them.
+[Configured command integrity](config.md#configured-command-integrity) lists the startup constraints and the procedure for operator updates.
 
 ```toml
 [tool.git]
@@ -210,6 +214,8 @@ refuses makes `curl` exit non-zero.
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
+| Any other | The operation would change a configured tool program or an enclosing path. Update the program between runs. | `<path>: is a configured tool command or its ancestor` |
+| Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
 
 ## See also
 

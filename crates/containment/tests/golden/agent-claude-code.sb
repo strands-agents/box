@@ -5,6 +5,7 @@
 ; Hide every other process while permitting self-inspection.
 (deny process-info*)
 (allow process-info* (target self))
+(allow process-info-pidinfo (target children))
 
 ; One block per grant cell, below, each in grant order. A cell is one operation at one scope, and
 ; the kernel takes the union of every allow — so a path granted read and write reaches two blocks

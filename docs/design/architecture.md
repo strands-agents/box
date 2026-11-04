@@ -299,6 +299,11 @@ part of what you have to trust.
    ([direct filesystem reach is declared and
    disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). A tool that cannot be
    translated refuses the box before the agent exists.
+
+   On Linux, preserved interpreter spellings appear under `interpreter aliases for configured access`,
+   before the runtime-minimum section. Each line maps a spelling to the file the process's original grants already authorize.
+   These mappings preserve configured access without adding executable or library authority.
+   The [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the emitted form.
 7. **It starts the trampoline**, which becomes the agent, and then it waits.
 
 Teardown runs in the reverse direction, and the order is the point. The workload is reaped first, so

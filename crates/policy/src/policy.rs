@@ -7,7 +7,7 @@ use std::sync::Arc;
 mod authority;
 
 use crate::check::{Finding, PolicyCheck};
-use crate::dogwood::{DogwoodEngine, check_against, validate_staged_source};
+use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
 use crate::request::ActionRequest;
 use crate::schema::GovernedBox;
 use crate::{
@@ -167,9 +167,9 @@ impl PolicyEngine {
 
     /// Open durable history with the schema fragment of each tool grammar in `grammars`.
     #[cfg(test)]
-    pub(crate) fn open_with_grammars(
+    pub(crate) fn open_with_grammars<'a>(
         sources: Vec<Policy>,
-        grammars: &[crate::grammar::Grammar],
+        grammars: impl IntoIterator<Item = &'a crate::grammar::Grammar>,
         history: &Path,
     ) -> Result<Self, PolicyError> {
         let effective = EffectivePolicy {
@@ -177,7 +177,7 @@ impl PolicyEngine {
             policy_id: effective_policy_id(&sources),
         };
         let grammar_schemas: Vec<String> = grammars
-            .iter()
+            .into_iter()
             .map(crate::grammar::Grammar::schema)
             .collect();
         Ok(Self {
@@ -302,10 +302,7 @@ impl PolicyEngine {
                 .collect::<Vec<_>>()
         };
         if complete {
-            let checked = crate::schema::composed_action_schema(&grammars.schemas(), &[])
-                .map_err(crate::check::Refused::from)
-                .and_then(|schema| check_against(&text, schema, operator, true, &[]));
-            return match checked {
+            return match check_and_expand(&text, &grammars.schemas(), &[], operator, true, &[]) {
                 Ok((_, _, warnings)) => PolicyCheck::new(
                     Vec::new(),
                     warnings.into_iter().map(warning).collect(),

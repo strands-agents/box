@@ -171,6 +171,9 @@
 
 use std::process::ExitCode;
 
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod user_namespace;
+
 #[cfg(target_os = "linux")]
 mod proc_mem_probe;
 
@@ -757,6 +760,10 @@ fn attempt_terminal_injection(byte: u8) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn linux_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_arch = "aarch64")]
+    if args.get(1).is_some_and(|value| value == "--user-namespace") {
+        return user_namespace::run(&args);
+    }
     match args.get(1).map(String::as_str) {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),

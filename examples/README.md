@@ -27,3 +27,6 @@ it reads, writes, or deletes goes through the box's shell. The
 
 Agent runs require model access. Each tutorial states its platform requirements.
 For Box installation and configuration, follow [getting started](../docs/user/getting-started.md).
+
+[Linux cloud deployments](./cloud-deployments/): run a coding workload on Amazon EKS or a shipment agent on AgentCore Runtime.
+The samples include source, deployment commands, expected refusals, and tested-platform limits.

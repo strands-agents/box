@@ -50,14 +50,54 @@ the file on disk afterwards changes nothing, and it checks the digest before it 
 Then it locks itself down and turns into the target program, keeping only the environment that
 `strands-box` built for it. The target starts already contained and can't undo it.
 
+The setup-status channel separates setup failures from workload exit codes. The trampoline reports
+completed preparation only after the sandbox, target environment, and working directory are ready.
+It keeps the failure channel open through the executable launch attempt. Box waits for channel
+closure and reports any failure stage, including a launch failure after the preparation marker.
+On Linux, the namespace reaper sends a separate completion marker after its own setup.
+Box requires both markers. The launcher and reaper close their copies before they wait for workload exit.
+A long-lived workload therefore cannot keep the setup reader blocked through those copies.
+
+Channel closure before all required preparation markers is incomplete setup. Buffered and streaming
+execution report it as an error. If the agent launcher dies from a signal, Box preserves its signal exit
+status. A reported setup failure or malformed marker still takes priority over that status. Closure after that marker
+means preparation completed without a reported launch failure. It does not prove application readiness
+or successful executable launch: abrupt death between the marker and the launch closes the channel too.
+The same status reader serves buffered and streaming execution. It rejects the obsolete completion marker immediately, so an old helper cannot retain a streaming setup wait.
+
 The trampoline doesn't decide anything itself. Whether a process gets the agent's rules or the rules
 for a tool's or local MCP server's sandbox is written in the configuration, and `strands-box` writes
 that.
 
-Anyone who can write to the install directory could swap the trampoline, so `strands-box` doesn't
-trust the path. Every time it starts a contained process, it opens the trampoline and checks that
-the open file is a native executable carrying the marker the build embeds. Then it copies those
-exact bytes into `private/trampoline/`, names the copy by its SHA-256 digest, and runs the copy.
+At startup, Box opens its executable, trampoline, and socket-alias image and records their file identities and hard-link names.
+For the macOS package layout, it also records an executable regular file named `box` beside `Box.app` as the package launcher.
+A standalone application bundle does not require this wrapper. Other nearby entries named `box` do not become package launchers.
+A hard link gives one file another filesystem name. Box inventories these names in each program's
+installation directory and its immediate `deps` directory, which supports Cargo builds.
+Box refuses startup when that inventory cannot account for every hard link.
+
+Linux also maps these files through the current mount table and verifies each resulting file identity.
+This covers file and directory bind mounts, which expose existing files at other paths.
+Box refreshes these aliases for each grant check and hosted mutation. It refuses incomplete or unstable inventories.
+On macOS, Box also checks verified spellings through the Data volume. Mounted aliases do not increase the hard-link count.
+
+Box protects these programs because they start containment or route workload operations to its checks
+([installed Box programs resist workload writes](decisions.md#installed-box-programs-resist-workload-writes)).
+Every process's writable grants must exclude these files, their recorded names, and enclosing
+directories. Strands Shell and Monty also refuse changes to them, even when policy permits the
+operation. [Installation integrity](../user/config.md#installation-integrity) describes the refusals.
+
+Before each contained launch, Box checks the recorded file identities and link counts. It uses the
+trampoline file opened at startup. Linux executes that file through a descriptor, an operating-system
+handle for an open file. On macOS, Box copies its bytes into `private/trampoline/`, names the copy by
+its SHA-256 digest, and runs the copy.
+Alias materialization also hashes and copies through one retained readable descriptor, without reopening its source path.
+
+Box also checks the trampoline's native executable format and embedded public marker. The marker
+identifies the artifact kind. It does not authenticate the release. These checks assume the operator
+trusts the installed binaries at startup. Box constrains workload writes, but does not protect the
+installation from writers outside Box or detect prior compromise. The operator updates the
+installation between runs.
 
 ### Alias - `strands-box-sock-alias`
 

@@ -810,7 +810,18 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     let git = Server::new("git", "git-mcp", "status", DiscoveryBehavior::Ready);
     box_.install_server(&git);
     box_.install_program("git", "#!/bin/bash\nprintf 'GIT_BINARY_RAN\\n'\n");
-    box_.declare_tool("git", "[tool.git]\ncommand = [\"git\"]\n");
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("Bash interpreter");
+        format!("[tool.git.filesystem]\nread_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    box_.declare_tool(
+        "git",
+        &format!("[tool.git]\ncommand = [\"git\"]\n{interpreter_grant}"),
+    );
     let policy = format!(
         "@id(\"no_git_binary\")\n\
          forbid (principal, action == Box::Action::\"shell:spawn\", resource)\n\
@@ -1774,7 +1785,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["missing"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["missing"]"#),
         "{stderr}"
     );
     drop(client);
@@ -2263,7 +2274,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["stale"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the stale-only action must degrade rather than adopt a stored schema: {stderr}"
     );
     assert!(
@@ -2290,7 +2301,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     assert!(
         String::from_utf8_lossy(&second_output.stderr)
-            .contains(r#"discovery denied tools/list for ["stale"]"#),
+            .contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the second run must also degrade the stale-only action: {}",
         String::from_utf8_lossy(&second_output.stderr)
     );

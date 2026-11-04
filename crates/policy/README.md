@@ -42,7 +42,7 @@ the six names in the last row.
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, and why one is refused. |
-| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's program file and called name, and why a binding is refused. |
+| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's program file and called name, and why declaring a tool is refused. |
 | `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:
@@ -324,9 +324,12 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
-a `::error`. A Shell `read_metadata` that got an answer has happened, even when the answer
-is "no", so it records a `::response`; one that the reach floor or the admission-window guard
-refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
+a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even
+when the answer is "no", so it records a `::response`. So does one of a path inside the reachable set that cannot be
+resolved, such as one under a missing folder, with no `.` or `..` component, no symbolic link, and
+nothing beneath the deny floor, although the reach check refuses it, because the workload has its
+answer; any other one that the reach floor or
+a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
 without reporting). A rule that counts certain completions matches

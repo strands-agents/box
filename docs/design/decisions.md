@@ -69,14 +69,14 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux evaluation requires explicit consent
+### Linux publication and runtime consent stay separate
 
-Linux evaluation requires the operator to set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` before using the command line or library.
-Help and version checks remain available without consent.
-Linux archives belong to `-linux-preview.N` prereleases; stable releases continue to distribute macOS alone.
-A stable Linux download would imply readiness that the current qualification does not establish, so it is excluded.
-Operators and test automation must opt in, and the flag does not grant filesystem access or establish security acceptance.
-Removing these controls requires a later readiness decision.
+Linux evaluation requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`, while help and version checks remain available without consent.
+Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable release without a workflow revert.
+Keeping Linux in preview only would prevent an accepted Linux build from using the stable channel.
+The cost is an explicit platform choice: the release owner must establish Linux readiness before publishing its archive.
+Linux previews always include ARM64 Linux and leave the latest stable release unchanged.
+Package availability and runtime consent establish neither filesystem authority nor security acceptance.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -411,14 +411,15 @@ partial read-write access. `linux_rejects_write_only_before_any_process_runs` pi
 This accepted platform limitation avoids silently adding read permission. Landlock is the planned
 long-term approach; its implementation and qualification remain deferred.
 
-On Linux, when the
-authority directory sits more than one level below a write grant, the workload can rename the
-ancestor between them and create a fresh directory at the vacated path, which a later run whose
-`--config` names that path adopts; macOS refuses the ancestor rename, and
-`this_boxs_authority_survives_a_rename_of_its_parent` records both platforms. Placing the authority
-directly under the granted root, as `<project>/.strands-box` is, leaves no ancestor to rename. And a
-path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes the
-agent's own read work while `cat` through the Shell stays refused.
+Both platforms refuse native workload renames of ancestors between a write grant and the loaded
+authority directory. Linux keeps these ancestors fixed with mounts inside the workload's mount
+namespace; macOS denies changes to their directory entries. The test
+`this_boxs_authority_survives_a_rename_of_its_parent` checks both platforms and confirms that unrelated
+sibling operations still work. On Linux, this protection does not cover a permitted Shell move
+executed outside the workload's mount namespace.
+
+A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
+the agent's own read work while `cat` through the Shell stays refused.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
@@ -452,11 +453,22 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
 read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
-pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
-first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
-script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
-that runs a helper needs that helper's directory in its own `exec` list. Two residual risks are
-stated. Write and exec on one path is a warning and not a refusal, so a workload that can write a
+pins. On macOS, Box grants the interpreter chain of the one program it was told to run: it reads
+the program's first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter
+is itself a script, and grants exec at file scope on each hop.
+
+On Linux, every interpreter in a declared script's chain needs coverage from the process's original
+filesystem grants. An agent needs `exec` coverage. A declared tool or local server can use its own
+read or writable grants where those grants permit execution. System paths have no exemption.
+Discovery follows `env` and its selected command, and checks every nested script's interpreter.
+Script contents select the programs to check; they grant no authority to those programs.
+Box preserves required path spellings only for files already authorized, without adding a new source
+for library dependency discovery. A tool's readable interpreter can still need separate grants for non-system libraries.
+
+A workload-selected program without a declared tool table needs existing `exec` coverage for its
+interpreter chain on either platform. Box derives no wider exec closure, so a program that runs a
+helper needs that helper's directory in its own `exec` list. Two residual risks are stated.
+Write and exec on one path is a warning and not a refusal, so a workload that can write a
 path it can also run can run code it wrote there. And a granted shell can interpret workload-authored
 input inside its parent's boundary, because native descendants raise no new decision.
 
@@ -811,13 +823,32 @@ enforced against recorded history, so do not claim tamper resistance for them. A
 is satisfied by a denied attempt, because the request event carries no verdict, so a step-up rule keyed
 on `::request` is defeated by asking and being refused. Key a precondition on `::response` instead;
 `a_denied_attempt_satisfies_a_request_keyed_precondition` pins the failure mode, which is known and
-open. A missing outcome event also makes a counting rule undercount and fail open. A Shell metadata
-read that got an answer records `::response` even when the answer is "no", so a `read_metadata`
-budget counts a probe of an absent path, which `a_read_metadata_budget_counts_probes_of_absent_paths`
-pins, and a read that the reach floor or the admission-window guard refuses stays `::error`, which
-`a_metadata_read_the_floor_refuses_meets_no_response_precondition` and
-`a_probe_the_admission_window_refuses_reports_a_failure` pin; the cost is that no event kind
-separates a "yes" from a "no". History is pruned to
+open. A missing outcome event also makes a counting rule undercount and fail open. A metadata read
+that got an answer, in the Shell or in Python, records `::response` even when the answer is "no",
+so a `read_metadata` budget counts a probe of a missing file in an existing folder, which
+`a_read_metadata_budget_counts_probes_of_absent_paths` and
+`a_read_metadata_budget_counts_stats_of_missing_paths` pin. A metadata read of a path that can't be
+resolved, such as one under a missing folder or under a folder the surrounding OS won't let Box
+search, also records `::response`, although the reachable paths check refuses it, which
+`a_metadata_read_under_a_missing_folder_meets_a_response_precondition`,
+`a_metadata_read_under_a_missing_folder_spends_the_budget`, and
+`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box records it so only when
+the path is inside the reachable paths, has no `.` or `..` component, crosses no symbolic link in a folder Box can see, and
+isn't in Box's own state, which `only_a_plain_path_under_a_missing_folder_is_unresolved` and
+`a_stat_outside_the_reachable_set_spends_nothing` pin. The event kind doesn't depend on what a
+symbolic link, a `.` or `..` component, or Box's own state holds, so those refusals stay
+`::error`. Any other read that Box refuses stays `::error`: a reach-floor refusal, which
+`a_metadata_read_the_floor_refuses_meets_no_response_precondition` pins; the Shell's
+admission-window guard, which refuses any namespace change and which
+`a_probe_the_admission_window_refuses_reports_a_failure` pins; and Python's walk, which refuses a
+symbolic link swapped into the path and which `a_predicate_refused_by_an_ancestor_swap_records_failed`
+and `a_metadata_read_of_a_leaf_swapped_for_a_link_records_failed` pin. Recording a "no" as `::error`
+lost, because the workload still learns the answer, and Python records what the Shell records. The
+cost is that no event kind separates a "yes" from a "no", so a `::response` precondition on a
+metadata read is met by learning that a path is missing, also when the reachable paths check
+refused the read. A `::response` budget doesn't count a refused probe through a symbolic link,
+with a `.` or `..` component, or into Box's own state. A cap on attempts counts `::request`, which
+counts every probe. History is pruned to
 the deepest authored window and the workload itself fills that window, so treat window depth as an
 availability bound and not as a strength claim. A counting rule also evaluates against recorded
 history and not against requests in flight, so a parallel burst can exceed a limit together while each
@@ -1051,22 +1082,29 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 ```
 
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
-### A tool grammar binds on the program file's identity and the name it was called by
+### A tool grammar binds by its program name, on the program file's identity and the name it was called by
 
-Box binds a tool grammar to a pair: the identity of the resolved program file, and the name the program
-was called by. The identity is the file's device and inode on the host, so a hard link or a symbolic
-link to a bound file is that same file, and a link can't route around the binding. A command is
-parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
-enough, because several programs can share one binary. mise runs every tool it manages through one shim
-binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can be links
-to one binary. The name alone isn't enough, because the caller picks the name, so any file called `git`
-would claim the git grammar. Binding on the file identity alone was rejected: it's one lookup, but it
-would read `npm install` through the mise shim binary as a cargo command.
+A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
+A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+`/opt/homebrew/bin/git`, because both run `git`. So one program name has at most one grammar, and Box
+refuses a second grammar with the same `program` and names both tables. Letting two grammars share a
+program was rejected, because both would claim the same tools, and the order of the tables would pick
+which one reads a command.
 
-Several grammars can bind one file, each under its own name. So a cargo grammar binds the mise shim
-binary as `cargo`, and an npm grammar binds the same file as `npm`. Box refuses a second grammar only on
-a pair that another grammar already binds. One grammar per file was rejected, because then only one
-tool that mise manages could have a grammar.
+For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
+name the program was called by. The identity is the file's device and inode on the host, so a hard
+link or a symbolic link to a bound file is that same file, and a link can't route around the binding.
+A command is parsed with a tool grammar only when both halves match one binding. The file identity
+alone isn't enough, because several programs can share one binary. mise runs every tool it manages
+through one shim binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and
+`rustc` can be links to one binary. The name alone isn't enough, because the caller picks the name,
+so any file called `git` would claim the git grammar. Binding on the file identity alone was rejected:
+it's one lookup, but it would read `npm install` through the mise shim binary as a cargo command.
+
+Several grammars can bind one file, each under its own program name. So a cargo grammar binds the
+mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. One grammar per file was
+rejected, because then only one tool that mise manages could have a grammar. A name that a `[tool]`
+declares, but that no grammar's `program` matches, binds no grammar and stays a `shell:spawn`.
 
 Box refuses a spawn of a bound file before any policy decides it, in two cases, and no rule can permit
 either one. The first is a name that no `[tool]` declares, such as `python` through the mise shim
@@ -1075,15 +1113,16 @@ link it bound through, leads to another file now, for example after an update wh
 a new name, a new link, or a new file can't fall back to a `shell:spawn` rule that permits more. Reading an undeclared
 name as the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
 grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
-named. A name that a `[tool]` declares with no grammar stays a `shell:spawn`, also after its file is
-replaced, because the operator named it and chose no grammar for it.
+named. A declared name with no grammar stays a `shell:spawn` also after its file is replaced, because
+the operator named it and chose no grammar for it.
 
-The cost has three parts. An operator must declare each name that runs a bound file, or Box refuses
-that name. An update that replaces a bound binary while the box runs refuses that program until the
-box restarts. And a grammar covers a file identity, not a program: a file that no grammar binds stays a
-`shell:spawn` under every name, even a name that no `[tool]` declares. So a copy of a bound binary at
-another path, or the same program reached through an unbound shim binary, is decided by the
-`shell:spawn` rules and not by its grammar.
+The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
+and `/opt/homebrew/bin/git` both read with the one git grammar. An operator must declare each name that
+runs a bound file, or Box refuses that name. An update that replaces a bound binary while the box runs
+refuses that program until the box restarts. And a grammar covers only the files that a `[tool]` runs:
+a file that no grammar binds stays a `shell:spawn` under every name, even a name that no `[tool]`
+declares. So a copy of a bound binary at another path, or the same program reached through an unbound
+shim binary, is decided by the `shell:spawn` rules and not by its grammar.
 
 ## Containment
 
@@ -1180,6 +1219,21 @@ descriptors, and then the command. It is process-agnostic, so nothing about a pa
 inside it. Its exit codes separate three failures: a setup error before the sandbox applies, a failed apply,
 and a contained process whose environment decode or exec failed.
 
+<a id="installed-box-programs-resist-workload-writes"></a>
+### Installed Box programs resist workload writes
+
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
+`TrustedInstallation` retains their identities and refuses grants and broker mutations that can
+replace the files or their paths. The cost is that writable development trees must exclude the
+running installation and its verified alternative names. The operator owns initial contents and
+updates between runs, and the public build marker identifies artifact kind rather than authenticating
+contents. `every_process_table_refuses_writes_to_installed_executables_and_their_ancestors` and
+`the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors` pin the direct-grant and
+broker checks.
+
 <a id="the-configuration-crosses-exec-as-digest-bound-json"></a>
 ### The configuration crosses the exec boundary as an inherited descriptor, bound by a digest
 
@@ -1265,6 +1319,7 @@ code-level enforcement of no-escalation for an exec grant.
 <a id="write-plus-execute-warns-and-does-not-refuse"></a>
 ### Write plus execute on one path warns, and does not refuse
 
+This rule applies to workload programs outside the files Box protects from writes.
 An operator who names one directory in both a write list and an exec list gets a warning at startup,
 and the box still runs. A refusal was wrong for a real build, which loads and runs what it compiles.
 The warning names the executable and the write grant that reaches it. The cost is stated rather than
