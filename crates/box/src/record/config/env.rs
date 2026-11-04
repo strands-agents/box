@@ -29,8 +29,24 @@ pub(super) const LOADER_HOOKS: [&str; 10] = [
     "_JAVA_OPTIONS",
 ];
 
-/// Refuse an environment name the box cannot safely hand a phantom to.
+/// Refuse an environment name the box cannot safely hand a phantom to, or that is unset on the host.
 pub(crate) fn checked_provisioned_name(host: &str, name: &str) -> Result<String, BoxError> {
+    let name = checked_variable_name(host, name)?;
+    // Whitespace-only, not merely empty: `Bearer   ` on the wire fails at the upstream in a way an
+    // operator reads as the box denying the call. It agrees with the vault's content rule
+    if std::env::var_os(&name)
+        .is_none_or(|value| value.to_str().is_none_or(|value| value.trim().is_empty()))
+    {
+        return Err(Internal::CredentialProjection(format!(
+            "credential variable {name} is not set, or holds only whitespace"
+        ))
+        .into());
+    }
+    Ok(name)
+}
+
+/// Refuse an environment name the box cannot safely hand a phantom to.
+pub(crate) fn checked_variable_name(host: &str, name: &str) -> Result<String, BoxError> {
     if name.is_empty() {
         return Err(Internal::CredentialProjection(format!(
             "credential for {host} has an empty environment variable name"
@@ -40,16 +56,6 @@ pub(crate) fn checked_provisioned_name(host: &str, name: &str) -> Result<String,
     if !valid_environment_name(name) || reserved_workload_environment(name) || composed_over(name) {
         return Err(Internal::CredentialProjection(format!(
             "credential for {host} names invalid or reserved variable {name:?}"
-        ))
-        .into());
-    }
-    // Whitespace-only, not merely empty: `Bearer   ` on the wire fails at the upstream in a way an
-    // operator reads as the box denying the call. It agrees with the vault's content rule
-    if std::env::var_os(name)
-        .is_none_or(|value| value.to_str().is_none_or(|value| value.trim().is_empty()))
-    {
-        return Err(Internal::CredentialProjection(format!(
-            "credential variable {name} is not set, or holds only whitespace"
         ))
         .into());
     }

@@ -19,8 +19,8 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 const DISALLOWED: &[char] = &[
     // shell metacharacters
     ';', '&', '|', '$', '`', '(', ')', '<', '>', '{', '}', '[', ']', '!', '*', '\\', '"', '\'',
-    // whitespace / control
-    ' ', '\t', '\n', '\r', '\0', // URI query/fragment — an op reference is a bare path
+    // control; a space is allowed, because 1Password names hold spaces and no shell parses the argv
+    '\t', '\n', '\r', '\0', // URI query/fragment — an op reference is a bare path
     '?', '#',
 ];
 
@@ -70,7 +70,7 @@ impl OnePasswordSource {
         }
         let mut segments = 0usize;
         for segment in body.split('/') {
-            if segment.is_empty() {
+            if segment.trim().is_empty() {
                 return reject("has an empty path segment");
             }
             segments += 1;
@@ -361,7 +361,8 @@ mod tests {
             "op://vault/item/a|b",        // pipe
             "op://vault/item/a&b",        // background
             "op://vault/item/a\nb",       // embedded newline
-            "op://vault/item/with space", // whitespace
+            "op://vault/item/with\ttab",  // whitespace other than a space
+            "op://vault/ /field",         // blank segment
             "https://vault/item/field",   // wrong scheme (no op:// prefix)
         ];
         for uri in bad {
@@ -382,6 +383,7 @@ mod tests {
     fn validate_accepts_canonical_and_sectioned_forms() {
         assert!(OnePasswordSource::validate("op://vault/item/field").is_ok());
         assert!(OnePasswordSource::validate("op://vault/item/section/field").is_ok());
+        assert!(OnePasswordSource::validate("op://vault/named item/field").is_ok());
     }
 
     /// 18.3 — an `op://` reference resolves to opaque material through the stubbed runner seam (no
@@ -395,5 +397,56 @@ mod tests {
         // Resolves to a plain opaque secret string (trailing newline stripped) — the shape the store
         // wraps as `CredentialMaterial::Opaque` and then mints a phantom for.
         assert_eq!(secret.as_str(), "op-real-secret");
+    }
+
+    /// An `op://` route opens through the vault, mints one phantom, and swaps it for the value
+    /// `op` printed.
+    #[test]
+    fn an_op_route_resolves_and_its_phantom_maps_to_the_secret() {
+        use crate::{
+            Backend, Destination, DestinationPattern, InjectMode, Outbound, RouteSpec, Vault,
+            VaultConfig,
+        };
+
+        let backend = Backend::local_with(source_with(CannedRunner(b"ghp_from_op\n".to_vec())));
+        let opened = Vault::open(
+            VaultConfig::new(backend, "tenant-op")
+                .route(RouteSpec::opaque(
+                    DestinationPattern::parse("api.github.com").unwrap(),
+                    Locator::parse_uri("op://Private/GitHub/token").unwrap(),
+                    InjectMode::header("Bearer {}".to_string(), None).unwrap(),
+                ))
+                .require_every_route(),
+        )
+        .expect("the op route resolves");
+
+        let [phantom] = opened.phantoms() else {
+            panic!("one opaque route mints one phantom");
+        };
+        let token = phantom.token().to_string();
+        assert_ne!(token, "ghp_from_op", "the phantom is never the secret");
+
+        let vault = opened.into_vault();
+        let headers = vec![("Authorization".to_string(), format!("Bearer {token}"))];
+        let attachment = vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "api.github.com",
+                    port: 443,
+                    path: "/user",
+                },
+                method: "GET",
+                url: "https://api.github.com/user",
+                query: "",
+                headers: &headers,
+                body: b"",
+            })
+            .expect("the phantom matches its binding")
+            .expect("a credential is bound for this destination");
+        let authorization = attachment
+            .set_headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+            .map(|(_, value)| value.to_string());
+        assert_eq!(authorization.as_deref(), Some("Bearer ghp_from_op"));
     }
 }

@@ -339,7 +339,7 @@ fn an_undeliverable_credential_scheme_is_refused_at_configure() {
     }
     for (name, locator) in [
         ("file-scheme", "file:///etc/tokens/gh"),
-        ("op-scheme", "op://Private/GitHub/token"),
+        ("oauth2-scheme", "oauth2://issuer/client"),
         ("cmd-scheme", "cmd://mint-a-token"),
     ] {
         let (box_, output) = attempt_configure(
@@ -563,6 +563,64 @@ fn the_workload_environment_holds_only_a_phantom() {
         "the real secret must never enter the workload's environment"
     );
 }
+/// The workload variable an `op://` route names, unset on the host.
+const OP_VARIABLE: &str = "STRANDS_BOX_E2E_OP_TOKEN";
+
+/// A directory holding an `op` that prints `secret`, standing in for the 1Password CLI.
+fn fake_op(secret: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().expect("a directory for the fake op");
+    let op = directory.path().join("op");
+    std::fs::write(&op, format!("#!/bin/sh\nprintf '%s\\n' '{secret}'\n"))
+        .expect("write the fake op");
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755))
+        .expect("make the fake op executable");
+    directory
+}
+
+/// An `op://` route places only a phantom, under `secret.variable`, as an `env://` route does.
+#[test]
+fn an_op_route_puts_only_a_phantom_in_the_workload_environment() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    assert!(
+        std::env::var_os(OP_VARIABLE).is_none(),
+        "the op variable must be unset on the host"
+    );
+    let fake = fake_op(REAL_SECRET);
+    let path = format!(
+        "{}:{}",
+        fake.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let box_ = Request::with_config(
+        "phantom-op",
+        &permit_egress_to("api.example.test", 443),
+        &format!(
+            "[egress.a]\ndestinations = [\"api.example.test\"]\nsecret.ref = \"op://Private/GitHub/token\"\nsecret.variable = \"{OP_VARIABLE}\"\n"
+        ),
+    )
+    .env("PATH", &path)
+    .expect();
+
+    let output = box_.run(&["/usr/bin/env"]);
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let held = environment
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{OP_VARIABLE}=")))
+        .unwrap_or_default();
+    assert!(
+        held.starts_with("strands_box_"),
+        "the workload must hold a minted phantom, got {held:?}"
+    );
+    assert!(
+        !environment.contains(REAL_SECRET),
+        "the real secret must never enter the workload's environment"
+    );
+}
+
 /// A phantom is a RUN-lifetime value, and it is stable for that run.
 ///
 /// The phantom used to be minted once per daemon load and shared by every run of the box. Each
