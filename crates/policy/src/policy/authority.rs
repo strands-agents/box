@@ -16,7 +16,9 @@ use crate::dogwood::{
     refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
 };
 use crate::request::ActionRequest;
-use crate::schema::{ActionIdentity, GovernedBox, mcp_action_namespace, mcp_tool_action};
+use crate::schema::{
+    ActionIdentity, GovernedBox, composed_action_schema, mcp_action_namespace, mcp_tool_action,
+};
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request, RequestId};
 
@@ -32,6 +34,7 @@ struct CandidatePolicy {
 struct ProposalState {
     operator: Operator,
     candidates: Vec<CandidatePolicy>,
+    grammar_schemas: Vec<String>,
     schemas: BTreeMap<String, String>,
     ready: BTreeSet<usize>,
     pending: BTreeMap<usize, String>,
@@ -110,18 +113,26 @@ impl Authority {
         sources: Vec<Policy>,
         history: &Path,
     ) -> Result<Self, PolicyStagingError> {
-        Self::open_staged_with_engine(operator, sources, DogwoodEngine::open_for_staging(history)?)
+        Self::open_staged_with_engine(
+            operator,
+            sources,
+            Vec::new(),
+            DogwoodEngine::open_for_staging(history)?,
+        )
     }
 
+    /// Opens a staging authority. Each schema set holds `grammar_schemas` below the MCP schemas.
     pub(super) fn open_staged_file(
         operator: &Operator,
         sources: Vec<Policy>,
+        grammar_schemas: Vec<String>,
         history: File,
         label: std::path::PathBuf,
     ) -> Result<Self, PolicyStagingError> {
         Self::open_staged_with_engine(
             operator,
             sources,
+            grammar_schemas,
             DogwoodEngine::open_for_staging_file(history, label)?,
         )
     }
@@ -129,59 +140,67 @@ impl Authority {
     fn open_staged_with_engine(
         operator: &Operator,
         sources: Vec<Policy>,
+        grammar_schemas: Vec<String>,
         mut engine: DogwoodEngine,
     ) -> Result<Self, PolicyStagingError> {
         let candidates = candidates(&authored(&sources)).map_err(Refused::into_error)?;
         let mut proposal = ProposalState {
             operator: operator.clone(),
             candidates,
+            grammar_schemas,
             schemas: BTreeMap::new(),
             ready: BTreeSet::new(),
             pending: BTreeMap::new(),
         };
         let complete = proposal.complete_policy_set();
         refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
-        let (readiness, pending_tools, warnings) =
-            match validate_canonical_policy_set(&complete, &[], operator, &[]) {
-                Ok((effective_schema, warnings)) => {
-                    engine
-                        .commit_staged(&complete, effective_schema)
-                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                    proposal.mark_all_ready();
-                    (Readiness::Ready, BTreeSet::new(), warnings)
-                }
-                Err(
-                    inert @ (PolicyError::Spelling(_)
-                    | PolicyError::InputAcrossFamilies(_)
-                    | PolicyError::SharedRuleId(_)
-                    | PolicyError::ReservedAction(_)
-                    | PolicyError::InertTemporalPermit(_)),
-                ) => {
-                    return Err(inert.into());
-                }
-                Err(_) => {
-                    proposal.classify(&[])?;
-                    // Serve the schema-independent subset while typed schemas stage
-                    // (`Discovering`), instead of denying every request. A per-tool rule whose server
-                    // never stages (its `tools/list` is denied) is not refused here;
-                    // `finish_mcp_discovery` degrades that one server instead.
-                    let subset = proposal.ready_policy_set();
-                    let (effective_schema, warnings) = validate_canonical_policy_set(
-                        &subset,
-                        &[],
-                        operator,
-                        &proposal.ready_positions(),
-                    )?;
-                    engine
-                        .commit_staged(&subset, effective_schema)
-                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                    (
-                        Readiness::Discovering,
-                        pending_typed_tools(&proposal),
-                        warnings,
-                    )
-                }
-            };
+        let (readiness, pending_tools, warnings) = match validate_canonical_policy_set(
+            &complete,
+            &proposal.grammar_schemas,
+            &[],
+            operator,
+            &[],
+        ) {
+            Ok((effective_schema, warnings)) => {
+                engine
+                    .commit_staged(&complete, effective_schema)
+                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                proposal.mark_all_ready();
+                (Readiness::Ready, BTreeSet::new(), warnings)
+            }
+            Err(
+                inert @ (PolicyError::Spelling(_)
+                | PolicyError::InputAcrossFamilies(_)
+                | PolicyError::SharedRuleId(_)
+                | PolicyError::ReservedAction(_)
+                | PolicyError::InertTemporalPermit(_)),
+            ) => {
+                return Err(inert.into());
+            }
+            Err(_) => {
+                proposal.classify(&[])?;
+                // Serve the schema-independent subset while typed schemas stage
+                // (`Discovering`), instead of denying every request. A per-tool rule whose server
+                // never stages (its `tools/list` is denied) is not refused here;
+                // `finish_mcp_discovery` degrades that one server instead.
+                let subset = proposal.ready_policy_set();
+                let (effective_schema, warnings) = validate_canonical_policy_set(
+                    &subset,
+                    &proposal.grammar_schemas,
+                    &[],
+                    operator,
+                    &proposal.ready_positions(),
+                )?;
+                engine
+                    .commit_staged(&subset, effective_schema)
+                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                (
+                    Readiness::Discovering,
+                    pending_typed_tools(&proposal),
+                    warnings,
+                )
+            }
+        };
 
         Ok(Self {
             proposal: Mutex::new(Some(proposal)),
@@ -228,8 +247,13 @@ impl Authority {
 
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
-        let (effective_schema, _) =
-            validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[])?;
+        let (effective_schema, _) = validate_canonical_policy_set(
+            &complete,
+            &proposed.grammar_schemas,
+            &schemas,
+            &proposed.operator,
+            &[],
+        )?;
 
         let mut live = self.live.lock().map_err(|_| {
             PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -272,7 +296,13 @@ impl Authority {
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
 
-        match validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[]) {
+        match validate_canonical_policy_set(
+            &complete,
+            &proposed.grammar_schemas,
+            &schemas,
+            &proposed.operator,
+            &[],
+        ) {
             Ok((effective_schema, _)) => {
                 let mut live = self.live.lock().map_err(|_| {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -318,6 +348,7 @@ impl Authority {
                 let subset = proposed.ready_policy_set();
                 let (subset_schema, _) = validate_canonical_policy_set(
                     &subset,
+                    &proposed.grammar_schemas,
                     &schemas,
                     &proposed.operator,
                     &proposed.ready_positions(),
@@ -615,6 +646,7 @@ impl ProposalState {
     fn validate_ready(&self, schemas: &[String]) -> Result<(), PolicyError> {
         validate_canonical_policy_set(
             &self.ready_policy_set(),
+            &self.grammar_schemas,
             schemas,
             &self.operator,
             &self.ready_positions(),
@@ -638,6 +670,7 @@ impl ProposalState {
                 let candidate = self.candidate_policy_set(ordinal);
                 match check_canonical_policy_set(
                     &candidate,
+                    &self.grammar_schemas,
                     schemas,
                     &self.operator,
                     &self.candidate_positions(ordinal),
@@ -651,7 +684,9 @@ impl ProposalState {
                         return Err((ordinal, refused));
                     }
                     Err(refused) => {
-                        if !self.names_a_typed_action(ordinal) {
+                        if !self.names_a_typed_action(ordinal)
+                            || self.names_an_undeclared_qualified_action(ordinal)
+                        {
                             return Err((ordinal, refused));
                         }
                         self.pending.insert(ordinal, refused.error.to_string());
@@ -677,6 +712,24 @@ impl ProposalState {
             );
         }
         !typed.is_empty()
+    }
+
+    /// Whether a candidate names a qualified action, such as `Tool::git::Action::"push"`, that no
+    /// tool grammar schema declares. No MCP schema can declare one, so the rule cannot wait for it.
+    fn names_an_undeclared_qualified_action(&self, ordinal: usize) -> bool {
+        let Some(candidate) = self.candidates.get(ordinal) else {
+            return false;
+        };
+        let named = qualified_actions(&candidate.expanded_source);
+        if named.is_empty() {
+            return false;
+        }
+        let Ok(schema) = composed_action_schema(&self.grammar_schemas, &[]) else {
+            return true;
+        };
+        named
+            .iter()
+            .any(|action| !schema.cedar.actions().any(|declared| declared == action))
     }
 
     /// The rule that candidate `ordinal` stands for, with the `@id` its expanded source carries.
@@ -903,9 +956,10 @@ enum HistoryReferences {
 }
 
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
-/// excluding the fixed `Box::Action` vocabulary, including one that only a condition names, and
-/// treating a `when temporal` history reference as `references` says. The scan finds the candidate
-/// text, and `decoded_tool_action` is the one decoder that says which tool it names.
+/// excluding the fixed `Box::Action` vocabulary and every qualified namespace, such as a tool
+/// grammar's `Tool::<name>`, which no MCP schema declares. It keeps one that only a condition
+/// names, and treats a `when temporal` history reference as `references` says. The scan finds the
+/// candidate text, and `decoded_tool_action` is the one decoder that says which tool it names.
 fn collect_typed_actions(
     source: &str,
     references: HistoryReferences,
@@ -922,6 +976,7 @@ fn collect_typed_actions(
             .chars()
             .rev()
             .collect();
+        let qualified = rest[..pos - namespace.len()].ends_with("::");
         let after = &rest[pos + MARKER.len()..];
         match closing_quote(after) {
             Some(end) => {
@@ -931,13 +986,40 @@ fn collect_typed_actions(
                 // (`::request{`, `::response{`, `::error{`), and not an action the rule decides.
                 let history = rest.starts_with("::");
                 let keep = !history || references == HistoryReferences::Named;
-                if keep {
+                if keep && !qualified {
                     out.extend(decoded_tool_action(&namespace, literal));
                 }
             }
             None => break,
         }
     }
+}
+
+/// Every action under a qualified namespace, such as `Tool::git::Action::"push"`, in `source`.
+fn qualified_actions(source: &str) -> Vec<EntityUid> {
+    const MARKER: &str = "::Action::\"";
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find(MARKER) {
+        let start = rest[..pos]
+            .rfind(|character: char| {
+                !(character.is_ascii_alphanumeric() || character == '_' || character == ':')
+            })
+            .map_or(0, |index| index + 1);
+        let namespace = &rest[start..pos];
+        let after = &rest[pos + MARKER.len()..];
+        let Some(end) = closing_quote(after) else {
+            break;
+        };
+        if namespace.contains("::")
+            && let Ok(action) =
+                EntityUid::from_str(&format!("{namespace}::Action::\"{}\"", &after[..end]))
+        {
+            out.push(action);
+        }
+        rest = &after[end + 1..];
+    }
+    out
 }
 
 /// The offset of the quote that ends a Cedar string literal, where `\` escapes the character
@@ -970,11 +1052,13 @@ fn decoded_tool_action(namespace: &str, literal: &str) -> Option<(String, String
 pub(super) fn check_staged(
     operator: &Operator,
     sources: &[Policy],
+    grammar_schemas: Vec<String>,
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
     let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
         candidates,
+        grammar_schemas,
         schemas: BTreeMap::new(),
         ready: BTreeSet::new(),
         pending: BTreeMap::new(),
@@ -984,7 +1068,13 @@ pub(super) fn check_staged(
     };
     refuse_input_reads_before_discovery(&proposal.complete_policy_set())
         .map_err(|refused| unlocated(refused.findings))?;
-    match check_canonical_policy_set(&proposal.complete_policy_set(), &[], operator, &[]) {
+    match check_canonical_policy_set(
+        &proposal.complete_policy_set(),
+        &proposal.grammar_schemas,
+        &[],
+        operator,
+        &[],
+    ) {
         Ok((_, warnings)) => return Ok((warnings, Vec::new())),
         Err(refused) if is_inert(&refused.error) => return Err(unlocated(refused.findings)),
         Err(_) => {}
@@ -1003,6 +1093,7 @@ pub(super) fn check_staged(
     }
     let (_, warnings) = check_canonical_policy_set(
         &proposal.ready_policy_set(),
+        &proposal.grammar_schemas,
         &[],
         operator,
         &proposal.ready_positions(),

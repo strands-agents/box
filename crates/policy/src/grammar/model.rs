@@ -45,7 +45,15 @@ pub(crate) struct Grammar {
     pub(super) version: u32,
     pub(super) program: String,
     pub(super) effects: BTreeMap<EffectName, String>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "compiling reads these tables into `shell`")
+    )]
     pub(super) global_options: BTreeMap<String, ShellOption>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "compiling reads these tables into `shell`")
+    )]
     pub(super) actions: BTreeMap<ActionName, ShellAction>,
     shell: ShellGrammar,
 }
