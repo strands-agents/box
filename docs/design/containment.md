@@ -249,6 +249,25 @@ The restriction follows dependencies of dependencies, even when a later library 
 Existing content-read grants or existing trusted system-library allowances must cover reads on that branch.
 Write, Exec, metadata, and directory-listing permissions do not substitute for content Read on macOS.
 
+Linux also checks execution authority for each writable dependency, including the program's native loader.
+It refuses automatic executable access unless an explicit Exec grant covers the dependency or the workload has broad execution permission.
+This check applies inside system-library directories too.
+The hard-link execution check excludes an inode only when ownership, permissions, and an effective-credential write check exclude workload writes through those aliases.
+The writable directory must contain no nested mounts.
+A shared mount uses the same ownership rules for the source and any alias.
+Different mounts qualify only when neither remaps ownership and both use recognized local filesystems.
+This check recognizes ext2, ext3, ext4, XFS, Btrfs, tmpfs, and ramfs across mount boundaries.
+Other filesystem types and unknown permission or mount information remain restricted.
+This can require execution authority even when every current link is outside the writable directories.
+A read-only file owned by the workload remains restricted because its owner can change its permissions.
+These exceptions affect execution admission only; the conservative dependency-read checks above remain unchanged.
+Read access cannot authorize execution of writable bytes.
+An immutable dependency of a writable program retains its existing read checks without an additional Exec requirement.
+
+A read-only dependency mount does not freeze the file's contents through another writable mount.
+The retained descriptor fixes the file identity, while the execution check prevents implicit admission of workload-modifiable libraries.
+Explicit Exec and Write overlap retains its warning and permitted behavior.
+
 For a required dependency identified during `box run` startup, missing Read coverage prevents the affected workload from starting.
 The command returns an error. The report groups files by their resolved path and names each requesting executable or library.
 It tells the operator to append missing paths to the existing `read_file` list. Existing entries remain necessary.

@@ -812,13 +812,32 @@ enforced against recorded history, so do not claim tamper resistance for them. A
 is satisfied by a denied attempt, because the request event carries no verdict, so a step-up rule keyed
 on `::request` is defeated by asking and being refused. Key a precondition on `::response` instead;
 `a_denied_attempt_satisfies_a_request_keyed_precondition` pins the failure mode, which is known and
-open. A missing outcome event also makes a counting rule undercount and fail open. A Shell metadata
-read that got an answer records `::response` even when the answer is "no", so a `read_metadata`
-budget counts a probe of an absent path, which `a_read_metadata_budget_counts_probes_of_absent_paths`
-pins, and a read that the reach floor or the admission-window guard refuses stays `::error`, which
-`a_metadata_read_the_floor_refuses_meets_no_response_precondition` and
-`a_probe_the_admission_window_refuses_reports_a_failure` pin; the cost is that no event kind
-separates a "yes" from a "no". History is pruned to
+open. A missing outcome event also makes a counting rule undercount and fail open. A metadata read
+that got an answer, in the Shell or in Python, records `::response` even when the answer is "no",
+so a `read_metadata` budget counts a probe of a missing file in an existing folder, which
+`a_read_metadata_budget_counts_probes_of_absent_paths` and
+`a_read_metadata_budget_counts_stats_of_missing_paths` pin. A metadata read of a path that can't be
+resolved, such as one under a missing folder or under a folder the surrounding OS won't let Box
+search, also records `::response`, although the reachable paths check refuses it, which
+`a_metadata_read_under_a_missing_folder_meets_a_response_precondition`,
+`a_metadata_read_under_a_missing_folder_spends_the_budget`, and
+`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box records it so only when
+the path is inside the reachable paths, has no `.` or `..` component, crosses no symbolic link in a folder Box can see, and
+isn't in Box's own state, which `only_a_plain_path_under_a_missing_folder_is_unresolved` and
+`a_stat_outside_the_reachable_set_spends_nothing` pin. The event kind doesn't depend on what a
+symbolic link, a `.` or `..` component, or Box's own state holds, so those refusals stay
+`::error`. Any other read that Box refuses stays `::error`: a reach-floor refusal, which
+`a_metadata_read_the_floor_refuses_meets_no_response_precondition` pins; the Shell's
+admission-window guard, which refuses any namespace change and which
+`a_probe_the_admission_window_refuses_reports_a_failure` pins; and Python's walk, which refuses a
+symbolic link swapped into the path and which `a_predicate_refused_by_an_ancestor_swap_records_failed`
+and `a_metadata_read_of_a_leaf_swapped_for_a_link_records_failed` pin. Recording a "no" as `::error`
+lost, because the workload still learns the answer, and Python records what the Shell records. The
+cost is that no event kind separates a "yes" from a "no", so a `::response` precondition on a
+metadata read is met by learning that a path is missing, also when the reachable paths check
+refused the read. A `::response` budget doesn't count a refused probe through a symbolic link,
+with a `.` or `..` component, or into Box's own state. A cap on attempts counts `::request`, which
+counts every probe. History is pruned to
 the deepest authored window and the workload itself fills that window, so treat window depth as an
 availability bound and not as a strength claim. A counting rule also evaluates against recorded
 history and not against requests in flight, so a parallel burst can exceed a limit together while each
