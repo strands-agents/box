@@ -42,6 +42,7 @@ pub use check::{Finding, Location, PolicyCheck, RuleRef};
 pub use decision::{Decision, DenyReason, PolicyAttribution, RuleId};
 pub use dogwood::event_schema_source;
 pub use error::{PolicyDiagnostic, PolicyError, PolicyStagingError};
+pub use grammar::{ToolGrammar, ToolGrammarError, ToolGrammars};
 pub use mcp_schema::{
     McpSchemaError, compose_action_schema, generate_mcp_schema, validate_mcp_schema_composition,
 };

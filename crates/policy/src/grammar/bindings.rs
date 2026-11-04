@@ -353,6 +353,9 @@ mod tests {
         /// Put a new file at `relative`, as an update does: a rename over the old name.
         fn replace(&self, relative: &str) -> ProgramFile {
             let staged = self.path(&format!("{relative}.new"));
+            // Keep the old inode allocated, as a running process does, so no later file reuses it.
+            std::fs::hard_link(self.path(relative), self.path(&format!("{relative}.old")))
+                .expect("the old build stays allocated");
             std::fs::write(&staged, "a new build").expect("a new program file");
             std::fs::rename(&staged, self.path(relative)).expect("the rename");
             self.program(relative)

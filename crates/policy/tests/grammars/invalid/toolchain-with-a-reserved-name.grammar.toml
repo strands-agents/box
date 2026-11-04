@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.test]`: field "args" has a name that the schema gives every action
+# expect: `<grammar>.shell.test`: field "args" has a name that the schema gives every action
 # A tool grammar for cargo whose toolchain selector takes a name the schema gives every action.
 
 name    = "cargo"
