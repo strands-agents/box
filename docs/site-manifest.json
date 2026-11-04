@@ -139,6 +139,28 @@
       }
     },
     {
+      "id": "tutorial-eks",
+      "source": "docs/user/tutorials/eks.md",
+      "slug": "guides/deploy-to-eks",
+      "title": "Run Box on Amazon EKS",
+      "description": "Deploy Box as an Amazon EKS Job, verify policy enforcement, and optionally run Claude Code with Pod Identity.",
+      "nav": {
+        "group": "Guides",
+        "order": 12
+      }
+    },
+    {
+      "id": "tutorial-agentcore-runtime",
+      "source": "docs/user/tutorials/agentcore-runtime.md",
+      "slug": "guides/deploy-to-agentcore-runtime",
+      "title": "Run a Box shipment agent on AgentCore Runtime",
+      "description": "Package, deploy, invoke, and verify a Box-contained shipment agent on Amazon Bedrock AgentCore Runtime.",
+      "nav": {
+        "group": "Guides",
+        "order": 13
+      }
+    },
+    {
       "id": "security",
       "source": "docs/user/security.md",
       "slug": "security",
