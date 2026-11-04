@@ -52,6 +52,14 @@ Use the [Linux target tests](../docs/dev/linux-target-tests.md) to check an inst
 without Cargo or cloud credentials on the target. The runner reuses the Phase 3 lifecycle probe
 and writes separate deployment evidence. It does not replace this deterministic suite.
 
+## Native runtime helpers
+
+`src/runtime.rs` owns native Python discovery, verified runtime grants, and developer-tool configuration.
+Its unit tests live in `src/runtime/tests.rs` beside that implementation.
+The library keeps the existing exported names, so integration cases retain their imports.
+These helper unit tests do not prove that a contained workload can use the selected runtime.
+The platform integration cases provide that separate evidence.
+
 ## Add a test case — one file in the right folder
 
 Cases are grouped into folders by category. Create `tests/<category>/<case>.rs`
