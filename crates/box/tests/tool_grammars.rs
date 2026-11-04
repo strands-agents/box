@@ -127,6 +127,35 @@ fn a_grammar_with_the_switch_off_is_refused_at_startup() {
 }
 
 #[test]
+fn two_grammars_for_one_program_are_refused_at_startup() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let second = GRAMMAR
+        .replace("[tool.git.", "[tool.brew_git.")
+        .replace("name = \"git\"", "name = \"brew_git\"");
+
+    let (output, version) = attempt(FORBID_PUSH, |home| {
+        format!(
+            "{}{GRAMMAR}[tool.brew_git]\ncommand = [\"/opt/homebrew/bin/git\"]\n{second}{SWITCH_ON}",
+            git_tool(home)
+        )
+    });
+
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(
+            "tool grammar refused: `tool.brew_git.grammar` and `tool.git.grammar` both have \
+             `program = \"git\"`; keep one grammar for each program"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(version, None, "a refused configuration stores no record");
+}
+
+#[test]
 fn a_box_with_the_switch_off_and_no_grammar_is_unchanged() {
     if !namespace_launcher_is_usable() {
         eprintln!("skipping: the namespace launcher is not usable on this host");

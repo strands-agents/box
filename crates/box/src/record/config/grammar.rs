@@ -144,11 +144,10 @@ usage = "git push [<remote>]"
         ]))
         .expect_err("two grammars name git");
 
-        assert!(
-            error.to_string().contains(
-                "`tool.brew_git.grammar` and `tool.git.grammar` both have `program = \"git\"`"
-            ),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "tool grammar refused: `tool.brew_git.grammar` and `tool.git.grammar` both have \
+             `program = \"git\"`; keep one grammar for each program"
         );
     }
 
@@ -164,11 +163,10 @@ usage = "git push [<remote>]"
         ]))
         .expect_err("two grammars name git");
 
-        assert!(
-            error
-                .to_string()
-                .contains("`tool.git.grammar` and `tool.hub.grammar` both have `name = \"git\"`"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "tool grammar refused: `tool.git.grammar` and `tool.hub.grammar` both have \
+             `name = \"git\"`; give each grammar its own name"
         );
     }
 

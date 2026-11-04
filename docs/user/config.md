@@ -559,10 +559,10 @@ Each of these is refused at startup, before any box state exists:
 - A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
   `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
   `command` runs "gh"; ...``.
-- Two grammars with one `program`, or with one `name`: ``tool grammar refused: `tool.brew_git.grammar`
-  and `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
-- A grammar larger than 64 KiB, measured as the table written out as TOML. The largest grammar Box
-  ships as a test, for `git`, is about 25 KB.
+- Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
+  `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
+- Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
+  both have `name = "git"`; give each grammar its own name``.
 - A grammar that breaks a rule of the grammar format. Each refusal names the key, as a path in
   `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
 
