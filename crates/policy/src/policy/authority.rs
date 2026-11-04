@@ -18,7 +18,7 @@ use crate::dogwood::{
 use crate::request::ActionRequest;
 use crate::schema::{ActionIdentity, GovernedBox, mcp_action_namespace, mcp_tool_action};
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
+use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request, RequestId};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
@@ -385,7 +385,7 @@ impl Authority {
         governed: &GovernedBox,
         principal: &Principal,
         request: ActionRequest<'_>,
-    ) -> Decision {
+    ) -> (Decision, Option<RequestId>) {
         let identity = &request.identity();
         match self.live.lock() {
             Ok(live) => {
@@ -397,7 +397,7 @@ impl Authority {
                         .degraded_tools
                         .contains(&(namespace.clone(), tool.clone()))
                 {
-                    return Decision::no_match();
+                    return (Decision::no_match(), None);
                 }
                 match live.readiness {
                     Readiness::Discovering => {
@@ -410,14 +410,14 @@ impl Authority {
                                 .pending_tools
                                 .contains(&(namespace.clone(), tool.clone()))
                         {
-                            return Decision::policy_pending();
+                            return (Decision::policy_pending(), None);
                         }
                         live.engine.decide(governed, principal, request)
                     }
                     Readiness::Ready => live.engine.decide(governed, principal, request),
                 }
             }
-            Err(_) => Decision::internal_fault(),
+            Err(_) => (Decision::internal_fault(), None),
         }
     }
 
@@ -427,13 +427,15 @@ impl Authority {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
-        live.engine.observe_outcome(governed, principal, outcome)
+        live.engine
+            .observe_outcome(governed, principal, request_id, outcome)
     }
 
     /// Records the `::response` of one completed action whose `input` is a JSON record.
@@ -448,13 +450,15 @@ impl Authority {
         &self,
         identity: &ActionIdentity,
         input: &serde_json::Value,
+        request_id: &RequestId,
         status: i32,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
-        live.engine.observe_response(identity, input, status)
+        live.engine
+            .observe_response(identity, input, request_id, status)
     }
 
     /// Decides one `tools/call` under a single live-lock read: a degraded tool is denied, a
@@ -484,6 +488,7 @@ impl Authority {
         let decision = if live.engine.declares_tool_action(&action) {
             live.engine
                 .decide(governed, principal, ActionRequest::Request(request))
+                .0
         } else {
             Decision::no_match()
         };
@@ -1089,11 +1094,31 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
     }
 
     fn decide(authority: &Authority, request: &Request<'_>) -> Decision {
-        authority.decide(
-            &governed(),
-            &Principal::agent(),
-            ActionRequest::Request(request),
-        )
+        authority
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(request),
+            )
+            .0
+    }
+
+    fn submitted_http_request(authority: &Authority) -> RequestId {
+        authority
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&Request::Http {
+                    host: "api.example.com",
+                    port: 443,
+                    method: "POST",
+                    path: "/v1",
+                    body_bytes: 1,
+                    intercepted: true,
+                }),
+            )
+            .1
+            .expect("the fixture request is submitted")
     }
 
     fn http_outcome() -> Outcome<'static> {
@@ -1255,11 +1280,13 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
                 &[],
             )
             .request();
-            authority.decide(
-                &governed(),
-                &Principal::agent(),
-                ActionRequest::Grammar(&request),
-            )
+            authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Grammar(&request),
+                )
+                .0
         };
         let push = ["push", "origin", "main"];
         let forced = ["push", "--force", "origin", "main"];
@@ -1318,10 +1345,16 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             &history.path().join("dogwood.redb"),
         )
         .expect("the fixed authority opens");
+        let request_id = submitted_http_request(&authority);
         poison(&authority.live);
 
         let error = authority
-            .record(&governed(), &Principal::agent(), &http_outcome())
+            .record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            )
             .expect_err("a poisoned live-authority lock must refuse records");
         assert!(error.to_string().contains("authority lock poisoned"));
     }
@@ -1335,6 +1368,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             &history.path().join("dogwood.redb"),
         )
         .expect("the fixed authority opens");
+        let request_id = submitted_http_request(&authority);
         authority
             .live
             .lock()
@@ -1343,7 +1377,12 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             .poison_scope_for_test();
 
         let error = authority
-            .record(&governed(), &Principal::agent(), &http_outcome())
+            .record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            )
             .expect_err("a poisoned Dogwood scope must refuse records");
         assert!(
             error
@@ -1746,6 +1785,7 @@ permit(principal, action == issues_mcp::Action::"search", resource);"#,
                     &Principal::agent(),
                     ActionRequest::Request(&call)
                 )
+                .0
                 .is_allow(),
             "a hyphenated degraded server's tool call is denied fail-closed"
         );
@@ -1883,6 +1923,15 @@ permit(principal, action == alpha::Action::"read", resource);"#,
             &history.path().join("initial.redb"),
         )
         .expect("the blocked authority opens");
+        // The recording thread completes a request submitted before the staged transaction.
+        // Seed the replacement test store with a policy so that request has a real token.
+        drop(
+            DogwoodEngine::open(
+                r#"permit(principal, action == Box::Action::"http:request", resource);"#,
+                &history.path().join("faulted.redb"),
+            )
+            .expect("the pre-transaction policy installs"),
+        );
         let faults = Arc::new(FaultInjector::new());
         let _release = ReleaseFaultOnDrop(Arc::clone(&faults));
         let engine = DogwoodEngine::open_for_staging_with_faults(
@@ -1891,6 +1940,7 @@ permit(principal, action == alpha::Action::"read", resource);"#,
         )
         .expect("the faulted durable engine opens");
         authority.live.lock().expect("live authority lock").engine = engine;
+        let request_id = submitted_http_request(&authority);
         let authority = Arc::new(authority);
 
         faults.arm(FaultPoint::CommitBeforeCommit);
@@ -1908,8 +1958,12 @@ permit(principal, action == alpha::Action::"read", resource);"#,
         let recording_authority = Arc::clone(&authority);
         let recording = std::thread::spawn(move || {
             let _ = started.send(());
-            let result =
-                recording_authority.record(&governed(), &Principal::agent(), &http_outcome());
+            let result = recording_authority.record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            );
             let _ = recorded.send(result);
         });
         start

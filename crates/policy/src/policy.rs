@@ -11,7 +11,8 @@ use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
 use crate::request::ActionRequest;
 use crate::schema::GovernedBox;
 use crate::{
-    Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
+    Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal,
+    Request, RequestId,
 };
 use authority::Authority;
 
@@ -300,7 +301,7 @@ impl PolicyEngine {
         self.authority.reload(sources)
     }
 
-    /// Decide whether `principal` may perform `request`.
+    /// Decide whether `principal` may perform `request`, returning its identifier after confirmed submission.
     ///
     /// An installed [`DecisionObserver`](crate::DecisionObserver) sees every verdict this
     /// returns, including a default-deny. It sees the verdict *after* it is reached and can
@@ -311,7 +312,7 @@ impl PolicyEngine {
         governed: &GovernedBox,
         principal: &Principal,
         request: &Request<'_>,
-    ) -> Decision {
+    ) -> (Decision, Option<RequestId>) {
         self.decide_request(governed, principal, ActionRequest::Request(request))
     }
 
@@ -321,9 +322,12 @@ impl PolicyEngine {
         governed: &GovernedBox,
         principal: &Principal,
         request: ActionRequest<'_>,
-    ) -> Decision {
-        let decision = self.authority.decide(governed, principal, request);
-        self.conclude(&request.identity(), request.resource(), decision)
+    ) -> (Decision, Option<RequestId>) {
+        let (decision, request_id) = self.authority.decide(governed, principal, request);
+        (
+            self.conclude(&request.identity(), request.resource(), decision),
+            request_id,
+        )
     }
 
     /// Decide one parsed command line as its grammar action, in the box's one history
@@ -340,8 +344,9 @@ impl PolicyEngine {
         invocation: &crate::grammar::GrammarInvocation<'_>,
     ) -> (Decision, Option<crate::grammar::PendingGrammarResponse>) {
         let request = invocation.request();
-        let decision = self.decide_request(governed, principal, ActionRequest::Grammar(&request));
-        let pending = request.allowed_by(&decision);
+        let (decision, request_id) =
+            self.decide_request(governed, principal, ActionRequest::Grammar(&request));
+        let pending = request.allowed_by(&decision, request_id);
         (decision, pending)
     }
 
@@ -358,7 +363,10 @@ impl PolicyEngine {
         response: crate::grammar::PendingGrammarResponse,
         status: i32,
     ) -> Result<(), PolicyError> {
-        response.complete(|identity, input| self.authority.record_response(identity, input, status))
+        response.complete(|identity, input, request_id| {
+            self.authority
+                .record_response(identity, input, request_id, status)
+        })
     }
 
     /// Name the resource on the verdict, then report it once.
@@ -379,14 +387,16 @@ impl PolicyEngine {
         decision
     }
 
-    /// Record one completed effect as policy history.
+    /// Record one completed effect with its confirmed request identifier from this opened authority.
     pub fn record(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.authority.record(governed, principal, outcome)
+        self.authority
+            .record(governed, principal, request_id, outcome)
     }
 
     /// Return the loaded engine and source identity.
@@ -567,6 +577,7 @@ unless temporal {
             assert!(
                 !authority
                     .decide(&governed, &principal, &attempted_read)
+                    .0
                     .is_allow(),
                 "the first attempt must be denied"
             );
@@ -578,6 +589,7 @@ unless temporal {
             assert!(
                 !recovered
                     .decide(&governed, &principal, &dependent_write)
+                    .0
                     .is_allow(),
                 "the recovered denied attempt must remain in force within one hour"
             );
@@ -595,6 +607,7 @@ unless temporal {
             assert!(
                 !within_window
                     .decide(&governed, &principal, &dependent_write)
+                    .0
                     .is_allow(),
                 "reapplying the same policy must retain the attempt within one hour"
             );
@@ -605,6 +618,7 @@ unless temporal {
         assert!(
             recovered
                 .decide(&governed, &principal, &dependent_write)
+                .0
                 .is_allow(),
             "the recovered denied attempt must expire after one hour"
         );
@@ -634,7 +648,7 @@ unless temporal {
         faults.arm(FaultPoint::AppendBeforeCommit);
         let verdict = std::thread::scope(|scope| {
             scope.spawn(|| {
-                let verdict = authority.decide(&governed, &principal, &request);
+                let verdict = authority.decide(&governed, &principal, &request).0;
                 decided.send(verdict).expect("the test is waiting");
             });
             let reached = faults.wait_until_reached(std::time::Duration::from_secs(30));
@@ -696,24 +710,33 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         ]
     }
 
-    fn assert_every_permit_is_live(authority: &PolicyEngine, notes: &ApprovedPath) {
+    fn assert_every_permit_is_live(authority: &PolicyEngine, notes: &ApprovedPath) -> RequestId {
         let governed = GovernedBox::assigned("test-box");
         let principal = Principal::agent();
+        let mut first_request_id = None;
         for request in &five_requests(notes) {
+            let (decision, request_id) = authority.decide(&governed, &principal, request);
             assert!(
-                authority.decide(&governed, &principal, request).is_allow(),
+                decision.is_allow(),
                 "every permit is live before the fault: {request:?}"
             );
+            let request_id = request_id.expect("the permitted request has an identifier");
+            first_request_id.get_or_insert(request_id);
         }
+        first_request_id.expect("the first request has an identifier")
     }
 
     /// Ten decisions across the five requests, each an `InternalFault` with the rendered text,
     /// then a record that is refused rather than lost.
-    fn assert_every_verdict_is_an_internal_fault(authority: &PolicyEngine, notes: &ApprovedPath) {
+    fn assert_every_verdict_is_an_internal_fault(
+        authority: &PolicyEngine,
+        notes: &ApprovedPath,
+        request_id: &RequestId,
+    ) {
         let governed = GovernedBox::assigned("test-box");
         let principal = Principal::agent();
         for request in five_requests(notes).iter().cycle().take(10) {
-            let decision = authority.decide(&governed, &principal, request);
+            let decision = authority.decide(&governed, &principal, request).0;
             assert!(
                 matches!(
                     decision,
@@ -736,6 +759,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                 .record(
                     &governed,
                     &principal,
+                    request_id,
                     &Outcome::Fs {
                         path: Path::new("/workspace/notes.txt"),
                         operation: crate::request::FsOperation::ReadContent,
@@ -751,11 +775,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
     fn every_decision_after_the_store_poisons_is_an_internal_fault() {
         let authority = five_permits();
         let notes = ApprovedPath::interpreter_resolved("/workspace/notes.txt");
-        assert_every_permit_is_live(&authority, &notes);
+        let request_id = assert_every_permit_is_live(&authority, &notes);
 
         authority.poison_store_for_test();
 
-        assert_every_verdict_is_an_internal_fault(&authority, &notes);
+        assert_every_verdict_is_an_internal_fault(&authority, &notes, &request_id);
     }
 
     #[test]
@@ -764,11 +788,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
     fn decisions_meet_a_store_that_refuses_every_write() {
         let authority = five_permits();
         let notes = ApprovedPath::interpreter_resolved("/workspace/notes.txt");
-        assert_every_permit_is_live(&authority, &notes);
+        let request_id = assert_every_permit_is_live(&authority, &notes);
 
         crate::rerun::refuse_every_file_write();
 
-        assert_every_verdict_is_an_internal_fault(&authority, &notes);
+        assert_every_verdict_is_an_internal_fault(&authority, &notes, &request_id);
     }
 
     #[test]
@@ -852,6 +876,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                     &Principal::agent(),
                     &request
                 )
+                .0
                 .is_allow(),
             "the rule names Box::Agent::\"self\", which is what the default principal is"
         );
@@ -862,6 +887,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                     &Principal::agent().with_id("worker-1"),
                     &request
                 )
+                .0
                 .is_allow(),
             "integration ids must not change the fixed Box::Agent::\"self\" identity"
         );
@@ -884,6 +910,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                         cwd: "/home",
                     }
                 )
+                .0
                 .is_allow()
         );
     }
@@ -904,6 +931,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                             operation: crate::request::FsOperation::WriteContent,
                         }
                     )
+                    .0
                     .is_allow(),
                 "the authored catch-all permit must govern {path}"
             );
@@ -950,23 +978,27 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 
         let governed = GovernedBox::assigned("observed-box");
         let approved = ApprovedPath::interpreter_resolved("/workspace/main.py");
-        let permitted = authority.decide(
-            &governed,
-            &Principal::agent(),
-            &Request::Fs {
-                path: &approved,
-                operation: crate::request::FsOperation::ReadContent,
-            },
-        );
+        let permitted = authority
+            .decide(
+                &governed,
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::request::FsOperation::ReadContent,
+                },
+            )
+            .0;
         // Nothing permits a write, so this is the default deny.
-        let refused = authority.decide(
-            &governed,
-            &Principal::agent(),
-            &Request::Fs {
-                path: &approved,
-                operation: crate::request::FsOperation::WriteContent,
-            },
-        );
+        let refused = authority
+            .decide(
+                &governed,
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::request::FsOperation::WriteContent,
+                },
+            )
+            .0;
 
         assert!(permitted.is_allow());
         assert!(!refused.is_allow());
@@ -1019,9 +1051,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
             assert_eq!(
                 observed
                     .decide(&governed, &Principal::agent(), &request)
+                    .0
                     .is_allow(),
                 plain
                     .decide(&governed, &Principal::agent(), &request)
+                    .0
                     .is_allow(),
                 "an observer must not move a verdict for {operation:?}"
             );
@@ -1222,11 +1256,11 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         for name in ["codex", "review"] {
             let governed = GovernedBox::assigned(name);
             assert!(
-                fixed.decide(&governed, &shell, &request).is_allow(),
+                fixed.decide(&governed, &shell, &request).0.is_allow(),
                 "{name} must map to Resource::\"unused\""
             );
             assert!(
-                !other.decide(&governed, &shell, &request).is_allow(),
+                !other.decide(&governed, &shell, &request).0.is_allow(),
                 "no box may map to another resource id"
             );
         }
@@ -1243,14 +1277,16 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
 
     fn write_allowed(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
         matches!(
-            engine.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::Fs {
-                    path,
-                    operation: crate::request::FsOperation::WriteContent,
-                },
-            ),
+            engine
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::Fs {
+                        path,
+                        operation: crate::request::FsOperation::WriteContent,
+                    },
+                )
+                .0,
             Decision::Allow { .. }
         )
     }

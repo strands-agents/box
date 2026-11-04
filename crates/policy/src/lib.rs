@@ -51,6 +51,6 @@ pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,
 };
-pub use request::{FsAccess, FsOperation, Principal, Request};
+pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
 pub use spelling::{Operator, PolicyWarning};

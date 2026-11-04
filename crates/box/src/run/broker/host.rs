@@ -294,7 +294,7 @@ fn authorize_mcp_start(
         .chain(server.arguments().iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-    let decision = spec.policy.decide(
+    let (decision, request_id) = spec.policy.decide(
         &spec.governed,
         &policy::Principal::agent(),
         &policy::Request::ShellSpawn {
@@ -313,7 +313,9 @@ fn authorize_mcp_start(
             &decision,
         ));
     match &decision {
-        policy::Decision::Allow { .. } => Ok(()),
+        policy::Decision::Allow { .. } => request_id
+            .map(|_| ())
+            .ok_or_else(|| io::Error::other("permitted MCP start has no committed request token")),
         policy::Decision::Deny { .. } => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("MCP server {:?} may not start: {decision}", server.name),

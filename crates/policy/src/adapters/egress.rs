@@ -16,7 +16,7 @@ use crate::GovernedBox;
 use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
-use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request};
+use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request, RequestId};
 
 /// Binds one policy and egress principal to outbound effect interception.
 pub struct EgressPolicyInterceptor {
@@ -102,26 +102,29 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<(), String> {
-        let Some(frame) = mcp else { return Ok(()) };
+    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<Option<RequestId>, String> {
+        let Some(frame) = mcp else { return Ok(None) };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
         let request = mcp_request(frame);
-        if let Err(reason) = authorize(&self.policy, &self.governed, &self.principal, &request) {
-            // A denied `tools/list` produces no reply, so the server is marked terminal here, and
-            // discovery can finish with that one server degraded.
-            if let McpFrame::List { server, method } = *frame
-                && method == "tools/list"
-            {
-                self.catalogs.list_denied(server);
-                self.report_if_remote_finished();
+        let request_id = match authorize(&self.policy, &self.governed, &self.principal, &request) {
+            Ok(request_id) => request_id,
+            Err(reason) => {
+                // A denied `tools/list` produces no reply, so the server is marked terminal here, and
+                // discovery can finish with that one server degraded.
+                if let McpFrame::List { server, method } = *frame
+                    && method == "tools/list"
+                {
+                    self.catalogs.list_denied(server);
+                    self.report_if_remote_finished();
+                }
+                return Err(format!(
+                    "mcp:call gate (server {:?} method {:?}): {reason}",
+                    diagnostic_context(frame.server()),
+                    diagnostic_context(frame.method())
+                ));
             }
-            return Err(format!(
-                "mcp:call gate (server {:?} method {:?}): {reason}",
-                diagnostic_context(frame.server()),
-                diagnostic_context(frame.method())
-            ));
-        }
+        };
         // Gate two: the namespaced per-tool action, a refinement of the `mcp:call` allow. A tracked
         // server's tool must first be named exactly by its accepted `tools/list`. The refinement then
         // blocks only on an explicit `forbid`, and an unruled tool rides the coarse allow. `McpFrame`
@@ -157,7 +160,7 @@ impl EgressPolicyInterceptor {
                 ));
             }
         }
-        Ok(())
+        Ok(Some(request_id))
     }
 }
 
@@ -167,30 +170,35 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
         let decision = match effect {
-            // The host, decided before it is resolved. No address exists yet, so an address rule does
-            // not apply here; it applies to the per-address `Connect` that follows.
-            EgressEffectAttempt::Resolve { host, port } => match self.policy.decide(
-                &self.governed,
-                &self.principal,
-                &Request::Connect {
-                    host,
-                    ip: None,
-                    port: *port,
-                },
-            ) {
-                Decision::Deny {
-                    reason: DenyReason::PolicyPending,
-                    ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
-            },
+            // Name resolution records a request only; each address has its own connect attempt.
+            EgressEffectAttempt::Resolve { host, port } => {
+                let (decision, request_id) = self.policy.decide(
+                    &self.governed,
+                    &self.principal,
+                    &Request::Connect {
+                        host,
+                        ip: None,
+                        port: *port,
+                    },
+                );
+                match decision {
+                    Decision::Deny {
+                        reason: DenyReason::PolicyPending,
+                        ..
+                    } if self.mcp_hosts.contains(*host) => Ok((None, None)),
+                    Decision::Deny { .. } => Err(decision.to_string()),
+                    Decision::Allow { .. } => {
+                        confirmed_request_id(request_id).map(|request_id| (Some(request_id), None))
+                    }
+                }
+            }
             EgressEffectAttempt::Connect {
                 host,
                 port,
                 address,
                 ..
-            } => match self.policy.decide(
+            } => authorize(
+                &self.policy,
                 &self.governed,
                 &self.principal,
                 &Request::Connect {
@@ -198,15 +206,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     ip: Some(address.ip()),
                     port: *port,
                 },
-            ) {
-                // Unreachable: a `Connect` never carries `PolicyPending`, so this arm never fires.
-                Decision::Deny {
-                    reason: DenyReason::PolicyPending,
-                    ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
-            },
+            )
+            .map(|request_id| (Some(request_id), None)),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -216,9 +217,9 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 intercepted,
                 mcp,
             } => {
-                // The `http:request` gate. `decide` records to history, so it is called exactly
-                // once here; the `mcp:call` gate below is the second recorded decision.
-                match self.policy.decide(
+                // HTTP and MCP decisions are separate requests, even in one gateway exchange.
+                authorize(
+                    &self.policy,
                     &self.governed,
                     &self.principal,
                     &Request::Http {
@@ -229,44 +230,27 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
                     },
-                ) {
-                    // Unreachable: an `Http` request never carries `PolicyPending`, so this arm never
-                    // fires.
-                    Decision::Deny {
-                        reason: DenyReason::PolicyPending,
-                        ..
-                    } if self.mcp_hosts.contains(*host)
-                        && !matches!(
-                            mcp,
-                            Some(
-                                McpFrame::ToolCall { .. }
-                                    | McpFrame::PromptGet { .. }
-                                    | McpFrame::ResourceRead { .. }
-                            )
-                        ) =>
-                    {
-                        Ok(())
-                    }
-                    decision @ Decision::Deny { .. } => {
-                        Err(format!("http:request gate: {decision}"))
-                    }
-                    // Allowed; the `mcp:call` gate and per-tool refinement run on the Ready authority.
-                    Decision::Allow { .. } => self.mcp_gates(mcp),
-                }
+                )
+                .map_err(|reason| format!("http:request gate: {reason}"))
+                .and_then(|request_id| {
+                    self.mcp_gates(mcp)
+                        .map(|mcp_request_id| (Some(request_id), mcp_request_id))
+                })
             }
-            // The release of a reply to the workload decides nothing and records nothing. The
-            // reply reaches history once, on the `HttpRequest` permit, as `output.status`.
-            EgressEffectAttempt::ResponseRelease { .. } => Ok(()),
+            // Response release records nothing: the HTTP permit already records the reply.
+            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, None)),
             _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
-            .map(|()| {
+            .map(|(request_id, mcp_request_id)| {
                 Box::new(LocalPolicyEffectPermit {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
                     governed: self.governed.clone(),
                     attempt: AttemptIdentity::capture(effect),
+                    request_id,
+                    mcp_request_id,
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
@@ -456,12 +440,18 @@ struct LocalPolicyEffectPermit {
     /// Integration metadata for the box this boundary serves.
     governed: GovernedBox,
     attempt: AttemptIdentity,
+    request_id: Option<RequestId>,
+    mcp_request_id: Option<RequestId>,
 }
 
 impl LocalPolicyEffectPermit {
     /// Submit this effect's history, translating the proxy's outcome into the policy
     /// vocabulary.
     fn submit(&self, outcome: EgressEffectOutcome) -> io::Result<()> {
+        let Some(request_id) = self.request_id.as_ref() else {
+            // Response release and bootstrap resolution have no outcome event.
+            return Ok(());
+        };
         let delivery = delivery_of(outcome);
         let recorded = match (&self.attempt, delivery) {
             (
@@ -474,6 +464,7 @@ impl LocalPolicyEffectPermit {
             ) => self.policy.record(
                 &self.governed,
                 &self.principal,
+                request_id,
                 &Outcome::Connect {
                     host,
                     port: *port,
@@ -498,6 +489,7 @@ impl LocalPolicyEffectPermit {
                 let http = self.policy.record(
                     &self.governed,
                     &self.principal,
+                    request_id,
                     &Outcome::Http {
                         host,
                         port: *port,
@@ -519,11 +511,12 @@ impl LocalPolicyEffectPermit {
                 // call is a `response` whatever the server then replies (a JSON-RPC error is still
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
-                match mcp {
-                    Some(mcp) if !matches!(delivery, Delivery::Failed) => {
-                        http.and(self.policy.record(
+                match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
+                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
+                        .and(self.policy.record(
                             &self.governed,
                             &self.principal,
+                            mcp_request_id,
                             &Outcome::Mcp {
                                 server: &mcp.server,
                                 method: &mcp.method,
@@ -531,8 +524,7 @@ impl LocalPolicyEffectPermit {
                                 prompt: mcp.prompt.as_deref(),
                                 uri: mcp.uri.as_deref(),
                             },
-                        ))
-                    }
+                        )),
                     _ => http,
                 }
             }
@@ -642,11 +634,16 @@ fn authorize(
     governed: &GovernedBox,
     principal: &Principal,
     request: &Request<'_>,
-) -> Result<(), String> {
-    match policy.decide(governed, principal, request) {
-        Decision::Allow { .. } => Ok(()),
-        decision @ Decision::Deny { .. } => Err(decision.to_string()),
+) -> Result<RequestId, String> {
+    let (decision, request_id) = policy.decide(governed, principal, request);
+    match decision {
+        Decision::Allow { .. } => confirmed_request_id(request_id),
+        Decision::Deny { .. } => Err(decision.to_string()),
     }
+}
+
+fn confirmed_request_id(request_id: Option<RequestId>) -> Result<RequestId, String> {
+    request_id.ok_or_else(|| Decision::internal_fault().to_string())
 }
 
 fn diagnostic_context(value: &str) -> String {
@@ -726,6 +723,38 @@ mod tests {
             interceptor,
             _history: history,
         }
+    }
+
+    #[test]
+    fn http_and_mcp_outcomes_keep_their_own_ids_when_calls_finish_out_of_order() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let fixture = interceptor(DEMO_PERMITS);
+        let path = fixture._history.path().join("dogwood.redb");
+        let attempt = mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#);
+        let first = fixture.intercept(&attempt).expect("first call admitted");
+        let second = fixture
+            .intercept(&attempt)
+            .expect("identical second call admitted");
+        second
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("second records");
+        first
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("first records");
+        drop(fixture.interceptor);
+        let events = events(&path);
+        assert_eq!(
+            events.len(),
+            8,
+            "two HTTP and two MCP request/response pairs"
+        );
+        assert_pair(&events[2], &events[4]);
+        assert_pair(&events[3], &events[5]);
+        assert_pair(&events[0], &events[6]);
+        assert_pair(&events[1], &events[7]);
+        assert_eq!(events[0].action(), "http:request");
+        assert_eq!(events[1].action(), "mcp:call");
+        assert_eq!(events[..4].iter().map(id).collect::<BTreeSet<_>>().len(), 4);
     }
 
     /// The demo server's `tools/list`, which generates the typed `demo::Action::"add"` action.

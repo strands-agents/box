@@ -3,7 +3,7 @@
 use std::io;
 
 use egress_gateway::McpTarget;
-use policy::{Decision, GovernedBox, PolicyEngine, Principal, Request};
+use policy::{Decision, GovernedBox, PolicyEngine, Principal, Request, RequestId};
 use serde_json::Value;
 
 use crate::record::config::mcp::McpServer;
@@ -90,7 +90,7 @@ pub(super) fn admit_tool_call(
             return Ok(McpRequestAdmission::Undecided);
         };
 
-        let decision = policy.decide(
+        let (decision, request_id) = policy.decide(
             governed,
             principal,
             &Request::McpCall {
@@ -126,6 +126,10 @@ pub(super) fn admit_tool_call(
             }
         }
 
+        let request_id = request_id.ok_or_else(|| {
+            io::Error::other("permitted MCP request has no committed request token")
+        })?;
+
         // Gate two: the server-namespaced per-tool refinement for a `tools/call`.
         // It rides the coarse allow unless a `forbid` on the tool or its arguments matches; an
         // undeclared tool is unaffected. The arguments are typed against the composed schema.
@@ -159,12 +163,13 @@ pub(super) fn admit_tool_call(
                             resource,
                             &refined,
                         ),
+                        request_id,
                     ));
                 }
                 Decision::Allow { .. } => {}
             }
         }
-        Ok(McpRequestAdmission::Allowed(coarse))
+        Ok(McpRequestAdmission::Allowed(coarse, request_id))
     })
 }
 
@@ -188,7 +193,7 @@ pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
 
 pub(super) enum McpRequestAdmission {
     Undecided,
-    Allowed(EffectiveDecision),
+    Allowed(EffectiveDecision, RequestId),
     PolicyPending(EffectiveDecision, io::Error),
     Denied {
         decision: EffectiveDecision,
@@ -459,7 +464,7 @@ mod tests {
             frame,
         )? {
             McpRequestAdmission::Undecided => Ok(None),
-            McpRequestAdmission::Allowed(_) => Ok(reported),
+            McpRequestAdmission::Allowed(..) => Ok(reported),
             McpRequestAdmission::PolicyPending(_, refusal) => Err(refusal),
             McpRequestAdmission::Denied { refusal, .. } => Err(refusal),
         }
@@ -669,11 +674,12 @@ mod tests {
                };"#,
         );
         let governed = GovernedBox::assigned("test-box");
-        let record_response = || {
+        let record_response = |request_id: &RequestId| {
             engine
                 .record(
                     &governed,
                     &Principal::agent(),
+                    request_id,
                     &Outcome::Mcp {
                         server: "issues-mcp",
                         method: "tools/call",
@@ -687,21 +693,17 @@ mod tests {
 
         // Two calls under the cap: each admitted, each records a `mcp:call::response`.
         for _ in 0..2 {
-            assert!(
-                matches!(
-                    admit_tool_call(
-                        &engine,
-                        &governed,
-                        &Principal::agent(),
-                        "issues-mcp",
-                        SEARCH
-                    )
-                    .expect("admit"),
-                    McpRequestAdmission::Allowed(_)
-                ),
-                "a call under the cap must be admitted"
-            );
-            record_response();
+            let McpRequestAdmission::Allowed(_, request_id) = admit_tool_call(
+                &engine,
+                &governed,
+                &Principal::agent(),
+                "issues-mcp",
+                SEARCH,
+            )
+            .expect("admit") else {
+                panic!("a call under the cap must be admitted");
+            };
+            record_response(&request_id);
         }
 
         // The third: count(mcp:call::response) == 2, so the temporal forbid fires.
@@ -738,7 +740,7 @@ mod tests {
             SEARCH,
         )
         .expect("the tool call is valid");
-        let McpRequestAdmission::Allowed(decision) = admission else {
+        let McpRequestAdmission::Allowed(decision, _) = admission else {
             panic!("the coarse permit must be the final permit");
         };
         let (action, resource, rule, verdict, reason) = decision.parts();
@@ -872,7 +874,7 @@ mod tests {
                @id("tool") @description("tool permit")
                permit(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
         );
-        let McpRequestAdmission::Allowed(decision) = admit_tool_call(
+        let McpRequestAdmission::Allowed(decision, _) = admit_tool_call(
             &policy,
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),

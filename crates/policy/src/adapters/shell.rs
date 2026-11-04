@@ -20,7 +20,7 @@ use crate::grammar::{
 use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
-use crate::{Decision, Outcome, PolicyEngine, Principal, Request};
+use crate::{Decision, Outcome, PolicyEngine, Principal, Request, RequestId};
 
 /// Binds one policy and Shell principal to the Shell effect-interception seam.
 pub struct ShellPolicyInterceptor {
@@ -325,7 +325,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 }
             }
         }
-        let decision = match effect {
+        let (decision, request_id) = match effect {
             // One resolved command. The Shell has already parsed, expanded, and resolved
             // it, so `program` is what will run rather than what was typed.
             EffectAttempt::ShellRun {
@@ -415,42 +415,43 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                     self.home.as_deref(),
                 );
                 let destination = ApprovedPath::under_home(*to, self.home.as_deref());
-                let mut legs = vec![
-                    Request::Fs {
-                        path: &source,
-                        operation: pair_operation,
-                    },
-                    Request::Fs {
-                        path: &source,
-                        operation: FsOperation::ReadContent,
-                    },
-                ];
-                if let Some(removal) = destination_removal(*operation) {
-                    legs.push(Request::Fs {
-                        path: &destination,
-                        operation: removal,
-                    });
-                }
-                legs.push(Request::Fs {
+                let authorize = |request: &Request<'_>| {
+                    let (decision, request_id) =
+                        self.policy.decide(&self.governed, &self.principal, request);
+                    admitted_request_id(decision, request_id)
+                };
+                // Stop at the first refusal. Each recorded outcome keeps its own leg's token.
+                authorize(&Request::Fs {
+                    path: &source,
+                    operation: pair_operation,
+                })?;
+                let source_read_id = authorize(&Request::Fs {
+                    path: &source,
+                    operation: FsOperation::ReadContent,
+                })?;
+                let removal = destination_removal(*operation);
+                let removal_id = removal
+                    .map(|removal| {
+                        authorize(&Request::Fs {
+                            path: &destination,
+                            operation: removal,
+                        })
+                    })
+                    .transpose()?;
+                let request_id = authorize(&Request::Fs {
                     path: &destination,
                     operation: pair_operation,
-                });
-                // First denial wins, and short-circuits: a later leg is never asked about
-                // an effect already refused. The last leg's verdict stands when every
-                // earlier one allowed, so an all-allow pair reports a real rule id.
-                let mut legs = legs.iter();
-                let mut verdict = self.policy.decide(
-                    &self.governed,
-                    &self.principal,
-                    legs.next().expect("at least three legs"),
-                );
-                for leg in legs {
-                    if !matches!(verdict, Decision::Allow { .. }) {
-                        break;
-                    }
-                    verdict = self.policy.decide(&self.governed, &self.principal, leg);
-                }
-                verdict
+                })?;
+                return Ok(self.permit(Admitted::FilesystemPair {
+                    request_id,
+                    source_read_id,
+                    removal_id,
+                    source_read_path: matches!(operation, FsPairOperation::Rename { .. })
+                        .then(|| (*from).to_string()),
+                    target_path: (*to).to_string(),
+                    destination_removal: removal,
+                    operation: pair_operation,
+                }));
             }
             // No network arm: the Shell raises no request attempt. An outbound
             // request is authorized at the egress boundary by
@@ -473,14 +474,20 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             }
         };
 
-        match decision {
-            Decision::Allow { .. } => Ok(self.permit(Admitted::capture(
-                effect,
-                credential_reads,
-                reported_program_path.as_deref(),
-            ))),
-            Decision::Deny { .. } => Err(denied(&decision)),
-        }
+        let request_id = admitted_request_id(decision, request_id)?;
+        Ok(self.permit(Admitted::capture(
+            effect,
+            credential_reads,
+            reported_program_path.as_deref(),
+            request_id,
+        )))
+    }
+}
+
+fn admitted_request_id(decision: Decision, request_id: Option<RequestId>) -> io::Result<RequestId> {
+    match decision {
+        Decision::Allow { .. } => request_id.ok_or_else(|| denied(&Decision::internal_fault())),
+        Decision::Deny { .. } => Err(denied(&decision)),
     }
 }
 
@@ -488,6 +495,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
 enum Admitted {
     /// One resolved command whose program the Shell implements.
     Run {
+        request_id: RequestId,
         command: String,
         program: String,
         args: Vec<String>,
@@ -495,6 +503,7 @@ enum Admitted {
     },
     /// One resolved command executed by a host binary.
     Spawn {
+        request_id: RequestId,
         command: String,
         program: String,
         program_path: String,
@@ -506,11 +515,15 @@ enum Admitted {
     /// the path the effect mutates — under the same operation both legs were authorized
     /// as, so the response names the action whose request was permitted.
     Filesystem {
+        request_id: RequestId,
         path: String,
         operation: FsOperation,
     },
     /// One filesystem pair whose rename source also needs a read response in history.
     FilesystemPair {
+        request_id: RequestId,
+        source_read_id: RequestId,
+        removal_id: Option<RequestId>,
         source_read_path: Option<String>,
         target_path: String,
         destination_removal: Option<FsOperation>,
@@ -528,6 +541,7 @@ impl Admitted {
         effect: &EffectAttempt<'_>,
         credential_reads: &[String],
         reported_program_path: Option<&str>,
+        request_id: RequestId,
     ) -> Self {
         match effect {
             EffectAttempt::ShellRun {
@@ -537,6 +551,7 @@ impl Admitted {
                 cwd,
                 ..
             } => Self::Run {
+                request_id,
                 command: (*command).to_string(),
                 program: (*program).to_string(),
                 args: args.to_vec(),
@@ -550,6 +565,7 @@ impl Admitted {
                 cwd,
                 ..
             } => Self::Spawn {
+                request_id,
                 command: (*command).to_string(),
                 program: (*program).to_string(),
                 program_path: reported_program_path.unwrap_or(program_path).to_string(),
@@ -558,19 +574,9 @@ impl Admitted {
                 cwd: (*cwd).to_string(),
             },
             EffectAttempt::Filesystem { path, operation } => Self::Filesystem {
+                request_id,
                 path: (*path).to_string(),
                 operation: fs_operation(*operation),
-            },
-            EffectAttempt::FilesystemPair {
-                from,
-                to,
-                operation,
-            } => Self::FilesystemPair {
-                source_read_path: matches!(operation, FsPairOperation::Rename { .. })
-                    .then(|| (*from).to_string()),
-                target_path: (*to).to_string(),
-                destination_removal: destination_removal(*operation),
-                operation: fs_pair_operation(*operation),
             },
             _ => Self::Unmapped,
         }
@@ -623,6 +629,7 @@ struct PolicyEffectPermit {
 impl PolicyEffectPermit {
     fn record_fs_outcome(
         &self,
+        request_id: &RequestId,
         path: &str,
         operation: FsOperation,
         result: FsResult,
@@ -631,6 +638,7 @@ impl PolicyEffectPermit {
         self.policy.record(
             &self.governed,
             &self.principal,
+            request_id,
             &Outcome::Fs {
                 path: Path::new(reported.as_str()),
                 operation,
@@ -646,6 +654,7 @@ impl PolicyEffectPermit {
                 .policy
                 .record_grammar_response(pending, reported_status.unwrap_or(-1)),
             Admitted::Run {
+                request_id,
                 command,
                 program,
                 args,
@@ -653,6 +662,7 @@ impl PolicyEffectPermit {
             } => self.policy.record(
                 &self.governed,
                 &self.principal,
+                &request_id,
                 &Outcome::ShellRun {
                     command: &command,
                     program: &program,
@@ -662,6 +672,7 @@ impl PolicyEffectPermit {
                 },
             ),
             Admitted::Spawn {
+                request_id,
                 command,
                 program,
                 program_path,
@@ -671,6 +682,7 @@ impl PolicyEffectPermit {
             } => self.policy.record(
                 &self.governed,
                 &self.principal,
+                &request_id,
                 &Outcome::ShellSpawn {
                     command: &command,
                     program: &program,
@@ -691,10 +703,15 @@ impl PolicyEffectPermit {
             // `input.path` of `~/…/secret` never fired, because the resolution still carried the
             // host path. Egress stayed open after the secret was read, which is the one thing that
             // rule exists to close.
-            Admitted::Filesystem { path, operation } => {
-                self.record_fs_outcome(&path, operation, result)
-            }
+            Admitted::Filesystem {
+                request_id,
+                path,
+                operation,
+            } => self.record_fs_outcome(&request_id, &path, operation, result),
             Admitted::FilesystemPair {
+                request_id,
+                source_read_id,
+                removal_id,
                 source_read_path,
                 target_path,
                 destination_removal,
@@ -703,14 +720,23 @@ impl PolicyEffectPermit {
                 .as_ref()
                 .filter(|_| result.response_result().is_some())
                 .map_or(Ok(()), |source_read_path| {
-                    self.record_fs_outcome(source_read_path, FsOperation::ReadContent, result)
+                    self.record_fs_outcome(
+                        &source_read_id,
+                        source_read_path,
+                        FsOperation::ReadContent,
+                        result,
+                    )
                 })
                 .and_then(|()| {
-                    destination_removal.map_or(Ok(()), |removal| {
-                        self.record_fs_outcome(&target_path, removal, result)
-                    })
+                    destination_removal
+                        .zip(removal_id)
+                        .map_or(Ok(()), |(removal, removal_id)| {
+                            self.record_fs_outcome(&removal_id, &target_path, removal, result)
+                        })
                 })
-                .and_then(|()| self.record_fs_outcome(&target_path, operation, result)),
+                .and_then(|()| {
+                    self.record_fs_outcome(&request_id, &target_path, operation, result)
+                }),
             Admitted::Unmapped => Ok(()),
         };
 
@@ -809,6 +835,52 @@ mod tests {
             interceptor,
             _history: history,
         }
+    }
+
+    #[tokio::test]
+    async fn a_rename_records_each_outcome_with_its_own_leg_id() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let fixture = interceptor(
+            r#"
+            permit(principal, action == Box::Action::"fs:read", resource);
+            permit(principal, action == Box::Action::"fs:move", resource);
+            permit(principal, action == Box::Action::"fs:delete", resource);
+        "#,
+        );
+        let path = fixture._history.path().join("dogwood.redb");
+        let permit = fixture
+            .intercept(&EffectAttempt::FilesystemPair {
+                from: "/work/source",
+                to: "/work/target",
+                operation: FsPairOperation::Rename {
+                    destination_exists: true,
+                    destination_is_dir: false,
+                },
+            })
+            .await
+            .expect("all four rename legs admitted");
+        permit
+            .record_outcome(EffectOutcome::Kernel(EffectResult::Completed))
+            .await
+            .expect("rename records");
+        drop(fixture.interceptor);
+        let events = events(&path);
+        assert_eq!(events.len(), 7, "four requests and three existing outcomes");
+        assert_pair(&events[1], &events[4]);
+        assert_pair(&events[2], &events[5]);
+        assert_pair(&events[3], &events[6]);
+        assert_eq!(
+            events[..4]
+                .iter()
+                .map(id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(
+            events[4..].iter().all(|event| id(event) != id(&events[0])),
+            "the source mutation remains request-only"
+        );
     }
 
     /// **A home-relative `program_path` rule decides a spawn under the home**, so `shell:spawn`
@@ -1657,7 +1729,7 @@ mod tests {
             ("ls", &absent, words(&["-l"])),
         ] {
             let attempt = spawn(program, program_path, &args);
-            let direct = engine.0.decide(
+            let (direct, _) = engine.0.decide(
                 &GovernedBox::assigned("test-box"),
                 &Principal::agent(),
                 &Request::ShellSpawn {
