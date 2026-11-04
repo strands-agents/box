@@ -1,4 +1,4 @@
-"""Check Job receipts without connecting to Kubernetes."""
+"""Check generated configuration and Job receipts without cloud connections."""
 import contextlib
 import importlib.util
 import io
@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -181,6 +182,34 @@ raise SystemExit(module.main())
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 self.assertEqual(sum("create" in call for call in calls), 1)
                 self.assertEqual(len(calls), 4)
+
+
+class ClaudeConfigurationTests(unittest.TestCase):
+    def test_claude_server_grants_its_canonical_interpreter_only_to_the_server(self):
+        source = Path(__file__).with_name("claude") / "claude_runtime.py"
+        spec = importlib.util.spec_from_file_location("tested_claude_runtime", source)
+        runtime = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"AWS_REGION": "us-west-2"}):
+            spec.loader.exec_module(runtime)
+        interpreter = Path(sys.executable).resolve()
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / "python-alias" if linked else interpreter
+                if linked:
+                    executable.symlink_to(interpreter)
+                with mock.patch.object(runtime.sys, "executable", str(executable)):
+                    directory = runtime.ClaudeRuntime("unused-box").configure(
+                        Path("/usr/bin/true"), None, False, exercise=True,
+                        directory=root / "configuration",
+                    )
+                config = tomllib.loads((directory / "box.toml").read_text())
+                header = (directory / "runtime-demo-mcp").read_text().splitlines()[0]
+                self.assertEqual(header, "#!" + str(interpreter))
+                self.assertEqual(config["mcp"]["runtime_demo"]["filesystem"]["read_file"],
+                                 [str(interpreter)])
+                self.assertNotIn(str(interpreter), config["agent"]["filesystem"]["read_file"])
+                self.assertNotIn("exec", config["agent"]["filesystem"])
 
 
 if __name__ == "__main__":
