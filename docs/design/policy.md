@@ -139,9 +139,23 @@ changed between the decision and the check (in the Shell, any change to the name
 symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
 counts denied attempts too.
 
-On `shell:exec` and `shell:spawn`, `input.cwd` uses `~` for the operator's home and `~/…` for a
-directory below it. A directory outside that home stays absolute. The decision, request event, and
-outcome event use this same spelling, while execution uses the original directory.
+On `shell:exec`, `input.cwd` names the Shell's working directory. For programs launched through
+Strands Shell, Box selects the launch directory before the `shell:spawn` decision. The selected
+`[tool.<name>]` or `[agent]` table's `workspace` takes precedence. Otherwise, Box uses the caller's
+resolved directory inside the agent's workspace or the selected table's `read`, `write`, `list`,
+and `metadata` trees. Box uses the agent's workspace for other caller directories.
+
+Both actions use `~` for the operator's home and `~/…` for a directory below it. A directory outside
+that home stays absolute. The decision, request event, and outcome event use the same spelling.
+For `shell:spawn`, Box uses the selected absolute directory to start the program. A tool grammar maps
+a command line to a policy action for that tool. Each grammar action uses the same selected launch
+directory, with an absolute `cwd` in both decisions and history.
+
+If Box cannot select or resolve a directory for a Strands Shell launch, policy checks the Shell's
+original directory. The command then follows its existing dispatch and failure path. Before that
+program starts, Box checks that its launch directory matches the absolute directory retained from
+the policy check.
+The caller's Shell keeps its own working directory.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can

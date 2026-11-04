@@ -149,7 +149,7 @@ a program. Each nested command, such as the one `find -exec` or `xargs` runs, is
 | `arg1?` | String | The first argument after the program. |
 | `arg2?` | String | The second argument. |
 | `arg_count` | Long | How many arguments follow the program. |
-| `cwd` | String | The working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
+| `cwd` | String | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 
 **`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and two
 more:
@@ -159,12 +159,20 @@ more:
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
 
-The request and outcome record the same `cwd` spelling. The command runs in the original filesystem
-directory.
+On `shell:spawn`, `cwd` names the program's launch directory. For programs launched through
+Strands Shell, the selected `[tool.<name>]` or `[agent]` table's `workspace` takes precedence.
+Otherwise, Box checks the caller's resolved directory against the agent's workspace and the
+selected table's `read`, `write`, `list`, and `metadata` trees. It uses the caller's directory when
+one of those trees covers it, or the agent's workspace otherwise.
 
-A program bound to a tool grammar raises its `Tool::<name>::Action` rather than `shell:spawn`.
-Grammar actions retain the original absolute `cwd` in decisions and history, including directories
-under the operator home. Use that absolute path in directory predicates for grammar actions.
+The decision, request, and outcome use the same `cwd` spelling. The program starts in the
+corresponding absolute directory. If Box cannot select or resolve a directory for a Strands Shell
+launch, `cwd` names the Shell's original directory. A program launched through Strands Shell starts
+only when its resolved directory matches the directory policy checked.
+
+A program bound to a tool grammar raises its `Tool::<name>::Action`. Its `cwd` names the same
+selected launch directory and stays absolute in decisions and history, including paths below the
+operator home. Use that absolute path in directory predicates for grammar actions.
 
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers

@@ -264,6 +264,79 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
     true
 }
 
+#[derive(Clone)]
+pub(crate) struct ToolSpawner {
+    spawn: strands_shell::os::HostSpawner,
+    selection: Arc<ToolSelection>,
+}
+
+struct ToolSelection {
+    attachment: Attachment,
+    record: Record,
+    workspace: PathBuf,
+    commands: Arc<crate::run::commands::ConfiguredCommands>,
+}
+
+impl ToolSelection {
+    fn select(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+    ) -> Result<SelectedTool, BoxError> {
+        select_tool_with_commands(
+            &self.record,
+            &self.attachment,
+            program,
+            called,
+            args,
+            &self.commands,
+        )
+    }
+
+    fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        let selected = self
+            .select(program, called, args)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let directory = selected
+            .spec
+            .workspace
+            .clone()
+            .unwrap_or_else(|| caller_directory(requested, &selected.spec, &self.workspace));
+        let directory = directory.canonicalize()?;
+        if !directory.is_absolute() || !directory.is_dir() || directory.to_str().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the tool working directory must be an absolute UTF-8 directory",
+            ));
+        }
+        Ok(directory)
+    }
+}
+
+impl ToolSpawner {
+    pub(crate) fn spawn(&self) -> strands_shell::os::HostSpawner {
+        Arc::clone(&self.spawn)
+    }
+
+    pub(crate) fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        self.selection
+            .working_directory(program, called, args, requested)
+    }
+}
+
 /// Build the hook that runs a host binary in its own boundary
 /// (docs/design/decisions.md#the-box-runs-a-host-binary-through-the-spawn-host-seam).
 ///
@@ -282,87 +355,94 @@ fn tool_spawner(
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         super::macos_enforcement::Registration,
     >,
-) -> strands_shell::os::HostSpawner {
-    Arc::new(move |spawn: strands_shell::os::HostSpawn| {
-        let recorder = Arc::clone(&recorder);
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        let registration = registration.clone();
-        let attachment = attachment.clone();
-        let layout = layout.clone();
-        let record = record.clone();
-        let approved = Arc::clone(&approved);
-        let workspace = workspace.clone();
-        let protected_sources = protected_sources.clone();
-        Box::pin(async move {
-            let mut selected = select_tool_with_commands(
-                &record,
-                &attachment,
-                &spawn.program,
-                &spawn.invoked,
-                &spawn.args,
-                approved.commands(),
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
-            let table = selected.table.clone();
-            // The reach this run judged for the table; every declared table was judged, so a miss
-            // is refused.
-            let reach = approved.table(&table).ok_or_else(|| {
-                std::io::Error::other(format!("{table} has no reach judged for this run"))
-            })?;
-            if let Some(command) = reach.command.as_ref() {
-                selected.spec.command[0] = command.invoked().display().to_string();
-            }
-            let site = Site {
-                attachment: &attachment,
-                layout: &layout,
-                stored: &record,
-                protected_sources: &protected_sources,
-            };
-            let boundary = Boundary::translate(
-                &selected.spec,
-                Launch {
-                    table: &table,
-                    trailing: &selected.trailing,
-                    fallback_workspace: &cwd,
-                    shebang_interpreters: selected.shebang_interpreters,
-                    // A spawned host binary is the toolchain case: it loads frameworks and
-                    // libraries the agent's own program never touches.
-                    runtime_reach: RuntimeReach::Leaf,
-                    argument_zero: Some(&spawn.invoked),
-                    egress: EgressMode::for_spec(&selected.spec),
-                    approved: Some(reach),
-                },
-                &site,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
-            if selected.spec.native_egress() {
-                let label = table
-                    .strip_prefix("[tool.")
-                    .and_then(|rest| rest.strip_suffix(']'))
-                    .unwrap_or(&table);
-                recorder.record(telemetry::EffectiveDecision::enforcement_permit(
-                    "egress:native",
-                    label.to_string(),
-                    "native-egress",
-                ));
-            }
-            let captured = crate::run::contain::supervise::LeafBox::run(
-                boundary,
-                &layout,
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-                registration,
-            )
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            Ok(strands_shell::os::HostSpawnOutcome {
-                status: captured.status,
-                stdout: captured.stdout,
-                stderr: captured.stderr,
+) -> ToolSpawner {
+    let selection = Arc::new(ToolSelection {
+        attachment,
+        record,
+        workspace,
+        commands: Arc::clone(approved.commands()),
+    });
+    let spawn_selection = Arc::clone(&selection);
+    let spawn: strands_shell::os::HostSpawner =
+        Arc::new(move |spawn: strands_shell::os::HostSpawn| {
+            let recorder = Arc::clone(&recorder);
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            let registration = registration.clone();
+            let selection = Arc::clone(&spawn_selection);
+            let layout = layout.clone();
+            let approved = Arc::clone(&approved);
+            let protected_sources = protected_sources.clone();
+            Box::pin(async move {
+                let mut selected = selection
+                    .select(&spawn.program, &spawn.invoked, &spawn.args)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
+                let table = selected.table.clone();
+                // The reach this run judged for the table; every declared table was judged, so a miss
+                // is refused.
+                let reach = approved.table(&table).ok_or_else(|| {
+                    std::io::Error::other(format!("{table} has no reach judged for this run"))
+                })?;
+                if let Some(command) = reach.command.as_ref() {
+                    selected.spec.command[0] = command.invoked().display().to_string();
+                }
+                let site = Site {
+                    attachment: &selection.attachment,
+                    layout: &layout,
+                    stored: &selection.record,
+                    protected_sources: &protected_sources,
+                };
+                let boundary = Boundary::translate(
+                    &selected.spec,
+                    Launch {
+                        table: &table,
+                        trailing: &selected.trailing,
+                        fallback_workspace: &cwd,
+                        shebang_interpreters: selected.shebang_interpreters,
+                        // A spawned host binary is the toolchain case: it loads frameworks and
+                        // libraries the agent's own program never touches.
+                        runtime_reach: RuntimeReach::Leaf,
+                        argument_zero: Some(&spawn.invoked),
+                        egress: EgressMode::for_spec(&selected.spec),
+                        approved: Some(reach),
+                    },
+                    &site,
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                if boundary.working_directory() != spawn.cwd.as_path() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "the tool working directory does not match the policy-approved directory",
+                    ));
+                }
+                // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
+                if selected.spec.native_egress() {
+                    let label = table
+                        .strip_prefix("[tool.")
+                        .and_then(|rest| rest.strip_suffix(']'))
+                        .unwrap_or(&table);
+                    recorder.record(telemetry::EffectiveDecision::enforcement_permit(
+                        "egress:native",
+                        label.to_string(),
+                        "native-egress",
+                    ));
+                }
+                let captured = crate::run::contain::supervise::LeafBox::run(
+                    boundary,
+                    &layout,
+                    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                    registration,
+                )
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                Ok(strands_shell::os::HostSpawnOutcome {
+                    status: captured.status,
+                    stdout: captured.stdout,
+                    stderr: captured.stderr,
+                })
             })
-        })
-    })
+        });
+    ToolSpawner { spawn, selection }
 }
 
 /// Builds and spawns the contained leaf for a stdio MCP server. Every stdio server is contained;
@@ -1922,6 +2002,75 @@ while :; do :; done"#
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_refuses_a_workspace_retargeted_after_directory_admission() {
+        let home = tempfile::tempdir().expect("operator home");
+        let operator = home.path().canonicalize().expect("canonical operator home");
+        let root = crate::record::layout::testing::box_root(&operator, "cwd-retarget");
+        crate::test_support::with_operator_home(&operator, || {
+            let projects = operator.join("projects");
+            let admitted = projects.join("admitted");
+            let replacement = projects.join("replacement");
+            std::fs::create_dir_all(&admitted).expect("admitted workspace");
+            std::fs::create_dir(&replacement).expect("replacement workspace");
+            let workspace_alias = projects.join("workspace");
+            std::os::unix::fs::symlink(&admitted, &workspace_alias).expect("workspace alias");
+            let mut record = record_with_mcp(&root, Vec::new());
+            let mut spec = record.agent.clone().expect("agent specification");
+            spec.workspace = Some(workspace_alias.clone());
+            spec.filesystem.read = vec![projects.clone()];
+            spec.filesystem.write = vec![projects.clone()];
+            record.tool.insert("probe".to_string(), spec);
+            let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let spawner = tool_spawner(
+                selection_attachment(),
+                root,
+                record,
+                approved,
+                admitted.clone(),
+                Vec::new(),
+                telemetry::DecisionRecorder::discarding(),
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                None,
+            );
+            let program = Path::new("/bin/sh").canonicalize().expect("host shell");
+            let args = vec![
+                "-c".to_string(),
+                "printf launched > launch-marker".to_string(),
+            ];
+            let checked = spawner
+                .working_directory(&program, Path::new("sh"), &args, &admitted)
+                .expect("the original directory passes preselection");
+            assert_eq!(checked, admitted);
+            let changed_alias = projects.join("workspace-next");
+            std::os::unix::fs::symlink(&replacement, &changed_alias)
+                .expect("changed workspace alias");
+            std::fs::rename(&changed_alias, &workspace_alias).expect("retarget workspace alias");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tool runtime");
+            let refusal = runtime
+                .block_on((spawner.spawn())(strands_shell::os::HostSpawn {
+                    program,
+                    invoked: PathBuf::from("/bin/sh"),
+                    args,
+                    cwd: checked,
+                    env: Vec::new(),
+                }))
+                .err()
+                .expect("the changed directory must refuse the launch");
+            assert_eq!(refusal.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                refusal.to_string(),
+                "the tool working directory does not match the policy-approved directory",
+            );
+            assert!(!admitted.join("launch-marker").exists());
+            assert!(!replacement.join("launch-marker").exists());
+        });
+    }
+
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
             native_filesystem_policy: None,
@@ -1950,6 +2099,147 @@ while :; do :; done"#
             contained_mcp: Default::default(),
             telemetry: Default::default(),
         }
+    }
+
+    fn directory_selection(record: Record, workspace: PathBuf) -> ToolSelection {
+        ToolSelection {
+            commands: Arc::new(
+                crate::run::commands::ConfiguredCommands::load(&record)
+                    .expect("configured commands"),
+            ),
+            attachment: selection_attachment(),
+            record,
+            workspace,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_uses_the_invoked_alias_and_longest_prefix() {
+        let (_root, bin, mut record) = rustup_links();
+        let mut longer = record.tool["cargo"].clone();
+        longer.command.push("-c".to_string());
+        record.tool.insert("cargo-c".to_string(), longer);
+        for (label, spec) in &mut record.tool {
+            let workspace = bin.join(format!("{label}-workspace"));
+            std::fs::create_dir(&workspace).expect("a tool workspace");
+            spec.workspace = Some(workspace);
+        }
+        let selection = directory_selection(record, bin.clone());
+        for (called, args, label) in [
+            ("cargo", Vec::new(), "cargo"),
+            ("rustc", Vec::new(), "rustc"),
+            (
+                "rustc",
+                vec!["-c".to_string(), "printf x".to_string()],
+                "cargo-c",
+            ),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&bin.join("rustup"), Path::new(called), &args, &bin)
+                    .expect("the matching workspace"),
+                bin.join(format!("{label}-workspace")),
+                "called as {called} with {args:?}",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_canonicalizes_the_declared_workspace() {
+        let (_root, bin, mut record) = rustup_links();
+        let workspace = bin.join("project");
+        std::fs::create_dir(&workspace).expect("a workspace");
+        let alias = bin.join("project-link");
+        std::os::unix::fs::symlink(&workspace, &alias).expect("a workspace alias");
+        record.tool.get_mut("cargo").expect("cargo").workspace = Some(alias);
+        let selection = directory_selection(record, bin.clone());
+        assert_eq!(
+            selection
+                .working_directory(&bin.join("rustup"), Path::new("cargo"), &[], &bin)
+                .expect("the declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_selection_applies_the_caller_workspace_rules() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical root");
+        let workspace = root.join("project");
+        let permitted = root.join("vendor");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("src")).expect("a caller directory");
+        std::fs::create_dir_all(permitted.join("src")).expect("a granted directory");
+        std::fs::create_dir(&outside).expect("an outside directory");
+        let mut record = selection_record(&[("sh", &["/bin/sh"])]);
+        record.tool.get_mut("sh").expect("sh").filesystem.read = vec![permitted.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        for (requested, expected) in [
+            (workspace.join("src"), workspace.join("src")),
+            (permitted.join("src"), permitted.join("src")),
+            (outside, workspace.clone()),
+            (root.join("absent"), workspace.clone()),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&program, Path::new("sh"), &[], &requested)
+                    .expect("the caller workspace selection"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_directory_selection_honors_the_agent_spec_fallback() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let requested = workspace.join("src");
+        std::fs::create_dir(&requested).expect("a caller directory");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[]);
+        let agent = record.agent.as_mut().expect("agent");
+        agent.workspace = Some(workspace.clone());
+        agent.filesystem.exec = vec![program.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        assert_eq!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &requested)
+                .expect("the agent specification supplies its declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_preselection_reports_unavailable_commands_and_workspaces() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[("sh", &["/bin/sh", "-c"])]);
+        record.tool.get_mut("sh").expect("sh").workspace = Some(workspace.join("absent"));
+        let selection = directory_selection(record, workspace.clone());
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &["-c".to_string()], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(
+                    &workspace.join("missing"),
+                    Path::new("./missing"),
+                    &[],
+                    &workspace
+                )
+                .is_err()
+        );
     }
 
     /// **The longest `command` prefix the invocation matches selects the tool**, and the arguments
