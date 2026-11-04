@@ -53,8 +53,11 @@ trailing dot on the host is dropped, percent-escapes of unreserved characters ar
 digits of every escape that stays **in the path** are uppercased, `.` and
 `..` and empty path segments are resolved, a default port is dropped, and `file:/x` and
 `file://localhost/x` both become `file:///x`. A fragment is dropped, because a fragment never
-reaches the server. An empty query is dropped. A URI under any other scheme is left exactly as the
-workload wrote it. The server is then sent the canonical form, so it reads the resource the rule
+reaches the server. An empty query is dropped only for a `file:` URI.
+
+HTTP and HTTPS queries keep the `?`, even when the query is empty. Thus `https://notes/report?`
+and `https://notes/report` remain distinct resource addresses. A URI under any other scheme is left
+exactly as the workload wrote it. The server is then sent the canonical form, so it reads the resource the rule
 decided on. Write each `uri` literal in that form: a rule compares text exactly, so a literal in
 any other spelling never matches.
 
