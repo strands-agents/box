@@ -6,7 +6,9 @@
 //! | `bin/<name>` | one hard link to that image per interpreter name and per MCP server |
 //! | `private/alias-image.stamp` | the SHA-256 of the installed image the copy was taken from |
 
-use std::io::{self, Read as _};
+use std::fs::File;
+use std::io;
+use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{BoxError, ShellError};
@@ -24,22 +26,25 @@ pub(crate) fn materialize(
     servers: &[crate::record::config::mcp::McpServer],
     owner: &Lock,
 ) -> Result<(), BoxError> {
-    materialize_from(layout, servers, &installed_image()?, owner)
+    let installation = crate::run::installation::TrustedInstallation::load()?;
+    let (installed, image) = installation.alias_image();
+    materialize_opened(layout, servers, installed, image, owner)
 }
 
 /// `_owner` is the run lock as a token: `run` takes it before the first call and holds it until
 /// the workload has exited.
-fn materialize_from(
+fn materialize_opened(
     layout: &BoxRoot,
     servers: &[crate::record::config::mcp::McpServer],
     installed: &Path,
+    source: &File,
     _owner: &Lock,
 ) -> Result<(), BoxError> {
     let materialize_error = |path: &Path, reason: String| ShellError::Materialize {
         path: path.to_path_buf(),
         reason,
     };
-    let digest = image_digest(installed).map_err(|error| {
+    let digest = image_digest(source).map_err(|error| {
         materialize_error(
             installed,
             format!("reading the installed image for its digest: {error}"),
@@ -52,7 +57,7 @@ fn materialize_from(
     let recorded = layout.read_text(&layout.alias_stamp()).ok();
     if recorded.as_deref() != Some(digest.as_str()) || layout.file_identity(&image)?.is_none() {
         layout
-            .install_private_image(installed, &image, 0o500)
+            .install_private_image(source, &image, 0o500)
             .map_err(|error| {
                 materialize_error(&image, format!("place the box's alias image: {error}"))
             })?;
@@ -117,7 +122,9 @@ fn is_stale_against(
     servers: &[crate::record::config::mcp::McpServer],
     installed: &Path,
 ) -> bool {
-    let Ok(current) = image_digest(installed) else {
+    let Ok(current) = crate::record::layout::open_without_following(installed)
+        .and_then(|image| image_digest(&image))
+    else {
         return false;
     };
     if layout.read_text(&layout.alias_stamp()).ok().as_deref() != Some(current.as_str()) {
@@ -136,14 +143,14 @@ fn is_stale_against(
 }
 
 /// The SHA-256 of the installed image's bytes, as the stamp records it.
-fn image_digest(installed: &Path) -> io::Result<String> {
+fn image_digest(installed: &File) -> io::Result<String> {
     use sha2::{Digest as _, Sha256};
 
-    let mut file = crate::record::layout::open_without_following(installed)?;
+    let mut offset = 0;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = installed.read_at(&mut buffer, offset)?;
         if read == 0 {
             return Ok(hasher
                 .finalize()
@@ -152,6 +159,7 @@ fn image_digest(installed: &Path) -> io::Result<String> {
                 .collect::<String>());
         }
         hasher.update(&buffer[..read]);
+        offset += read as u64;
     }
 }
 
@@ -189,6 +197,7 @@ use std::os::unix::fs::MetadataExt as _;
 
 #[cfg(test)]
 mod tests {
+    use std::io::Seek as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
@@ -211,6 +220,17 @@ mod tests {
         std::fs::write(path, bytes).expect("the stand-in image is written");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .expect("the stand-in image is executable");
+    }
+
+    fn materialize_from(
+        layout: &BoxRoot,
+        servers: &[crate::record::config::mcp::McpServer],
+        installed: &Path,
+        owner: &Lock,
+    ) -> Result<(), BoxError> {
+        let source = crate::record::layout::open_without_following(installed)
+            .expect("the fixture image opens");
+        materialize_opened(layout, servers, installed, &source, owner)
     }
 
     fn identity(path: &Path) -> (u64, u64) {
@@ -271,6 +291,69 @@ mod tests {
             !is_stale_against(&layout, &servers, &installed),
             "a box just materialized from this image must not read as stale"
         );
+    }
+
+    #[test]
+    fn materialization_uses_the_opened_image_after_its_path_is_replaced() {
+        let (layout, owner, installed, _home) = fixture(b"opened image");
+        let source = File::open(&installed).expect("the installed image opens");
+        let digest = image_digest(&source).expect("the opened image hashes");
+        std::fs::rename(&installed, installed.with_extension("retained"))
+            .expect("the original image moves aside");
+        write_image(&installed, b"replacement image");
+
+        materialize_opened(&layout, &[], &installed, &source, &owner)
+            .expect("the opened image materializes");
+
+        assert_eq!(
+            std::fs::read(layout.alias_image()).expect("the placed image reads"),
+            b"opened image"
+        );
+        assert_eq!(
+            layout
+                .read_text(&layout.alias_stamp())
+                .expect("the stamp reads"),
+            digest
+        );
+        assert!(is_stale_against(&layout, &[], &installed));
+        materialize_from(&layout, &[], &installed, &owner)
+            .expect("a later materialization opens the replacement");
+        assert_eq!(
+            std::fs::read(layout.alias_image()).expect("the refreshed image reads"),
+            b"replacement image"
+        );
+        assert!(!is_stale_against(&layout, &[], &installed));
+    }
+
+    #[test]
+    fn materialization_reads_the_whole_image_without_changing_a_shared_offset() {
+        let (layout, owner, installed, _home) = fixture(b"complete installed image");
+        let source = File::open(&installed).expect("the installed image opens");
+        let digest = image_digest(&source).expect("the whole image hashes");
+        let mut shared = source.try_clone().expect("the descriptor clones");
+        shared
+            .seek(std::io::SeekFrom::Start(7))
+            .expect("the shared offset advances");
+
+        materialize_opened(&layout, &[], &installed, &source, &owner)
+            .expect("the image materializes from its beginning");
+
+        assert_eq!(
+            std::fs::read(layout.alias_image()).expect("the image reads"),
+            b"complete installed image"
+        );
+        assert_eq!(
+            layout
+                .read_text(&layout.alias_stamp())
+                .expect("the stamp reads"),
+            digest
+        );
+        assert_eq!(shared.stream_position().expect("the offset reads"), 7);
+        assert_eq!(
+            image_digest(&source).expect("the image hashes again"),
+            digest
+        );
+        assert_eq!(shared.stream_position().expect("the offset stays"), 7);
     }
 
     /// **A second `materialize` on the same box reuses the clone and touches no alias name.**

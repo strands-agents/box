@@ -22,24 +22,58 @@ struct Installation {
     root: PathBuf,
     bundle: PathBuf,
     binaries: PathBuf,
+    main: PathBuf,
     workspace: PathBuf,
     config: PathBuf,
 }
 
 impl Installation {
     fn new() -> Self {
+        Self::with_layout("release/bin", BOX)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_package() -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let installation = Self::with_layout("Box.app/Contents/MacOS", "box");
+        let release_script = include_str!("../../../scripts/macos-release.py");
+        let wrapper = release_script
+            .split_once("LAUNCHER = '''")
+            .expect("the release script defines the shipped wrapper")
+            .1
+            .split_once("'''")
+            .expect("the shipped wrapper has a closing delimiter")
+            .0;
+        let wrapper_path = installation.bundle.join("box");
+        std::fs::write(&wrapper_path, wrapper).unwrap();
+        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for name in [LAUNCHER, ALIAS] {
+            std::os::unix::fs::symlink(
+                format!("Box.app/Contents/MacOS/{name}"),
+                installation.bundle.join(name),
+            )
+            .unwrap();
+        }
+        installation
+    }
+
+    fn with_layout(directory: &str, main_name: &str) -> Self {
         let temporary = fixture::short_temporary_home();
         let root = temporary.path().canonicalize().unwrap();
         let bundle = root.join("bundle");
-        let binaries = bundle.join("release/bin");
+        let binaries = bundle.join(directory);
+        let main = binaries.join(main_name);
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&binaries).unwrap();
         std::fs::create_dir(&workspace).unwrap();
         let source = fixture::box_binary();
         let source = source.parent().unwrap();
-        for name in [BOX, LAUNCHER, ALIAS] {
-            std::fs::copy(source.join(name), binaries.join(name))
-                .unwrap_or_else(|error| panic!("copy legitimate {name}: {error}"));
+        for (source_name, installed_name) in
+            [(BOX, main_name), (LAUNCHER, LAUNCHER), (ALIAS, ALIAS)]
+        {
+            std::fs::copy(source.join(source_name), binaries.join(installed_name))
+                .unwrap_or_else(|error| panic!("copy legitimate {source_name}: {error}"));
         }
         let config = root.join("box.toml");
         std::fs::write(
@@ -52,16 +86,25 @@ impl Installation {
             root,
             bundle,
             binaries,
+            main,
             workspace,
             config,
         }
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.binaries.join(name)
+        if name == BOX {
+            self.main.clone()
+        } else {
+            self.binaries.join(name)
+        }
     }
 
     fn run(&self, script: &str, tables: &str) -> Output {
+        self.run_from(&self.main, script, tables)
+    }
+
+    fn run_from(&self, executable: &Path, script: &str, tables: &str) -> Output {
         let command = ["/bin/bash", "-c", script];
         std::fs::write(
             &self.config,
@@ -74,7 +117,7 @@ impl Installation {
             ),
         )
         .unwrap();
-        let mut command = Command::new(self.path(BOX));
+        let mut command = Command::new(executable);
         command
             .args(["run", "--config"])
             .arg(&self.config)
@@ -148,6 +191,7 @@ fn every_process_table_refuses_writes_to_installed_executables_and_their_ancesto
     let targets = [
         (installation.path(BOX), true),
         (installation.path(LAUNCHER), true),
+        (installation.path(ALIAS), true),
         (installation.binaries.clone(), false),
         (installation.bundle.clone(), false),
     ];
@@ -183,9 +227,11 @@ fn installed_executables_remain_readable_and_an_unrelated_sibling_remains_writab
         sibling.display().to_string(),
     );
     let script = format!(
-        "IFS= read -r -n 1 first < {} && IFS= read -r -n 1 second < {} && printf SIBLING_WRITE_OK > {} && printf {ENTERED}",
+        "IFS= read -r -n 1 first < {} && IFS= read -r -n 1 second < {} && \
+         IFS= read -r -n 1 third < {} && printf SIBLING_WRITE_OK > {} && printf {ENTERED}",
         quoted(&installation.path(BOX)),
         quoted(&installation.path(LAUNCHER)),
+        quoted(&installation.path(ALIAS)),
         quoted(&sibling),
     );
     let output = installation.run(&script, &tables);
@@ -209,7 +255,7 @@ fn an_operator_can_replace_installed_executables_between_runs() {
     let script = format!("printf {ENTERED}");
     let before = installation.run(&script, &installation.read_grant());
     assert!(before.status.success(), "{}", text(&before));
-    for name in [BOX, LAUNCHER] {
+    for name in [BOX, LAUNCHER, ALIAS] {
         let replacement = installation.binaries.join("operator-update");
         std::fs::copy(installation.path(name), &replacement).unwrap();
         std::fs::rename(&replacement, installation.path(name)).unwrap();
@@ -227,7 +273,7 @@ fn installed_executables_with_existing_hard_links_refuse_before_the_workload_sta
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    for name in [BOX, LAUNCHER] {
+    for name in [BOX, LAUNCHER, ALIAS] {
         let installation = Installation::new();
         let alias = installation.workspace.join("existing-link");
         std::fs::hard_link(installation.path(name), &alias).unwrap();
@@ -253,6 +299,7 @@ fn the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors() {
     let targets = [
         installation.path(BOX),
         installation.path(LAUNCHER),
+        installation.path(ALIAS),
         installation.binaries.clone(),
         installation.bundle.clone(),
     ];
@@ -281,7 +328,7 @@ fn monty_cannot_remove_installed_executables_through_their_paths_or_symlinks() {
         return;
     }
     let installation = Installation::new();
-    for name in [BOX, LAUNCHER] {
+    for name in [BOX, LAUNCHER, ALIAS] {
         let installed = installation.path(name);
         let alias = installation.workspace.join(format!("{name}-link"));
         std::os::unix::fs::symlink(&installed, &alias).unwrap();
@@ -302,6 +349,160 @@ fn monty_cannot_remove_installed_executables_through_their_paths_or_symlinks() {
             assert!(alias.exists(), "the alias must remain");
         }
     }
+}
+
+fn assert_hosted_mutations_refused(installation: &Installation, target: &Path) {
+    let original = std::fs::read(target).unwrap();
+    let destination = installation.workspace.join("renamed-program");
+    let replacement = installation.workspace.join("ordinary-replacement");
+    std::fs::write(&replacement, "ORDINARY_REPLACEMENT_TEXT").unwrap();
+    let python_source = format!("Path({:?})", target.display().to_string());
+    let python_destination = format!("Path({:?})", destination.display().to_string());
+    let python_replacement = format!("Path({:?})", replacement.display().to_string());
+    let operations = [
+        (
+            "zsh",
+            "rewrite",
+            format!("printf INSTALLATION_MUTATION_TEXT > {}", quoted(target)),
+        ),
+        ("zsh", "delete", format!("rm {}", quoted(target))),
+        (
+            "zsh",
+            "rename",
+            format!("mv {} {}", quoted(target), quoted(&destination)),
+        ),
+        (
+            "zsh",
+            "replace",
+            format!("mv {} {}", quoted(&replacement), quoted(target)),
+        ),
+        (
+            "python3",
+            "rewrite",
+            format!(
+                "from pathlib import Path\n{python_source}.write_text('INSTALLATION_MUTATION_TEXT')"
+            ),
+        ),
+        (
+            "python3",
+            "delete",
+            format!("from pathlib import Path\n{python_source}.unlink()"),
+        ),
+        (
+            "python3",
+            "rename",
+            format!("from pathlib import Path\n{python_source}.rename({python_destination})"),
+        ),
+        (
+            "python3",
+            "replace",
+            format!("from pathlib import Path\n{python_replacement}.rename({python_source})"),
+        ),
+    ];
+    for (interpreter, operation, hosted) in operations {
+        let script = format!("{interpreter} -c '{}'", hosted.replace('\'', "'\\''"));
+        let output = installation.run(&script, "");
+        let label = format!("{interpreter} {operation}: {}", target.display());
+        assert!(!output.status.success(), "{label}: {}", text(&output));
+        assert!(
+            text(&output).contains("trusted Box executable"),
+            "{label} must reach the installation protection: {}",
+            text(&output),
+        );
+        assert!(
+            std::fs::read(target).unwrap() == original,
+            "{label} must preserve the installed bytes",
+        );
+        assert!(!destination.exists(), "{label} must not rename the program");
+        assert_eq!(
+            std::fs::read_to_string(&replacement).unwrap(),
+            "ORDINARY_REPLACEMENT_TEXT",
+            "{label} must retain the replacement source",
+        );
+    }
+}
+
+#[test]
+fn hosted_interpreters_cannot_mutate_the_installed_alias_image() {
+    let _serial = INSTALLATION_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let installation = Installation::new();
+    assert_hosted_mutations_refused(&installation, &installation.path(ALIAS));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn every_process_table_refuses_writes_to_the_macos_package_wrapper_and_alias_image() {
+    let _serial = INSTALLATION_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let installation = Installation::macos_package();
+    for owner in ["agent", "tool.writer", "mcp.writer"] {
+        for target in [installation.bundle.join("box"), installation.path(ALIAS)] {
+            let tables = installation.write_grant(owner, &target, true);
+            let output = installation.run(&format!("printf {ENTERED}"), &tables);
+            assert_installation_refusal(&output, &format!("{owner}: {}", target.display()));
+            assert!(
+                text(&output).contains(&format!("[{owner}]")),
+                "the refusal must name the process table: {}",
+                text(&output),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hosted_interpreters_cannot_mutate_the_macos_package_wrapper_or_alias_image() {
+    let _serial = INSTALLATION_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let installation = Installation::macos_package();
+    for target in [installation.bundle.join("box"), installation.path(ALIAS)] {
+        assert_hosted_mutations_refused(&installation, &target);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_macos_package_wrapper_launches_with_ordinary_sibling_writes() {
+    let _serial = INSTALLATION_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let installation = Installation::macos_package();
+    let wrapper = installation.bundle.join("box");
+    let original = std::fs::read(&wrapper).unwrap();
+    let native = installation.bundle.join("native-output");
+    let shell = installation.bundle.join("shell-output");
+    let monty = installation.bundle.join("monty-output");
+    std::fs::write(&native, "ORIGINAL").unwrap();
+    let tables = installation.write_grant("agent", &native, true);
+    let hosted_shell = format!("printf SHELL_SIBLING_WRITE_OK > {}", quoted(&shell));
+    let hosted_monty = format!(
+        "from pathlib import Path\nPath({:?}).write_text('MONTY_SIBLING_WRITE_OK')",
+        monty.display().to_string(),
+    );
+    let script = format!(
+        "printf NATIVE_SIBLING_WRITE_OK > {} && zsh -c '{}' && python3 -c '{}' && printf {ENTERED}",
+        quoted(&native),
+        hosted_shell.replace('\'', "'\\''"),
+        hosted_monty.replace('\'', "'\\''"),
+    );
+    let output = installation.run_from(&wrapper, &script, &tables);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(ENTERED));
+    for (path, expected) in [
+        (&native, "NATIVE_SIBLING_WRITE_OK"),
+        (&shell, "SHELL_SIBLING_WRITE_OK"),
+        (&monty, "MONTY_SIBLING_WRITE_OK"),
+    ] {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+    }
+    assert_eq!(std::fs::read(wrapper).unwrap(), original);
 }
 
 #[test]

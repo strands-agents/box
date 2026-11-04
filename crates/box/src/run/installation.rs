@@ -44,7 +44,7 @@ pub(super) fn executable() -> io::Result<PathBuf> {
 /// The installed executable identities that no workload may change.
 #[derive(Debug)]
 pub(crate) struct TrustedInstallation {
-    binaries: [InstalledBinary; 2],
+    binaries: Vec<InstalledBinary>,
     preparation: std::sync::Mutex<()>,
 }
 
@@ -68,11 +68,34 @@ impl TrustedInstallation {
             path: helper.clone(),
             reason: "the installation has no parent directory".into(),
         })?;
+        let mut binaries = vec![
+            InstalledBinary::open_identity(current.clone(), directory)?,
+            InstalledBinary::open(helper.clone(), directory)?,
+            InstalledBinary::open(directory.join("strands-box-sock-alias"), directory)?,
+        ];
+        if current.ends_with("Box.app/Contents/MacOS/box") {
+            let package = current
+                .ancestors()
+                .nth(4)
+                .ok_or_else(|| InstallationError::Invalid {
+                    path: current.clone(),
+                    reason: "the application bundle has no package directory".into(),
+                })?;
+            let wrapper = package.join("box");
+            match std::fs::symlink_metadata(&wrapper) {
+                Ok(_) => binaries.push(InstalledBinary::open_identity(wrapper, package)?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(InstallationError::Invalid {
+                        path: wrapper,
+                        reason: error.to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
         let installation = Self {
-            binaries: [
-                InstalledBinary::open_identity(current, directory)?,
-                InstalledBinary::open(helper.clone(), directory)?,
-            ],
+            binaries,
             preparation: std::sync::Mutex::new(()),
         };
         installation.verify()?;
@@ -89,6 +112,11 @@ impl TrustedInstallation {
     pub(crate) fn launcher(&self) -> (&Path, &File) {
         let helper = &self.binaries[1];
         (&helper.path, &helper.opened)
+    }
+
+    pub(crate) fn alias_image(&self) -> (&Path, &File) {
+        let alias = &self.binaries[2];
+        (&alias.path, &alias.opened)
     }
 
     pub(crate) fn prepare(&self) -> std::sync::MutexGuard<'_, ()> {

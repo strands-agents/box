@@ -555,8 +555,10 @@ fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants()
     let directory = root.join("storage/install");
     let current = directory.join("box");
     let helper = directory.join("launcher");
+    let alias_image = directory.join("strands-box-sock-alias");
     std::fs::write(&current, "plain current-binary fixture; never executed\n").unwrap();
-    for binary in [&current, &helper] {
+    std::fs::write(&alias_image, "plain alias-image fixture; never executed\n").unwrap();
+    for binary in [&current, &helper, &alias_image] {
         std::fs::set_permissions(binary, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
     }

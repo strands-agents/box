@@ -10,6 +10,7 @@ struct Fixture {
     directory: PathBuf,
     current: PathBuf,
     helper: PathBuf,
+    alias: PathBuf,
 }
 
 impl Fixture {
@@ -20,6 +21,8 @@ impl Fixture {
         std::fs::create_dir_all(directory.join("deps")).unwrap();
         let current = directory.join("strands-box");
         let helper = directory.join("strands-box-contain-trampoline");
+        let alias = directory.join("strands-box-sock-alias");
+        executable_fixture(&alias);
         executable_fixture(&current);
         executable_fixture(&helper);
         Self {
@@ -28,6 +31,7 @@ impl Fixture {
             directory,
             current,
             helper,
+            alias,
         }
     }
 
@@ -35,13 +39,17 @@ impl Fixture {
         TrustedInstallation::open(self.current.clone(), self.helper.clone()).unwrap()
     }
 
-    fn cargo_aliases(&self) -> [PathBuf; 2] {
+    fn cargo_aliases(&self) -> [PathBuf; 3] {
         let aliases = [
             self.directory.join("deps/strands_box-artifact"),
             self.directory
                 .join("deps/strands_box_contain_trampoline-artifact"),
+            self.directory.join("deps/strands_box_sock_alias-artifact"),
         ];
-        for (installed, alias) in [&self.current, &self.helper].into_iter().zip(&aliases) {
+        for (installed, alias) in [&self.current, &self.helper, &self.alias]
+            .into_iter()
+            .zip(&aliases)
+        {
             std::fs::hard_link(installed, alias).unwrap();
         }
         aliases
@@ -350,4 +358,79 @@ fn a_symbolic_main_name_is_refused_by_the_metadata_only_open() {
     let alias = fixture.directory.join("symbolic-main");
     std::os::unix::fs::symlink(&fixture.current, &alias).unwrap();
     assert!(TrustedInstallation::open(alias, fixture.helper.clone()).is_err());
+}
+
+#[test]
+fn the_installed_alias_image_is_protected_and_retained_for_reading() {
+    use std::io::Read as _;
+
+    let fixture = Fixture::new();
+    let installation = fixture.open();
+    assert!(installation.refuses_mutation(&fixture.alias));
+    assert!(
+        installation
+            .validate_reach("[agent]", &fixture.writable(&fixture.alias))
+            .is_err()
+    );
+    let (path, opened) = installation.alias_image();
+    assert_eq!(path, fixture.alias);
+    let mut bytes = String::new();
+    opened
+        .try_clone()
+        .unwrap()
+        .read_to_string(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, std::fs::read_to_string(path).unwrap());
+}
+
+#[test]
+fn the_packaged_launcher_and_its_hard_links_refuse_writes() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("box-core");
+    let bundled = package.join("Box.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundled).unwrap();
+    let current = bundled.join("box");
+    let helper = bundled.join("strands-box-contain-trampoline");
+    let alias = bundled.join("strands-box-sock-alias");
+    let wrapper = package.join("box");
+    let wrapper_link = package.join("box-launcher-link");
+    for path in [&current, &helper, &alias, &wrapper] {
+        executable_fixture(path);
+    }
+    std::fs::hard_link(&wrapper, &wrapper_link).unwrap();
+    let installation = TrustedInstallation::open(current, helper).unwrap();
+    for path in [&wrapper, &wrapper_link, &alias, &package] {
+        assert!(installation.refuses_mutation(path), "{}", path.display());
+        assert!(
+            installation
+                .validate_reach("[agent]", &fixture.writable(path))
+                .is_err(),
+            "{}",
+            path.display()
+        );
+    }
+    let sibling = package.join("ordinary-output");
+    std::fs::write(&sibling, "workload output").unwrap();
+    assert!(!installation.refuses_mutation(&sibling));
+    installation
+        .validate_reach("[agent]", &fixture.writable(&sibling))
+        .unwrap();
+    installation.verify().unwrap();
+    std::fs::rename(&wrapper, package.join("operator-update")).unwrap();
+    assert!(installation.verify().is_err());
+}
+
+#[test]
+fn a_standalone_application_bundle_does_not_require_a_package_wrapper() {
+    let fixture = Fixture::new();
+    let bundled = fixture.root.join("Box.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundled).unwrap();
+    let current = bundled.join("box");
+    let helper = bundled.join("strands-box-contain-trampoline");
+    for path in [&current, &helper, &bundled.join("strands-box-sock-alias")] {
+        executable_fixture(path);
+    }
+    let installation = TrustedInstallation::open(current, helper).unwrap();
+    installation.verify().unwrap();
+    assert_eq!(installation.binaries.len(), 3);
 }

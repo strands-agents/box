@@ -1203,9 +1203,10 @@ and a contained process whose environment decode or exec failed.
 <a id="installed-box-programs-resist-workload-writes"></a>
 ### Installed Box programs resist workload writes
 
-Box protects its installed executable and containment trampoline from workload changes, even when
-policy or a filesystem grant permits the write. These programs enforce the sandbox, so we extend
-configured-tool protection instead of relying entirely on the operator to exclude their installation.
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
 `TrustedInstallation` retains their identities and refuses grants and broker mutations that can
 replace the files or their paths. The cost is that writable development trees must exclude the
 running installation and its verified alternative names. The operator owns initial contents and

@@ -226,7 +226,7 @@ A policy that validates can still fail to run, because opening the history has i
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
 tool programs with multiple hard links or overlap with direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
-Box also refuses installed trusted binaries with unaccounted hard-link names or overlap with any
+Box also refuses installed trusted programs with unaccounted hard-link names or overlap with any
 process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
 describes these refusals.
 

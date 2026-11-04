@@ -180,8 +180,9 @@ include:
 - **Configured tool programs:** Box refuses direct writable grants that can overwrite a configured
   command or replace its path, including its symbolic-link route and enclosing directories.
   The check covers the agent, every tool, and every local MCP server.
-- **Installed trusted binaries:** Box refuses writable grants that can change its installed
-  executable or containment launcher, including hard-link names, mounted aliases, and enclosing directories.
+- **Installed trusted programs:** Box refuses writable grants that can change its executable, containment
+  launcher, socket-alias image, or the macOS package launcher when present.
+  This includes hard-link names, mounted aliases, and enclosing directories.
   The check covers every process's grants
   ([installation integrity](binaries.md#trampoline---strands-box-contain-trampoline)).
 

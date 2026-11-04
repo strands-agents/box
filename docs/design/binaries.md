@@ -69,8 +69,10 @@ The trampoline doesn't decide anything itself. Whether a process gets the agent'
 for a tool's or local MCP server's sandbox is written in the configuration, and `strands-box` writes
 that.
 
-At startup, Box opens its executable and trampoline and records their file identities and hard-link
-names. A hard link gives one file another filesystem name. Box inventories these names in the
+At startup, Box opens its executable, trampoline, and socket-alias image and records their file identities and hard-link names.
+For the macOS package layout, it also records the `box` launcher beside `Box.app` when that launcher exists.
+A standalone application bundle does not require this wrapper.
+A hard link gives one file another filesystem name. Box inventories these names in each program's
 installation directory and its immediate `deps` directory, which supports Cargo builds.
 Box refuses startup when that inventory cannot account for every hard link.
 
@@ -79,7 +81,7 @@ This covers file and directory bind mounts, which expose existing files at other
 Box refreshes these aliases for each grant check and hosted mutation. It refuses incomplete or unstable inventories.
 On macOS, Box also checks verified spellings through the Data volume. Mounted aliases do not increase the hard-link count.
 
-Box protects these programs because they enforce the sandbox
+Box protects these programs because they start containment or route workload operations to its checks
 ([installed Box programs resist workload writes](decisions.md#installed-box-programs-resist-workload-writes)).
 Every process's writable grants must exclude these files, their recorded names, and enclosing
 directories. Strands Shell and Monty also refuse changes to them, even when policy permits the
@@ -89,8 +91,9 @@ Before each contained launch, Box checks the recorded file identities and link c
 trampoline file opened at startup. Linux executes that file through a descriptor, an operating-system
 handle for an open file. On macOS, Box copies its bytes into `private/trampoline/`, names the copy by
 its SHA-256 digest, and runs the copy.
+Alias materialization also hashes and copies through one retained readable descriptor, without reopening its source path.
 
-Box also checks the launcher's native executable format and embedded public marker. The marker
+Box also checks the trampoline's native executable format and embedded public marker. The marker
 identifies the artifact kind. It does not authenticate the release. These checks assume the operator
 trusts the installed binaries at startup. Box constrains workload writes, but does not protect the
 installation from writers outside Box or detect prior compromise. The operator updates the
