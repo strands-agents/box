@@ -202,11 +202,15 @@ their place.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
-On Linux, a launch with real or effective user ID zero refuses directory write grants before the workload starts.
-Run Box as a non-root account to grant directory writes.
+On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
+Run Box as a non-root account to grant sandbox directory writes.
 Root launches support explicitly granted existing-file writes and read-only directory access.
 Private `/tmp` storage remains writable and separate from the surrounding OS.
 The same restriction applies when a container maps a non-root account to user ID zero.
+
+These filesystem lists govern sandbox access.
+Shell and Python requests through Box use separate policy and reach checks in the trusted process.
+This restriction does not change their file ownership or permission to create files.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
