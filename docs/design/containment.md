@@ -254,6 +254,23 @@ when changing ordinary permissions, so those commands can fail even when they ad
 `permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
 existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
 
+### What a process sees of other processes on macOS
+
+Every macOS sandbox hides other processes. The agent, each tool, and each local MCP server get the
+same two rules:
+
+- **Itself:** a process can read all of its own process information.
+- **Its direct children:** a process can read the `proc_pidinfo` information of a process it
+  started. Only that one operation is allowed. A harness such as Kiro CLI uses it to watch the
+  programs it runs.
+
+A process still can't read the information of its parent, a sibling, or any other process on the
+machine. That includes the `strands-box run` process that started the box.
+The rules are in
+[`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
+`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
+control outside the box shows the refusal comes from the sandbox.
+
 ### How you check a box's reach
 
 A filesystem grant is reach that no policy decision covers, and no record of each access exists
