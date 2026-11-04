@@ -838,6 +838,17 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
+- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
+  refuses directory write grants, but Shell and Python requests execute in the trusted process.
+  They pass policy and `Reach` checks without becoming containment authorizations.
+  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
+  identity. A root launch therefore retains root ownership on permitted new files.
+  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
+  does not establish closure of the broader ownership finding.
+  The Shell's symlink path still requires source read/write and destination write permission.
+  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
+  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
   atomic, and the walk stops at the first component it cannot see. A link removed between them, or
