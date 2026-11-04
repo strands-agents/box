@@ -34,20 +34,16 @@ options.force = { flag = ["-f", "--force"], adds = ["force_push"] }
 
 const SWITCH_ON: &str = "\n[experimental-features]\ntool-grammars = true\n";
 
-/// A `[tool.git]` whose program is the host's own `git`, or `true(1)` under the name `git`.
+/// A `[tool.git]` whose program is a copy of `true(1)`, named `git`, that the test owns.
 fn git_tool(home: &Path) -> String {
-    let program = ["/usr/bin/git", "/bin/git"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let directory = home.join("tools");
-            std::fs::create_dir_all(&directory).expect("the tools directory");
-            let program = directory.join("git");
-            std::fs::copy(support::fixture::no_op_program(), &program).expect("a git stand-in");
-            program.display().to_string()
-        });
-    format!("[tool.git]\ncommand = [{program:?}]\n")
+    let directory = home.join("tools");
+    std::fs::create_dir_all(&directory).expect("the tools directory");
+    let program = directory.join("git");
+    std::fs::copy(support::fixture::no_op_program(), &program).expect("a git stand-in");
+    format!(
+        "[tool.git]\ncommand = [{:?}]\n",
+        program.display().to_string()
+    )
 }
 
 fn stderr(output: &Output) -> String {
