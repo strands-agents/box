@@ -129,6 +129,32 @@ records why, the item links it.
   in the window, so a `24h` window on a busy action costs more than a `1m` one. Pick the shortest
   window the rule needs. See [residual risk](../design/policy.md#residual-risk).
 
+## File attributes on macOS
+
+By default, a write folder on macOS lets a process create, change, and delete files, and refuses
+calls that set file times. The top-level [`file-attributes`](config.md#file-attributes) key
+allows those calls. It also allows more than
+you may expect, because macOS cannot allow one without the others.
+
+With the switch on, a process in a write folder can:
+
+- Set the set-user-ID or set-group-ID bit on a file it can write, through `setattrlist`. The
+  `chmod` call stays refused. Anything that later runs the file runs as the file's owner or group,
+  outside the sandbox. If the box runs as root, that owner is root.
+- Change the group of a file to a group the box's user holds. A box that runs as root can use any
+  group.
+- Store an access control list on a file or folder through `setattrlist`. An entry can deny delete
+  or grant other users access to what the folder holds later.
+- Give a file to another user through `setattrlist`, when the box runs as root. A box that runs as
+  your user can give a file only to you.
+
+File flags, Finder information, `chown`, and `acl_set_file` stay refused, and so does every change
+outside the write folders.
+
+Turn the switch on only for a box whose write folders you review afterwards, and take extra care
+before you turn it on for a box that runs as root. To find set-ID files that a run left, run `find <folder> -perm +6000`.
+To remove a list that blocks deleting a folder, run `chmod -R -N <folder>`.
+
 ## See also
 
 - [Policy](policy.md): what a policy is, the actions, common rules, and load failures.

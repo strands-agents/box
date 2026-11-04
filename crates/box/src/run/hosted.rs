@@ -956,6 +956,7 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
             name: "codex".to_string(),
@@ -1939,6 +1940,7 @@ while :; do :; done"#
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),

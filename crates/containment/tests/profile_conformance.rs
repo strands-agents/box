@@ -3570,6 +3570,55 @@ fn a_leaf_shape_renders_byte_for_byte_what_it_rendered_before() {
     );
 }
 
+/// **The file-attributes switch adds the wildcard allow and its withheld-leaf denies to each write root, and
+/// nothing else.** Removing exactly those lines from the switched profile gives the recorded one.
+#[test]
+fn the_file_attributes_switch_adds_only_the_wildcard_and_its_denies_to_a_leaf_shape() {
+    let fixture = ShapeFixture::new();
+    let off = generate_seatbelt_profile(&fixture.leaf_with_a_writable_workspace())
+        .expect("the recorded shape renders");
+    let on = generate_seatbelt_profile(
+        &fixture
+            .leaf_with_a_writable_workspace()
+            .allow_file_attributes(),
+    )
+    .expect("the switched shape renders");
+    let write_roots: Vec<String> = [fixture.project.clone(), fixture.box_root.join("home")]
+        .iter()
+        .map(|root| {
+            root.canonicalize()
+                .expect("the write root resolves")
+                .display()
+                .to_string()
+        })
+        .collect();
+    let added: Vec<String> = write_roots
+        .iter()
+        .flat_map(|root| {
+            [
+                format!("(allow file-write* (subpath \"{root}\"))"),
+                format!("(deny file-write-flags (subpath \"{root}\"))"),
+                format!("(deny file-write-owner (subpath \"{root}\"))"),
+                format!("(deny file-write-acl (subpath \"{root}\"))"),
+                format!("(deny file-write-finderinfo (subpath \"{root}\"))"),
+            ]
+        })
+        .collect();
+    let remaining: Vec<&str> = on
+        .lines()
+        .filter(|line| !added.iter().any(|rule| rule == line))
+        .collect();
+    assert_eq!(
+        on.lines().count() - remaining.len(),
+        added.len(),
+        "each added rule appears exactly once"
+    );
+    assert_eq!(
+        remaining.join("\n"),
+        off.lines().collect::<Vec<_>>().join("\n")
+    );
+}
+
 // ── The three cells added on 2026-09-19 ──────────────────────────────────────────────
 
 /// **`List` at `Root` renders directory reads and no regular file's data.**
