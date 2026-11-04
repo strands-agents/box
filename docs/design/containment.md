@@ -197,6 +197,19 @@ naming it is `Other`, and so are `/`, `/Users`, and the operator home. A read gr
 reports `Forbidden` with `WholeFilesystem` or `CredentialStore`. The caller can treat a
 `SystemTree` refusal differently from every other refusal without its own copy of the rows.
 
+### Linux root launches
+
+A Linux workload keeps the launcher's underlying file identity after Box removes its capabilities.
+If root starts the workload, new files and symbolic links in granted directories can therefore belong to root in the surrounding OS.
+A separate privileged program can follow one of those links outside the workload's grants.
+
+Box refuses directory write grants when the launcher's real or effective user ID is zero.
+It checks the composed grants during validation and again before entering the namespaces.
+The restriction applies to agent, tool, and local-server workloads.
+Existing-file writes, read-only directories, and private `/tmp` storage remain available.
+Directory writes require a non-root launch, including when an outer container presents the launcher as user ID zero.
+This check uses the launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the host. The mount's `nosuid` option

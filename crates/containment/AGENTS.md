@@ -1036,9 +1036,7 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
   `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.
-- **Nothing here refuses or detects root.** `facade.rs` and `floors.rs` judge paths and never the
-  caller, and the one `geteuid` in the tree is a permitted-syscall table entry in
-  `backend/linux/namespace/syscall.rs` rather than a check. **A Seatbelt `deny` binds root**,
+- **macOS continues to support root launches. A Seatbelt `deny` binds root**,
   measured 2026-08-31 with a control for each row, so the setuid bits, device nodes, both flag
   classes, the write root's own identity, and every ungranted path are all refused at `euid` 0.
   - **`file-write*` carried `file-write-owner`, and the leaf allowlist is what took it back. CLOSED
@@ -1094,11 +1092,20 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     (`FIXTURE_HOME_PARENT_TEXT` is `/var/tmp`). The source-reading guard beside it is deleted, and it
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
-  - **The Linux launcher writes `uid_map` as `0 <uid> 1`**, which under real root is `0 0 1`, so the
-    workload's in-namespace uid 0 is host uid 0. Startup clears every capability set. A nested user
-    namespace can restore privileges within that namespace. Seccomp still refuses `mount` and
-    `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
-    Nothing detects the identity collapse. Still open.
+  - **Linux root launches refuse directory write grants.** Kevin selected existing-file-only root
+    writes with private temporary storage on 2026-11-04 and then directed completion of the startup check.
+    `require_nonroot_directory_writes` checks every composed authorization during validation and
+    application, before namespace entry. Either real or effective user ID zero triggers the refusal.
+    Root reads and exact-file writes remain available. `/tmp` is private writable storage, while a
+    granted `/var/tmp` is a host directory and meets the same refusal as other directory writes.
+    The check uses the current user namespace. It can refuse a rootless container's namespace root
+    and does not resolve arbitrary mappings into ancestor namespaces.
+    `root_directory_grants_are_refused_before_workload_execution` pins the startup refusal.
+    `root_file_grants_preserve_private_access_and_temporary_storage` pins permitted root behavior.
+    `nonroot_directory_grants_preserve_creation` retains ordinary directory creation.
+    The identity map remains `0 <uid> 1`, and startup still clears every capability set.
+    A nested user namespace can restore privileges within that namespace. Seccomp still refuses
+    `mount` and `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
