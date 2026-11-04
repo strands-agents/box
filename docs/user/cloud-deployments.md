@@ -6,12 +6,16 @@ Use it to prepare and check a deployment. It supplies configuration guidance, no
 
 ## Install and configure Box
 
-Box publishes Linux packages only for ARM64 (`aarch64-unknown-linux-gnu`), built against Amazon Linux 2023.
-Choose a [release that includes Linux](https://github.com/strands-agents/box/releases) and follow its Linux download and checksum instructions.
+Linux release packages target ARM64 (`aarch64-unknown-linux-gnu`), with executables built against Amazon Linux 2023.
+If a [release](https://github.com/strands-agents/box/releases) includes Linux, follow its Linux download and checksum instructions.
+Otherwise, [build from source](../../README.md#build-from-source) on ARM64 Amazon Linux 2023.
 Use an ARM64 runtime, container, or MicroVM. Check that `uname -m` reports `aarch64`.
 
-Install `box`, `strands-box-contain-trampoline`, and `strands-box-sock-alias` from the same build in one directory.
+Keep the main executable and both helpers from the same build in one directory.
+Release packages call the main executable `box`; source builds call it `strands-box`.
+The helpers are `strands-box-contain-trampoline` and `strands-box-sock-alias`.
 Both helpers must be regular executable files. Box refuses helper symlinks and files without executable permissions.
+
 Set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the environment that starts Box.
 Use the [configuration reference](./config.md) to configure Box.
 
