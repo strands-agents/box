@@ -52,6 +52,14 @@ Use the [Linux target tests](../docs/dev/linux-target-tests.md) to check an inst
 without Cargo or cloud credentials on the target. The runner reuses the Phase 3 lifecycle probe
 and writes separate deployment evidence. It does not replace this deterministic suite.
 
+## Native runtime helpers
+
+`src/runtime.rs` owns native Python discovery, verified runtime grants, and developer-tool configuration.
+Its unit tests live in `src/runtime/tests.rs` beside that implementation.
+The library keeps the existing exported names, so integration cases retain their imports.
+These helper unit tests do not prove that a contained workload can use the selected runtime.
+The platform integration cases provide that separate evidence.
+
 ## Add a test case — one file in the right folder
 
 Cases are grouped into folders by category. Create `tests/<category>/<case>.rs`
@@ -107,7 +115,26 @@ fresh `DET_BOX_ROOT` in `~/.det-harness-boxes/` and removes it after the suite. 
 `cargo test` leaves its boxes in `~/.det-harness-boxes/`; remove that directory when no suite
 is running.
 
+### Extend shared helpers
+
+Keep each integration case in its category folder, with its own identifier and platform declaration.
+Use `src/scenarios.rs` for setup and expected results that several execution routes share.
+Keep commands, interpreter checks, and route-specific refusal checks in each case.
+`MoveReplacement` shows this pattern for Shell and Monty.
+
+`src/process.rs` owns concurrent workload execution and child cleanup.
+Cleanup first requests normal shutdown, so Box can stop its workload groups.
+After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
+Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.
+These are harness unit tests, not integration evidence for Box containment.
+
 ### The fixture API (`b: &BoxFixture`)
+
+The workspace and its `out/` directory stay writable. Configured tool commands use separate
+copies in the sibling `tools/` directory, outside every process's write grants. Native probes
+stay in `out/`; a case grants that directory execution with `with_exec_tree()`. Use
+`install_tool()` before declaring a compiled probe as a tool. For a native control, keep the
+original probe path so the control runs with the agent's grants.
 
 Two routes lead into the box, and a case must pick the one its enforcement point lives on:
 

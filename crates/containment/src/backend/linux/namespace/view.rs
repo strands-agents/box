@@ -11,8 +11,12 @@ use crate::error::ContainmentError;
 use crate::model::{ObjectIdentity, ObjectPin, Operation, Scope};
 
 use super::MECHANISM;
-use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
+use crate::backend::dependencies::{
+    MissingReads, folded, require_not_refused, workload_writable,
+    workload_writable_with_alias_check,
+};
 
+mod dependency_permissions;
 mod targets;
 
 /// What provides an entry's bytes.
@@ -300,8 +304,7 @@ impl MountView {
                         source: Some(dependency.resolved),
                         target: dependency.path,
                         kind: MountKind::Bind,
-                        // Never writable: read-plus-execute is the safe pairing precisely
-                        // because the bytes cannot change under the grant.
+                        // Write access stays on the explicitly granted mount.
                         writable: false,
                         executable: true,
                         origin: dependency.origin,
@@ -324,6 +327,7 @@ impl MountView {
         let write_roots = config.grants_in(Operation::Write, Scope::Root);
         let write_files = config.grants_in(Operation::Write, Scope::File);
         let exec_roots = config.grants_in(Operation::Exec, Scope::Root);
+        let explicit_exec_files = config.grants_in(Operation::Exec, Scope::File);
         for entry in entries
             .iter_mut()
             .filter(|entry| entry.kind == MountKind::Bind && entry.origin == MountOrigin::Grant)
@@ -346,6 +350,22 @@ impl MountView {
                 .any(|tree| source.starts_with(&tree.resolved))
             {
                 entry.executable = true;
+            }
+            if entry.writable
+                && entry.executable
+                && !config.broad_exec()
+                && !exec_roots
+                    .iter()
+                    .any(|grant| source.starts_with(&grant.resolved))
+                && !explicit_exec_files
+                    .iter()
+                    .any(|grant| source == grant.resolved)
+            {
+                return Err(refusal(format!(
+                    "writable executable mount for '{}' has no explicit execution grant. \
+                     Remove its write access or explicitly grant execution for this path.",
+                    source.display()
+                )));
             }
         }
 
@@ -449,6 +469,28 @@ impl MountView {
             }
         }
 
+        for refused in entries
+            .iter()
+            .filter(|entry| entry.origin == MountOrigin::Refusal)
+        {
+            for grant in entries.iter().filter(|entry| {
+                entry.writable
+                    && entry.kind == MountKind::Bind
+                    && refused.target.starts_with(&entry.target)
+            }) {
+                protected_parents.extend(
+                    refused
+                        .target
+                        .ancestors()
+                        .skip(1)
+                        .take_while(|parent| {
+                            *parent != grant.target && parent.starts_with(&grant.target)
+                        })
+                        .map(Path::to_path_buf),
+                );
+            }
+        }
+
         // A fresh grant hides every descendant. Extra denial or protection mountpoints would
         // reveal names beneath a metadata-only grant; the empty filesystem already denies access.
         let empty_roots: Vec<_> = entries
@@ -524,8 +566,14 @@ impl MountView {
         self.mount_locations.borrow_mut().clear();
         for entry in &self.entries {
             self.establish(entry, root)?;
+            if entry.origin == MountOrigin::Grant
+                && entry.kind == MountKind::Bind
+                && entry.writable
+                && self.protect_parents(root, &entry.target)?
+            {
+                self.establish(entry, root)?;
+            }
         }
-        self.protect_parents(root)?;
 
         // The pivot's temporary old-root mountpoint has to exist *before* the root is sealed read-
         // only.
@@ -556,9 +604,14 @@ impl MountView {
         Ok(())
     }
 
-    /// Pin each protected parent before the root becomes read-only.
-    fn protect_parents(&self, root: &Path) -> Result<(), ContainmentError> {
-        for parent in &self.protected_parents {
+    /// Pin the protected parents inside the grant that will cover them.
+    fn protect_parents(&self, root: &Path, grant: &Path) -> Result<bool, ContainmentError> {
+        let mut protected = false;
+        for parent in self
+            .protected_parents
+            .iter()
+            .filter(|parent| parent.as_path() != grant && parent.starts_with(grant))
+        {
             let target = root.join(parent.strip_prefix("/").unwrap_or(parent));
             let metadata = std::fs::symlink_metadata(&target).map_err(|error| {
                 refusal(format!(
@@ -585,9 +638,10 @@ impl MountView {
                     target.display()
                 ))
             })?;
+            protected = true;
         }
 
-        Ok(())
+        Ok(protected)
     }
 
     /// Establish one planned mount beneath `root`.
@@ -1504,7 +1558,8 @@ fn require_loadable(
     restricted: bool,
     missing: &mut MissingReads,
 ) -> Result<Option<(PathBuf, Rc<std::fs::File>, bool)>, ContainmentError> {
-    let restricted = restricted || workload_writable(config, library, MECHANISM)?;
+    let writable = workload_writable(config, library, MECHANISM)?;
+    let restricted = restricted || writable;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1531,6 +1586,32 @@ fn require_loadable(
         return Ok(None);
     }
     let file = Rc::new(open_dependency(&granted.resolved)?);
+    if !config.broad_exec()
+        && !config.authorizations().iter().any(|grant| {
+            grant.operation == Operation::Exec
+                && match grant.scope {
+                    Scope::Root => granted.resolved.starts_with(&grant.resolved),
+                    Scope::File => granted.resolved == grant.resolved,
+                    Scope::Dir => false,
+                }
+        })
+        && workload_writable_with_alias_check(
+            config,
+            library,
+            MECHANISM,
+            Some(&file.metadata().map_err(|error| {
+                refusal(format!("checking admitted dependency identity: {error}"))
+            })?),
+            |root| dependency_permissions::hard_link_alias_may_be_writable(&file, root),
+        )?
+    {
+        return Err(refusal(format!(
+            "writable dependency {:?} needed by {:?} has no explicit execution grant. \
+             Remove its write access or explicitly grant execution. \
+             Read and Write grants do not authorize loading writable code.",
+            granted.resolved, image
+        )));
+    }
     Ok(Some((granted.resolved, file, restricted)))
 }
 
@@ -1850,6 +1931,7 @@ fn refusal(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod combined_grants;
     mod loader_admission;
     mod nested_grants;
     mod protection_alias;
@@ -2747,9 +2829,124 @@ mod tests {
             assert!(std::fs::write(&protected, b"changed").is_err());
             assert_eq!(std::fs::read(&protected).unwrap(), b"unchanged");
             assert!(std::fs::rename(&parent, root.join("moved")).is_err());
-            std::fs::write(parent.join("ordinary"), b"allowed").unwrap();
-            assert_eq!(std::fs::read(parent.join("ordinary")).unwrap(), b"allowed");
+            let ordinary = parent.join("ordinary");
+            std::fs::write(&ordinary, b"allowed").unwrap();
+            std::fs::rename(&ordinary, root.join("ordinary")).unwrap();
+            std::fs::rename(root.join("ordinary"), &ordinary).unwrap();
+            assert_eq!(std::fs::read(&ordinary).unwrap(), b"allowed");
         });
+    }
+
+    fn refusal_parent_moves_preserve_permitted_children(scope: Scope) {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let parent = root.join("parent");
+            let readonly = parent.join("readonly");
+            std::fs::create_dir_all(&readonly).unwrap();
+            std::fs::write(readonly.join("value"), b"unchanged").unwrap();
+            let denied = parent.join("private");
+            match scope {
+                Scope::File => std::fs::write(&denied, b"protected").unwrap(),
+                Scope::Root => std::fs::create_dir(&denied).unwrap(),
+                Scope::Dir => unreachable!(),
+            }
+            let config = ContainmentConfig::new()
+                .allow(&readonly, Operation::Read, Scope::Root)
+                .unwrap()
+                .allow(&root, Operation::Write, Scope::Root)
+                .unwrap()
+                .refuse(&denied, scope)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            let error = std::fs::rename(&parent, root.join("moved")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
+            let refused_write = match scope {
+                Scope::File => denied.clone(),
+                Scope::Root => denied.join("planted"),
+                Scope::Dir => unreachable!(),
+            };
+            assert!(std::fs::write(&refused_write, b"refused").is_err());
+            assert!(std::fs::write(readonly.join("value"), b"changed").is_err());
+            assert_eq!(std::fs::read(readonly.join("value")).unwrap(), b"unchanged");
+            let ordinary = parent.join("ordinary");
+            let outside = root.join("ordinary");
+            std::fs::write(&ordinary, b"allowed").unwrap();
+            std::fs::rename(&ordinary, &outside).unwrap();
+            std::fs::rename(&outside, &ordinary).unwrap();
+            std::fs::hard_link(&ordinary, root.join("linked")).unwrap();
+            assert_eq!(std::fs::read(root.join("linked")).unwrap(), b"allowed");
+            let child = parent.join("child");
+            let moved_child = root.join("child");
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("value"), b"allowed").unwrap();
+            std::fs::rename(&child, &moved_child).unwrap();
+            std::fs::rename(&moved_child, &child).unwrap();
+            assert_eq!(std::fs::read(child.join("value")).unwrap(), b"allowed");
+        });
+    }
+
+    #[test]
+    fn file_refusal_parent_moves_preserve_permitted_children() {
+        refusal_parent_moves_preserve_permitted_children(Scope::File);
+    }
+
+    #[test]
+    fn directory_refusal_parent_moves_preserve_permitted_children() {
+        refusal_parent_moves_preserve_permitted_children(Scope::Root);
+    }
+
+    fn metadata_refusal_ancestors(scope: Scope) {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let parent = root.join("parent");
+            let metadata = parent.join("metadata");
+            let denied = metadata.join("denied");
+            std::fs::create_dir_all(&metadata).unwrap();
+            match scope {
+                Scope::File => std::fs::write(&denied, b"protected").unwrap(),
+                Scope::Root => std::fs::create_dir(&denied).unwrap(),
+                Scope::Dir => unreachable!(),
+            }
+            let config = ContainmentConfig::new()
+                .allow(&root, Operation::Write, Scope::Root)
+                .unwrap()
+                .allow(&metadata, Operation::Metadata, Scope::Dir)
+                .unwrap()
+                .refuse(&denied, scope)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            let error = std::fs::rename(&parent, root.join("moved")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
+            assert!(!denied.exists());
+            assert!(std::fs::write(&denied, b"changed").is_err());
+            assert_eq!(std::fs::read_dir(&metadata).unwrap().count(), 0);
+            let sibling = parent.join("sibling");
+            let renamed = parent.join("renamed");
+            std::fs::create_dir(&sibling).unwrap();
+            std::fs::write(sibling.join("value"), b"allowed").unwrap();
+            std::fs::rename(&sibling, &renamed).unwrap();
+            assert_eq!(std::fs::read(renamed.join("value")).unwrap(), b"allowed");
+        });
+    }
+
+    #[test]
+    fn file_refusal_ancestors_remain_protected_above_metadata_only_grants() {
+        metadata_refusal_ancestors(Scope::File);
+    }
+
+    #[test]
+    fn directory_refusal_ancestors_remain_protected_above_metadata_only_grants() {
+        metadata_refusal_ancestors(Scope::Root);
     }
 
     fn planned_parent_fixture() -> (tempfile::TempDir, tempfile::TempDir, MountView, PathBuf) {
@@ -2773,8 +2970,10 @@ mod tests {
 
     #[test]
     fn a_missing_or_replaced_protected_parent_refuses_the_view() {
-        let (_source, staging, view, target) = planned_parent_fixture();
-        let error = view.protect_parents(staging.path()).unwrap_err();
+        let (source, staging, view, target) = planned_parent_fixture();
+        let error = view
+            .protect_parents(staging.path(), source.path())
+            .unwrap_err();
         assert!(
             error.to_string().contains("inspecting protected parent"),
             "{error}"
@@ -2782,7 +2981,9 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::rename(&target, target.with_extension("before")).unwrap();
         std::fs::write(&target, b"replacement").unwrap();
-        let error = view.protect_parents(staging.path()).unwrap_err();
+        let error = view
+            .protect_parents(staging.path(), source.path())
+            .unwrap_err();
         assert!(error.to_string().contains("is not a directory"), "{error}");
         assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
     }
@@ -2790,11 +2991,13 @@ mod tests {
     #[test]
     fn a_failed_protected_parent_bind_refuses_the_view() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
-            let (_source, staging, view, target) = planned_parent_fixture();
+            let (source, staging, view, target) = planned_parent_fixture();
             std::fs::create_dir_all(&target).unwrap();
-            view.protect_parents(staging.path()).unwrap();
+            view.protect_parents(staging.path(), source.path()).unwrap();
             super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
-            let error = view.protect_parents(staging.path()).unwrap_err();
+            let error = view
+                .protect_parents(staging.path(), source.path())
+                .unwrap_err();
             assert!(
                 error.to_string().contains("binding protected parent"),
                 "{error}"

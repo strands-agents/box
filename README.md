@@ -219,6 +219,8 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
+
 Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
 credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
@@ -241,6 +243,12 @@ just test-all      # workspace tests and box example checks
 `cargo test --workspace --all-features` runs the full suite. Include
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
+
+In pull-request CI, changes to `docs/site-manifest.json`,
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+site-manifest contract test instead of the full Rust test matrix. The test compares the base
+contract to keep the product ID stable and require an append-only retirement before a page or route
+is removed.
 
 ## Documentation
 

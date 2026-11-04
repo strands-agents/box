@@ -14,6 +14,7 @@
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
 
 pub(crate) mod broker;
+pub(crate) mod commands;
 pub(crate) mod configure;
 pub(crate) mod contain;
 pub(crate) mod credential;

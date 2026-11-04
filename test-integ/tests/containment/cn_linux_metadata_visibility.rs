@@ -10,16 +10,17 @@ det_case! {
     desc: "Linux hides ungranted file metadata and contents from both agent and tool, while explicit read grants expose the same file",
     run: |b| {
         let probe = b.compile_probe("fsprobe-linux-metadata", PROBE);
+        let tool_probe = b.install_tool(&probe);
         let file = b.listed_tree().join("entry.txt");
         let missing = b.listed_tree().join("absent-metadata-control");
         assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "LISTED_CONTENT");
         assert!(!missing.exists(), "DET_ERROR: the absent control already exists");
         let size = std::fs::metadata(&file).unwrap().len();
-        let quoted_probe = serde_json::to_string(&probe.to_string_lossy()).unwrap();
+        let quoted_probe = serde_json::to_string(&tool_probe.to_string_lossy()).unwrap();
         let quoted_file = serde_json::to_string(&file.to_string_lossy()).unwrap();
-        let script = format!(
+        let script = |program: &std::path::Path| format!(
             "{p} stat {f}; {p} stat {m}; {p} read {f}; printf 'METADATA_PROBE_COMPLETE\n'",
-            p = sh_quote(&probe.to_string_lossy()),
+            p = sh_quote(&program.to_string_lossy()),
             f = sh_quote(&file.to_string_lossy()),
             m = sh_quote(&missing.to_string_lossy()),
         );
@@ -41,9 +42,9 @@ det_case! {
                     }
                 };
                 let result = if tool {
-                    b.run_mediated_with_config(edit, &script)
+                    b.run_mediated_with_config(edit, &script(&tool_probe))
                 } else {
-                    b.run_sh_with_config(edit, &script)
+                    b.run_sh_with_config(edit, &script(&probe))
                 };
                 result.assert_contains("METADATA_PROBE_COMPLETE");
                 if tool {

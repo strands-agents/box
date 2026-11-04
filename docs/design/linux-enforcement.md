@@ -52,6 +52,21 @@ Direct Linux file operations use filesystem grants rather than individual policy
 Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
 See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
+## Capabilities inside nested namespaces
+
+A Linux [capability](#terms) is a privilege for an operation such as namespace administration.
+Box clears every capability set before the workload starts.
+This step removes startup authority but does not prevent Linux from granting capabilities in a nested user namespace.
+
+The filters permit `unshare`, `clone`, and `clone3` to create user namespaces, and `setns` to enter eligible child namespaces.
+The process can then hold capabilities within that namespace and the namespaces it owns.
+Those capabilities do not grant privileges in a parent user namespace.
+
+Box's seccomp filters remain active after namespace creation or entry, and child processes inherit them.
+The filters still refuse `mount` and `fsopen`, which mount a filesystem or begin filesystem setup.
+Other permitted operations can use the restored capabilities, such as creation of a nested mount namespace.
+These namespaces share the surrounding OS kernel, so [kernel security remains a dependency](security.md#the-operator-and-platform-own-the-environment).
+
 ## How the filesystem view changes access
 
 The view starts with an isolated root and adds the files that the workload needs.
@@ -96,6 +111,13 @@ Linux configuration refuses a deny path that does not exist.
 For an existing denied file, Linux can substitute an empty file.
 A read can then succeed with empty output while writes fail.
 
+For denied files and directories beneath writable grants, Box protects the intermediate ancestor directories.
+It binds those directories onto themselves, then covers those mounts with the original writable grant.
+Within the workload's mount namespace, Linux keeps the hidden mounts attached to those directory entries and refuses to rename them.
+The visible grant stays continuous, so unrelated file and directory renames across those ancestors remain available.
+Box installs nested grants and denial masks after this covering bind, preserving their precedence and source identity checks.
+Existing boundaries between separate grants or filesystems still apply.
+
 Linux refuses `list`, because the mount view cannot expose directory names without file contents.
 An agent's metadata-only directory grant contributes no mount and causes no startup error.
 Other grants can still expose that directory.
@@ -112,11 +134,22 @@ This also permits execution of programs in those directories.
 
 On ARM64, the recognized paths are `/lib64`, `/usr/lib64`, `/lib/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`, `/lib`, and `/usr/lib`.
 Box compares their resolved directory identities with the granted directory.
+After combining overlapping grants, Box refuses a writable, executable mount without an explicit execution grant covering its source.
+This includes a loader-directory read combined with a write on the same directory or an ancestor.
+An execution grant for one file does not authorize execution across its containing directory.
+Read-only library directories keep their automatic execution access.
 
 ELF means Executable and Linkable Format, the Linux binary format.
 For an exact ELF binary grant, Box discovers its executable-format interpreter and declared library dependencies.
 It also follows the dependencies of discovered system libraries.
 System libraries are libraries within the recognized loader directories listed above.
+
+Before an agent starts, Box checks whether each discovered loader or shared library is writable through the workload's grants.
+A writable dependency needs an explicit `exec` grant, even when a read-only program loads it.
+Otherwise, Box refuses startup.
+This check includes writable symbolic-link paths and hard-link aliases.
+Hard-linked libraries can retain automatic execution access when ownership, permissions, and mount checks establish that the workload cannot modify them.
+See [writable library grants](../user/config.md#linux-writable-libraries) for the configuration requirements and limits.
 
 This discovery does not inspect script interpreter lines.
 Box handles the declared command's script interpreter chain separately.
@@ -168,21 +201,37 @@ This restriction does not isolate every terminal operation or restore arbitrary 
 
 ## Network access
 
-With gateway networking enabled, the Linux sandbox has a private network namespace without external routes.
-Box creates a loopback endpoint inside that namespace.
-A relay carries its connections to the egress gateway in the trusted process.
-The relay transfers bytes.
-The gateway applies policy.
-See [egress enforcement](egress.md).
-
-For a tool, `[tool.<name>.network] contain_egress = false` selects the surrounding OS network namespace.
+On Linux, `contain_egress` selects the network mode for a tool or local MCP server.
+A tool sets it under `[tool.<name>.network]`.
 A local MCP server has the corresponding [MCP setting](../user/mcp.md).
-Traffic then bypasses the gateway and its policy checks.
-Filesystem and process restrictions still apply.
-The agent refuses a network table.
+The agent uses gateway networking and refuses a network table.
 
-This exception does not enable every socket family.
-The Linux filter permits UNIX and IPv4 sockets and refuses all other families, including IPv6.
+`contain_egress = true` is the default.
+The sandbox has a private network namespace without external routes.
+Box creates a loopback endpoint inside that namespace.
+A relay carries its connections to the local egress gateway in the box's trusted process.
+The gateway supports outbound HTTP and HTTPS requests.
+The gateway applies policy, as described in [egress enforcement](egress.md).
+
+The sandbox cannot connect directly to the surrounding OS's loopback (`localhost`) listeners or [abstract Unix sockets](#terms).
+A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
+Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
+See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
+
+`contain_egress = false` selects the surrounding OS network namespace.
+Direct connections can reach IPv4 destinations, including loopback listeners, and abstract Unix sockets.
+Direct connections bypass the gateway's policy checks, credential injection, and traffic records.
+Box still sets proxy environment variables, so clients that use them can continue through the gateway.
+
+In both modes, the Linux filter permits Unix and IPv4 sockets and refuses other socket families, including IPv6.
+[Pathname Unix sockets](#terms) remain subject to filesystem visibility and operating system permissions.
+A directory grant can expose sockets inside that directory.
+
+The process retains the invoking operator's identity in the surrounding OS.
+A reachable service that trusts that identity may treat the process as the operator.
+The process keeps its filesystem and process restrictions.
+Those restrictions do not constrain a surrounding-OS service that acts on the process's behalf.
 
 <a id="startup-failures-and-qualification"></a>
 
@@ -208,6 +257,11 @@ Minimum versions, minimum privileges, package installation, and testing the asse
 | Term | Definition | Notes |
 |---|---|---|
 | Namespace | A kernel mechanism that gives processes a separate view of selected resources. | Box uses several namespace types. |
+| Abstract Unix socket | A local communication endpoint with a name instead of a filesystem path. | Its visibility follows the network namespace. |
+| Pathname Unix socket | A local communication endpoint addressed through a filesystem path. | A directory grant can expose its path. |
+| Capability | A Linux privilege for a specific operation. | User namespaces scope these privileges. |
+| `unshare`, `clone`, `clone3`, and `setns` | System calls that create or enter namespaces. | `clone` and `clone3` also create processes. |
+| `mount` and `fsopen` | System calls that mount a filesystem or begin filesystem setup. | Box refuses both after nested namespace creation or entry. |
 | Bind mount | An existing file or directory exposed at another mount point. | Its access flags affect direct file operations. |
 | Seccomp | A Linux mechanism that filters system calls. | Box uses static filters before workload execution. |
 | Shared library | Code that a program loads from a separate file. | The loader needs readable, executable access. |

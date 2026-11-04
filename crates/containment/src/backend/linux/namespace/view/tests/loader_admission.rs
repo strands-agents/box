@@ -128,6 +128,46 @@ fn writable_image_cannot_name_an_ungranted_interpreter() {
 }
 
 #[test]
+fn a_writable_interpreter_requires_an_explicit_execution_grant() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap();
+    let interpreter = planted_image(&home, "project/loader", &synthetic_elf(None, &[], None));
+    let program = planted_image(
+        &home,
+        "bin/program",
+        &synthetic_elf(Some(interpreter.to_str().unwrap()), &[], None),
+    );
+    for scope in [Scope::File, Scope::Root] {
+        let writable = if scope == Scope::File {
+            interpreter.as_path()
+        } else {
+            interpreter.parent().unwrap()
+        };
+        let config = ContainmentConfig::new()
+            .allow(&program, Operation::Exec, Scope::File)
+            .unwrap()
+            .allow(writable, Operation::Read, scope)
+            .unwrap()
+            .allow(writable, Operation::Write, scope)
+            .unwrap();
+        let error = MountView::plan(&config).unwrap_err().to_string();
+        assert!(error.contains("writable dependency"), "{error}");
+        assert!(error.contains("no explicit execution grant"), "{error}");
+        assert!(error.contains(interpreter.to_str().unwrap()), "{error}");
+
+        let allowed = config
+            .allow(&interpreter, Operation::Exec, Scope::File)
+            .unwrap();
+        assert_eq!(allowed.warnings().len(), 1);
+        let dependencies = elf_dependencies(&program, &allowed).unwrap();
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.resolved == interpreter && dependency.origin == MountOrigin::Interpreter
+        }));
+        assert!(MountView::plan(&allowed).is_ok());
+    }
+}
+
+#[test]
 fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
     super::super::super::failure_tests::in_fresh_process(|| {
         let (_directory, program, note, config) = fixture();
@@ -143,6 +183,8 @@ fn writable_dependency_cannot_extend_a_read_only_programs_reach() {
         );
         let config = config
             .allow(launcher, Operation::Exec, Scope::File)
+            .unwrap()
+            .allow(library, Operation::Exec, Scope::File)
             .unwrap();
         refuses_ungranted(&config, &note);
     });
@@ -312,7 +354,58 @@ fn a_loader_directory_symlink_does_not_authorize_operator_bytes() {
 }
 
 #[test]
-fn stated_byte_grants_admit_dependency_bytes() {
+fn a_writable_library_in_a_loader_directory_requires_an_explicit_execution_grant() {
+    super::super::super::failure_tests::in_fresh_process(|| {
+        if !mount_namespace_is_available() {
+            return;
+        }
+        assert!(forked(|| {
+            assert!(enter_private_namespace());
+            mount_syscall(
+                Some(Path::new("tmpfs")),
+                Path::new("/usr/lib"),
+                Some("tmpfs"),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                None,
+            )
+            .unwrap();
+            let library = planted_image(
+                Path::new("/usr/lib"),
+                "libbox_writable.so",
+                &synthetic_elf(None, &[], None),
+            );
+            assert!(inside_loader_directory(&library));
+            let directory = tempfile::tempdir().unwrap();
+            let home = directory.path().canonicalize().unwrap();
+            let program = planted_image(
+                &home,
+                "program",
+                &synthetic_elf(None, &[library.to_str().unwrap()], None),
+            );
+            let config = ContainmentConfig::new()
+                .allow(&program, Operation::Exec, Scope::File)
+                .unwrap()
+                .allow(&library, Operation::Read, Scope::File)
+                .unwrap()
+                .allow(&library, Operation::Write, Scope::File)
+                .unwrap();
+            let error = MountView::plan(&config).unwrap_err().to_string();
+            assert!(error.contains("writable dependency"), "{error}");
+            assert!(error.contains("no explicit execution grant"), "{error}");
+            assert!(error.contains(library.to_str().unwrap()), "{error}");
+
+            let allowed = config
+                .allow(&library, Operation::Exec, Scope::File)
+                .unwrap();
+            assert_eq!(allowed.warnings().len(), 1);
+            assert!(MountView::plan(&allowed).is_ok());
+            true
+        }));
+    });
+}
+
+#[test]
+fn stated_byte_grants_admit_only_immutable_dependency_bytes() {
     super::super::super::failure_tests::in_fresh_process(|| {
         if !mount_namespace_is_available() {
             return;
@@ -331,6 +424,11 @@ fn stated_byte_grants_admit_dependency_bytes() {
                     synthetic_elf(None, &[note.to_str().unwrap()], None),
                 )
                 .unwrap();
+                if operation == Operation::Write {
+                    let error = MountView::plan(&config).unwrap_err();
+                    assert!(error.to_string().contains("writable dependency"), "{error}");
+                    continue;
+                }
                 let view = MountView::plan(&config).unwrap();
                 assert!(forked(|| {
                     assert!(enter_private_namespace());
@@ -557,6 +655,115 @@ fn an_explicitly_denied_dependency_is_not_offered_as_a_read_grant() {
         error.contains("explicitly denied") && !error.contains("read_file"),
         "{error}"
     );
+}
+
+fn read_only_library_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap();
+    let library = planted_image(
+        &home,
+        "installed/library.so",
+        &synthetic_elf(None, &[], None),
+    );
+    std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let program = planted_image(
+        &home,
+        "bin/program",
+        &synthetic_elf(None, &[library.to_str().unwrap()], None),
+    );
+    let workspace = home.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    (directory, program, library, workspace)
+}
+
+#[test]
+fn an_owned_read_only_hard_link_still_requires_an_execution_grant() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let (_directory, program, library, workspace) = read_only_library_fixture();
+    std::fs::hard_link(&library, library.with_extension("linked")).unwrap();
+    let identity = library.metadata().unwrap();
+    // SAFETY: getuid only reads the calling process's identity.
+    assert_eq!(identity.uid(), unsafe { libc::getuid() });
+    assert_eq!(identity.mode() & 0o777, 0o444);
+    assert_eq!(identity.nlink(), 2);
+    let config = ContainmentConfig::new()
+        .allow(&program, Operation::Exec, Scope::File)
+        .unwrap()
+        .allow(&library, Operation::Read, Scope::File)
+        .unwrap()
+        .allow(&workspace, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&workspace, Operation::Write, Scope::Root)
+        .unwrap();
+
+    assert!(workload_writable(&config, &library, MECHANISM).unwrap());
+    let error = MountView::plan(&config).unwrap_err().to_string();
+    assert!(error.contains("writable dependency"), "{error}");
+    assert!(error.contains(library.to_str().unwrap()), "{error}");
+    std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(library.metadata().unwrap().mode() & 0o777, 0o644);
+}
+
+#[test]
+fn a_read_only_library_with_direct_write_reach_still_requires_execution() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    for scope in [Scope::File, Scope::Root] {
+        let (_directory, program, library, _workspace) = read_only_library_fixture();
+        assert_eq!(library.metadata().unwrap().nlink(), 1);
+        let path = if scope == Scope::File {
+            library.as_path()
+        } else {
+            library.parent().unwrap()
+        };
+        let config = ContainmentConfig::new()
+            .allow(&program, Operation::Exec, Scope::File)
+            .unwrap()
+            .allow(path, Operation::Read, scope)
+            .unwrap()
+            .allow(path, Operation::Write, scope)
+            .unwrap();
+
+        let error = MountView::plan(&config).unwrap_err().to_string();
+        assert!(error.contains("writable dependency"), "{error}");
+        assert!(error.contains(library.to_str().unwrap()), "{error}");
+        let allowed = config
+            .allow(&library, Operation::Exec, Scope::File)
+            .unwrap();
+        assert!(MountView::plan(&allowed).is_ok());
+    }
+}
+
+#[test]
+fn a_read_only_library_with_an_exact_writable_alias_still_requires_execution() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (_directory, program, library, workspace) = read_only_library_fixture();
+    let alias = workspace.join("library-alias.so");
+    std::fs::hard_link(&library, &alias).unwrap();
+    assert_eq!(library.metadata().unwrap().nlink(), 2);
+    let config = ContainmentConfig::new()
+        .allow(&program, Operation::Exec, Scope::File)
+        .unwrap()
+        .allow(&library, Operation::Read, Scope::File)
+        .unwrap()
+        .allow(&alias, Operation::Read, Scope::File)
+        .unwrap()
+        .allow(&alias, Operation::Write, Scope::File)
+        .unwrap();
+    assert!(
+        config
+            .authorizations()
+            .iter()
+            .all(|grant| { grant.operation != Operation::Write || grant.scope == Scope::File })
+    );
+
+    let error = MountView::plan(&config).unwrap_err().to_string();
+    assert!(error.contains("writable dependency"), "{error}");
+    assert!(error.contains(library.to_str().unwrap()), "{error}");
 }
 
 #[test]

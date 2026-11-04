@@ -133,7 +133,14 @@ fn protected_alias_stays_usable(kind: AliasKind, alias_name: &str, linked_tree: 
     let alias_contents = std::fs::read_link(&fixture.alias).unwrap();
     in_private_namespace(|| {
         assert!(establish_every_entry(&fixture.view, &fixture.root));
-        fixture.view.protect_parents(&fixture.root).unwrap();
+        for entry in fixture.view.entries().iter().filter(|entry| {
+            entry.origin == MountOrigin::Grant && entry.kind == MountKind::Bind && entry.writable
+        }) {
+            fixture
+                .view
+                .protect_parents(&fixture.root, &entry.target)
+                .unwrap();
+        }
         for path in [&fixture.protected, &fixture.requested] {
             let staged = fixture.staged(path);
             let metadata = std::fs::metadata(&staged).unwrap();
@@ -406,7 +413,13 @@ fn independent_alias_protection(descendant: AliasDescendant) {
             Some(libc::EROFS)
         );
         if descendant == AliasDescendant::Unchanged {
-            view.protect_parents(&root).unwrap();
+            for entry in view.entries().iter().filter(|entry| {
+                entry.origin == MountOrigin::Grant
+                    && entry.kind == MountKind::Bind
+                    && entry.writable
+            }) {
+                view.protect_parents(&root, &entry.target).unwrap();
+            }
             for target in [&protected, &alias_protected] {
                 let target = staged(target);
                 assert_eq!(std::fs::read(&target).unwrap(), b"protected policy");

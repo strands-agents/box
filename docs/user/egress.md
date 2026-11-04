@@ -1,4 +1,4 @@
-# The `[egress.<name>]` table
+# Egress credential configuration
 
 An `[egress.<name>]` table in `box.toml` binds a credential to a set of destinations. The box's
 egress gateway adds the credential to each request to those destinations. Policy decides whether
@@ -7,6 +7,10 @@ each request goes out.
 Audience: an operator with a working box from [getting started](./getting-started.md) who gives
 the agent a credential for a service. For how the gateway decides and forwards each request, read
 [how Box controls outbound traffic](../design/egress.md).
+
+A tool or local MCP server with `network.contain_egress = false` can connect directly, outside
+gateway policy. On Linux, this includes IPv4 access to reachable private networks, loopback
+services, and instance metadata endpoints. See [server network settings](./mcp.md#network).
 
 ## Example
 
