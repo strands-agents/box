@@ -99,8 +99,9 @@ Both tables hold the same four fields:
 A `[tool.<label>]` also takes `grammar`, the tool grammar for the program the tool runs. It is
 experimental and loads only when `[experimental-features] tool-grammars = true`. `[agent]` refuses
 it. The grammar's actions enter the policy schema, and the Shell does not yet decide a spawn as a
-grammar action. `tool_grammars.rs` pins the switch, the record version, and the startup refusal of
-a policy that names an action no grammar declares.
+grammar action, so `run` warns at startup for each grammar. `tool_grammars.rs` pins the switch,
+the record version, the warning, and the startup refusal of a policy that names an action no
+grammar declares and of two grammars for one program.
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

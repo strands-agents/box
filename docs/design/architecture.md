@@ -290,7 +290,8 @@ part of what you have to trust.
    box binds each grammar to the program file of every tool that runs the grammar's program ([a tool
    grammar binds on the program file and the called
    name](decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name)), and a program
-   file it can't read refuses the box.
+   file it can't read refuses the box. The Shell doesn't yet decide a spawn as a grammar action, so
+   a rule on one loads but can't take effect, and `run` prints a warning for each grammar.
 5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
    each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
    grant refuses the box here.
