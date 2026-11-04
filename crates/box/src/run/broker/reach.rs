@@ -24,7 +24,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use policy::{PathRefusal, PathResolver};
 
@@ -307,7 +307,12 @@ impl Reach {
             .resolver
             .approve_host(&identity)
             .map(|approved| approved.as_path().to_path_buf())
-            .map_err(|refusal| Refused::new(reported_as, reason(&refusal)))?;
+            .map_err(|refusal| {
+                let mut refused = Refused::new(reported_as, reason(&refusal));
+                refused.unresolved = matches!(refusal, PathRefusal::Unresolvable { .. })
+                    && self.is_an_unresolved_answer(&identity);
+                refused
+            })?;
         // **The deny floor, applied last and on the canonical identity.**
         //
         self.refuse_forbidden(&approved, reported_as, mutates)?;
@@ -360,6 +365,26 @@ impl Reach {
         Ok(())
     }
 
+    /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
+    fn is_an_unresolved_answer(&self, identity: &Path) -> bool {
+        if identity
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return false;
+        }
+        let mut prefix = PathBuf::new();
+        for component in identity.components() {
+            prefix.push(component);
+            match std::fs::symlink_metadata(&prefix) {
+                Ok(metadata) if metadata.file_type().is_symlink() => return false,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        self.refuse_forbidden(identity, "", false).is_ok()
+    }
+
     /// Whether `named` lies under a root of this box's reachable set.
     fn is_inside_the_set(&self, named: &Path) -> bool {
         [
@@ -401,6 +426,9 @@ pub(super) struct Refused {
 
     /// What is wrong with it, in the operator's and the agent's terms.
     reason: &'static str,
+
+    /// Whether the host could not resolve the path, beneath no deny floor and through no symbolic link.
+    unresolved: bool,
 }
 
 impl Refused {
@@ -408,7 +436,13 @@ impl Refused {
         Self {
             requested: requested.to_string(),
             reason,
+            unresolved: false,
         }
+    }
+
+    /// Whether the refusal only reports that the host could not resolve the path.
+    pub(super) fn is_unresolved(&self) -> bool {
+        self.unresolved
     }
 }
 
@@ -724,6 +758,41 @@ mod tests {
             .unwrap_or_else(|| panic!("{spelled} must be beneath the floor"))
             .to_string();
             assert!(refusal.contains(BENEATH_THE_FLOOR), "{spelled}: {refusal}");
+        }
+    }
+
+    /// Only a path under a missing folder, through no link and beneath no deny floor, is unresolved.
+    #[test]
+    fn only_a_plain_path_under_a_missing_folder_is_unresolved() {
+        let (operator, reach) = operator_home_fixture();
+        let resolved = operator.path().canonicalize().expect("the home resolves");
+        let private = resolved.join("boxes/codex/private");
+        std::fs::create_dir(resolved.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(resolved.join("real"), resolved.join("link"))
+            .expect("a link in the home");
+        std::os::unix::fs::symlink(private.join("nodir"), resolved.join("dangle"))
+            .expect("a dangling link into box state");
+        let unresolved = |target: PathBuf| {
+            let spelled = target.to_str().expect("UTF-8").to_string();
+            crate::test_support::with_operator_home(&resolved, || reach.approve(&target, &spelled))
+                .err()
+                .unwrap_or_else(|| panic!("{spelled} must be refused"))
+                .is_unresolved()
+        };
+
+        assert!(unresolved(resolved.join("absent-dir/x")));
+        assert!(unresolved(resolved.join("absent-dir/deeper/x")));
+        for target in [
+            private.join("nodir/x"),
+            resolved.join("link/nodir/x"),
+            resolved.join("link/x"),
+            resolved.join("dangle"),
+            resolved.join("dangle/x"),
+            resolved.join("boxes/codex/private/policy.dw"),
+            resolved.join("absent-dir/../boxes/codex/private/policy.dw"),
+        ] {
+            let spelled = target.display().to_string();
+            assert!(!unresolved(target), "{spelled} must not be unresolved");
         }
     }
 

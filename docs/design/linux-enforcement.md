@@ -144,6 +144,13 @@ For an exact ELF binary grant, Box discovers its executable-format interpreter a
 It also follows the dependencies of discovered system libraries.
 System libraries are libraries within the recognized loader directories listed above.
 
+Before an agent starts, Box checks whether each discovered loader or shared library is writable through the workload's grants.
+A writable dependency needs an explicit `exec` grant, even when a read-only program loads it.
+Otherwise, Box refuses startup.
+This check includes writable symbolic-link paths and hard-link aliases.
+Hard-linked libraries can retain automatic execution access when ownership, permissions, and mount checks establish that the workload cannot modify them.
+See [writable library grants](../user/config.md#linux-writable-libraries) for the configuration requirements and limits.
+
 This discovery does not inspect script interpreter lines.
 For a declared script command, Box checks each interpreter against that process's original filesystem grants.
 An agent needs `exec` coverage; a tool or local MCP server can reuse its readable grants.
@@ -198,21 +205,37 @@ This restriction does not isolate every terminal operation or restore arbitrary 
 
 ## Network access
 
-With gateway networking enabled, the Linux sandbox has a private network namespace without external routes.
-Box creates a loopback endpoint inside that namespace.
-A relay carries its connections to the egress gateway in the trusted process.
-The relay transfers bytes.
-The gateway applies policy.
-See [egress enforcement](egress.md).
-
-For a tool, `[tool.<name>.network] contain_egress = false` selects the surrounding OS network namespace.
+On Linux, `contain_egress` selects the network mode for a tool or local MCP server.
+A tool sets it under `[tool.<name>.network]`.
 A local MCP server has the corresponding [MCP setting](../user/mcp.md).
-Traffic then bypasses the gateway and its policy checks.
-Filesystem and process restrictions still apply.
-The agent refuses a network table.
+The agent uses gateway networking and refuses a network table.
 
-This exception does not enable every socket family.
-The Linux filter permits UNIX and IPv4 sockets and refuses all other families, including IPv6.
+`contain_egress = true` is the default.
+The sandbox has a private network namespace without external routes.
+Box creates a loopback endpoint inside that namespace.
+A relay carries its connections to the local egress gateway in the box's trusted process.
+The gateway supports outbound HTTP and HTTPS requests.
+The gateway applies policy, as described in [egress enforcement](egress.md).
+
+The sandbox cannot connect directly to the surrounding OS's loopback (`localhost`) listeners or [abstract Unix sockets](#terms).
+A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
+Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
+See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
+
+`contain_egress = false` selects the surrounding OS network namespace.
+Direct connections can reach IPv4 destinations, including loopback listeners, and abstract Unix sockets.
+Direct connections bypass the gateway's policy checks, credential injection, and traffic records.
+Box still sets proxy environment variables, so clients that use them can continue through the gateway.
+
+In both modes, the Linux filter permits Unix and IPv4 sockets and refuses other socket families, including IPv6.
+[Pathname Unix sockets](#terms) remain subject to filesystem visibility and operating system permissions.
+A directory grant can expose sockets inside that directory.
+
+The process retains the invoking operator's identity in the surrounding OS.
+A reachable service that trusts that identity may treat the process as the operator.
+The process keeps its filesystem and process restrictions.
+Those restrictions do not constrain a surrounding-OS service that acts on the process's behalf.
 
 <a id="startup-failures-and-qualification"></a>
 
@@ -238,6 +261,8 @@ Minimum versions, minimum privileges, package installation, and testing the asse
 | Term | Definition | Notes |
 |---|---|---|
 | Namespace | A kernel mechanism that gives processes a separate view of selected resources. | Box uses several namespace types. |
+| Abstract Unix socket | A local communication endpoint with a name instead of a filesystem path. | Its visibility follows the network namespace. |
+| Pathname Unix socket | A local communication endpoint addressed through a filesystem path. | A directory grant can expose its path. |
 | Capability | A Linux privilege for a specific operation. | User namespaces scope these privileges. |
 | `unshare`, `clone`, `clone3`, and `setns` | System calls that create or enter namespaces. | `clone` and `clone3` also create processes. |
 | `mount` and `fsopen` | System calls that mount a filesystem or begin filesystem setup. | Box refuses both after nested namespace creation or entry. |

@@ -838,6 +838,13 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
+- **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
+  walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
+  atomic, and the walk stops at the first component it cannot see. A link removed between them, or
+  one behind a folder Box cannot search, can let the read record `::response`. That event is the
+  one a plain probe of the same reported path already records, and the refusal message does not
+  change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
+
 Do not treat any of these as settled by the code existing.
 
 - **A sibling box's stored state is reachable, and this is the sharpest one.** `Reach`'s `forbidden`
