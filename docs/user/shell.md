@@ -214,6 +214,7 @@ refuses makes `curl` exit non-zero.
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 | Any other | The operation would change a configured tool program or an enclosing path. Update the program between runs. | `<path>: is a configured tool command or its ancestor` |
+| Any other | The operation would change the installed Box executable, its launcher, or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
 
 ## See also
 

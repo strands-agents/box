@@ -61,6 +61,7 @@ pub(crate) struct Launch<'a> {
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
 }
 
 impl ApprovedReach {
@@ -70,6 +71,8 @@ impl ApprovedReach {
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
         let commands = std::sync::Arc::new(crate::run::commands::ConfiguredCommands::load(stored)?);
+        let installation =
+            std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?);
         let agent = stored
             .agent
             .iter()
@@ -88,15 +91,27 @@ impl ApprovedReach {
             .map(|(table, spec)| {
                 let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
                 commands.validate_reach(&table, &reach)?;
+                installation.validate_reach(&table, &reach)?;
+                reach.installation = Some(std::sync::Arc::clone(&installation));
                 reach.command = commands.get(&table).cloned();
                 Ok((table, reach))
             })
             .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
-        Ok(Self { tables, commands })
+        Ok(Self {
+            tables,
+            commands,
+            installation,
+        })
     }
 
     pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
         &self.commands
+    }
+
+    pub(crate) fn installation(
+        &self,
+    ) -> &std::sync::Arc<crate::run::installation::TrustedInstallation> {
+        &self.installation
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -205,6 +220,7 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
+    installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
@@ -421,6 +437,11 @@ impl Boundary {
                 &judged
             }
         };
+        let installation = match &reach.installation {
+            Some(installation) => std::sync::Arc::clone(installation),
+            None => std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?),
+        };
+        installation.validate_reach(table, reach)?;
         let exec_trees: Vec<&Path> = reach
             .grants
             .iter()
@@ -704,6 +725,7 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
+            installation,
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -726,6 +748,10 @@ impl Boundary {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
+    }
+
+    pub(crate) fn installation(&self) -> &crate::run::installation::TrustedInstallation {
+        &self.installation
     }
 
     pub(crate) fn executable(&self) -> &Path {
