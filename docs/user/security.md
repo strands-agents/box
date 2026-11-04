@@ -66,6 +66,10 @@ resolves into trusted Box state, which no policy may open
 resolves to an authority source that this run loaded, which no policy may open or change
 ```
 
+These protections cover the current box's files.
+Keep other boxes' configuration, policy, and generated state outside the workload's write access.
+Apply the [placement and access guidance](config.md#protect-other-boxes) to filesystem grants and requests through Strands Shell and Monty.
+
 **Cloud metadata protection is two `forbid` rules in your policy.** `metadata_hosts` refuses the
 metadata services by name. `metadata_addresses` refuses link-local and metadata addresses, checked
 on the address the gateway dials. Add both to the policy you wrote in

@@ -11,3 +11,6 @@ Each example includes source, setup commands, policy checks, and cleanup instruc
 Start with the [EKS build guide](../../docs/user/tutorials/eks.md) or the [Runtime build guide](../../docs/user/tutorials/agentcore-runtime.md).
 The source examples pin the Box revisions used for their recorded cloud checks.
 Keep their Linux ARM64 and service configuration limits when adapting them.
+
+For Linux environment requirements and service configuration, read the [cloud deployment guide](../../docs/user/cloud-deployments.md).
+The guide also covers Lambda MicroVM.
