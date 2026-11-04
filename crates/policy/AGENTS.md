@@ -42,8 +42,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
   `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
   `Request`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
-  `ToolGrammarError`. That is 55 names with `--all-features` and 49 by default; recompute it when
-  you touch the façade.
+  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 57 names with `--all-features`
+  and 51 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
