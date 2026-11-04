@@ -598,7 +598,7 @@ const GRAMMAR_RECORD_VERSION: u32 = 25;
 pub(crate) struct ExperimentalFeatures {
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) tool_grammars: bool,
 }
 
@@ -1491,6 +1491,38 @@ native-filesystem-policy = false
             error
                 .to_string()
                 .starts_with("invalid `[agent]` table: `grammar` is refused on `[agent]`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_record_without_tool_grammars_writes_no_tool_grammars_key() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.native_filesystem_policy = true;
+        stored.version = EXPERIMENTAL_RECORD_VERSION;
+
+        let encoded = toml::to_string(&stored).expect("the record writes");
+
+        assert!(
+            encoded.contains("native-filesystem-policy = true"),
+            "{encoded}"
+        );
+        assert!(!encoded.contains("tool-grammars"), "{encoded}");
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_an_mcp_server() {
+        let text = format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n[experimental-features]\n\
+             tool-grammars = true\n[mcp.alpha]\ntype = \"stdio\"\n\
+             command = [\"fake-alpha-mcp\"]\n[mcp.alpha.grammar]\nformat = 1\n"
+        );
+
+        let error = ConfigFile::parse(&text, Path::new("box.toml"))
+            .expect_err("an MCP server takes no grammar");
+
+        assert!(
+            error.to_string().contains("unknown field `grammar`"),
             "{error}"
         );
     }
