@@ -241,6 +241,21 @@ A harness reads the command's exit status, so the Shell keeps refusal, failure, 
 refused file operation fails the command the way the operation's own error would. The
 [reference](../user/shell.md#exit-statuses) lists each status and its message.
 
+## Execution deadlines
+
+**Each call has one execution allowance.** The operator sets
+[`limits.shell.timeout`](../user/config.md#limits), or keeps the 30-second default.
+The broker's backup deadline adds five seconds for the Shell to finish and report its result.
+Output resets neither deadline. While a Shell call runs, the connection's idle timer is suspended,
+and the Shell alias waits for the broker's result without a separate response deadline.
+Connection and write operations retain their own transport timeouts.
+
+**Deadline checks depend on the interpreter returning control.** Monty runs synchronous Python
+code on the same thread that checks the Shell and broker deadlines, so a VM turn can delay those
+checks. Its own 120-second active execution limit and 180-second cumulative sleep limit remain in
+effect. The direct Python aliases retain their separate limits. A broker that stops making
+progress can leave a Shell alias waiting; the alias's wait is not proof that the call has stopped.
+
 ## Example: find the to-dos and stage them
 
 Suppose the workspace is `~/src/project`, the operator started `box run` with the Command Line

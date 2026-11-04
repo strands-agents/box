@@ -14,6 +14,7 @@
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -24,6 +25,7 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -49,6 +51,7 @@ use self::egress::{
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -449,6 +452,7 @@ impl RunContract {
             record: Record {
                 version: record_version(
                     &self.file.experimental_features,
+                    &self.file.limits,
                     self.file
                         .agent
                         .iter()
@@ -457,6 +461,7 @@ impl RunContract {
                     &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -510,6 +515,10 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// The operator-selected execution limits.
+    #[serde(default, skip_serializing_if = "Limits::is_default")]
+    pub(crate) limits: Limits,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -579,6 +588,8 @@ const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// The record version that preserves configured execution limits.
+const LIMITS_RECORD_VERSION: u32 = 25;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,10 +630,13 @@ impl ExperimentalFeatures {
 /// The record version for what a record holds.
 fn record_version<'a>(
     features: &ExperimentalFeatures,
+    limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if crate::record::config::mcp::shares_a_program(mcp) {
+    if !limits.is_default() {
+        LIMITS_RECORD_VERSION
+    } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
         process_record_version(features, specs)
@@ -870,6 +884,7 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -885,6 +900,7 @@ impl Record {
         })?;
         let expected = record_version(
             &record.experimental_features,
+            &record.limits,
             record
                 .agent
                 .iter()
@@ -1116,6 +1132,9 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// The execution limits for hosted interpreters.
+    #[serde(default)]
+    limits: Limits,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1305,6 +1324,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1316,6 +1336,113 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn shell_limits_accept_dotted_and_nested_tables() {
+        for body in [
+            "[limits]\nshell.timeout = 600\n",
+            "[limits.shell]\ntimeout = 600\n",
+        ] {
+            let configured = load(body).unwrap();
+            assert_eq!(
+                configured.limits.shell.timeout(),
+                std::time::Duration::from_secs(600)
+            );
+            let stored = record_from_config(body).unwrap();
+            assert_eq!(stored.limits, configured.limits);
+            assert_eq!(stored.version, LIMITS_RECORD_VERSION);
+            assert_eq!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                stored
+            );
+        }
+    }
+
+    #[test]
+    fn empty_limits_preserve_the_existing_record_format() {
+        for body in ["", "[limits]\n", "[limits.shell]\n"] {
+            let stored = pinned_record(body);
+            assert_eq!(stored.version, RECORD_VERSION);
+            assert!(!stored.to_toml().unwrap().contains("limits"));
+            assert_eq!(stored.limits.shell.timeout(), limits::DEFAULT_SHELL_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn a_configured_timeout_cannot_hide_in_an_earlier_record() {
+        let mut stored = pinned_record("[limits.shell]\ntimeout = 30\n");
+        assert_eq!(stored.version, LIMITS_RECORD_VERSION);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = version;
+            assert!(matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion {
+                    found,
+                    expected: LIMITS_RECORD_VERSION
+                }) if found == version
+            ));
+        }
+
+        let mut unconfigured = record(None, BTreeMap::new());
+        unconfigured.version = LIMITS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&unconfigured.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: LIMITS_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn configured_limits_preserve_other_versioned_record_fields() {
+        let limits: Limits = toml::from_str("[shell]\ntimeout = 600\n").unwrap();
+        let shared = pinned_record(SHARED_PROGRAM);
+        let mut spec = agent(&["/bin/true"]);
+        for native_filesystem_policy in [false, true] {
+            let features = ExperimentalFeatures {
+                native_filesystem_policy,
+            };
+            for override_value in [None, Some(false)] {
+                spec.native_filesystem_policy = override_value;
+                for servers in [&[][..], shared.mcp.as_slice()] {
+                    assert_eq!(
+                        record_version(&features, &limits, std::iter::once(&spec), servers),
+                        LIMITS_RECORD_VERSION
+                    );
+                }
+            }
+        }
+        let body = format!("{SHARED_PROGRAM}\n[limits.shell]\ntimeout = 600\n");
+        let stored = pinned_record(&body);
+        assert_eq!(stored.version, LIMITS_RECORD_VERSION);
+        assert_eq!(stored.mcp, shared.mcp);
+        assert_eq!(stored.contained_mcp, shared.contained_mcp);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn invalid_limits_are_refused_in_configuration_and_stored_records() {
+        for value in ["0", "-1", "1.5", "\"60s\"", "9223372036854775807"] {
+            let body = format!("[limits.shell]\ntimeout = {value}\n");
+            let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+            let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
+            let mut stored = record(None, BTreeMap::new());
+            stored.version = LIMITS_RECORD_VERSION;
+            let text = format!("{}\n{body}", stored.to_toml().unwrap());
+            let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
         }
     }
 
@@ -1931,7 +2058,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

@@ -20,10 +20,6 @@ use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
-/// The Shell's own wall-clock bound on a single command. Must stay under the transport's
-/// `SERVE_REQUEST_TIMEOUT`, which a `const` assert there enforces.
-pub(super) const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The most command text the broker will accept into the Shell.
 const SHELL_MAX_INPUT: usize = 256 * 1024;
 const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;

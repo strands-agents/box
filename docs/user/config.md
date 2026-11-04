@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries nine keys. `name` and `box_dir` are required.
+The file carries ten keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -81,8 +81,9 @@ The file carries nine keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
+| `[limits]` | table | Execution limits for Strands Shell. |
 
-The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the ten: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -106,6 +107,22 @@ its own private tree from inside. It stays until you delete it: end the `run` pr
 and remove the directory after `run` has exited to delete one. Do not remove the directory while
 its `run` is alive: on macOS, the kernel kills a shell or Python call of that box whose program file
 loses a name during its security assessment.
+
+## `[limits]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `shell.timeout` | positive integer | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. |
+
+To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
+`[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
+Zero, negative numbers, fractions, strings, and values too large for the platform's clock are load errors.
+
+This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`.
+Python retains its [own limits](monty.md#limits-and-exit-statuses), including when called inside the
+Shell. Synchronous Python execution can delay the Shell's timeout check.
+See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
+[stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
 
 ## `[experimental-features]`
 
@@ -659,6 +676,7 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, and a literal egress secret.
+An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

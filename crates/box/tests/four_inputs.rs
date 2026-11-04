@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds nine keys, and the four inputs still stand
+//! # The configuration holds ten keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
@@ -193,13 +193,14 @@ fn the_config_record_carries_only_the_four_inputs() {
             "box_dir",
             "egress",
             "experimental_features",
+            "limits",
             "mcp",
             "name",
             "policy",
             "telemetry",
             "tool"
         ],
-        "the nine config keys include explicit experimental enforcement selection. \
+        "the ten config keys include execution limits and explicit experimental enforcement selection. \
          `experimental-features` adds native policy checks without granting filesystem reach. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );

@@ -24,6 +24,9 @@ use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::error::{BoxError, ShellError};
+#[cfg(test)]
+use crate::record::config::limits::DEFAULT_SHELL_TIMEOUT;
+use crate::record::config::limits::SHELL_TIMEOUT_GRACE;
 use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
@@ -35,7 +38,7 @@ use crate::run::broker::protocol::{
     write_frame,
 };
 use crate::run::broker::reach::Reach;
-use crate::run::broker::shell::{EgressRouting, SHELL_COMMAND_TIMEOUT, ShellSpec};
+use crate::run::broker::shell::{EgressRouting, ShellSpec};
 
 /// How many client connections may be in flight at once.
 const SERVE_CONNECTION_CAPACITY: usize = 64;
@@ -43,14 +46,8 @@ const SERVE_CONNECTION_CAPACITY: usize = 64;
 /// Bound on one framed read or write with an untrusted peer.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on one Shell Call's framing, outside the interpreter's own deadline.
-pub(super) const SERVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-
-const _: () = assert!(
-    SERVE_REQUEST_TIMEOUT.as_nanos() > SHELL_COMMAND_TIMEOUT.as_nanos(),
-    "the transport's bound must outlast the interpreter's, or a command stopped at its own \
-     deadline is reported as a boundary failure"
-);
+#[cfg(test)]
+const SERVE_REQUEST_TIMEOUT: Duration = DEFAULT_SHELL_TIMEOUT.saturating_add(SHELL_TIMEOUT_GRACE);
 
 /// How long a REQUEST-shaped connection may sit idle between frames before it is dropped.
 const SERVE_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -180,6 +177,7 @@ impl BrokerHost {
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
+        let command_timeout = record.limits.shell.timeout();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -211,6 +209,7 @@ impl BrokerHost {
                     egress,
                     recorder,
                     host_spawner,
+                    command_timeout,
                     &ready_sender,
                     shutdown_receiver,
                 );
@@ -452,6 +451,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<strands_shell::os::HostSpawner>,
+    command_timeout: Duration,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -471,8 +471,8 @@ fn host(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            command_timeout,
+            request_timeout: command_timeout + SHELL_TIMEOUT_GRACE,
             reach,
             policy,
             governed,
@@ -732,15 +732,16 @@ async fn serve_transport(
                             let _ = changed;
                             return Ok(());
                         }
-                        next = tokio::time::timeout(
-                            idle_timeout(!mcp.is_empty()),
-                            &mut next_frame,
-                        ) => {
-                            match next.map_err(|_| timed_out("read a transport frame"))?? {
+                        next = &mut next_frame => {
+                            match next? {
                                 Some(frame) => break frame,
                                 // A clean close ends the connection, which reaps every Program on it.
                                 None => return Ok(()),
                             }
+                        }
+                        _ = tokio::time::sleep(idle_timeout(!mcp.is_empty())),
+                            if running.is_empty() => {
+                            return Err(timed_out("read a transport frame"));
                         }
                     }
                 },
@@ -1312,7 +1313,14 @@ async fn run_call(
     // Drained inside the loop, so a chunk reaches the client while the Call is still running.
     let outcome = loop {
         tokio::select! {
-            outcome = &mut call => break Some(outcome),
+            outcome = &mut call => {
+                // Synchronous interpreter work can return after both the call and timer are ready.
+                if tokio::time::Instant::now() >= deadline {
+                    deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
+                    break None;
+                }
+                break Some(outcome);
+            }
             chunk = output.next_chunk(), if !over_budget => {
                 let mut pending = Vec::new();
                 if output.admit(chunk, &mut pending) == DrainOutcome::CapReached {
@@ -1716,7 +1724,7 @@ done"#;
     fn connection_spec(marker_directory: &Path) -> Arc<ShellSpec> {
         spec_with(
             marker_directory,
-            SHELL_COMMAND_TIMEOUT,
+            DEFAULT_SHELL_TIMEOUT,
             SERVE_REQUEST_TIMEOUT,
         )
     }
@@ -1775,7 +1783,7 @@ done"#;
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
+            command_timeout: DEFAULT_SHELL_TIMEOUT,
             request_timeout: SERVE_REQUEST_TIMEOUT,
             reach: Arc::new(
                 Reach::over(
@@ -3105,7 +3113,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
+                command_timeout: DEFAULT_SHELL_TIMEOUT,
                 request_timeout: SERVE_REQUEST_TIMEOUT,
                 reach: Arc::new(
                     Reach::over(
@@ -3411,7 +3419,7 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
+                command_timeout: DEFAULT_SHELL_TIMEOUT,
                 request_timeout: SERVE_REQUEST_TIMEOUT,
                 reach: Arc::new(
                     Reach::over(
@@ -3567,7 +3575,7 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
+                command_timeout: DEFAULT_SHELL_TIMEOUT,
                 request_timeout: SERVE_REQUEST_TIMEOUT,
                 reach: Arc::new(
                     Reach::over(
