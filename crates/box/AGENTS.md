@@ -241,9 +241,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`, and
   `[experimental-features]`.** The experimental settings select native file checks and tool
   grammars. They add no authority beyond the authored policy. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is five fields — `command`, `workspace`, `env`,
-  `filesystem`, and `native-filesystem-policy`. A `[tool.<label>]` also takes `grammar`, which
-  loads only behind `[experimental-features] tool-grammars` and which `[agent]` refuses. `filesystem` holds the path lists: eight for `[agent]`, six
+  `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
+  `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS

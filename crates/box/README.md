@@ -87,7 +87,7 @@ workload; a key becomes an input when it decides which requests are governed.
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
 decided, so a tool needs no authority of its own.
 
-Both tables hold the same four fields:
+Both tables hold the same four fields, and a `[tool.<label>]` also holds `grammar`:
 
 | Field | What it states |
 |---|---|
@@ -95,13 +95,10 @@ Both tables hold the same four fields:
 | `workspace` | The initial working directory. It grants nothing |
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
+| `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
 
-A `[tool.<label>]` also takes `grammar`, the tool grammar for the program the tool runs. It is
-experimental and loads only when `[experimental-features] tool-grammars = true`. `[agent]` refuses
-it. The grammar's actions enter the policy schema, and the Shell does not yet decide a spawn as a
-grammar action, so `run` warns at startup for each grammar. `tool_grammars.rs` pins the switch,
-the record version, the warning, and the startup refusal of a policy that names an action no
-grammar declares and of two grammars for one program.
+`tool_grammars.rs` pins the `tool-grammars` switch, record version 25, the startup warning for each
+grammar, and the startup refusals.
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

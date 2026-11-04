@@ -121,15 +121,8 @@ Signed macOS releases include the adapter, but leave it disabled until you selec
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
-Tool grammars are experimental too, and need their own switch:
-
-```toml
-[experimental-features]
-tool-grammars = true
-```
-
-With `tool-grammars` off, which is the default, a `[tool.<name>.grammar]` table is refused. See
-[`[tool.<name>.grammar]`](#toolnamegrammar).
+`tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
+by default.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -494,68 +487,17 @@ Start a new run to validate the updated files.
 
 ## `[tool.<name>.grammar]`
 
-This table is experimental. It loads only when `[experimental-features] tool-grammars = true`.
-
-A tool grammar describes one program for policy: its actions, its effects, and how Box reads a
-command line as one of those actions. You write it inline, on the `[tool]` that runs the program:
-
-```toml
-[tool.git]
-command = ["git"]
-
-[tool.git.grammar]
-name    = "git"
-program = "git"
-format  = 1
-version = 1
-
-[tool.git.grammar.effects]
-force_push = "Replaces commits on a remote branch"
-
-[tool.git.grammar.shell.push]
-usage         = "git push [options] [<remote> [<refspec>...]]"
-options.force = { flag = ["-f", "--force"], adds = ["force_push"] }
-```
-
-The table takes the same keys as a grammar file: `name`, `program`, `format`, `version`, `effects`,
-`global`, and `shell`. Box reads no grammar from a file by path.
-
-`name` is the policy namespace, so the grammar above declares `Tool::git::Action::"push"` and
-`Tool::git::Effect::"force_push"`. It must be an identifier, and it doesn't have to match the
-`[tool]` label. Your policy can name these actions, and Box checks the policy against them when the
-box starts:
-
-```dw
-forbid (principal, action == Tool::git::Action::"push", resource)
-when { context.input.effects.contains(Tool::git::Effect::"force_push") };
-```
-
-A policy that names a `Tool::` action that no grammar declares is refused at startup. A rule that
-names a grammar action and an MCP tool action together waits for the MCP server like any other
-per-tool rule.
-
-The Shell doesn't decide a spawn as its grammar action yet. A `git` that your agent runs is still
-a `shell:spawn`, so keep the `shell:spawn` rules that admit it for now. A rule on a grammar action
-doesn't fire yet, and `run` prints a warning for each grammar at startup to say so.
-
-`program` must be the name the tool's own `command` runs. For `command = ["/usr/bin/git"]` that's
-`git`. A grammar is defined once, but it covers every `[tool]` whose `command` runs that name, so
-with these two tables a grammar on `[tool.git]` covers both binaries:
-
-```toml
-[tool.git]
-command = ["/usr/bin/git"]
-
-[tool.brew_git]
-command = ["/opt/homebrew/bin/git"]
-```
-
-`[agent]` and `[mcp.<name>]` refuse a `grammar` table.
+This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
+`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
+action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
+grammars is coming later.
 
 Each of these is refused at startup, before any box state exists:
 
 - A grammar while `tool-grammars` is off: ``invalid `[tool.git]` table: `grammar` is
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
+- A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
+  grammar on `[mcp.<name>]` is an unknown field there.
 - A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
   `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
   `command` runs "gh"; ...``.
@@ -565,6 +507,8 @@ Each of these is refused at startup, before any box state exists:
   both have `name = "git"`; give each grammar its own name``.
 - A grammar that breaks a rule of the grammar format. Each refusal names the key, as a path in
   `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
+- A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
+  policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
 
 A box that turns `tool-grammars` on writes record version 25, so an older build refuses the box
 rather than misread it. To go back to an older build, turn the switch off and remove every
