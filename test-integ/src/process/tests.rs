@@ -231,6 +231,7 @@ def stop(signum, frame):
 signal.signal(signal.SIGTERM, stop)
 pathlib.Path("workload.pid").write_text(str(workload.pid))
 pathlib.Path("workload.group").write_text(str(os.getpgid(workload.pid)))
+pathlib.Path("supervisor.ready").touch()
 if sys.argv[1] == "ready":
     pathlib.Path(".det-ready").touch()
 print("supervisor-output", flush=True)
@@ -292,14 +293,31 @@ fn when_the_callback_panics_then_shutdown_reaps_the_separate_workload() {
 fn when_readiness_times_out_then_shutdown_reaps_the_separate_workload() {
     let tmp = tempfile::tempdir().unwrap();
     let (b, _workload) = descendant_fixture(tmp.path(), false);
+    let child = WorkloadChild(
+        Command::new(&b.box_bin)
+            .arg("run")
+            .current_dir(&b.ws)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let result = catch_unwind(AssertUnwindSafe(|| {
-        b.spawn_meanwhile_with_timeouts(
-            "unused",
-            &[],
-            || panic!("callback must not run"),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        );
+        let mut child = child;
+        let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !tmp.path().join("supervisor.ready").exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "the fixture supervisor exited before initialization"
+            );
+            assert!(
+                std::time::Instant::now() < startup_deadline,
+                "the fixture supervisor did not initialize"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!b.ready_marker().exists());
+        child.wait_for_ready(&b.ready_marker(), Duration::from_millis(100));
     }));
     assert!(
         super::super::panic_message(&result.unwrap_err())
