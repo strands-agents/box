@@ -616,3 +616,159 @@ fn a_server_whose_command_does_not_expand_is_named_and_does_not_start() {
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
 }
+
+#[test]
+fn wildcard_slots_launch_received_values_without_expanding_them() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-star-arguments");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through(
+            "alpha-mcp",
+            [
+                "--declared",
+                "alpha",
+                "--token",
+                "*",
+                "*",
+                "--otlp=${OTEL_EXPORTER_OTLP_PROTOCOL}",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+    box_.install_server(&alpha);
+    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
+    box_.set_argument_wildcards(true);
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let received = [
+        "--declared",
+        "alpha",
+        "--token",
+        "${RUNTIME_VALUE:-literal}",
+        "",
+        "--otlp=http/protobuf",
+    ];
+    let mut wrong = received.map(str::to_string).to_vec();
+    wrong[2] = "--password".into();
+    assert_launch_refused(&box_, "alpha-mcp", &wrong);
+    assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+    let mut client = box_.open_client_with("alpha-mcp", &received);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    let (_, response) = client.initialize_and_activate(json!("init"), STARTUP);
+    assert_eq!(answered_as(&response), "alpha");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&box_.trace("alpha-mcp", "argv")).unwrap(),
+        json!(received),
+    );
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn wildcard_arguments_remain_literal_without_opt_in() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for enabled in [None, Some(false)] {
+        let box_ = RuntimeMcpBox::new("mcp-star-disabled");
+        let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+            .launched_through("alpha-mcp", vec!["*".into()]);
+        box_.install_server(&alpha);
+        box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
+        if let Some(enabled) = enabled {
+            box_.set_argument_wildcards(enabled);
+        }
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        assert_launch_refused(&box_, "alpha-mcp", &["runtime-value".into()]);
+        assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+        let mut client = box_.open_client_with("alpha-mcp", &["*"]);
+        run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+        client.initialize_and_activate(json!("init"), STARTUP);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&box_.trace("alpha-mcp", "argv")).unwrap(),
+            json!(["*"]),
+        );
+        drop(client);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[test]
+fn wildcard_launches_require_policy_to_permit_the_effective_command() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for explicit_forbid in [false, true] {
+        let box_ = RuntimeMcpBox::new("mcp-star-policy");
+        let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+            .launched_through("alpha-mcp", vec!["*".into()]);
+        box_.install_server(&alpha);
+        let mut policy = call_policy(&["alpha"]);
+        if explicit_forbid {
+            policy.push_str(&start_permit_for("alpha-mcp"));
+            policy.push_str(
+                r#"
+                forbid (principal, action == Box::Action::"shell:spawn", resource)
+                when {
+                    context.input has arg1 &&
+                    context.input.arg1 == "from-harness" &&
+                    context.input.command == "alpha-mcp from-harness"
+                };"#,
+            );
+        }
+        box_.write_workspace_as_authored(&policy, &[alpha], BLOCKING_WORKLOAD);
+        box_.set_argument_wildcards(true);
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        let refusal = box_.invoke_refused_open_with("alpha-mcp", &["from-harness"], SHUTDOWN);
+        assert!(!refusal.status.success());
+        assert!(
+            refusal.stderr.contains("may not start"),
+            "{}",
+            refusal.stderr
+        );
+        assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[test]
+fn overlapping_wildcard_commands_start_no_server() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-star-ambiguity");
+    let alpha = Server::new("alpha", "shared-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through("shared-mcp", vec!["*".into()]);
+    let beta = Server::new("beta", "shared-mcp", "write", DiscoveryBehavior::Ready)
+        .launched_through("shared-mcp", vec!["specific".into()]);
+    box_.install_server(&alpha);
+    box_.write_workspace(
+        &call_policy(&["alpha", "beta"]),
+        &[alpha, beta],
+        BLOCKING_WORKLOAD,
+    );
+    box_.set_argument_wildcards(true);
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let refusal = box_.invoke_refused_open_with("shared-mcp", &["specific"], SHUTDOWN);
+    assert!(!refusal.status.success());
+    assert!(
+        refusal.stderr.contains("multiple servers"),
+        "{}",
+        refusal.stderr
+    );
+    assert_eq!(box_.invocation_count("shared-mcp"), 0);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}

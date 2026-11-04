@@ -127,6 +127,10 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
+For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled,
+the `shell:spawn` request records the effective launch command and arguments, including the
+received values in the `*` positions.
+
 A metadata read is an operation that happened once the workload has its answer, so a Shell
 `test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
 an existing folder is a `::response`, not a `::error`. A check of a path that can't be resolved,

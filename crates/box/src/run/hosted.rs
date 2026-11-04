@@ -454,8 +454,12 @@ impl McpLeafLauncher {
         .ok()
     }
 
-    /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
-    pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
+    pub(crate) fn argument_wildcards(&self) -> bool {
+        self.record.experimental_features.mcp_argument_wildcards
+    }
+
+    /// Prepare the server boundary with its effective launch arguments.
+    pub(crate) fn prepare(&self, server: &str, received: &[String]) -> Result<Boundary, BoxError> {
         let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
                 reason: format!("no contained MCP server named {server:?}"),
@@ -474,7 +478,7 @@ impl McpLeafLauncher {
             protected_sources: &self.protected_sources,
         };
         let egress = EgressMode::for_spec(&contained.spec);
-        Boundary::translate(
+        let boundary = Boundary::translate(
             &contained.spec,
             Launch {
                 table: &table,
@@ -487,7 +491,32 @@ impl McpLeafLauncher {
                 approved: Some(reach),
             },
             &site,
-        )
+        )?;
+        if !self.argument_wildcards() {
+            return Ok(boundary);
+        }
+        if received.len() != boundary.arguments().len() {
+            return Err(ConfigError::Mcp {
+                name: server.into(),
+                reason: "received argument count differs from the configured command".into(),
+            }
+            .into());
+        }
+        let arguments = contained
+            .spec
+            .fixed_arguments()
+            .iter()
+            .zip(boundary.arguments())
+            .zip(received)
+            .map(|((declared, expanded), received)| {
+                if declared == "*" {
+                    received.clone()
+                } else {
+                    expanded.clone()
+                }
+            })
+            .collect();
+        Ok(boundary.with_arguments(arguments))
     }
 
     /// Spawn the contained streaming leaf `boundary` describes.
@@ -1910,11 +1939,11 @@ while :; do :; done"#
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 None,
             );
-            launcher.prepare("alpha").expect("unchanged grant");
+            launcher.prepare("alpha", &[]).expect("unchanged grant");
             std::fs::rename(&granted, operator.join("moved")).expect("move granted file");
             std::fs::create_dir(&granted).expect("replace file grant with directory");
             let refusal = launcher
-                .prepare("alpha")
+                .prepare("alpha", &[])
                 .err()
                 .expect("changed grant refused");
             let message = refusal.to_string();

@@ -258,6 +258,14 @@ impl Drop for BrokerHost {
 }
 
 impl ShellSpec {
+    fn mcp_argument_wildcards(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(launcher) = self.mcp_leaf_launcher.as_deref() {
+            return launcher.argument_wildcards();
+        }
+        false
+    }
+
     /// `server`'s arguments as its start passes them, or `None` when they do not expand.
     fn launched_arguments(
         &self,
@@ -292,8 +300,15 @@ fn authorize_mcp_start(
     };
     let program_path = reported(program_path);
     let cwd = reported(working_directory);
+    let command_arguments = if spec.mcp_argument_wildcards()
+        && server.arguments().iter().any(|argument| argument == "*")
+    {
+        arguments
+    } else {
+        server.arguments()
+    };
     let command = std::iter::once(server.program())
-        .chain(server.arguments().iter().map(String::as_str))
+        .chain(command_arguments.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
     let decision = spec.policy.decide(
@@ -327,6 +342,7 @@ fn authorize_mcp_start(
 async fn start_mcp_server(
     spec: &ShellSpec,
     server: &crate::record::config::mcp::McpServer,
+    received: &[String],
 ) -> io::Result<(
     crate::run::broker::mcp::RunningMcpServer,
     tokio::process::ChildStdout,
@@ -347,7 +363,7 @@ async fn start_mcp_server(
         && launcher.contains(&server.name)
     {
         let boundary = launcher
-            .prepare(&server.name)
+            .prepare(&server.name, received)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let credential_reads = launcher.credential_reads(&server.name, Path::new(home));
         authorize_mcp_start(
@@ -799,6 +815,7 @@ async fn serve_transport(
                             server,
                             arguments,
                             |declared| spec.launched_arguments(declared),
+                            spec.mcp_argument_wildcards(),
                         ) {
                             Ok(admitted) => admitted,
                             Err(error) => {
@@ -821,7 +838,7 @@ async fn serve_transport(
                         let next_mcp_opened = mcp_opened
                             .checked_add(1)
                             .ok_or_else(|| invalid_input("too many MCP programs were opened"))?;
-                        match start_mcp_server(&spec, admitted).await {
+                        match start_mcp_server(&spec, admitted, arguments).await {
                             Ok((running, stdout)) => {
                                 let sequence = mcp_opened;
                                 mcp_opened = next_mcp_opened;
@@ -1575,7 +1592,7 @@ done"#;
             marker.path(),
             vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         );
-        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0])
+        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0], spec.mcp[0].arguments())
             .await
             .expect("the MCP server starts");
         let (frames, mut output) =
@@ -1832,7 +1849,7 @@ done"#;
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let spec = mcp_spec_with_policy(markers.path(), command.clone(), forbid);
         let server = spec.mcp[0].clone();
-        let refused = runtime.block_on(start_mcp_server(&spec, &server));
+        let refused = runtime.block_on(start_mcp_server(&spec, &server, server.arguments()));
         let error = refused.err().expect("the forbidden start is refused");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("no_marker_start"), "{error}");
@@ -1843,7 +1860,7 @@ done"#;
         let spec = mcp_spec_with_policy(markers.path(), command, permit);
         let server = spec.mcp[0].clone();
         let (running, _stdout) = runtime
-            .block_on(start_mcp_server(&spec, &server))
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .expect("the permitted start runs");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !started.exists() && std::time::Instant::now() < deadline {

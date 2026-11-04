@@ -103,6 +103,24 @@ impl McpServer {
     pub(crate) fn arguments(&self) -> &[String] {
         self.command.get(1..).unwrap_or_default()
     }
+
+    pub(crate) fn matches_arguments(
+        &self,
+        received: &[String],
+        expanded: &[String],
+        wildcards: bool,
+    ) -> bool {
+        let matches = |expected: &[String]| {
+            expected.len() == received.len()
+                && self.arguments().len() == received.len()
+                && self.arguments().iter().zip(expected).zip(received).all(
+                    |((declared, expected), received)| {
+                        (wildcards && declared == "*") || expected == received
+                    },
+                )
+        };
+        matches(self.arguments()) || matches(expanded)
+    }
 }
 
 /// Every local (stdio) MCP server an operator authored, as `(name, ContainedMcp)` pairs. Each spec
@@ -186,7 +204,7 @@ pub(crate) fn for_command<'a>(
     servers.iter().find(|server| {
         server.program() == program
             && launched(server)
-                .is_some_and(|launched| launched == arguments || server.arguments() == arguments)
+                .is_some_and(|launched| server.matches_arguments(arguments, &launched, false))
     })
 }
 

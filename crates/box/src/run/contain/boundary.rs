@@ -798,6 +798,11 @@ impl Boundary {
         &self.arguments
     }
 
+    pub(crate) fn with_arguments(mut self, arguments: Vec<String>) -> Self {
+        self.arguments = arguments;
+        self
+    }
+
     pub(crate) fn argument_zero(&self) -> Option<&Path> {
         self.argument_zero.as_deref().map(Path::new)
     }

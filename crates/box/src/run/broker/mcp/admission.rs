@@ -15,10 +15,29 @@ pub(crate) fn admit_server<'a>(
     program: &str,
     arguments: &[String],
     launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+    wildcards: bool,
 ) -> io::Result<&'a McpServer> {
     use crate::record::config::mcp::{for_command, on_program};
 
-    if let Some(server) = for_command(declared, program, arguments, &launched) {
+    if wildcards {
+        let mut matches = declared.iter().filter(|server| {
+            server.program() == program
+                && launched(server)
+                    .is_some_and(|expanded| server.matches_arguments(arguments, &expanded, true))
+        });
+        if let Some(server) = matches.next() {
+            if let Some(other) = matches.next() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "MCP command matches multiple servers: {}, {}; no server starts",
+                        server.name, other.name
+                    ),
+                ));
+            }
+            return Ok(server);
+        }
+    } else if let Some(server) = for_command(declared, program, arguments, &launched) {
         return Ok(server);
     }
     let received = std::iter::once(program.to_string())
@@ -260,10 +279,88 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        admit_server(&declared(), program, &arguments, |server| {
-            Some(server.arguments().to_vec())
-        })
+        admit_server(
+            &declared(),
+            program,
+            &arguments,
+            |server| Some(server.arguments().to_vec()),
+            false,
+        )
         .cloned()
+    }
+
+    #[test]
+    fn wildcard_matching_skips_only_whole_star_arguments_after_opt_in() {
+        let servers = vec![McpServer {
+            name: "test".into(),
+            command: words(&["server", "--token", "*", "prefix*", "*"]),
+        }];
+        let launch = |server: &McpServer| Some(server.arguments().to_vec());
+        for value in ["runtime", "", "${ANYTHING:-default}", "two words", "*"] {
+            let args = words(&["--token", value, "prefix*", "second"]);
+            assert!(admit_server(&servers, "server", &args, launch, true).is_ok());
+            assert!(admit_server(&servers, "server", &args, launch, false).is_err());
+        }
+        for (program, args) in [
+            ("other", words(&["--token", "x", "prefix*", "y"])),
+            ("server", words(&["--other", "x", "prefix*", "y"])),
+            ("server", words(&["--token", "x", "prefix-expanded", "y"])),
+            ("server", words(&["--token", "x", "prefix*"])),
+            ("server", words(&["--token", "x", "prefix*", "y", "extra"])),
+        ] {
+            assert!(admit_server(&servers, program, &args, launch, true).is_err());
+        }
+        assert!(admit_server(&servers, "server", servers[0].arguments(), launch, false).is_ok());
+    }
+
+    #[test]
+    fn wildcard_matching_refuses_ambiguity_and_keeps_fixed_argument_expansion() {
+        let one = McpServer {
+            name: "one".into(),
+            command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}", "*"]),
+        };
+        let other = McpServer {
+            name: "other".into(),
+            command: words(&["server", "http/protobuf", "value"]),
+        };
+        let launch = |_: &McpServer| Some(words(&["http/protobuf", "*"]));
+        for args in [
+            words(&["${OTEL_EXPORTER_OTLP_PROTOCOL}", "value"]),
+            words(&["http/protobuf", "value"]),
+        ] {
+            assert!(
+                admit_server(std::slice::from_ref(&one), "server", &args, launch, true).is_ok()
+            );
+        }
+        assert!(
+            admit_server(
+                std::slice::from_ref(&one),
+                "server",
+                &words(&["wrong", "value"]),
+                launch,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            admit_server(
+                std::slice::from_ref(&one),
+                "server",
+                &words(&["http/protobuf", "value"]),
+                |_| None,
+                true
+            )
+            .is_err()
+        );
+        let error = admit_server(
+            &[one, other],
+            "server",
+            &words(&["http/protobuf", "value"]),
+            launch,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple servers"));
     }
 
     const TOOLS: &str = r#"
@@ -374,9 +471,13 @@ mod tests {
             name: "aws-mcp".to_string(),
             command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
         }];
-        let refusal = admit_server(&servers, "uvx", &[], |server| {
-            Some(server.arguments().to_vec())
-        })
+        let refusal = admit_server(
+            &servers,
+            "uvx",
+            &[],
+            |server| Some(server.arguments().to_vec()),
+            false,
+        )
         .expect_err("the program alone is not the declared command");
         assert_eq!(
             refusal.to_string(),
@@ -392,6 +493,7 @@ mod tests {
             "uvx",
             &words(&["mcp-server-fetch"]),
             |server| (server.name != "fetch").then(|| server.arguments().to_vec()),
+            false,
         )
         .expect_err("a command that does not expand matches nothing")
         .to_string();

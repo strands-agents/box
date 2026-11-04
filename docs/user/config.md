@@ -80,7 +80,7 @@ The file carries nine keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
+| `[experimental-features]` | table | Optional native filesystem policy checks and MCP argument wildcards. Disabled by default. |
 
 The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
@@ -157,6 +157,16 @@ The default is `false`. Unknown feature names are errors.
 Signed macOS releases include the adapter, but leave it disabled until you select it.
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
+
+To accept caller-supplied values in whole-argument `*` positions of stdio MCP commands:
+
+```toml
+[experimental-features]
+mcp-argument-wildcards = true
+```
+
+This setting also defaults to `false`. See [MCP argument wildcards](mcp.md#argument-wildcards)
+for matching, launch behavior, and record compatibility.
 
 ## `[agent]` and `[tool.<name>]`
 

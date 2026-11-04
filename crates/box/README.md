@@ -131,6 +131,13 @@ exposes the server after its schema is accepted and the complete policy bundle i
 call uses its generated `<normalized-server>::Action::"<tool>"` action. Other MCP methods use
 `Box::Action::"mcp:call"`.
 
+`[experimental-features] mcp-argument-wildcards = true` lets a local MCP `command` use `"*"`
+for one complete argument. For example, `command = ["server", "--token", "*"]` accepts the
+harness's token argument and starts the server with that value after `shell:spawn` permits the
+effective command. The program, argument count, and fixed arguments must still match. This flag
+defaults to false. See [argument wildcards](../../docs/user/mcp.md#argument-wildcards) for the
+matching rules and offline schema generation limit.
+
 For example, server `issues-mcp` and tool `SearchIssues` use
 `issues_mcp::Action::"SearchIssues"`. Run `strands-box policy generate-schema` and copy the
 exact UID from the `actions.cedarschema` it writes.
