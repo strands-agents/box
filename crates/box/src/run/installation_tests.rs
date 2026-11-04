@@ -434,3 +434,32 @@ fn a_standalone_application_bundle_does_not_require_a_package_wrapper() {
     installation.verify().unwrap();
     assert_eq!(installation.binaries.len(), 3);
 }
+
+#[test]
+fn unrelated_siblings_do_not_turn_a_standalone_bundle_into_a_package() {
+    for kind in ["directory", "symlink", "non-executable"] {
+        let fixture = Fixture::new();
+        let bundled = fixture.root.join("Box.app/Contents/MacOS");
+        std::fs::create_dir_all(&bundled).unwrap();
+        let current = bundled.join("box");
+        let helper = bundled.join("strands-box-contain-trampoline");
+        for path in [&current, &helper, &bundled.join("strands-box-sock-alias")] {
+            executable_fixture(path);
+        }
+        let sibling = fixture.root.join("box");
+        match kind {
+            "directory" => std::fs::create_dir(&sibling).unwrap(),
+            "symlink" => std::os::unix::fs::symlink(&fixture.current, &sibling).unwrap(),
+            "non-executable" => {
+                std::fs::write(&sibling, "ordinary sibling").unwrap();
+                std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let installation = TrustedInstallation::open(current.clone(), helper).unwrap();
+        installation.verify().unwrap();
+        assert_eq!(installation.binaries.len(), 3, "{kind}");
+        assert!(installation.refuses_mutation(&current), "{kind}");
+        assert!(installation.refuses_mutation(&bundled), "{kind}");
+    }
+}

@@ -389,8 +389,8 @@ Before the workload starts, Box checks its installed executable, containment lau
 The socket-alias image routes shell and Python commands to Box's policy checks.
 The check covers `[agent]`, every `[tool.<name>]`, and every local `[mcp.<name>]` table.
 
-For the macOS package layout, Box also protects the `box` launcher beside `Box.app` when that launcher exists.
-A standalone application bundle does not require that wrapper.
+For the macOS package layout, Box protects an executable regular file named `box` beside `Box.app` as the package launcher.
+A standalone application bundle does not require that wrapper. A nearby directory, symbolic link, or non-executable file named `box` does not prevent startup.
 Operator-created launch scripts and additional symbolic-link names are outside this installation inventory.
 Keep those launch paths and their containing directories outside workload write grants.
 

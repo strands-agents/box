@@ -41,6 +41,17 @@ pub(super) fn executable() -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
 }
 
+pub(super) fn directory(executable: &Path) -> Option<&Path> {
+    let directory = executable.parent()?;
+    #[cfg(test)]
+    let directory = if directory.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        directory.parent().unwrap_or(directory)
+    } else {
+        directory
+    };
+    Some(directory)
+}
+
 /// The installed executable identities that no workload may change.
 #[derive(Debug)]
 pub(crate) struct TrustedInstallation {
@@ -83,7 +94,10 @@ impl TrustedInstallation {
                 })?;
             let wrapper = package.join("box");
             match std::fs::symlink_metadata(&wrapper) {
-                Ok(_) => binaries.push(InstalledBinary::open_identity(wrapper, package)?),
+                Ok(metadata) if metadata.is_file() && metadata.mode() & 0o111 != 0 => {
+                    binaries.push(InstalledBinary::open_identity(wrapper, package)?);
+                }
+                Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(InstallationError::Invalid {

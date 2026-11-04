@@ -376,6 +376,70 @@ fn mount_table_read_and_parse_errors_refuse_the_inventory() {
     assert_eq!(reads, 2);
 }
 
+fn namespace_prerequisite_is_denied(output: &std::process::Output) -> bool {
+    output.status.code() == Some(1)
+        && output.stdout.is_empty()
+        && matches!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "unshare: unshare failed: Operation not permitted"
+                | "unshare: unshare failed: Permission denied"
+                | "unshare: unshare failed: Function not implemented"
+                | "unshare: write failed /proc/self/uid_map: Operation not permitted"
+                | "unshare: write failed /proc/self/gid_map: Operation not permitted"
+        )
+}
+
+#[test]
+fn namespace_prerequisites_recognize_creation_and_id_mapping_refusals() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    for message in [
+        "unshare: unshare failed: Operation not permitted",
+        "unshare: unshare failed: Permission denied",
+        "unshare: unshare failed: Function not implemented",
+        "unshare: write failed /proc/self/uid_map: Operation not permitted",
+        "unshare: write failed /proc/self/gid_map: Operation not permitted",
+    ] {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: format!("{message}\n").into_bytes(),
+        };
+        assert!(namespace_prerequisite_is_denied(&output), "{message}");
+    }
+}
+
+#[test]
+fn namespace_test_failures_cannot_be_reported_as_prerequisite_skips() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let denied = b"unshare: write failed /proc/self/uid_map: Operation not permitted";
+    for (status, stdout, stderr) in [
+        (0, &b""[..], &denied[..]),
+        (101, &b""[..], &denied[..]),
+        (1, &b"INSTALLATION_MOUNT_NAMESPACE_ENTERED"[..], &denied[..]),
+        (1, &b"running 1 test"[..], &denied[..]),
+        (1, &b""[..], &b"unexpected namespace error"[..]),
+        (
+            1,
+            &b""[..],
+            &b"unshare: unshare failed: Invalid argument"[..],
+        ),
+        (
+            1,
+            &b""[..],
+            &b"inner failure: unshare: unshare failed: Operation not permitted"[..],
+        ),
+    ] {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(status << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        assert!(!namespace_prerequisite_is_denied(&output), "{output:?}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants() {
@@ -428,17 +492,7 @@ fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants()
             .expect("the installed unshare command starts");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success()
-            && !stdout.contains(ENTERED)
-            && stderr.contains("unshare failed")
-            && [
-                "Operation not permitted",
-                "Permission denied",
-                "Function not implemented",
-            ]
-            .iter()
-            .any(|reason| stderr.contains(reason))
-        {
+        if namespace_prerequisite_is_denied(&output) {
             println!(
                 "skipping: this host refuses the private user and mount namespace \
                  for the real installation mount-alias test: {}",

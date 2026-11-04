@@ -169,11 +169,14 @@ fn installed_image() -> Result<PathBuf, BoxError> {
         path: PathBuf::from(ALIAS_IMAGE_NAME),
         source,
     })?;
-    let installed = current
-        .parent()
+    installed_image_for(&current)
+}
+
+fn installed_image_for(current: &Path) -> Result<PathBuf, BoxError> {
+    let installed = crate::run::installation::directory(current)
         .map(|directory| directory.join(ALIAS_IMAGE_NAME))
         .ok_or_else(|| ShellError::NotExecutable {
-            path: current.clone(),
+            path: current.to_path_buf(),
         })?;
 
     let metadata = std::fs::symlink_metadata(&installed).map_err(|source| ShellError::Missing {
@@ -524,6 +527,36 @@ mod tests {
                 alias.display()
             );
         }
+    }
+
+    #[test]
+    fn cargo_alias_freshness_uses_the_same_installation_as_materialization() {
+        let (layout, owner, installed, _home) = fixture(b"current profile image");
+        let profile = installed.parent().expect("the installation directory");
+        let dependencies = profile.join("deps");
+        std::fs::create_dir(&dependencies).expect("the test binary directory");
+        let stale_copy = dependencies.join(ALIAS_IMAGE_NAME);
+        write_image(&stale_copy, b"earlier dependency image");
+        let current = dependencies.join("strands_box-tests");
+        let materialization_source = crate::run::installation::directory(&current)
+            .expect("the helper installation directory")
+            .join(ALIAS_IMAGE_NAME);
+        materialize_from(&layout, &[], &materialization_source, &owner)
+            .expect("the current profile image materializes");
+
+        let freshness_source = installed_image_for(&current).expect("the installed alias image");
+        assert!(!is_stale_against(&layout, &[], &freshness_source));
+        assert_eq!(
+            std::fs::read(layout.alias_image()).expect("the placed image reads"),
+            b"current profile image"
+        );
+        write_image(&stale_copy, b"another dependency image");
+        assert!(!is_stale_against(&layout, &[], &freshness_source));
+        write_image(&installed, b"rebuilt profile image");
+        assert!(is_stale_against(&layout, &[], &freshness_source));
+        materialize_from(&layout, &[], &materialization_source, &owner)
+            .expect("the rebuilt profile image materializes");
+        assert!(!is_stale_against(&layout, &[], &freshness_source));
     }
 
     /// The installed image beside a built binary, when there is one, materializes as well.

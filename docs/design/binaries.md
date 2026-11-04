@@ -70,8 +70,8 @@ for a tool's or local MCP server's sandbox is written in the configuration, and 
 that.
 
 At startup, Box opens its executable, trampoline, and socket-alias image and records their file identities and hard-link names.
-For the macOS package layout, it also records the `box` launcher beside `Box.app` when that launcher exists.
-A standalone application bundle does not require this wrapper.
+For the macOS package layout, it also records an executable regular file named `box` beside `Box.app` as the package launcher.
+A standalone application bundle does not require this wrapper. Other nearby entries named `box` do not become package launchers.
 A hard link gives one file another filesystem name. Box inventories these names in each program's
 installation directory and its immediate `deps` directory, which supports Cargo builds.
 Box refuses startup when that inventory cannot account for every hard link.

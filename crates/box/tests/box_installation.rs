@@ -505,6 +505,46 @@ fn the_macos_package_wrapper_launches_with_ordinary_sibling_writes() {
     assert_eq!(std::fs::read(wrapper).unwrap(), original);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_standalone_application_bundle_launches_beside_unrelated_box_paths() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let _serial = INSTALLATION_TEST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for kind in ["directory", "symlink", "non-executable"] {
+        let installation = Installation::with_layout("Box.app/Contents/MacOS", "box");
+        let sibling = installation.bundle.join("box");
+        match kind {
+            "directory" => std::fs::create_dir(&sibling).unwrap(),
+            "symlink" => std::os::unix::fs::symlink(&installation.main, &sibling).unwrap(),
+            "non-executable" => {
+                std::fs::write(&sibling, "ordinary sibling").unwrap();
+                std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let output = installation.run(&format!("printf {ENTERED}"), "");
+        assert!(output.status.success(), "{kind}: {}", text(&output));
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(ENTERED),
+            "{kind}"
+        );
+        match kind {
+            "directory" => assert!(sibling.is_dir()),
+            "symlink" => assert_eq!(std::fs::read_link(sibling).unwrap(), installation.main),
+            "non-executable" => {
+                assert_eq!(
+                    std::fs::read_to_string(sibling).unwrap(),
+                    "ordinary sibling"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[test]
 fn native_hard_links_cannot_turn_a_read_only_source_into_writable_output() {
     let _serial = INSTALLATION_TEST

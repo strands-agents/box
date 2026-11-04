@@ -282,16 +282,7 @@ pub(crate) fn locate() -> Result<PathBuf, BoxError> {
             path: PathBuf::from(HELPER_NAME),
             source,
         })?;
-    let directory = current.parent();
-    #[cfg(test)]
-    let directory = directory.map(|directory| {
-        if directory.file_name() == Some(std::ffi::OsStr::new("deps")) {
-            directory.parent().unwrap_or(directory)
-        } else {
-            directory
-        }
-    });
-    let helper = directory
+    let helper = crate::run::installation::directory(&current)
         .map(|directory| directory.join(HELPER_NAME))
         .ok_or_else(|| TrampolineError::NotExecutable {
             path: current.clone(),
