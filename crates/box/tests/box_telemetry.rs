@@ -1333,6 +1333,165 @@ fn an_otlp_target_receives_the_records_with_the_secret_attached() {
     );
 }
 
+/// A stand-in OTLP endpoint that answers `200` and hands back each request's head and body.
+fn stand_in_endpoint() -> (u16, mpsc::Receiver<(String, Vec<u8>)>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a stand-in endpoint");
+    let port = listener.local_addr().expect("its port").port();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(64) {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut head = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).ok();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+            let _ = sender.send((head, body));
+        }
+    });
+    (port, receiver)
+}
+
+/// Every request the endpoint received until one carried a verdict, or the deadline passed.
+fn received_until_a_verdict(
+    receiver: &mpsc::Receiver<(String, Vec<u8>)>,
+) -> Vec<(String, Vec<u8>)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut received = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let Ok((head, body)) = receiver.recv_timeout(std::time::Duration::from_secs(20)) else {
+            break;
+        };
+        let verdict = String::from_utf8_lossy(&body).contains("strands.box.policy.verdict");
+        received.push((head, body));
+        if verdict {
+            break;
+        }
+    }
+    // A late batch on another route would show here, so wait out one export interval.
+    while let Ok(late) = receiver.recv_timeout(std::time::Duration::from_millis(1500)) {
+        received.push(late);
+    }
+    received
+}
+
+/// One header's value in a received head, matched case-insensitively.
+fn header_in<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then_some(value.trim())
+    })
+}
+
+/// **A Langfuse-shaped target gets spans only, under Basic auth the box encodes from the vault.**
+///
+/// Langfuse takes traces at `/api/public/otel/v1/traces` with `Authorization: Basic
+/// base64(public:secret)` and answers `404` on the other routes. The stand-in is on loopback, which
+/// is why the credential may cross it in the clear.
+#[test]
+fn a_langfuse_target_receives_spans_under_basic_auth() {
+    use base64::Engine as _;
+
+    needs_a_box!("a_langfuse_target_receives_spans_under_basic_auth");
+    let (port, receiver) = stand_in_endpoint();
+    let configured = Request::with_config(
+        "telemetry-langfuse",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.langfuse]\nkind = \"otlp\"\n\
+             destination = \"http://127.0.0.1:{port}/api/public/otel\"\n\
+             accepts = [\"traces\"]\n\
+             headers = {{ \"x-langfuse-ingestion-version\" = \"4\" }}\n\
+             secret = {{ ref = \"env://LANGFUSE_AUTH\", placement = \"basic_auth\" }}\n"
+        ),
+    )
+    .env("LANGFUSE_AUTH", "pk-lf-e2e:sk-lf-e2e")
+    .expect();
+    assert!(configured.bash("zsh -c 'true'").status.success());
+
+    let received = received_until_a_verdict(&receiver);
+    assert!(
+        received
+            .iter()
+            .any(|(_, body)| String::from_utf8_lossy(body).contains("strands.box.policy.verdict")),
+        "no span carried a verdict, across {} received",
+        received.len()
+    );
+    let expected = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("pk-lf-e2e:sk-lf-e2e")
+    );
+    for (head, _) in &received {
+        let line = head.lines().next().unwrap_or("");
+        assert!(
+            line.starts_with("POST /api/public/otel/v1/traces "),
+            "a traces-only target received another route: {line}"
+        );
+        assert_eq!(
+            header_in(head, "authorization"),
+            Some(expected.as_str()),
+            "{head}"
+        );
+        assert_eq!(header_in(head, "x-langfuse-ingestion-version"), Some("4"));
+        assert!(
+            !head.contains("strands_box_"),
+            "the phantom never rides upstream: {head}"
+        );
+    }
+}
+
+/// **A LangSmith-shaped target gets spans with its key in `x-api-key` and a project header.**
+#[test]
+fn a_langsmith_target_receives_spans_with_its_api_key() {
+    needs_a_box!("a_langsmith_target_receives_spans_with_its_api_key");
+    let (port, receiver) = stand_in_endpoint();
+    let configured = Request::with_config(
+        "telemetry-langsmith",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.langsmith]\nkind = \"otlp\"\n\
+             destination = \"http://127.0.0.1:{port}/otel\"\n\
+             accepts = [\"traces\"]\n\
+             headers = {{ \"Langsmith-Project\" = \"strands-box-e2e\" }}\n\
+             secret = {{ ref = \"env://LANGSMITH_API_KEY\", header = \"x-api-key\" }}\n"
+        ),
+    )
+    .env("LANGSMITH_API_KEY", "lsv2_pt_e2e")
+    .expect();
+    assert!(configured.bash("zsh -c 'true'").status.success());
+
+    let received = received_until_a_verdict(&receiver);
+    assert!(
+        received
+            .iter()
+            .any(|(_, body)| String::from_utf8_lossy(body).contains("strands.box.policy.verdict")),
+        "no span carried a verdict, across {} received",
+        received.len()
+    );
+    for (head, _) in &received {
+        let line = head.lines().next().unwrap_or("");
+        assert!(line.starts_with("POST /otel/v1/traces "), "{line}");
+        assert_eq!(header_in(head, "x-api-key"), Some("lsv2_pt_e2e"), "{head}");
+        assert_eq!(
+            header_in(head, "langsmith-project"),
+            Some("strands-box-e2e")
+        );
+    }
+}
+
 /// **The agent holds this box's endpoint and never a vendor credential.**
 #[test]
 fn the_agent_holds_the_endpoint_and_never_the_vendor_secret() {
