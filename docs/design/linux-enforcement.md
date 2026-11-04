@@ -4,7 +4,7 @@ Box uses Linux [namespaces](#terms) to give each workload a restricted filesyste
 A system call filter limits the operations that the workload can request from the kernel.
 
 The [platform comparison](platform-differences.md) states configuration differences and startup results.
-For installation and a contained workload, see [Run Box on Linux](../user/linux.md).
+For installation, see [getting started](../user/getting-started.md#linux).
 This page covers ARM64, the 64-bit Arm architecture.
 
 ## Where enforcement runs

@@ -169,11 +169,8 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-For Linux ARM64, follow [Run Box on Linux](docs/user/linux.md).
-The commands below use macOS.
-
-Follow the [getting-started guide](docs/user/getting-started.md) to run
-Strands CLI with Box. To follow this guide, you need a Mac with Apple silicon and
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS or Linux ARM64.
+Its Strands CLI walkthrough and the download command below use macOS. You need a Mac with Apple silicon and
 macOS 15 or later, Node.js 22.21 or later from Homebrew, and access to Claude
 Opus 5 on Amazon Bedrock in `us-west-2`.
 

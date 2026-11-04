@@ -18,17 +18,6 @@
       }
     },
     {
-      "id": "linux",
-      "source": "docs/user/linux.md",
-      "slug": "guides/run-on-linux",
-      "title": "Run Box on Linux",
-      "description": "Download Box on Linux ARM64, verify filesystem access, and adapt a configuration using the platform requirements.",
-      "nav": {
-        "group": "Overview",
-        "order": 2
-      }
-    },
-    {
       "id": "tutorial-first-policy",
       "source": "docs/user/tutorials/first-policy.md",
       "slug": "guides/write-a-policy",

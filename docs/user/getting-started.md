@@ -4,11 +4,8 @@ Box runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
-For Linux ARM64, start with [Run Box on Linux](linux.md).
-The steps below use macOS on Apple silicon.
-
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
-in a box. You'll give it one tool, a shell, so your policy decides every command it runs and every
+in a box on macOS. You'll give it one tool, a shell, so your policy decides every command it runs and every
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
@@ -46,7 +43,9 @@ Rules:
 
 ## Before you start
 
-You need:
+Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm).
+[Step 1](#step-1-download-box) has download instructions for both platforms.
+The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
 - Node.js 22.21 or later from Homebrew: `brew install node`.
@@ -62,6 +61,10 @@ cd ~/box-tutorial
 
 ## Step 1. Download Box
 
+Follow the instructions for your operating system.
+
+### macOS
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
 ./box-core/box --version
@@ -72,6 +75,39 @@ The script downloads the latest release, checks it, and unpacks it into `./box-c
 `Box.app`, with a `box` launcher and helper links into that bundle. Moving only an executable
 out of the bundle loses its provisioning profile. The package is also notarized, so macOS runs
 a copy that you download in a browser.
+
+### Linux
+
+Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
+Install tar, gzip, and `sha256sum`. The surrounding OS must permit namespace, mount, and
+system-call filter setup. See [Linux setup requirements](../design/linux-enforcement.md#startup-failures-and-qualification).
+
+From the [Box releases](https://github.com/strands-agents/box/releases), download
+`box-<tag>-aarch64-unknown-linux-gnu.tar.gz` and `SHA256SUMS.txt` from the same release into
+`~/box-tutorial`. The release tag replaces `<tag>`. Keep that directory empty until this download.
+
+From `~/box-tutorial`, verify the checksum before extraction:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS.txt &&
+  mkdir box-core &&
+  tar -C box-core -xzf box-*-aarch64-unknown-linux-gnu.tar.gz &&
+  ./box-core/box --version
+```
+
+The checksum command prints the archive name followed by `OK`.
+The version command prints `strands-box` followed by the release version.
+Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together in `box-core`.
+
+For releases that request Linux consent, set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the terminal that runs Box:
+
+```sh
+export EXPERIMENTAL_LINUX_SUPPORT=TRUE
+```
+
+Use the [configuration reference](config.md#direct-access-by-operating-system) to write the workload's filesystem grants.
+The [platform comparison](../design/platform-differences.md) explains differences when adapting a macOS configuration.
+For deployment examples, see [Amazon EKS](tutorials/eks.md) and [AgentCore Runtime](tutorials/agentcore-runtime.md).
 
 ### Build from source
 

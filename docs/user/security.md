@@ -15,9 +15,6 @@ For ownership of enforcement, configuration, and the surrounding environment, re
 [shared responsibility model](../design/security.md). This page covers the operator's
 configuration choices and policy limitations.
 
-For Linux, review the [platform comparison](../design/platform-differences.md) before reusing macOS grants.
-Filesystem access, runtime memory restrictions, and direct networking differ between platforms.
-
 ## The two tiers
 
 **`box.toml` governs the workload's own system calls, and the operating system enforces it.** The
@@ -32,7 +29,8 @@ workload reaches each of these directly. Policy is not asked, and the decision l
   the program runs. Its file operations are not decided.
 
 You own what `box.toml` grants. Review each path in `[agent.filesystem]` and each `[tool.<name>]`
-table, because direct reach raises no decision.
+table, because direct reach raises no decision. When adapting grants between macOS and Linux,
+see the [platform comparison](../design/platform-differences.md).
 
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
