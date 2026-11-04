@@ -71,8 +71,8 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 
 The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
 The package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
-It runs the candidate's `box --version` beside the destination before replacing files.
-That parent directory must be writable and allow execution; temporary download storage can be `noexec`.
+Before replacing files, it runs the candidate's `box --version` inside an existing destination, or beside a new destination.
+This staging location must be writable and allow execution; temporary download storage can be `noexec`.
 A failed candidate check preserves existing destination files and shows the loader error.
 If execution fails after final extraction, the downloader reports failure and warns that destination files changed.
 If the release omits Linux, select a tag that includes its archive and checksum entry.

@@ -100,11 +100,16 @@ actual="$(sha256_of "${tmp}/${asset}")"
 [ "$expected" = "$actual" ] || die "checksum mismatch for ${asset} (expected ${expected}, got ${actual})"
 log "Checksum verified."
 
-# Validate the extracted payload before writing into the destination.
+# Validate the extracted payload before replacing destination files.
 if [ "$host_os" = Linux ]; then
-    download_parent="$(dirname "$DOWNLOAD_DIR")"
-    mkdir -p "$download_parent"
-    staged="$(mktemp -d "${download_parent}/.box-download.XXXXXX")"
+    if [ -d "$DOWNLOAD_DIR" ]; then
+        staging_parent="$DOWNLOAD_DIR"
+    else
+        staging_parent="$(dirname "$DOWNLOAD_DIR")"
+        mkdir -p "$staging_parent"
+    fi
+    staged="$(mktemp -d "${staging_parent}/.box-download.XXXXXX")" \
+        || die "cannot create temporary package storage in ${staging_parent}; check write permissions"
 else
     staged="${tmp}/unpacked"
     mkdir "$staged"
@@ -126,7 +131,7 @@ if [ "$host_os" = Linux ]; then
     done
     "${staged}/box" --version >/dev/null \
         || die "cannot run the Linux package. It requires glibc 2.34 or newer,
-the GCC runtime library, and execution permission in the destination's parent directory.
+the GCC runtime library, and execution permission in the destination (or its parent when creating a new destination).
 The existing destination files were not changed. See the error above."
 fi
 

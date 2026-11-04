@@ -113,21 +113,29 @@ class DownloaderTests(unittest.TestCase):
         (folder / "SHA256SUMS.txt").write_text(f"{digest}  {marker}{asset.name}\n")
         return asset
 
-    def run_script(self, noexec_tmp=False):
+    def run_script(self, noexec_tmp=False, noexec_destination=False):
         command = [str(self.tools / "sh"), str(SCRIPT)]
-        if noexec_tmp:
+        if noexec_tmp or noexec_destination:
+            self.env["TEST_NOEXEC_DESTINATION"] = str(self.destination) if noexec_destination else ""
             # The mount exists only in this child namespace and disappears on exit.
             self.assertIsNotNone(shutil.which("unshare"), "noexec tests require util-linux")
             command = [shutil.which("unshare"), "--user", "--map-root-user", "--mount",
                        str(self.tools / "sh"), "-c", r'''set -eu
-mount -t tmpfs -o noexec,size=16m tmpfs "$TMPDIR"
-printf '#!/bin/sh\nexit 0\n' > "$TMPDIR/exec-probe"
-chmod 0755 "$TMPDIR/exec-probe"
-if [ -x "$TMPDIR/exec-probe" ]; then
+if [ -n "$TEST_NOEXEC_DESTINATION" ]; then
+    mount --bind "$TEST_NOEXEC_DESTINATION" "$TEST_NOEXEC_DESTINATION"
+    mount -o remount,bind,noexec "$TEST_NOEXEC_DESTINATION"
+    probe_dir="$TEST_NOEXEC_DESTINATION"
+else
+    mount -t tmpfs -o noexec,size=16m tmpfs "$TMPDIR"
+    probe_dir="$TMPDIR"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$probe_dir/exec-probe"
+chmod 0755 "$probe_dir/exec-probe"
+if [ -x "$probe_dir/exec-probe" ]; then
     echo "test requires a noexec mount" >&2
     exit 99
 fi
-rm "$TMPDIR/exec-probe"
+rm "$probe_dir/exec-probe"
 exec "$1" "$2"
 ''', "noexec-test", *command]
         result = subprocess.run(command, cwd=self.root,
@@ -135,6 +143,8 @@ exec "$1" "$2"
         self.assertEqual(list(self.temp.iterdir()), [], "temporary downloads must be cleaned up")
         self.assertEqual(list(self.destination.parent.glob(".box-download.*")), [],
                          "candidate packages must be cleaned up")
+        self.assertEqual(list(self.destination.glob(".box-download.*")), [],
+                         "candidate packages inside the destination must be cleaned up")
         return result
 
     def urls(self):
@@ -271,6 +281,30 @@ exec "$1" "$2"
         self.env["BOX_DOWNLOAD_DIR"] = str(destination)
         self.assert_refused("regular executable")
         self.assertFalse(destination.exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses parent write permissions")
+    def test_writable_destination_with_read_only_parent(self):
+        self.archive()
+        self.requests.touch()
+        self.root.chmod(0o555)
+        try:
+            result = self.run_script()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Downloaded box", result.stderr)
+        finally:
+            self.root.chmod(0o755)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mount test")
+    def test_noexec_symlink_destination_preserves_existing_files(self):
+        self.archive()
+        alias = self.root / "destination alias"
+        alias.symlink_to(self.destination, target_is_directory=True)
+        self.env["BOX_DOWNLOAD_DIR"] = str(alias)
+        before = {p.name: p.read_bytes() for p in self.destination.iterdir()}
+        result = self.run_script(noexec_destination=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Downloaded box", result.stderr)
+        self.assertEqual({p.name: p.read_bytes() for p in self.destination.iterdir()}, before)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mount test")
     def test_noexec_download_storage_allows_valid_packages(self):

@@ -190,8 +190,9 @@ the destination. A release can contain macOS assets only; check its assets if a 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
 Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
 The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
-Before replacing files, the downloader runs the candidate's `box --version` in a private directory beside the destination.
-The destination's parent directory must be writable and allow execution. Temporary download storage can prohibit execution (`noexec`).
+Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
+For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
+Temporary download storage can prohibit execution (`noexec`).
 A failed version check reports the loader error and leaves existing destination files unchanged.
 The final extraction can partially update the destination if it fails. Use a fresh `BOX_DOWNLOAD_DIR`
 to retain a previous installation.
