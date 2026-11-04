@@ -15,7 +15,7 @@ concurrency:
 jobs:
   detect-changes:
     name: Detect Changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -76,7 +76,7 @@ jobs:
 
   packaging:
     name: Packaging tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     cache-mode: read
     permissions:
@@ -106,7 +106,7 @@ jobs:
     name: Site manifest
     needs: detect-changes
     if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.site_manifest == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     permissions:
       contents: read
@@ -180,7 +180,7 @@ jobs:
     name: CI Gate
     if: always()
     needs: [detect-changes, packaging, rust, site-manifest, containment, verdict, native]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     permissions: {}
     steps:

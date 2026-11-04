@@ -474,11 +474,17 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `a_linked_program_is_started_through_the_link_and_granted_on_its_target` pin. Do not canonicalize
   the final component, and do not render a second spelling.
 
-  **A script launches an interpreter, so the whole chain is granted.** `shebang_interpreter_chain`
-  reads each `#!` line, resolves a `#!/usr/bin/env <name>` line to the real interpreter on the search
-  path, and bounds the chain so a cycle cannot loop. Without those grants a script refuses at exec
-  and no `fs:*` decision explains it. `a_direct_path_shebang_chain_names_its_interpreter` and
-  `env_shebang_resolves_the_real_interpreter_on_the_search_path` are the pins.
+  **Script interpreter authority depends on the platform and process.** On macOS, Box grants a
+  declared command's interpreter chain automatically. On Linux, every interpreter needs coverage
+  from that process's original filesystem grants. Agents need `exec`. Declared tools and local MCP
+  servers can reuse readable or writable grants that permit execution. System paths have no exemption.
+  `shebang_interpreter_chain` follows each `#!` line, including `env` and its selected command,
+  and bounds the chain so a cycle cannot loop. An earlier interpreter cannot authorize a later hop.
+  Workload-selected commands still require existing `exec` coverage on both platforms.
+  `a_direct_path_shebang_chain_names_its_interpreter` and
+  `env_shebang_resolves_the_real_interpreter_on_the_search_path` pin discovery.
+  `declared_scripts_refuse_unlisted_interpreter_files_regardless_of_mode` and
+  `an_authorized_interpreter_cannot_introduce_an_unlisted_nested_interpreter` pin Linux admission.
 
   **The resolver reads no file to pick a different program.** An absolute path is used as authored and
   a bare name is searched on the declared `PATH`, and nothing else can replace the candidate.

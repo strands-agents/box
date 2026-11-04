@@ -139,8 +139,8 @@ The box adds the runtime minimum to every process; see
 The program is an absolute path, or a bare name. A bare name resolves on `env.PATH`,
 then on the operator's own `PATH`, then on `/usr/bin:/bin`. A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
-path, or a bare name that `env.PATH` resolves```. When `command` is a script, add the interpreter
-its first line names to `exec`. The example's `command` runs
+path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
+[interpreter grants](#script-commands-on-linux). The example's `command` runs
 Homebrew's `node`, which loads the preload file and then the CLI's script; the arguments after the
 script are the CLI's own.
 
@@ -184,12 +184,75 @@ the box is the credential boundary: a process that must not hold a credential go
 Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 [the sandboxes for tools and local MCP servers](../design/containment.md#the-agents-box-and-leaf-boxes)).
 
+### Script commands on Linux
+
+On Linux, a script in `command[0]` requires existing filesystem grants for every program in its
+`#!` interpreter chain. Missing coverage prevents the process from starting.
+The refusal identifies the canonical interpreter path to grant. This path can differ from the spelling in the script.
+
+| Declared process | Required interpreter coverage in its own `filesystem` table |
+|---|---|
+| `[agent]` | `exec`, naming each interpreter file or a directory that covers it. |
+| `[tool.<name>]` or local `[mcp.<name>]` | `read` or `read_file`. Existing writable grants also count where they permit execution and satisfy the [Linux read-write requirement](#direct-access-by-operating-system). |
+
+Tool and local-server tables do not accept an `exec` list. System paths have no exemption.
+`#!/usr/bin/env python3` requires coverage for both `env` and the selected `python3`.
+If either program is itself a script, its interpreter also requires coverage. Denials and protected paths still restrict access.
+
+These fragments assume `/opt/check/check.sh` starts with `#!/usr/bin/dash`, and `/usr/bin/dash` is
+an executable regular file. Use the canonical path when the interpreter is a symbolic link.
+An agent script uses:
+
+```toml
+[agent]
+command = ["/opt/check/check.sh"]
+
+[agent.filesystem]
+exec = ["/usr/bin/dash"]
+```
+
+A declared tool script uses:
+
+```toml
+[tool.check]
+command = ["/opt/check/check.sh"]
+
+[tool.check.filesystem]
+read_file = ["/usr/bin/dash"]
+```
+
+Apply the same interpreter grants under `[mcp.<name>.filesystem]` for a local server.
+A tool interpreter granted through `read` or `read_file` can still need separate read grants for
+non-system libraries. Interpreter discovery does not automatically grant those libraries.
+
+Alternatively, put the native interpreter in `command[0]` and grant read access to the script:
+
+```toml
+[agent]
+command = ["/usr/bin/dash", "/opt/check/check.sh"]
+
+[agent.filesystem]
+read_file = ["/opt/check/check.sh"]
+```
+
+The command has an implicit executable grant. The script is an argument that the interpreter reads.
+Other files the program needs still require their own coverage.
+
+Box checks the original grants before preserving any additional path spelling needed to start the script.
+Preserving a spelling adds no authority over a different file.
+On macOS, Box grants a declared command's interpreter chain automatically.
+A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
+
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
 Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
 `[tool.<name>.filesystem]` takes six, and a `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
+
+Every process's writable grants must exclude the installed Box programs, their hard-link names,
+mounted aliases, and enclosing directories.
+[Installation integrity](#installation-integrity) describes the checks and refusals.
 
 | List | What each entry grants |
 |---|---|
@@ -265,6 +328,16 @@ paths:`. Getting started shows the example's disclosure. A credential store, suc
 `~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
 a tool granted the operator's SSH directory.
 
+On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
+
+```text
+strands-box: [tool.check] interpreter aliases for configured access:
+  alias       /bin/sh -> /usr/bin/dash  (interpreter spelling)
+```
+
+The arrow maps the script's spelling to the file its configured grants already authorize.
+The section appears only when Box preserves an interpreter spelling.
+
 With no `filesystem` table, the process reaches its `command` and the runtime minimum. The
 command's own exec grant is implicit: a process may always run its `command`, and the startup
 disclosure shows that grant as `exec <command> (command, implicit)`. So removing a directory from
@@ -296,6 +369,7 @@ happen after the box directory is created and before the workload starts.
 | A grant wholly inside a `deny` entry or the directory that holds `box.toml` and `policy.dw` | `<path> is at or inside <path>, which no grant reaches. The grant would render and reach nothing, so it is refused rather than left enforcing nothing` |
 | A writable grant that reaches the policy file without subtracting it | ``` `write` reaches this box's policy file, <path>. A grant may enclose it only when it is subtracted, and nothing subtracts it here``` |
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against. That program starts outside containment at the operator's identity, so a writable directory there is a program the workload chooses` |
+| A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
 Create the path first, or name the existing directory above it. The same rule holds for a
@@ -377,6 +451,35 @@ Build output covered by the agent's own grants remains writable when no tool tab
 
 To update a configured tool, end the current run. Update the program from the surrounding OS.
 Start a new run to resolve and validate the updated program.
+
+### Installation integrity
+
+Before the workload starts, Box checks its installed executable, containment launcher, and socket-alias image against every process's writable grants.
+The socket-alias image routes shell and Python commands to Box's policy checks.
+The check covers `[agent]`, every `[tool.<name>]`, and every local `[mcp.<name>]` table.
+
+For the macOS package layout, Box protects an executable regular file named `box` beside `Box.app` as the package launcher.
+A standalone application bundle does not require that wrapper. A nearby directory, symbolic link, or non-executable file named `box` does not prevent startup.
+Operator-created launch scripts and additional symbolic-link names are outside this installation inventory.
+Keep those launch paths and their containing directories outside workload write grants.
+
+Box accepts hard links only when it finds every name in the installation directory or its immediate
+`deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
+original file identities and hard-link counts.
+Linux also checks the files through existing mounts. On macOS, Box checks verified Data-volume spellings.
+A writable grant must exclude these aliases and their enclosing directories.
+
+| Condition | Refusal text | Next action |
+|---|---|---|
+| Box cannot account for every hard-link name. | `has hard links outside the installation inventory. Install an independent copy` | Install independent copies of the Box programs. |
+| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table and mapped files, then retry after mount changes finish. |
+| A recorded file name points to another file, or the hard-link count changes during the run. | `changed after this run loaded it. Stop Box before updating its installation` | End the run before installation updates. |
+
+Strands Shell and Monty also refuse changes to these files and their enclosing paths, even when
+policy permits the operation. Reads still require the applicable policy permission.
+
+End every active run before installation updates. Update the installation from the surrounding OS.
+Start a new run to validate the updated files.
 
 ## `[egress.<name>]`
 

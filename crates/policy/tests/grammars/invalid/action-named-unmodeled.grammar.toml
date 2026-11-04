@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.unmodeled]`: the name is reserved for a command that no action matches
+# expect: `<grammar>.shell.unmodeled`: the name is reserved for a command that no action matches
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

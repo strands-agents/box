@@ -30,6 +30,26 @@ impl std::ops::DerefMut for WorkloadChild {
 }
 
 impl WorkloadChild {
+    fn wait_for_ready(
+        &mut self,
+        marker: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        while !marker.exists() {
+            if let Ok(Some(status)) = self.try_wait() {
+                return Some(status);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "DET_ERROR: the workload never touched the ready marker {}",
+                marker.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None
+    }
+
     fn stop(&mut self) -> std::io::Result<std::process::ExitStatus> {
         if let Some(status) = self.0.try_wait()? {
             return Ok(status);
@@ -158,20 +178,7 @@ impl BoxFixture {
         // would block the box before it ever touched the ready marker.
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
-        let deadline = std::time::Instant::now() + ready_timeout;
-        let mut exited_early = None;
-        while !self.ready_marker().exists() {
-            if let Ok(Some(status)) = child.try_wait() {
-                exited_early = Some(status);
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "DET_ERROR: the workload never touched the ready marker {}",
-                self.ready_marker().display()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let exited_early = child.wait_for_ready(&self.ready_marker(), ready_timeout);
         if exited_early.is_none() {
             meanwhile();
             std::fs::write(self.go_marker(), "go\n").expect("DET_ERROR: write the go marker");

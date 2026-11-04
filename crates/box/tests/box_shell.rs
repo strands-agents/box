@@ -2252,9 +2252,9 @@ unless temporal {
 /// Two probe programs declared as the tools a test-before-commit rule names, each reading the
 /// probe directory its `#!` interpreter opens.
 const PROBE_TOOLCHAIN: &str = "[tool.git]\ncommand = [\"git\"]\n[tool.git.filesystem]\n\
-                               read = [\"{box_home}/probe-bin\"]\n\n\
+                               read = [\"{box_home}/probe-bin\"]\n{interpreter_grants}\n\
                                [tool.cargo]\ncommand = [\"cargo\"]\n[tool.cargo.filesystem]\n\
-                               read = [\"{box_home}/probe-bin\"]\n";
+                               read = [\"{box_home}/probe-bin\"]\n{interpreter_grants}";
 
 /// Place a probe program named `name` in `bin` that prints `<NAME>_RAN` and its arguments.
 fn install_probe_program(bin: &std::path::Path, name: &str) {
@@ -2278,10 +2278,19 @@ fn a_spawn_rule_keyed_on_a_prior_spawn_response_lifts_only_after_the_test_run_co
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    let interpreter_grants = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("resolve the probe interpreter");
+        format!("read_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    let toolchain = PROBE_TOOLCHAIN.replace("{interpreter_grants}", &interpreter_grants);
     let request = Request::with_config(
         "spawn-test-before-commit",
         TEST_BEFORE_COMMIT_POLICY,
-        &PROBE_TOOLCHAIN.replace("{box_home}/probe-bin", "~/probe-bin"),
+        &toolchain.replace("{box_home}/probe-bin", "~/probe-bin"),
     );
     // The operator owns the probes outside the agent's writable home.
     let bin = request.operator_home().join("probe-bin");
@@ -3501,16 +3510,25 @@ fn a_configured_linked_script_keeps_its_invocation_path() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let sh = std::path::Path::new("/bin/sh")
+            .canonicalize()
+            .expect("resolve the script interpreter");
+        format!(", {sh:?}")
+    } else {
+        String::new()
+    };
     let request = Request::with_config(
         "cmd-script-path",
         "permit(principal, action, resource);",
-        r#"
+        &r#"
 [tool.script]
 command = ["{workspace}/linked-script"]
 
 [tool.script.filesystem]
-read_file = ["{workspace}/script-target"]
-"#,
+read_file = ["{workspace}/script-target"{interpreter_grant}]
+"#
+        .replace("{interpreter_grant}", &interpreter_grant),
     )
     .without_agent_home();
     let workspace = request.operator_home().join("workspace");

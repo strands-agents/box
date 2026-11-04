@@ -272,17 +272,18 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
 fn tool_spawner(
-    attachment: Attachment,
-    layout: BoxRoot,
-    record: Record,
+    site: Site<'_>,
     approved: Arc<ApprovedReach>,
     workspace: PathBuf,
-    protected_sources: Vec<AuthoritySource>,
     recorder: Arc<telemetry::DecisionRecorder>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         super::macos_enforcement::Registration,
     >,
 ) -> strands_shell::os::HostSpawner {
+    let attachment = site.attachment.clone();
+    let layout = site.layout.clone();
+    let record = site.stored.clone();
+    let protected_sources = site.protected_sources.to_vec();
     Arc::new(move |spawn: strands_shell::os::HostSpawn| {
         let recorder = Arc::clone(&recorder);
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -773,12 +774,14 @@ impl HostedBox {
         // The host-binary seam: a command the Shell does not implement runs in the
         // boundary of the tool the invocation selects, not as an uncontained child.
         let host_spawner = Some(tool_spawner(
-            attachment.clone(),
-            root.clone(),
-            record.clone(),
+            Site {
+                attachment: &attachment,
+                layout: root,
+                stored: record,
+                protected_sources,
+            },
             Arc::clone(&approved),
             workspace.to_path_buf(),
-            protected_sources.to_vec(),
             Arc::clone(&recorder),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
@@ -812,6 +815,7 @@ impl HostedBox {
             mcp_leaf_launcher,
             protected_sources,
             std::sync::Arc::clone(approved.commands()),
+            std::sync::Arc::clone(approved.installation()),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
