@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status]`: usage puts `[+<toolchain>]` in a place other than directly after the program
+# expect: `<grammar>.shell.status.usage` puts `[+<toolchain>]` in a place other than directly after the program
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

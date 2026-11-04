@@ -139,9 +139,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features --verbose
 
-      - name: Install the alias image beside unit-test binaries
+      - name: Install launcher images beside unit-test binaries
         if: runner.os == 'Linux'
-        run: install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
 
       - name: Run tests (linux)
         shell: bash
@@ -181,7 +183,7 @@ jobs:
   lint:
     name: Lint
     if: ${{ inputs.run_lint }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Lint typically runs in ~2 min; 20 min caps a hung step instead of
     # letting it run to the 6-hour default.
     timeout-minutes: 20

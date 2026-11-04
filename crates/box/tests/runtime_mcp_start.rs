@@ -420,10 +420,18 @@ fn the_shell_resolves_a_launcher_name_on_the_operators_path_and_not_the_mcp_alia
         .expect("the program has a directory")
         .canonicalize()
         .expect("the operator bin resolves");
+    let interpreter_grants = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("resolve the launcher interpreter");
+        format!("read_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
     box_.declare_tool(
         "npx",
         &format!(
-            "[tool.npx]\ncommand = [\"npx\"]\n[tool.npx.filesystem]\nread = [{:?}]\n",
+            "[tool.npx]\ncommand = [\"npx\"]\n[tool.npx.filesystem]\nread = [{:?}]\n{interpreter_grants}",
             operator_bin.display().to_string()
         ),
     );

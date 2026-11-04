@@ -7,11 +7,10 @@ every system call the agent makes. Each tool and each local MCP server the agent
 what a box guarantees, where a box's reach comes from, how the agent's sandbox differs from the
 sandbox for a tool or a local MCP server, and what sits outside operating system enforcement.
 
-Box runs on macOS today, where Seatbelt enforces each sandbox. Where a property comes from the macOS
-backend, this page says so. [macOS enforcement](macos-enforcement.md) explains how Seatbelt does it.
+On macOS, Seatbelt enforces each sandbox. [macOS enforcement](macos-enforcement.md) explains that mechanism.
 
-> **Platform scope.** This page describes operating system enforcement on macOS. Its guarantees do not describe
-> Linux behavior.
+> **Platform scope.** Unless a section explicitly states Linux behavior, this page describes operating
+> system enforcement and guarantees on macOS.
 
 ## Two kinds of enforcement
 
@@ -147,6 +146,36 @@ the same four plus `network`. One translator turns each of them into a set of sa
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
 
+### Script interpreter grants on Linux
+
+Box reads a declared script's `#!` line before building its sandbox. It follows the named interpreter
+and repeats when that interpreter is itself a script. For `env`, it follows both `env` and the command
+that `env` selects.
+
+On Linux, discovery checks each interpreter against the process's original filesystem grants.
+An agent needs existing `exec` coverage. A declared tool or local server can use its own `read` or
+`read_file` coverage, because those grants permit execution in its sandbox.
+Existing writable grants also count where they permit execution and have the required read coverage.
+Tool and local-server tables still refuse an `exec` list.
+A missing grant prevents launch, including when the interpreter is under a system path.
+
+Each check uses the file identity resolved from the script's path spelling.
+Explicit denials, protected paths, and Box state remain outside the accepted grants.
+Discovery cannot use a grant added for an earlier interpreter to authorize a later interpreter.
+A required spelling can expose the same authorized file inside the sandbox without adding authority over another file.
+
+Box discovers shared-library dependencies from executable-file grants that existed before it inspected the script.
+Preserving an interpreter's spelling adds no new source for dependency discovery.
+A declared tool's readable interpreter can therefore need separate read grants for non-system libraries.
+Interpreter admission alone does not guarantee that the program can start or finish its work.
+
+On macOS, Box grants a declared command's interpreter chain automatically
+([one exec rule per grant](decisions.md#the-agent-gets-one-exec-rule-per-grant)).
+On either platform, a workload-selected program without a declared tool table needs existing `exec`
+coverage for its interpreter chain.
+The [configuration reference](../user/config.md#script-commands-on-linux) shows interpreter grants
+and the alternative of running a native interpreter with a readable script argument.
+
 ### The runtime minimum
 
 Box adds the system paths a process needs to start. There are two sets: the agent set and the
@@ -180,6 +209,11 @@ include:
 - **Configured tool programs:** Box refuses direct writable grants that can overwrite a configured
   command or replace its path, including its symbolic-link route and enclosing directories.
   The check covers the agent, every tool, and every local MCP server.
+- **Installed trusted programs:** Box refuses writable grants that can change its executable, containment
+  launcher, socket-alias image, or the macOS package launcher when present.
+  This includes hard-link names, mounted aliases, and enclosing directories.
+  The check covers every process's grants
+  ([installation integrity](binaries.md#trampoline---strands-box-contain-trampoline)).
 
 The credential store and system tree paths are listed in
 [`forbidden-paths.json`](../../crates/containment/src/containment-data/forbidden-paths.json), one
@@ -219,6 +253,23 @@ that clears both bits can succeed. GNU `chmod` can preserve a directory's inheri
 when changing ordinary permissions, so those commands can fail even when they add no special bit.
 `permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
 existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
+
+### What a process sees of other processes on macOS
+
+Every macOS sandbox hides other processes. The agent, each tool, and each local MCP server get the
+same two rules:
+
+- **Itself:** a process can read all of its own process information.
+- **Its direct children:** a process can read the `proc_pidinfo` information of a process it
+  started. Only that one operation is allowed. A harness such as Kiro CLI uses it to watch the
+  programs it runs.
+
+A process still can't read the information of its parent, a sibling, or any other process on the
+machine. That includes the `strands-box run` process that started the box.
+The rules are in
+[`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
+`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
+control outside the box shows the refusal comes from the sandbox.
 
 ### How you check a box's reach
 
@@ -486,9 +537,9 @@ Strands Shell and Monty run in Box's trusted process, outside every box. We run 
 policy engine decides for the whole box
 ([the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
 Each one asks policy before it touches a file, then applies the reachable paths check.
-This check also refuses writes, deletion, replacement, and enclosing-path changes for configured
-tool programs. Their read access remains subject to policy. These checks are separate from the
-agent's own grants.
+This check also refuses changes to configured tool programs and the installed trusted binaries,
+including changes to their enclosing paths. Reads remain subject to policy. These checks are
+separate from the agent's own grants.
 
 No credential floor sits beneath them. A broad `fs:read` permit lets Strands Shell read `~/.aws`,
 even though no grant could give the agent that path

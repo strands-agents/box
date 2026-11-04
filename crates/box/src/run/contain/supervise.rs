@@ -30,26 +30,29 @@ async fn spawn_registered(
         not(all(target_os = "macos", feature = "native-filesystem-policy")),
         allow(unused_mut)
     )]
-    let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        hold_for_registration: registration.is_some(),
-        config_path: boundary.containment_config(),
-        config_file: boundary.containment_config_file(),
-        config_sha256: boundary.containment_digest(),
-        target_environment: boundary.target_environment(),
-        executable: boundary.executable(),
-        arguments: boundary.arguments(),
-        argument_zero: boundary.argument_zero(),
-        working_directory: boundary.working_directory(),
-        image_name: &|digest| {
-            Ok(trampoline::ImageCache::new(
-                layout.trampoline_image(digest),
-                layout.open_trampoline_cache()?,
-            ))
+    let (mut command, mut trampoline) = trampoline::command(
+        trampoline::Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: registration.is_some(),
+            config_path: boundary.containment_config(),
+            config_file: boundary.containment_config_file(),
+            config_sha256: boundary.containment_digest(),
+            target_environment: boundary.target_environment(),
+            executable: boundary.executable(),
+            arguments: boundary.arguments(),
+            argument_zero: boundary.argument_zero(),
+            working_directory: boundary.working_directory(),
+            image_name: &|digest| {
+                Ok(trampoline::ImageCache::new(
+                    layout.trampoline_image(digest),
+                    layout.open_trampoline_cache()?,
+                ))
+            },
+            #[cfg(target_os = "linux")]
+            relay_control,
         },
-        #[cfg(target_os = "linux")]
-        relay_control,
-    })?;
+        boundary.installation(),
+    )?;
     configure_streams(&mut command);
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     let gate = trampoline.take_launch_gate();

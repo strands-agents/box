@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.push] adds`: names effect "remote_write", which `[effects]` does not declare
+# expect: `<grammar>.shell.push.adds`: names effect "remote_write", which `effects` does not declare
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

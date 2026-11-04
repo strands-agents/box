@@ -101,6 +101,7 @@ These raise an error whatever the policy says:
 | A path that is a symbolic link, or has one in it | `PermissionError: <path>: resolves to a different path, so it is not the identity policy judged` | The path of the file the link points to |
 | The box directory, or the `box.toml` and `policy.dw` this run loaded | `PermissionError: <path>: resolves into trusted Box state, which no policy may open`, or `resolves to an authority source that this run loaded` | A path outside the box directory |
 | A write, deletion, or rename that changes a configured tool program or an enclosing path | `PermissionError` containing `is a configured tool command or its ancestor` | [Update the program between runs](config.md#configured-command-integrity) |
+| A write, deletion, or rename that changes an installed Box program or an enclosing path | `PermissionError` containing `cannot change a trusted Box executable or its path` | [Update the installation between runs](config.md#installation-integrity) |
 
 A rename can also fail if another operation creates its destination while Box checks policy.
 Box raises `PermissionError: <destination>: filesystem identity changed during effect admission`

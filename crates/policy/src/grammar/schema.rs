@@ -5,9 +5,13 @@ use std::fmt::Write as _;
 use super::Grammar;
 use super::model::UNMODELED_ACTION;
 use super::shell_grammar::{BASE_FIELDS, FieldKind};
+#[cfg(test)]
 use crate::dogwood::check_against;
+#[cfg(test)]
 use crate::error::PolicyError;
+#[cfg(test)]
 use crate::schema::{ActionSchema, composed_action_schema};
+#[cfg(test)]
 use crate::spelling::{Operator, PolicyWarning};
 
 /// The namespace that holds the vocabulary of every tool grammar.
@@ -82,6 +86,7 @@ impl Grammar {
 }
 
 /// The canonical schema, composed with the fragment of each grammar and then each MCP fragment.
+#[cfg(test)]
 pub(crate) fn grammar_action_schema(
     grammars: &[Grammar],
     mcp_schemas: &[String],
@@ -91,6 +96,7 @@ pub(crate) fn grammar_action_schema(
 }
 
 /// Strict-validate `source` against the canonical schema, `grammars`, and `mcp_schemas`.
+#[cfg(test)]
 pub(crate) fn validate_with_grammars(
     source: &str,
     grammars: &[Grammar],

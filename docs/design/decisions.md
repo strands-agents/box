@@ -460,11 +460,22 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
 read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
-pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
-first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
-script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
-that runs a helper needs that helper's directory in its own `exec` list. Two residual risks are
-stated. Write and exec on one path is a warning and not a refusal, so a workload that can write a
+pins. On macOS, Box grants the interpreter chain of the one program it was told to run: it reads
+the program's first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter
+is itself a script, and grants exec at file scope on each hop.
+
+On Linux, every interpreter in a declared script's chain needs coverage from the process's original
+filesystem grants. An agent needs `exec` coverage. A declared tool or local server can use its own
+read or writable grants where those grants permit execution. System paths have no exemption.
+Discovery follows `env` and its selected command, and checks every nested script's interpreter.
+Script contents select the programs to check; they grant no authority to those programs.
+Box preserves required path spellings only for files already authorized, without adding a new source
+for library dependency discovery. A tool's readable interpreter can still need separate grants for non-system libraries.
+
+A workload-selected program without a declared tool table needs existing `exec` coverage for its
+interpreter chain on either platform. Box derives no wider exec closure, so a program that runs a
+helper needs that helper's directory in its own `exec` list. Two residual risks are stated.
+Write and exec on one path is a warning and not a refusal, so a workload that can write a
 path it can also run can run code it wrote there. And a granted shell can interpret workload-authored
 input inside its parent's boundary, because native descendants raise no new decision.
 
@@ -1078,22 +1089,29 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 ```
 
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
-### A tool grammar binds on the program file's identity and the name it was called by
+### A tool grammar binds by its program name, on the program file's identity and the name it was called by
 
-Box binds a tool grammar to a pair: the identity of the resolved program file, and the name the program
-was called by. The identity is the file's device and inode on the host, so a hard link or a symbolic
-link to a bound file is that same file, and a link can't route around the binding. A command is
-parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
-enough, because several programs can share one binary. mise runs every tool it manages through one shim
-binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can be links
-to one binary. The name alone isn't enough, because the caller picks the name, so any file called `git`
-would claim the git grammar. Binding on the file identity alone was rejected: it's one lookup, but it
-would read `npm install` through the mise shim binary as a cargo command.
+A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
+A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+`/opt/homebrew/bin/git`, because both run `git`. So one program name has at most one grammar, and Box
+refuses a second grammar with the same `program` and names both tables. Letting two grammars share a
+program was rejected, because both would claim the same tools, and the order of the tables would pick
+which one reads a command.
 
-Several grammars can bind one file, each under its own name. So a cargo grammar binds the mise shim
-binary as `cargo`, and an npm grammar binds the same file as `npm`. Box refuses a second grammar only on
-a pair that another grammar already binds. One grammar per file was rejected, because then only one
-tool that mise manages could have a grammar.
+For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
+name the program was called by. The identity is the file's device and inode on the host, so a hard
+link or a symbolic link to a bound file is that same file, and a link can't route around the binding.
+A command is parsed with a tool grammar only when both halves match one binding. The file identity
+alone isn't enough, because several programs can share one binary. mise runs every tool it manages
+through one shim binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and
+`rustc` can be links to one binary. The name alone isn't enough, because the caller picks the name,
+so any file called `git` would claim the git grammar. Binding on the file identity alone was rejected:
+it's one lookup, but it would read `npm install` through the mise shim binary as a cargo command.
+
+Several grammars can bind one file, each under its own program name. So a cargo grammar binds the
+mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. One grammar per file was
+rejected, because then only one tool that mise manages could have a grammar. A name that a `[tool]`
+declares, but that no grammar's `program` matches, binds no grammar and stays a `shell:spawn`.
 
 Box refuses a spawn of a bound file before any policy decides it, in two cases, and no rule can permit
 either one. The first is a name that no `[tool]` declares, such as `python` through the mise shim
@@ -1102,15 +1120,16 @@ link it bound through, leads to another file now, for example after an update wh
 a new name, a new link, or a new file can't fall back to a `shell:spawn` rule that permits more. Reading an undeclared
 name as the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
 grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
-named. A name that a `[tool]` declares with no grammar stays a `shell:spawn`, also after its file is
-replaced, because the operator named it and chose no grammar for it.
+named. A declared name with no grammar stays a `shell:spawn` also after its file is replaced, because
+the operator named it and chose no grammar for it.
 
-The cost has three parts. An operator must declare each name that runs a bound file, or Box refuses
-that name. An update that replaces a bound binary while the box runs refuses that program until the
-box restarts. And a grammar covers a file identity, not a program: a file that no grammar binds stays a
-`shell:spawn` under every name, even a name that no `[tool]` declares. So a copy of a bound binary at
-another path, or the same program reached through an unbound shim binary, is decided by the
-`shell:spawn` rules and not by its grammar.
+The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
+and `/opt/homebrew/bin/git` both read with the one git grammar. An operator must declare each name that
+runs a bound file, or Box refuses that name. An update that replaces a bound binary while the box runs
+refuses that program until the box restarts. And a grammar covers only the files that a `[tool]` runs:
+a file that no grammar binds stays a `shell:spawn` under every name, even a name that no `[tool]`
+declares. So a copy of a bound binary at another path, or the same program reached through an unbound
+shim binary, is decided by the `shell:spawn` rules and not by its grammar.
 
 ## Containment
 
@@ -1207,6 +1226,21 @@ descriptors, and then the command. It is process-agnostic, so nothing about a pa
 inside it. Its exit codes separate three failures: a setup error before the sandbox applies, a failed apply,
 and a contained process whose environment decode or exec failed.
 
+<a id="installed-box-programs-resist-workload-writes"></a>
+### Installed Box programs resist workload writes
+
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
+`TrustedInstallation` retains their identities and refuses grants and broker mutations that can
+replace the files or their paths. The cost is that writable development trees must exclude the
+running installation and its verified alternative names. The operator owns initial contents and
+updates between runs, and the public build marker identifies artifact kind rather than authenticating
+contents. `every_process_table_refuses_writes_to_installed_executables_and_their_ancestors` and
+`the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors` pin the direct-grant and
+broker checks.
+
 <a id="the-configuration-crosses-exec-as-digest-bound-json"></a>
 ### The configuration crosses the exec boundary as an inherited descriptor, bound by a digest
 
@@ -1292,6 +1326,7 @@ code-level enforcement of no-escalation for an exec grant.
 <a id="write-plus-execute-warns-and-does-not-refuse"></a>
 ### Write plus execute on one path warns, and does not refuse
 
+This rule applies to workload programs outside the files Box protects from writes.
 An operator who names one directory in both a write list and an exec list gets a warning at startup,
 and the box still runs. A refusal was wrong for a real build, which loads and runs what it compiles.
 The warning names the executable and the write grant that reaches it. The cost is stated rather than
