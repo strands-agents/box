@@ -95,7 +95,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `[agent.filesystem]`, reaches `require_bounded_grant`. Two entry points serve it:
   `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known, and
   `validate_grant(path, operator_home, operation, scope)` judges one composed grant and reports a
-  named-exactly credential store in its `bool`. Two lists in two crates was the divergence this merge removed,
+  named-exactly credential store in its `bool`. A refusal by a row carries the row's
+  `ForbiddenClass`, which `ContainmentError::forbidden_class` returns. Two lists in two crates was the divergence this merge removed,
   and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
   `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
   witness cannot see that `/Users` renders a home only because no credential entry sits under it.
@@ -850,6 +851,10 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   `mmap(PROT_EXEC)` from `execve`; a dependency beneath a planned exec-capable tree is not bound
   again. `a_read_root_on_a_loader_directory_is_bound_executable_and_read_only` and
   `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
+  If combined grants make that root writable, require a covering execution root or the leaf's
+  broad exec. Otherwise, refuse it.
+  `combined_loader_grants_require_execution_in_either_order_and_spelling` and
+  `a_writable_ancestor_cannot_make_a_loader_directory_executable` pin that refusal.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
   Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
   refuses reads with `EACCES`. Its owner changes for a non-root launcher; root ownership can
@@ -1090,8 +1095,10 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
   - **The Linux launcher writes `uid_map` as `0 <uid> 1`**, which under real root is `0 0 1`, so the
-    workload's in-namespace uid 0 is host uid 0. Capabilities are still all dropped, so no flag or
-    mount authority survives — but nothing detects the collapse. Still open.
+    workload's in-namespace uid 0 is host uid 0. Startup clears every capability set. A nested user
+    namespace can restore privileges within that namespace. Seccomp still refuses `mount` and
+    `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
+    Nothing detects the identity collapse. Still open.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux

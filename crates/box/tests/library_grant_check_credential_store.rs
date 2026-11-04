@@ -10,4 +10,12 @@ fn a_read_grant_in_a_credential_store_passes_and_says_so() {
     // SAFETY: this test binary holds one test, so no other thread reads the environment.
     unsafe { std::env::set_var("HOME", &home) };
     assert_eq!(strands_box::check_read_grant(&key).ok(), Some(true));
+    let enclosing = strands_box::check_read_grant(&home).expect_err("the home encloses a store");
+    assert_eq!(enclosing.kind(), strands_box::GrantRefusal::Other);
+    assert!(
+        enclosing
+            .to_string()
+            .contains("contains a credential store"),
+        "{enclosing}"
+    );
 }

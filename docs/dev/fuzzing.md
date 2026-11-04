@@ -1,19 +1,19 @@
-# Fuzz the tool pack shell parser
+# Fuzz the tool grammar shell parser
 
-The tool pack shell parser reads an argv as one action of a pack. Its fuzz tests are in
-`crates/policy/src/pack/fuzz.rs`. They build each argv from the vocabulary of each valid pack under
-`crates/policy/tests/packs/`, and from the argvs of the golden corpus. Then they check these
+The tool grammar shell parser reads an argv as one action of a grammar. Its fuzz tests are in
+`crates/policy/src/grammar/fuzz.rs`. They build each argv from the vocabulary of each valid grammar
+under `crates/policy/tests/grammars/`, and from the argvs of the golden corpus. Then they check these
 invariants:
 
 - The parser does not panic, and one parse that returns took less than one second. This check
   cannot stop a parse that does not return. Only the `-timeout` of the long run finds a hang.
 - Two parses of one argv give the same result.
-- An action, its fields, and its effects are ones that the pack declares.
-- When you insert a flag that the pack does not declare and that no other word holds, the result
+- An action, its fields, and its effects are ones that the grammar declares.
+- When you insert a flag that the grammar does not declare and that no other word holds, the result
   is `Unmodeled`, or the flag is a field value. The parser cannot read an undeclared flag as an
   option.
 - The same is true when you put an undeclared letter in a short cluster, after letters that take
-  no value in any option table of the pack. After a flag that takes a value, the letters are that
+  no value in any option table of the grammar. After a flag that takes a value, the letters are that
   value, so the check does not apply there.
 
 ## The bounded run
@@ -22,7 +22,7 @@ invariants:
 seed on each run, and takes a few seconds:
 
 ```sh
-cargo test -p strands-box-policy --all-features --lib pack::fuzz
+cargo test -p strands-box-policy --all-features --lib grammar::fuzz
 ```
 
 To run more inputs, set `BOLERO_RANDOM_ITERATIONS`. To replay a failure, set the
@@ -48,7 +48,7 @@ TARGET=$(rustc +nightly -vV | sed -n 's/^host: //p')
 EXE=$(RUSTFLAGS=$FUZZ_FLAGS cargo +nightly test --target "$TARGET" --profile release \
   -p strands-box-policy --lib --target-dir target/fuzz --no-run --message-format=json \
   | jq -r 'select(.profile.test == true and .target.kind == ["lib"]) | .executable')
-TEST=pack::fuzz::a_generated_argv_holds_each_parser_invariant
+TEST=grammar::fuzz::a_generated_argv_holds_each_parser_invariant
 WORK=$PWD/target/fuzz/parser
 mkdir -p "$WORK/corpus" "$WORK/crashes"
 BOLERO_TEST_NAME=$TEST BOLERO_LIBTEST_HARNESS=1 \

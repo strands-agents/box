@@ -13,6 +13,22 @@ const WALK: libc::c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | 
 #[cfg(target_os = "macos")]
 const WALK: libc::c_int = libc::O_SEARCH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
+/// Why a walk did not reach the parent of an approved path.
+pub(super) enum Unreached {
+    /// A component is missing, cannot be searched, or is a file, which answers the question about the path.
+    Answered(io::Error),
+    /// The walk refused a component that is a symbolic link, or a path it cannot walk.
+    Refused(io::Error),
+}
+
+impl Unreached {
+    pub(super) fn into_error(self) -> io::Error {
+        match self {
+            Self::Answered(error) | Self::Refused(error) => error,
+        }
+    }
+}
+
 /// The parent directory of an approved path, held open, and the leaf name inside it.
 pub(super) struct HeldPath {
     parent: File,
@@ -22,20 +38,30 @@ pub(super) struct HeldPath {
 impl HeldPath {
     /// Hold the parent of `approved`, refusing a symbolic link in any component of it.
     pub(super) fn of(approved: &Path) -> io::Result<Self> {
+        Self::reach(approved).map_err(Unreached::into_error)
+    }
+
+    /// Hold the parent of `approved`, and tell an answer about the path from a refusal.
+    pub(super) fn reach(approved: &Path) -> Result<Self, Unreached> {
         let mut components = approved.components();
         if components.next() != Some(Component::RootDir) {
-            return Err(not_canonical(approved));
+            return Err(Unreached::Refused(not_canonical(approved)));
         }
         let leaf = match components.next_back() {
-            Some(Component::Normal(leaf)) => c_name(leaf.as_bytes())?,
-            _ => return Err(not_canonical(approved)),
+            Some(Component::Normal(leaf)) => c_name(leaf.as_bytes()).map_err(Unreached::Refused)?,
+            _ => return Err(Unreached::Refused(not_canonical(approved))),
         };
-        let mut parent = open_at(libc::AT_FDCWD, c"/", WALK & !libc::O_NOFOLLOW)?;
+        let mut parent =
+            open_at(libc::AT_FDCWD, c"/", WALK & !libc::O_NOFOLLOW).map_err(Unreached::Refused)?;
         for component in components {
             let Component::Normal(name) = component else {
-                return Err(not_canonical(approved));
+                return Err(Unreached::Refused(not_canonical(approved)));
             };
-            parent = open_at(parent.as_raw_fd(), &c_name(name.as_bytes())?, WALK)?;
+            let name = c_name(name.as_bytes()).map_err(Unreached::Refused)?;
+            parent = match open_at(parent.as_raw_fd(), &name, WALK) {
+                Ok(next) => next,
+                Err(error) => return Err(unreached(&parent, &name, error)),
+            };
         }
         Ok(Self { parent, leaf })
     }
@@ -175,6 +201,36 @@ fn open_at(directory: libc::c_int, name: &CStr, flags: libc::c_int) -> io::Resul
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
+/// Classify a failed step of the walk by what the component is, without following it.
+fn unreached(parent: &File, name: &CStr, error: io::Error) -> Unreached {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    ) {
+        return Unreached::Answered(error);
+    }
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the parent and the name are owned, valid handles, and `metadata` is writable.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Unreached::Refused(error);
+    }
+    // SAFETY: `fstatat` returned 0, so it filled `metadata`.
+    let kind = unsafe { metadata.assume_init() }.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFLNK {
+        Unreached::Refused(error)
+    } else {
+        Unreached::Answered(error)
+    }
+}
+
 fn checked(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         Ok(())
@@ -205,5 +261,99 @@ fn clear_errno() {
     #[cfg(target_os = "macos")]
     unsafe {
         *libc::__error() = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn scratch() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let base = dir.path().canonicalize().expect("the scratch dir resolves");
+        (dir, base)
+    }
+
+    /// A walk that reaches the parent holds it.
+    #[test]
+    fn a_walk_to_an_existing_parent_holds_it() {
+        let (_dir, base) = scratch();
+        std::fs::create_dir(base.join("d")).expect("a directory");
+        assert!(HeldPath::reach(&base.join("d/f.txt")).is_ok());
+    }
+
+    /// A missing component is an answer about the path.
+    #[test]
+    fn a_missing_component_is_an_answer() {
+        let (_dir, base) = scratch();
+        let reached = HeldPath::reach(&base.join("absent/f.txt"));
+        assert!(matches!(reached, Err(Unreached::Answered(_))));
+    }
+
+    /// A regular file where a directory belongs is an answer about the path.
+    #[test]
+    fn a_regular_file_component_is_an_answer() {
+        let (_dir, base) = scratch();
+        std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
+        let reached = HeldPath::reach(&base.join("notes.txt/child"));
+        assert!(matches!(reached, Err(Unreached::Answered(_))));
+    }
+
+    /// A symbolic link where a directory belongs is a refusal.
+    #[test]
+    fn a_symbolic_link_component_is_a_refusal() {
+        let (_dir, base) = scratch();
+        std::fs::create_dir(base.join("target")).expect("a directory");
+        std::os::unix::fs::symlink(base.join("target"), base.join("link")).expect("a link");
+        let reached = HeldPath::reach(&base.join("link/f.txt"));
+        assert!(matches!(reached, Err(Unreached::Refused(_))));
+    }
+
+    /// A dangling symbolic link where a directory belongs is a refusal.
+    #[test]
+    fn a_dangling_symbolic_link_component_is_a_refusal() {
+        let (_dir, base) = scratch();
+        std::os::unix::fs::symlink(base.join("gone"), base.join("link")).expect("a link");
+        let reached = HeldPath::reach(&base.join("link/f.txt"));
+        assert!(matches!(reached, Err(Unreached::Refused(_))));
+    }
+
+    /// A directory the host will not search answers the question about the path.
+    #[test]
+    fn a_directory_the_host_will_not_search_is_an_answer() {
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: root ignores a directory's permission bits");
+            return;
+        }
+        let (_dir, base) = scratch();
+        let locked = base.join("locked");
+        std::fs::create_dir_all(locked.join("inner")).expect("nested directories");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the directory");
+        let reached = HeldPath::reach(&locked.join("inner/f.txt"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the directory");
+        assert!(matches!(reached, Err(Unreached::Answered(_))));
+    }
+
+    /// A path that is not canonical and absolute is a refusal.
+    #[test]
+    fn a_relative_path_is_a_refusal() {
+        assert!(matches!(
+            HeldPath::reach(Path::new("relative/f.txt")),
+            Err(Unreached::Refused(_))
+        ));
+    }
+
+    /// `of` refuses every path that `reach` does not hold.
+    #[test]
+    fn of_refuses_every_unreached_path() {
+        let (_dir, base) = scratch();
+        std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
+        assert!(HeldPath::of(&base.join("absent/f.txt")).is_err());
+        assert!(HeldPath::of(&base.join("notes.txt/child")).is_err());
     }
 }

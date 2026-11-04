@@ -41,7 +41,7 @@ det_case! {
     platforms: [Linux, Macos],
     desc: "A [tool.x.network] contain_egress=false tool reaches an un-proxied host endpoint and records egress:native, while the same tool with no network table or contain_egress=true cannot and records none",
     run: |b| {
-        let probe = b.compile_probe("leafprobe-ne04", PROBE);
+        let probe = b.install_tool(&b.compile_probe("leafprobe-ne04", PROBE));
         let quoted = serde_json::to_string(&probe.to_string_lossy()).unwrap();
         // `None` declares no network table; `Some(value)` declares `contain_egress = value`.
         let tool = |contain_egress: Option<bool>| {

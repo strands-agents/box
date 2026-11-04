@@ -1,0 +1,12 @@
+box-core/
+binary-manifest.json
+research/tested-build.json
+**/vendor/
+**/dependency-manifest.json
+**/evidence/
+**/__pycache__/
+.build/
+.venv/
+output*/
+deployment*/
+*.zip

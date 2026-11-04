@@ -211,21 +211,23 @@ det_case! {
     desc: "Leaf has no route to the broker: a [tool.x] leaf, a gateway [mcp.x] leaf, and a contain_egress=false [mcp.x] leaf hold no <box_dir>/bin on PATH in any spelling, run no alias, and fail to connect to box.sock; the agent holds all three",
     run: |b| {
         let probe = b.compile_probe("leafprobe-t03", PROBE);
+        let tool_probe = b.install_tool(&probe);
         let quoted = |s: &str| serde_json::to_string(s).unwrap();
         let exec_tree = b.with_exec_tree();
         let tool_path = format!("{}:/usr/bin:/bin", alias_spellings(b));
         let edit = |text: String| format!(
             "{}\n[tool.t03]\ncommand = [{}]\n\n[tool.t03.env]\nPATH = {}\n",
-            exec_tree(text), quoted(&probe.to_string_lossy()), quoted(&tool_path)
+            exec_tree(text), quoted(&tool_probe.to_string_lossy()), quoted(&tool_path)
         );
         b.apply_policy(&format!("{SERVER_PERMIT}\n"));
         let socket = b.box_dir().join("run").join("box.sock");
         let names = aliases(b);
         let p = sh_quote(&probe.to_string_lossy());
+        let tool_p = sh_quote(&tool_probe.to_string_lossy());
         let s = sh_quote(&socket.to_string_lossy());
         let execs = |prefix: &str| names.iter().map(|name| {
             let arguments: Vec<String> = alias_arguments(name).iter().map(|a| sh_quote(a)).collect();
-            format!("{prefix}{p} exec {} {}", sh_quote(&b.alias_dir().join(name).to_string_lossy()), arguments.join(" "))
+            format!("{prefix}{tool_p} exec {} {}", sh_quote(&b.alias_dir().join(name).to_string_lossy()), arguments.join(" "))
         }).collect::<Vec<_>>().join("; ");
 
         // The control: the agent runs the same probe and holds all three routes.
@@ -247,7 +249,7 @@ det_case! {
 
         // The tool leaf: spawned by the agent's Strands Shell, which proves the mediated route.
         let r = b.run_mediated_with_config(edit, &format!(
-            "{p} path; {p} unix-connect {s}; {}", execs("")
+            "{tool_p} path; {tool_p} unix-connect {s}; {}", execs("")
         ));
         r.assert_mediated_permitted("shell:spawn", "leafprobe-t03");
         let tool_value = r.out.lines().find_map(|l| l.strip_prefix("PATH_SET value=")).unwrap_or_else(|| {

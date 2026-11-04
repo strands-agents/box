@@ -324,6 +324,16 @@ impl ReachFloor {
     }
 }
 
+fn is_metadata_read(effect: &EffectAttempt<'_>) -> bool {
+    matches!(
+        effect,
+        EffectAttempt::Filesystem {
+            operation: FsOperation::ReadMetadata { .. },
+            ..
+        }
+    )
+}
+
 fn mutates(operation: FsOperation) -> bool {
     match operation {
         FsOperation::WriteContent { .. }
@@ -494,12 +504,15 @@ impl EffectInterceptor for ReachFloor {
                         );
                     }
                     // The attempt happened and did not, so it is recorded as failed rather
-                    // than dropped: a rule counting attempts must still see it. A recording
-                    let _ = permit
-                        .record_outcome(EffectOutcome::Kernel(EffectResult::Failed(
-                            io::ErrorKind::PermissionDenied,
-                        )))
-                        .await;
+                    // than dropped: a rule counting attempts must still see it. A metadata read
+                    // of a path the host cannot resolve is an answer
+                    // (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
+                    let outcome = if refused.is_unresolved() && is_metadata_read(effect) {
+                        EffectResult::Completed
+                    } else {
+                        EffectResult::Failed(io::ErrorKind::PermissionDenied)
+                    };
+                    let _ = permit.record_outcome(EffectOutcome::Kernel(outcome)).await;
                     Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         refused.to_string(),
@@ -1023,6 +1036,119 @@ mod tests {
         assert!(
             floor.intercept(&read_gated).await.is_ok(),
             "an answered metadata read meets the precondition"
+        );
+    }
+
+    /// A floor over `shared` whose read of `~/gated.txt` needs an earlier `operation` response.
+    fn precondition_floor(shared: &Path, box_root: &Path, operation: &str) -> ReachFloor {
+        let reach = Arc::new(crate::test_support::with_operator_home(shared, || {
+            Reach::over_box(shared, Some(shared), Some(shared), box_root, &[])
+                .expect("the reachable set is usable")
+        }));
+        let policy = Arc::new(open_policy(vec![Policy {
+            origin: PathBuf::from("precondition.dw"),
+            text: format!(
+                r#"permit(principal, action == Box::Action::"fs:read", resource)
+                   when {{ context.input.path != "~/gated.txt" }};
+                   permit(principal, action == Box::Action::"fs:read", resource)
+                   when {{ context.input.path == "~/gated.txt" }}
+                   when temporal {{
+                       formerly within 60s
+                       Box::Action::"fs:read"::response{{ input.path: _, input.operation: Box::FsReadOperation::"{operation}" }}
+                   }};"#
+            ),
+        }]));
+        ReachFloor {
+            reach,
+            inner: ShellPolicyInterceptor::into_handle_reporting_under(
+                policy,
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                shared,
+            ),
+            recorder: DecisionRecorder::discarding(),
+        }
+    }
+
+    /// **A metadata read under a missing folder meets a `::response` precondition**, and the same
+    /// path read for content, beneath box state, or through a link does not.
+    #[tokio::test]
+    async fn a_metadata_read_under_a_missing_folder_meets_a_response_precondition() {
+        let root = tempfile::tempdir().expect("a fixture root");
+        let shared = root.path().canonicalize().expect("the root resolves");
+        let box_root = shared.join("boxes/codex");
+        std::fs::create_dir_all(box_root.join("private")).expect("this box's private directory");
+        std::fs::write(shared.join("gated.txt"), "gated").expect("the gated file");
+        std::fs::create_dir(shared.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(shared.join("real"), shared.join("link"))
+            .expect("a link in the home");
+        std::os::unix::fs::symlink(box_root.join("private/nodir"), shared.join("dangle"))
+            .expect("a dangling link into box state");
+        let gated_text = shared.join("gated.txt").to_string_lossy().into_owned();
+        let read_gated = EffectAttempt::Filesystem {
+            path: &gated_text,
+            operation: strands_shell::FsOperation::ReadContent,
+        };
+        let metadata = strands_shell::FsOperation::ReadMetadata {
+            follow_symlinks: true,
+        };
+        let probe = |relative: &str| shared.join(relative).to_string_lossy().into_owned();
+
+        let floor = precondition_floor(&shared, &box_root, "read_metadata");
+        let absent = probe("absent-dir/x");
+        assert!(
+            floor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: &absent,
+                    operation: metadata,
+                })
+                .await
+                .is_err(),
+            "the floor still refuses a path it cannot resolve"
+        );
+        assert!(
+            floor.intercept(&read_gated).await.is_ok(),
+            "a metadata read under a missing folder is a response"
+        );
+
+        for relative in [
+            "boxes/codex/private/nodir/x",
+            "link/nodir/x",
+            "dangle",
+            "dangle/x",
+        ] {
+            let floor = precondition_floor(&shared, &box_root, "read_metadata");
+            let refused = probe(relative);
+            assert!(
+                floor
+                    .intercept(&EffectAttempt::Filesystem {
+                        path: &refused,
+                        operation: metadata,
+                    })
+                    .await
+                    .is_err(),
+                "the floor refuses {relative}"
+            );
+            assert!(
+                floor.intercept(&read_gated).await.is_err(),
+                "a metadata read of {relative} is not a response"
+            );
+        }
+
+        let floor = precondition_floor(&shared, &box_root, "read_content");
+        assert!(
+            floor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: &absent,
+                    operation: strands_shell::FsOperation::ReadContent,
+                })
+                .await
+                .is_err(),
+            "the floor refuses a content read under a missing folder"
+        );
+        assert!(
+            floor.intercept(&read_gated).await.is_err(),
+            "a content read under a missing folder is not a response"
         );
     }
 

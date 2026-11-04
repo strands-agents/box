@@ -1,4 +1,4 @@
-# The `box.toml` reference
+# box.toml configuration reference
 
 `box.toml` is the complete run configuration for one box. Pass its path through
 `strands-box run --config FILE`; the tutorial's download names the binary `box`. Box reads the
@@ -157,7 +157,8 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
 - **Names that make a runtime load code, refused:** `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `RUBYOPT`,
   `PERL5LIB`, `PERL5OPT`, `GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, and every
-  name that starts with `LD_`, `DYLD_`, or `PYTHON`.
+  name that starts with `LD_`, `DYLD_`, or `PYTHON`. The prefixes are refused as a family, so a
+  name that loads no code, such as `PYTHONUNBUFFERED`, is refused too.
 - **`HOME`:** an absolute path. It stays the operator's own home unless `[agent] env.HOME` names
   another directory; the example names `strands-home`, so the CLI reads its settings and writes its
   sessions there. A home inside `box_dir` is refused with ``` `env.HOME` is <path>, which lies in
@@ -231,6 +232,13 @@ directory and its descendants. Execute grants do not satisfy this requirement.
 For Linux read-write access, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
+An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
+If overlapping writes make that directory writable, startup refuses it without a directory `exec` grant.
+This includes writes granted through another spelling or an ancestor directory.
+Remove the write access, or explicitly grant execution where the existing path protections permit it.
+An `exec` entry for one file does not authorize the whole directory.
+Ordinary read-write data directories and the broader execution mode for tools remain unchanged.
+
 Startup output states `read-only`, `write-only`, or `read-write` for each content-access grant.
 For partial overlaps, the parent entry also identifies the overlapping grants that allow both.
 Denials and protected paths still restrict access. Duplicate or nested grants of the same
@@ -251,19 +259,6 @@ and the refusal names what the link points at. Whether a path such as `/bin/sh` 
 on the surrounding OS, so the same `exec = ["/bin/sh"]` entry loads under one and is refused under
 another. Write the target the refusal names.
 
-Box binds each directory in `exec` to the directory present when the run starts.
-If that directory is replaced, Box refuses all later launches that reuse the agent's filesystem lists.
-This includes programs covered by unchanged entries and replacement through an ancestor rename.
-Restore the original directory to resume those launches if it still exists.
-
-Commands such as `cargo clean` and `npm ci` can delete a listed directory before rebuilding it.
-When the original was deleted, verify the rebuilt toolchain and restart `strands-box run`.
-Unrelated permitted renames still work.
-
-This identity check covers directory entries only.
-A file entry can still select a replacement program after an ancestor rename.
-The check does not prevent writes to files inside an unchanged directory when existing permissions allow them.
-
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
@@ -281,9 +276,8 @@ states how a rule spells `program_path`.
 
 Every refusal below names the table and the entry, as ``` `[agent]` filesystem entry "<entry>" is
 refused: <reason>```. `<path>` stands for the path the message names, and `filesystem.read` for
-whichever list holds the entry. Shape refusals happen during parsing.
-Box checks existence and identity after it creates the box directory and before the workload starts.
-It checks `exec` directories again before later launches.
+whichever list holds the entry. Shape refusals happen at parse; existence and identity refusals
+happen after the box directory is created and before the workload starts.
 
 | Entry | Refusal |
 |---|---|
@@ -310,18 +304,36 @@ Create the path first, or name the existing directory above it. The same rule ho
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
 
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
+
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
 startup disclosure carries a warning:
 `strands-box: warning: [agent] command <path> lies inside the writable grant <path>, so the process
 can replace the program it runs`.
 
+<a id="linux-writable-libraries"></a>
+
+On Linux, an agent also needs an explicit `exec` grant for an automatically discovered writable loader or shared library.
+Otherwise, startup fails with `writable dependency <path> needed by <program> has no explicit execution grant`.
+A `read` or `read_file` entry does not resolve this error.
+Remove write access to the library, or grant execution if the agent should run code it can change.
+
+The same check covers writable symbolic-link paths and hard-link aliases.
+Immutable hard-linked libraries retain automatic execution access when Box can verify their ownership, permissions, and mount boundaries.
+A read-only file that the workload owns remains writable for this check because its owner can change its permissions.
+Ordinary local mounts can retain this exception when their ownership rules agree.
+Remapped ownership, nested mounts, unrecognized filesystem types, and inconclusive checks can still require explicit execution permission.
+Tools and local MCP servers retain their broader execution permission for their own filesystem grants.
+Their filesystem tables reject `exec`; only `[agent.filesystem]` accepts that list.
+
 ## `[tool.<name>]` selection
 
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
-same program, then the same fixed arguments. Box resolves the program to its canonical path before
-it matches. The longest matching prefix wins. Every declared tool is selectable, and a
-program under one of the agent's own `exec` entries needs no table of its own.
+same program, then the same fixed arguments. Box resolves each configured tool program before the
+workload starts and keeps that file identity for the run. The longest matching prefix wins.
+Every declared tool is selectable, and a program under one of the agent's own `exec` entries needs no table of its own.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
@@ -346,6 +358,28 @@ A `shell:spawn` permit that admits `git` goes with the table, which by itself st
 A list entry that names a credential store gives the selected tool the operator's long-lived
 credential bytes. To give a tool a secret, bind it with an `[egress.<name>] secret.ref`, and keep a
 tool's `env` for non-secret literals.
+
+### Configured command integrity
+
+Each configured tool program must exist before the run starts. Box checks grants in `[agent]`,
+every `[tool.<name>]`, and every local `[mcp.<name>]` table against those programs.
+
+| Condition | Refusal text | Next action |
+|---|---|---|
+| A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
+| A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
+| A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
+| The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+
+Box also refuses legitimate system executables that have multiple hard links. File ownership and
+permissions do not waive the requirement for exactly one hard link.
+
+During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
+even when policy permits the operation. Reads still require the applicable policy permission.
+Build output covered by the agent's own grants remains writable when no tool table names it.
+
+To update a configured tool, end the current run. Update the program from the surrounding OS.
+Start a new run to resolve and validate the updated program.
 
 ## `[egress.<name>]`
 

@@ -88,7 +88,7 @@ pub(crate) const fn cell_refusal(operation: Operation, scope: Scope) -> Option<&
 ///
 /// The token that stops a second lookup: prepare once, read [`Self::resolved_path`], then hand the
 /// same value to `allow_prepared`. It is [`PathGrant`] before an operation is attached.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PreparedFilesystemPath {
     original: PathBuf,
     resolved: PathBuf,
@@ -797,24 +797,6 @@ mod tests {
             PathGrant::new(path, Operation::Exec, Scope::Root).expect("prepare the directory");
         let text = serde_json::to_string(&grant).expect("serialize the grant");
         (grant, text)
-    }
-
-    #[test]
-    fn a_cloned_prepared_directory_keeps_its_original_identity() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let directory = temp.path().join("tools");
-        std::fs::create_dir(&directory).expect("create the tools directory");
-        let prepared = PreparedFilesystemPath::new(&directory).expect("prepare the directory");
-        std::fs::rename(&directory, temp.path().join("original")).expect("move the directory");
-        std::fs::create_dir(&directory).expect("replace the directory");
-
-        let grant = PathGrant::from_prepared(prepared.clone(), Operation::Exec, Scope::Root)
-            .expect("use the prepared directory");
-        assert_eq!(grant.identity, Some(prepared.identity));
-        let error = grant
-            .validate_live_identity()
-            .expect_err("a clone must retain the original directory identity");
-        assert!(error.to_string().contains("object changed"), "{error}");
     }
 
     #[test]

@@ -24,7 +24,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use policy::{PathRefusal, PathResolver};
 
@@ -52,6 +52,8 @@ pub(super) struct Reach {
 
     /// The exact authority-source identities that this run loaded.
     forbidden_exactly: Vec<AuthoritySource>,
+
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
 
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
@@ -194,11 +196,20 @@ impl Reach {
                 .collect(),
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
+            commands: std::sync::Arc::default(),
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
         })
+    }
+
+    pub(super) fn with_commands(
+        mut self,
+        commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    ) -> Self {
+        self.commands = commands;
+        self
     }
 
     /// The directory a relative path means, and what the interpreters report as `PWD`.
@@ -282,6 +293,9 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
+        if mutates && self.commands.refuses_mutation(named) {
+            return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
+        }
         if !self.is_inside_the_set(named) {
             return Err(Refused::new(reported_as, OUTSIDE_THE_SET));
         }
@@ -293,7 +307,12 @@ impl Reach {
             .resolver
             .approve_host(&identity)
             .map(|approved| approved.as_path().to_path_buf())
-            .map_err(|refusal| Refused::new(reported_as, reason(&refusal)))?;
+            .map_err(|refusal| {
+                let mut refused = Refused::new(reported_as, reason(&refusal));
+                refused.unresolved = matches!(refusal, PathRefusal::Unresolvable { .. })
+                    && self.is_an_unresolved_answer(&identity);
+                refused
+            })?;
         // **The deny floor, applied last and on the canonical identity.**
         //
         self.refuse_forbidden(&approved, reported_as, mutates)?;
@@ -307,6 +326,9 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<(), Refused> {
+        if mutates && self.commands.refuses_mutation(approved) {
+            return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
+        }
         // The authority this run loaded is trusted Box state wherever it sits, so no operation
         // reaches it; changing its enclosing directory is refused too. It keeps its own reason, so
         // the operator learns which file the run loaded rather than which root refused it.
@@ -343,6 +365,26 @@ impl Reach {
         Ok(())
     }
 
+    /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
+    fn is_an_unresolved_answer(&self, identity: &Path) -> bool {
+        if identity
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return false;
+        }
+        let mut prefix = PathBuf::new();
+        for component in identity.components() {
+            prefix.push(component);
+            match std::fs::symlink_metadata(&prefix) {
+                Ok(metadata) if metadata.file_type().is_symlink() => return false,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        self.refuse_forbidden(identity, "", false).is_ok()
+    }
+
     /// Whether `named` lies under a root of this box's reachable set.
     fn is_inside_the_set(&self, named: &Path) -> bool {
         [
@@ -365,6 +407,9 @@ const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no polic
 const ENCLOSES_BOX_STATE: &str =
     "contains trusted Box state, so no policy may change this directory";
 
+const CONFIGURED_COMMAND: &str =
+    "is a configured tool command or its ancestor, which this run does not allow to change";
+
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";
 
@@ -381,6 +426,9 @@ pub(super) struct Refused {
 
     /// What is wrong with it, in the operator's and the agent's terms.
     reason: &'static str,
+
+    /// Whether the host could not resolve the path, beneath no deny floor and through no symbolic link.
+    unresolved: bool,
 }
 
 impl Refused {
@@ -388,7 +436,13 @@ impl Refused {
         Self {
             requested: requested.to_string(),
             reason,
+            unresolved: false,
         }
+    }
+
+    /// Whether the refusal only reports that the host could not resolve the path.
+    pub(super) fn is_unresolved(&self) -> bool {
+        self.unresolved
     }
 }
 
@@ -704,6 +758,41 @@ mod tests {
             .unwrap_or_else(|| panic!("{spelled} must be beneath the floor"))
             .to_string();
             assert!(refusal.contains(BENEATH_THE_FLOOR), "{spelled}: {refusal}");
+        }
+    }
+
+    /// Only a path under a missing folder, through no link and beneath no deny floor, is unresolved.
+    #[test]
+    fn only_a_plain_path_under_a_missing_folder_is_unresolved() {
+        let (operator, reach) = operator_home_fixture();
+        let resolved = operator.path().canonicalize().expect("the home resolves");
+        let private = resolved.join("boxes/codex/private");
+        std::fs::create_dir(resolved.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(resolved.join("real"), resolved.join("link"))
+            .expect("a link in the home");
+        std::os::unix::fs::symlink(private.join("nodir"), resolved.join("dangle"))
+            .expect("a dangling link into box state");
+        let unresolved = |target: PathBuf| {
+            let spelled = target.to_str().expect("UTF-8").to_string();
+            crate::test_support::with_operator_home(&resolved, || reach.approve(&target, &spelled))
+                .err()
+                .unwrap_or_else(|| panic!("{spelled} must be refused"))
+                .is_unresolved()
+        };
+
+        assert!(unresolved(resolved.join("absent-dir/x")));
+        assert!(unresolved(resolved.join("absent-dir/deeper/x")));
+        for target in [
+            private.join("nodir/x"),
+            resolved.join("link/nodir/x"),
+            resolved.join("link/x"),
+            resolved.join("dangle"),
+            resolved.join("dangle/x"),
+            resolved.join("boxes/codex/private/policy.dw"),
+            resolved.join("absent-dir/../boxes/codex/private/policy.dw"),
+        ] {
+            let spelled = target.display().to_string();
+            assert!(!unresolved(target), "{spelled} must not be unresolved");
         }
     }
 

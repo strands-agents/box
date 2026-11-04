@@ -31,9 +31,9 @@ pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, Poli
     composed_action_schema(&[], mcp_schemas)
 }
 
-/// Compose the canonical schema with generated tool pack fragments, then ordered MCP fragments.
+/// Compose the canonical schema with generated tool grammar fragments, then ordered MCP fragments.
 pub(crate) fn composed_action_schema(
-    pack_schemas: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
 ) -> Result<ActionSchema, PolicyError> {
     for fragment in mcp_schemas {
@@ -41,7 +41,7 @@ pub(crate) fn composed_action_schema(
             .map_err(|error| PolicyError::Schema(error.to_string()))?;
     }
     let mut source = SCHEMA_SRC.to_string();
-    for fragment in pack_schemas.iter().chain(mcp_schemas) {
+    for fragment in grammar_schemas.iter().chain(mcp_schemas) {
         let base = source.trim_end();
         source = format!("{base}\n{fragment}");
     }
@@ -135,9 +135,9 @@ pub(crate) enum ActionIdentity {
     },
     #[cfg_attr(
         not(any(test, feature = "shell-adapter")),
-        expect(dead_code, reason = "only the shell adapter decides a pack action")
+        expect(dead_code, reason = "only the shell adapter decides a grammar action")
     )]
-    PackAction {
+    GrammarAction {
         namespace: String,
         action: String,
     },
@@ -172,7 +172,7 @@ impl ActionIdentity {
                 namespace,
                 tool: action,
             }
-            | Self::PackAction { namespace, action } => {
+            | Self::GrammarAction { namespace, action } => {
                 let action_type = format!("{namespace}::Action")
                     .parse::<EntityTypeName>()
                     .map_err(|error| PolicyError::Schema(error.to_string()))?;
@@ -194,7 +194,7 @@ impl ActionIdentity {
                 namespace,
                 tool: action,
             }
-            | Self::PackAction { namespace, action } => Cow::Owned(format!(
+            | Self::GrammarAction { namespace, action } => Cow::Owned(format!(
                 "{namespace}::Action::\"{}\"",
                 EntityId::new(action).escaped()
             )),
@@ -204,6 +204,16 @@ impl ActionIdentity {
 
 pub(crate) fn mcp_action_namespace(server: &str) -> String {
     cedar_identifier(server)
+}
+
+/// The `(namespace, tool)` a per-tool action names, or `None` for the fixed `Box` vocabulary.
+pub(crate) fn mcp_tool_action(action: &EntityUid) -> Option<(String, String)> {
+    let type_name = action.type_name();
+    if type_name.basename() != "Action" || type_name.to_string() == FIXED_ACTION_TYPE {
+        return None;
+    }
+    let namespace = type_name.namespace();
+    (!namespace.is_empty()).then(|| (namespace, action.id().unescaped().to_string()))
 }
 
 pub(crate) fn cedar_identifier(raw: &str) -> String {

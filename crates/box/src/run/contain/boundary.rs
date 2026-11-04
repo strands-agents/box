@@ -60,6 +60,7 @@ pub(crate) struct Launch<'a> {
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
 }
 
 impl ApprovedReach {
@@ -68,6 +69,7 @@ impl ApprovedReach {
         stored: &Record,
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
+        let commands = std::sync::Arc::new(crate::run::commands::ConfiguredCommands::load(stored)?);
         let agent = stored
             .agent
             .iter()
@@ -84,11 +86,17 @@ impl ApprovedReach {
             .chain(tools)
             .chain(servers)
             .map(|(table, spec)| {
-                judge_filesystem(spec, &table, stored, protected_sources)
-                    .map(|reach| (table, reach))
+                let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
+                commands.validate_reach(&table, &reach)?;
+                reach.command = commands.get(&table).cloned();
+                Ok((table, reach))
             })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        Ok(Self { tables })
+            .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
+        Ok(Self { tables, commands })
+    }
+
+    pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
+        &self.commands
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -215,6 +223,10 @@ pub(crate) struct Boundary {
     containment_config: PathBuf,
     containment_config_file: std::fs::File,
     containment_digest: String,
+
+    /// Open grant references retained for this process launch.
+    #[cfg(target_os = "linux")]
+    _containment: ContainmentConfig,
 
     /// The process's environment, serialized for the trampoline.
     target_environment: String,
@@ -588,20 +600,21 @@ impl Boundary {
                 // path, which the credential-store exception validates on its own terms.
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
-            } else if let Some(directory) = &grant.execution_directory {
-                guard.judge(
-                    directory.prepared.resolved_path(),
-                    grant.operation,
-                    grant.scope,
-                )?;
-                containment.allow_prepared(
-                    directory.prepared.clone(),
-                    grant.operation,
-                    grant.scope,
-                )?
             } else {
                 allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
             };
+        }
+
+        if let Some(command) = reach.command.as_ref() {
+            command.verify()?;
+            if command.path() != program_identity {
+                return Err(ConfigError::Process {
+                    table: table.to_string(),
+                    reason: "configured command identity changed before launch".to_string(),
+                }
+                .into());
+            }
+            containment = containment.require_file_identity(command.path(), command.opened())?;
         }
 
         containment = protect_authorities(
@@ -707,6 +720,8 @@ impl Boundary {
             containment_config,
             containment_config_file,
             containment_digest,
+            #[cfg(target_os = "linux")]
+            _containment: containment,
             target_environment,
             disclosure,
             #[cfg(target_os = "linux")]
@@ -1298,6 +1313,155 @@ mod tests {
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
 
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
+        use crate::run::contain::supervise::LeafBox;
+        for streaming in [false, true] {
+            for (environment, expected) in [(true, "target environment"), (false, "target exec")] {
+                let fixture = Fixture::new();
+                let mut spec = fixture.spec();
+                spec.command.push("printf WORKLOAD_RAN".into());
+                let mut boundary = fixture.translate_full(
+                    &spec,
+                    "[tool.test]",
+                    RuntimeReach::Leaf,
+                    EgressMode::Native,
+                );
+                if environment {
+                    boundary.target_environment = "{".into();
+                } else {
+                    boundary.executable = "/setup-reporting-missing".into();
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    if streaming {
+                        LeafBox::spawn_streaming(boundary, &fixture.root)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        LeafBox::run(boundary, &fixture.root).await.map(|_| ())
+                    }
+                })
+                .await
+                .expect("setup must finish");
+                let error = result
+                    .expect_err("a setup failure must not become a workload result")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("containment setup failed during {expected}")),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
+        use crate::run::contain::supervise::LeafBox;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for code in [0, 3, 4, 5, 42] {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.command.push(format!("printf BUFFER_OK; exit {code}"));
+            let boundary = fixture.translate_full(
+                &spec,
+                "[tool.test]",
+                RuntimeReach::Leaf,
+                EgressMode::Native,
+            );
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                LeafBox::run(boundary, &fixture.root),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(output.status, code);
+            assert_eq!(output.stdout, b"BUFFER_OK");
+        }
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec();
+        spec.command
+            .push("read value; printf '%s' \"$value\"; exit 5".into());
+        let boundary =
+            fixture.translate_full(&spec, "[tool.test]", RuntimeReach::Leaf, EgressMode::Native);
+        let leaf = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            LeafBox::spawn_streaming(boundary, &fixture.root),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut parts = leaf.into_parts().expect("live streams");
+        assert!(parts.child.try_wait().unwrap().is_none());
+        parts.stdin.write_all(b"STREAM_OK\n").await.unwrap();
+        let mut output = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            parts.stdout.read_to_end(&mut output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parts.child.wait().await.unwrap().code(), Some(5));
+        assert_eq!(output, b"STREAM_OK");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    fn the_host_can_build_a_view() -> bool {
+        // SAFETY: the child uses syscalls only and calls `_exit`.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return true;
+        }
+        if child == 0 {
+            // SAFETY: syscall-only child.
+            unsafe {
+                let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+                if libc::unshare(namespaces) != 0 {
+                    libc::_exit(10);
+                }
+                let inner = libc::fork();
+                if inner < 0 {
+                    libc::_exit(12);
+                }
+                if inner == 0 {
+                    if libc::mount(
+                        c"proc".as_ptr(),
+                        c"/proc".as_ptr(),
+                        c"proc".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    ) != 0
+                    {
+                        libc::_exit(11);
+                    }
+                    libc::_exit(0);
+                }
+                let mut inner_status = 0;
+                libc::waitpid(inner, &mut inner_status, 0);
+                let mounted = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+                libc::_exit(if mounted { 0 } else { 11 });
+            }
+        }
+
+        let mut status = 0;
+        // SAFETY: wait for this process's child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        let usable = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        if !usable {
+            eprintln!("skipping: this host cannot build a namespace mount view");
+        }
+        usable
+    }
+
     /// One operator home holding a box root, a project, and the trees the specs below name.
     struct Fixture {
         operator: tempfile::TempDir,
@@ -1567,6 +1731,50 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_boundary_keeps_unlinked_grants_open_until_it_drops() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = Fixture::new();
+        let granted = fixture.path("retained-grant");
+        std::fs::write(&granted, "per-launch fixture").expect("write the granted file");
+        let granted = granted.canonicalize().expect("canonical granted file");
+        let metadata = std::fs::metadata(&granted).expect("record the granted object");
+        let identity = (metadata.dev(), metadata.ino());
+        let deleted = PathBuf::from(format!("{} (deleted)", granted.display()));
+        let has_open_reference = || {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("inspect this process's open references")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let path = entry.path();
+                    let Ok(target) = std::fs::read_link(&path) else {
+                        return false;
+                    };
+                    (target == granted || target == deleted)
+                        && std::fs::metadata(&path)
+                            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+                })
+        };
+        assert!(!has_open_reference(), "the fixture holds no file reference");
+        let mut spec = fixture.spec();
+        spec.filesystem.read_file.push(granted.clone());
+        let boundary = fixture.translate(&spec, "[tool.reader]", &[]);
+        std::fs::remove_file(&granted).expect("unlink the granted fixture");
+        assert!(!granted.exists(), "the pathname no longer holds the object");
+        assert!(
+            has_open_reference(),
+            "the translated boundary must retain its approved object"
+        );
+
+        drop(boundary);
+        assert!(
+            !has_open_reference(),
+            "the object reference must be released with its boundary"
+        );
     }
 
     /// A `box.toml` written into `directory` and loaded as one authority source.
