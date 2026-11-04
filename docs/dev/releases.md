@@ -60,12 +60,22 @@ It does not download and execute the published Linux package.
 
 ## Verify the Linux download
 
-Download the Linux archive and checksum file from the release.
-Follow the checksum and extraction commands in its release notes on the qualified Amazon Linux 2023 ARM64 host.
+Run the downloader on the qualified Amazon Linux 2023 ARM64 host.
+Set `release_tag` to the published tag you are verifying; `v0.1.1` below is an example.
+
+```sh
+release_tag=v0.1.1
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION="$release_tag" sh
+./box-core/box --version
+```
+
+The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
+If the release omits Linux, select a tag that includes its archive and checksum entry.
+The downloader does not fall back to an older release or a prerelease automatically.
+Manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
 Verify the reported version, an allowed operation, and a denied operation using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
 Linux startup still requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`.
 A stable version does not remove this runtime requirement or establish security acceptance.
-Use manual checksum verification and extraction; this workflow change does not add Linux support to `download.sh`.

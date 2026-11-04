@@ -75,8 +75,12 @@ jobs:
               - '.github/workflows/ci.yml'
 
   packaging:
-    name: Packaging tests
-    runs-on: ubuntu-latest
+    name: Packaging tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     timeout-minutes: 5
     cache-mode: read
     permissions:
@@ -87,8 +91,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Check release source and archive selection
+      - name: Check downloader syntax
+        run: sh -n download.sh
+      - name: Check release source, archive selection, and downloader behavior
+        if: runner.os == 'Linux'
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Check downloader behavior on macOS
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
 
   rust:
     name: Rust
