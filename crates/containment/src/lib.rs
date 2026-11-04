@@ -27,7 +27,7 @@ pub use model::{
     BackendOverride, IpcMode, Network, Operation, PreparedFilesystemPath, ProcessInfoMode, Scope,
     SignalMode,
 };
-pub use os_paths::{os_minimum_cells, os_runtime_cells};
+pub use os_paths::{ForbiddenClass, os_minimum_cells, os_runtime_cells};
 pub use platform::Platform;
 
 /// Containment operation result.

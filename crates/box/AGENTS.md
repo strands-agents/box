@@ -832,6 +832,13 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
+- **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
+  walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
+  atomic, and the walk stops at the first component it cannot see. A link removed between them, or
+  one behind a folder Box cannot search, can let the read record `::response`. That event is the
+  one a plain probe of the same reported path already records, and the refusal message does not
+  change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
+
 Do not treat any of these as settled by the code existing.
 
 - **A sibling box's stored state is reachable, and this is the sharpest one.** `Reach`'s `forbidden`
@@ -891,8 +898,9 @@ Do not treat any of these as settled by the code existing.
   in that window can show names and metadata outside the set. And the descriptor walk refuses
   symlinks, not a swap of two real directories (`RENAME_SWAP`, `RENAME_EXCHANGE`), by the workload or
   by a permitted `fs:move`. That effect stays inside the bind, and reaches only what those renames
-  followed by a permitted Shell effect already reach. It is not limited to native write reach: on
-  Linux a `deny` overmount moves with a renamed ancestor. **Do not** "simplify" `approve_one` into a bare `approve` call:
+  followed by a permitted Shell effect already reach. It is not limited to native write reach.
+  On Linux, a permitted Shell move outside the workload's mount namespace can still move a `deny`
+  overmount with its ancestor. **Do not** "simplify" `approve_one` into a bare `approve` call:
   `PathRefusal::Unreachable` and the outside-the-set case share one message, so a path whose
   spelling is inside a root but whose identity is not would silently become a pass.
 - **The alias image is readable by the workload on Linux, and execute-only breaks the launcher.**

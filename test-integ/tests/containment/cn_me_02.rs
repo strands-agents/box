@@ -104,7 +104,7 @@ det_case! {
         open.self_test();
         let (route_port, open_port) = (route.port(), open.port());
         let real = format!("DET_REAL_SECRET_ME02_{}", std::process::id());
-        let probe = b.compile_probe("leafprobe-me02", PROBE);
+        let probe = b.install_tool(&b.compile_probe("leafprobe-me02", PROBE));
         b.apply_policy(&policy([route_port, open_port]));
         let path = format!("{}:{}", server_dir().display(), std::env::var("PATH").unwrap_or_default());
         let env = [(VARIABLE, real.as_str()), ("PATH", path.as_str())];
