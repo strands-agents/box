@@ -311,8 +311,7 @@ mod tests {
     #[test]
     fn grammar_events_conform_to_reserved_schema_fields_and_retain_each_pending_identifier() {
         use crate::{Policy, PolicyEngine};
-        use dogwood_language::{EventFieldType, LoweredPolicySet, PolicySchema, Value};
-        use dogwood_local_engine::{DurableLog, Record};
+        use dogwood_language::{LoweredPolicySet, PolicySchema, Value};
 
         let git = valid("git");
         let history = tempfile::tempdir().expect("history directory");
@@ -375,14 +374,7 @@ mod tests {
                 .expect("completion records");
         }
         drop(engine);
-        let log = DurableLog::open(&path).expect("history opens");
-        let mut events = Vec::new();
-        log.scan_from(0, |_, bytes| {
-            if let Record::Event(event) = Record::decode(bytes).expect("record decodes") {
-                events.push(event);
-            }
-        })
-        .expect("history scans");
+        let events = crate::test_history::events(&path);
         assert_eq!(
             events.len(),
             5,
@@ -395,10 +387,7 @@ mod tests {
             (&events[3], &identifiers[1]),
             (&events[4], &identifiers[0]),
         ] {
-            assert_eq!(
-                event.field_path(&["requestId".to_string()]),
-                Some(&Value::String(expected.clone()))
-            );
+            assert_eq!(crate::test_history::identifier(event), expected.as_str());
         }
         assert_eq!(events[3].action(), "push");
         assert_eq!(events[4].action(), "status");
@@ -424,37 +413,7 @@ mod tests {
                         && signature.kind() == event.kind()
                 })
                 .expect("grammar event belongs to the declared event schema");
-            for declared in signature
-                .fields()
-                .filter(|field| !matches!(field.path()[0].as_str(), "input" | "output"))
-            {
-                let field = declared.path();
-                let ty = declared.field_type();
-                let value = event.field_path(field).unwrap_or_else(|| {
-                    panic!(
-                        "{}::{} lacks declared reserved field {}",
-                        event.action(),
-                        event.kind(),
-                        field.join(".")
-                    )
-                });
-                let conforms = match (ty, value) {
-                    (EventFieldType::Cedar(ty), Value::String(_)) => ty == "String",
-                    (EventFieldType::Cedar(ty), Value::Int(_)) => ty == "Long",
-                    (EventFieldType::Cedar(ty), Value::Bool(_)) => ty == "Boolean",
-                    (EventFieldType::EntityTypes(types), Value::Entity { ty, .. }) => {
-                        types.contains(ty)
-                    }
-                    _ => false,
-                };
-                assert!(
-                    conforms,
-                    "{}::{} field {} must match {ty:?}, got {value:?}",
-                    event.action(),
-                    event.kind(),
-                    field.join(".")
-                );
-            }
+            crate::test_event_schema::assert_reserved_fields(event, signature, false);
         }
     }
 

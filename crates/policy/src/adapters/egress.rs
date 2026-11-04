@@ -171,27 +171,22 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
         let decision = match effect {
             // Name resolution records a request only; each address has its own connect attempt.
-            EgressEffectAttempt::Resolve { host, port } => {
-                let (decision, request_id) = self.policy.decide(
-                    &self.governed,
-                    &self.principal,
-                    &Request::Connect {
-                        host,
-                        ip: None,
-                        port: *port,
-                    },
-                );
-                match decision {
-                    Decision::Deny {
-                        reason: DenyReason::PolicyPending,
-                        ..
-                    } if self.mcp_hosts.contains(*host) => Ok((None, None)),
-                    Decision::Deny { .. } => Err(decision.to_string()),
-                    Decision::Allow { .. } => {
-                        confirmed_request_id(request_id).map(|request_id| (Some(request_id), None))
-                    }
-                }
-            }
+            EgressEffectAttempt::Resolve { host, port } => match self.policy.admit(
+                &self.governed,
+                &self.principal,
+                &Request::Connect {
+                    host,
+                    ip: None,
+                    port: *port,
+                },
+            ) {
+                Ok(request_id) => Ok((Some(request_id), None)),
+                Err(Decision::Deny {
+                    reason: DenyReason::PolicyPending,
+                    ..
+                }) if self.mcp_hosts.contains(*host) => Ok((None, None)),
+                Err(decision) => Err(decision.to_string()),
+            },
             EgressEffectAttempt::Connect {
                 host,
                 port,
@@ -635,15 +630,9 @@ fn authorize(
     principal: &Principal,
     request: &Request<'_>,
 ) -> Result<RequestId, String> {
-    let (decision, request_id) = policy.decide(governed, principal, request);
-    match decision {
-        Decision::Allow { .. } => confirmed_request_id(request_id),
-        Decision::Deny { .. } => Err(decision.to_string()),
-    }
-}
-
-fn confirmed_request_id(request_id: Option<RequestId>) -> Result<RequestId, String> {
-    request_id.ok_or_else(|| Decision::internal_fault().to_string())
+    policy
+        .admit(governed, principal, request)
+        .map_err(|decision| decision.to_string())
 }
 
 fn diagnostic_context(value: &str) -> String {

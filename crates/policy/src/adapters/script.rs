@@ -100,8 +100,8 @@ impl<'p> ScriptPolicyInterceptor<'p> {
         let admitted = Self::classify(call, self.home.as_deref())
             .ok_or_else(|| ScriptRefusal::Unsupported(call.on_no_handler()))?;
 
-        let (decision, request_id) = match &admitted {
-            Admitted::Filesystem { path, operation } => self.policy.decide(
+        let admission = match &admitted {
+            Admitted::Filesystem { path, operation } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::Fs {
@@ -114,7 +114,7 @@ impl<'p> ScriptPolicyInterceptor<'p> {
             Admitted::Ungoverned => return Ok(self.permit(admitted, None)),
         };
 
-        let request_id = admitted_request_id(decision, request_id)?;
+        let request_id = admission.map_err(ScriptRefusal::Denied)?;
         Ok(self.permit(admitted, Some(request_id)))
     }
 
@@ -283,56 +283,43 @@ impl<'p> ScriptPolicyInterceptor<'p> {
         let source = resolve(args.src.as_str(), home);
         let destination = resolve(args.dst.as_str(), home);
 
+        let authorize = |request: &Request<'_>| {
+            self.policy
+                .admit(&self.governed, &self.principal, request)
+                .map_err(ScriptRefusal::Denied)
+        };
+
         // A move of the source name still makes the source's bytes reachable through the
         // destination. Without this leg, a `forbid fs:read` on the source is laundered by a
         // permitted rename and a later read from the new name.
-        let (source_read_decision, source_read_id) = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
-                path: &source,
-                operation: FsOperation::ReadContent,
-            },
-        );
-        let source_read_id = admitted_request_id(source_read_decision, source_read_id)?;
+        let source_read_id = authorize(&Request::Fs {
+            path: &source,
+            operation: FsOperation::ReadContent,
+        })?;
 
         // The source is being removed from its name, which is a write to it.
-        let (source_decision, source_id) = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
-                path: &source,
-                operation: FsOperation::Rename,
-            },
-        );
-        admitted_request_id(source_decision, source_id)?;
+        authorize(&Request::Fs {
+            path: &source,
+            operation: FsOperation::Rename,
+        })?;
 
         // A name bound at the destination is removed by the rename, so that removal is
         // decided as `fs:delete` on the destination before the move onto it.
         let destination_removal = bound_at(destination.as_path()).removal();
         let removal_id = if let Some(removal) = destination_removal {
-            let (removal_decision, removal_id) = self.policy.decide(
-                &self.governed,
-                &self.principal,
-                &Request::Fs {
-                    path: &destination,
-                    operation: removal,
-                },
-            );
-            Some(admitted_request_id(removal_decision, removal_id)?)
+            let removal_id = authorize(&Request::Fs {
+                path: &destination,
+                operation: removal,
+            })?;
+            Some(removal_id)
         } else {
             None
         };
 
-        let (destination_decision, destination_id) = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
-                path: &destination,
-                operation: FsOperation::Rename,
-            },
-        );
-        let destination_id = admitted_request_id(destination_decision, destination_id)?;
+        let destination_id = authorize(&Request::Fs {
+            path: &destination,
+            operation: FsOperation::Rename,
+        })?;
 
         let permit = ScriptPermit {
             policy: self.policy,
@@ -354,22 +341,6 @@ impl<'p> ScriptPolicyInterceptor<'p> {
             permit,
         ))
     }
-}
-
-fn admitted_request_id(
-    decision: Decision,
-    request_id: Option<RequestId>,
-) -> Result<RequestId, ScriptRefusal> {
-    match decision {
-        Decision::Allow { .. } => {
-            request_id.ok_or_else(|| policy_refusal(&Decision::internal_fault()))
-        }
-        Decision::Deny { .. } => Err(policy_refusal(&decision)),
-    }
-}
-
-fn policy_refusal(decision: &Decision) -> ScriptRefusal {
-    ScriptRefusal::Denied(decision.clone())
 }
 
 /// What a rename finds bound at its destination.

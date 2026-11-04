@@ -325,7 +325,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 }
             }
         }
-        let (decision, request_id) = match effect {
+        let admission = match effect {
             // One resolved command. The Shell has already parsed, expanded, and resolved
             // it, so `program` is what will run rather than what was typed.
             EffectAttempt::ShellRun {
@@ -336,7 +336,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 // `literal` is deliberately unread: a decision is about what runs, never about
                 // how a word was spelled. Reading it would make the spelling a policy input.
                 ..
-            } => self.policy.decide(
+            } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::ShellExec {
@@ -354,7 +354,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 args,
                 cwd,
                 ..
-            } => self.policy.decide(
+            } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::ShellSpawn {
@@ -372,7 +372,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             // its own, which is the LIVE GAP recorded in the crate's `AGENTS.md`.
             EffectAttempt::Filesystem { path, operation } => {
                 let approved = ApprovedPath::under_home(*path, self.home.as_deref());
-                self.policy.decide(
+                self.policy.admit(
                     &self.governed,
                     &self.principal,
                     &Request::Fs {
@@ -416,9 +416,9 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 );
                 let destination = ApprovedPath::under_home(*to, self.home.as_deref());
                 let authorize = |request: &Request<'_>| {
-                    let (decision, request_id) =
-                        self.policy.decide(&self.governed, &self.principal, request);
-                    admitted_request_id(decision, request_id)
+                    self.policy
+                        .admit(&self.governed, &self.principal, request)
+                        .map_err(|decision| denied(&decision))
                 };
                 // Stop at the first refusal. Each recorded outcome keeps its own leg's token.
                 authorize(&Request::Fs {
@@ -474,20 +474,13 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             }
         };
 
-        let request_id = admitted_request_id(decision, request_id)?;
+        let request_id = admission.map_err(|decision| denied(&decision))?;
         Ok(self.permit(Admitted::capture(
             effect,
             credential_reads,
             reported_program_path.as_deref(),
             request_id,
         )))
-    }
-}
-
-fn admitted_request_id(decision: Decision, request_id: Option<RequestId>) -> io::Result<RequestId> {
-    match decision {
-        Decision::Allow { .. } => request_id.ok_or_else(|| denied(&Decision::internal_fault())),
-        Decision::Deny { .. } => Err(denied(&decision)),
     }
 }
 

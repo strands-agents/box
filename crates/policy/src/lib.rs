@@ -26,6 +26,13 @@ mod rerun;
 mod schema;
 mod spelling;
 
+#[cfg(test)]
+#[path = "../tests/support/event_schema.rs"]
+mod test_event_schema;
+#[cfg(test)]
+#[path = "../tests/support/history.rs"]
+mod test_history;
+
 #[cfg(feature = "egress-adapter")]
 pub use adapters::egress::EgressPolicyInterceptor;
 #[cfg(feature = "script-adapter")]

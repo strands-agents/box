@@ -1,11 +1,14 @@
 //! Request identifiers make completed HTTP operations visible to temporal limits.
 
+#[path = "support/history.rs"]
+mod history;
 mod support;
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use history::{events as stored_events, identifier};
 
-use dogwood_language::{Event, Value};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
 use dogwood_local_engine::{DurableLog, DurableTemporalEngine, Record};
 
 use policy::{
@@ -53,41 +56,9 @@ fn response() -> Outcome<'static> {
 
 fn assert_second_request_is_forbidden(predicate: &str) {
     let engine = tripwire(predicate);
-    let governed = GovernedBox::assigned("request-id-test");
-    let principal = Principal::agent();
-    let (first, request_id) = engine.decide(&governed, &principal, &request());
-    assert!(
-        first.is_allow(),
-        "the first request must be permitted: {first:?}"
-    );
-    engine
-        .record(
-            &governed,
-            &principal,
-            &request_id.expect("the request records"),
-            &response(),
-        )
-        .expect("the completed HTTP operation enters history");
-
-    let second = engine.decide(&governed, &principal, &request()).0;
-    assert!(
-        matches!(
-            second,
-            Decision::Deny {
-                reason: DenyReason::Forbidden,
-                ..
-            }
-        ),
-        "the recorded response must forbid the second request: {second:?}"
-    );
-    assert!(
-        second
-            .attribution()
-            .iter()
-            .any(|policy| policy.annotation_id.as_deref() == Some("tripwire")),
-        "the tripwire must cause the denial: {:?}",
-        second.attribution()
-    );
+    let request_id = admitted(&engine);
+    completed(&engine, &request_id);
+    assert_forbidden_by(&decide(&engine).0, "tripwire");
 }
 
 #[test]
@@ -141,41 +112,14 @@ fn an_unrecorded_operation_does_not_trip_a_response_limit() {
 fn durable_http_history_preserves_one_identifier_for_each_operation() {
     let history = tempfile::tempdir().expect("the history directory");
     let path = history.path().join("dogwood.redb");
-    let engine = PolicyEngine::open(
-        vec![Policy {
-            origin: PathBuf::from("http-permit.dw"),
-            text: r#"permit (principal, action == Box::Action::"http:request", resource);"#
-                .to_string(),
-        }],
-        &path,
-    )
-    .expect("the HTTP policy opens");
-    let governed = GovernedBox::assigned("request-id-test");
-    let principal = Principal::agent();
+    let engine = PolicyEngine::open(permit(), &path).expect("the HTTP policy opens");
     for _ in 0..2 {
-        let (decision, request_id) = engine.decide(&governed, &principal, &request());
-        assert!(decision.is_allow());
-        engine
-            .record(
-                &governed,
-                &principal,
-                &request_id.expect("the request records"),
-                &response(),
-            )
-            .expect("the response records");
+        let request_id = admitted(&engine);
+        completed(&engine, &request_id);
     }
     drop(engine);
 
-    let log = dogwood_local_engine::DurableLog::open(&path).expect("the durable history reopens");
-    let mut events = Vec::new();
-    log.scan_from(0, |_, bytes| {
-        if let dogwood_local_engine::Record::Event(event) =
-            dogwood_local_engine::Record::decode(bytes).expect("the record decodes")
-        {
-            events.push(event);
-        }
-    })
-    .expect("the stored events can be read");
+    let events = stored_events(&path);
     assert_eq!(
         events.len(),
         4,
@@ -185,15 +129,7 @@ fn durable_http_history_preserves_one_identifier_for_each_operation() {
         .iter()
         .map(|event| {
             assert_eq!(event.action(), "http:request");
-            match event.field_path(&["requestId".to_string()]) {
-                Some(dogwood_language::Value::String(identifier)) if !identifier.is_empty() => {
-                    identifier
-                }
-                value => panic!(
-                    "{} must store a nonempty requestId string: {value:?}",
-                    event.kind()
-                ),
-            }
+            identifier(event)
         })
         .collect();
     assert_eq!(
@@ -221,24 +157,16 @@ fn permit() -> Vec<Policy> {
     }]
 }
 
-fn stored_events(path: &Path) -> Vec<Event> {
-    let log = DurableLog::open(path).expect("durable history opens");
-    let mut events = Vec::new();
-    log.scan_from(0, |_, bytes| {
-        if let Record::Event(event) = Record::decode(bytes).expect("record decodes") {
-            events.push(event);
-        }
-    })
-    .expect("history scans");
-    events
-}
-
-fn admitted(engine: &PolicyEngine) -> RequestId {
-    let (decision, request_id) = engine.decide(
+fn decide(engine: &PolicyEngine) -> (Decision, Option<RequestId>) {
+    engine.decide(
         &GovernedBox::assigned("request-id-test"),
         &Principal::agent(),
         &request(),
-    );
+    )
+}
+
+fn admitted(engine: &PolicyEngine) -> RequestId {
+    let (decision, request_id) = decide(engine);
     assert!(
         decision.is_allow(),
         "the operation must be admitted: {decision:?}"
@@ -275,16 +203,6 @@ fn assert_forbidden_by(decision: &Decision, annotation: &str) {
             .any(|policy| policy.annotation_id.as_deref() == Some(annotation)),
         "the expected {annotation} monitor must cause the denial: {decision:?}"
     );
-}
-
-fn identifier(event: &Event) -> &str {
-    match event.field_path(&["requestId".to_string()]) {
-        Some(Value::String(value)) if !value.is_empty() => value,
-        other => panic!(
-            "{} must carry a nonempty requestId: {other:?}",
-            event.kind()
-        ),
-    }
 }
 
 #[test]
@@ -356,22 +274,9 @@ fn a_literal_request_id_predicate_observes_the_matching_response() {
         ),
     });
     engine.reload(&rules).expect("literal predicate installs");
-    assert!(
-        engine
-            .decide(
-                &GovernedBox::assigned("request-id-test"),
-                &Principal::agent(),
-                &request()
-            )
-            .0
-            .is_allow()
-    );
+    assert!(decide(&engine).0.is_allow());
     completed(&engine, &pending);
-    let (decision, _) = engine.decide(
-        &GovernedBox::assigned("request-id-test"),
-        &Principal::agent(),
-        &request(),
-    );
+    let (decision, _) = decide(&engine);
     assert!(
         !decision.is_allow(),
         "the response must match its literal requestId: {decision:?}"
@@ -424,14 +329,7 @@ fn failed_http_outcomes_trip_identifier_error_predicates_and_leave_response_pred
             )
             .expect("the failed operation records");
         assert_eq!(
-            engine
-                .decide(
-                    &GovernedBox::assigned("request-id-test"),
-                    &Principal::agent(),
-                    &request()
-                )
-                .0
-                .is_allow(),
+            decide(&engine).0.is_allow(),
             allowed_after_failure,
             "a failed operation must enter only the error monitor"
         );
@@ -490,11 +388,7 @@ fn a_denied_request_records_an_id_without_fabricating_an_outcome() {
         &path,
     )
     .expect("authority opens");
-    let (decision, request_id) = engine.decide(
-        &GovernedBox::assigned("request-id-test"),
-        &Principal::agent(),
-        &request(),
-    );
+    let (decision, request_id) = decide(&engine);
     assert!(matches!(
         decision,
         Decision::Deny {
@@ -721,11 +615,7 @@ fn an_identifier_guard_stays_closed_across_checkpoints_and_reopen() {
     let mut identifiers = BTreeSet::from([first.as_str().to_string()]);
     completed(&engine, &first);
     for iteration in 0..20_050 {
-        let (decision, request_id) = engine.decide(
-            &GovernedBox::assigned("request-id-test"),
-            &Principal::agent(),
-            &request(),
-        );
+        let (decision, request_id) = decide(&engine);
         assert!(
             !decision.is_allow(),
             "the guard must stay closed at submission {iteration}"
@@ -760,11 +650,7 @@ fn an_identifier_guard_stays_closed_across_checkpoints_and_reopen() {
         );
     }
     let engine = PolicyEngine::open(sources(), &path).expect("checkpointed history reopens");
-    let (decision, request_id) = engine.decide(
-        &GovernedBox::assigned("request-id-test"),
-        &Principal::agent(),
-        &request(),
-    );
+    let (decision, request_id) = decide(&engine);
     assert!(
         !decision.is_allow(),
         "the identifier monitor must survive checkpoint replay"

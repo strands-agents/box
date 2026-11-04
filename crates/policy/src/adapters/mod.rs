@@ -31,30 +31,7 @@ pub(crate) mod shell;
     )
 ))]
 mod correlation_tests {
-    pub(super) fn events(path: &std::path::Path) -> Vec<dogwood_language::Event> {
-        let log = dogwood_local_engine::DurableLog::open(path).expect("history opens");
-        let mut events = Vec::new();
-        log.scan_from(0, |_, bytes| {
-            if let dogwood_local_engine::Record::Event(event) =
-                dogwood_local_engine::Record::decode(bytes).expect("history decodes")
-            {
-                events.push(event);
-            }
-        })
-        .expect("history scans");
-        events
-    }
-
-    pub(super) fn id(event: &dogwood_language::Event) -> String {
-        match event.field_path(&["requestId".to_string()]) {
-            Some(dogwood_language::Value::String(id)) if !id.is_empty() => id.clone(),
-            value => panic!(
-                "{} {} lacks its request identifier: {value:?}",
-                event.action(),
-                event.kind()
-            ),
-        }
-    }
+    pub(super) use crate::test_history::{events, identifier as id};
 
     pub(super) fn assert_pair(
         request: &dogwood_language::Event,

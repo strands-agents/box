@@ -316,6 +316,25 @@ impl PolicyEngine {
         self.decide_request(governed, principal, ActionRequest::Request(request))
     }
 
+    /// Admit an effect with its confirmed request token or return the refusal.
+    #[cfg(any(
+        feature = "egress-adapter",
+        feature = "script-adapter",
+        feature = "shell-adapter"
+    ))]
+    pub(crate) fn admit(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> Result<RequestId, Decision> {
+        let (decision, request_id) = self.decide(governed, principal, request);
+        match decision {
+            Decision::Allow { .. } => request_id.ok_or_else(Decision::internal_fault),
+            denied => Err(denied),
+        }
+    }
+
     /// Decide one request through the one authority, then name and report the verdict.
     fn decide_request(
         &self,

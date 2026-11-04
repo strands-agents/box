@@ -1,29 +1,21 @@
 //! Check reserved history fields from public producers against the declared event schema.
 
+#[path = "support/event_schema.rs"]
+mod event_schema;
+#[path = "support/history.rs"]
+mod history;
+
+use event_schema::assert_reserved_fields;
+use history::{events, identifier};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use dogwood_language::{
-    Event, EventFieldType, LoweredPolicySet, PolicySchema, ServiceSchema, Value,
-};
-use dogwood_local_engine::{DurableLog, Record};
+use dogwood_language::{LoweredPolicySet, PolicySchema, ServiceSchema};
 use policy::{
     Delivery, FsOperation, FsResult, GovernedBox, Outcome, PathResolver, Policy, PolicyEngine,
     Principal, Request, compose_action_schema, event_schema_source, generate_mcp_schema,
 };
-
-fn events(path: &Path) -> Vec<Event> {
-    let log = DurableLog::open(path).expect("history opens");
-    let mut events = Vec::new();
-    log.scan_from(0, |_, bytes| {
-        if let Record::Event(event) = Record::decode(bytes).expect("record decodes") {
-            events.push(event);
-        }
-    })
-    .expect("history scans");
-    events
-}
 
 fn record_operation(
     engine: &PolicyEngine,
@@ -289,11 +281,11 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
         identifiers.len(),
         "every admission and outcome records once"
     );
-    for (event, identifier) in stored.iter().zip(&identifiers) {
-        assert!(!identifier.is_empty());
+    for (event, expected_id) in stored.iter().zip(&identifiers) {
+        assert!(!expected_id.is_empty());
         assert_eq!(
-            event.field_path(&["requestId".to_string()]),
-            Some(&Value::String(identifier.clone())),
+            identifier(event),
+            expected_id,
             "each outcome must retain its own request's token"
         );
         let signature = signatures
@@ -304,42 +296,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                     && signature.kind() == event.kind()
             })
             .expect("every emitted event belongs to the declared schema");
-        // Reserved fields are all declared leaves outside the action's input/output records.
-        // Derive this list; a new declaration must fail here until every producer supplies it.
-        for declared in signature
-            .fields()
-            .filter(|field| !matches!(field.path()[0].as_str(), "input" | "output"))
-        {
-            let field = declared.path();
-            let ty = declared.field_type();
-            let value = event.field_path(field).unwrap_or_else(|| {
-                panic!(
-                    "{}::{} lacks declared reserved field {}",
-                    event.action(),
-                    event.kind(),
-                    field.join(".")
-                )
-            });
-            let conforms = match (ty, value) {
-                (EventFieldType::Cedar(ty), Value::String(_)) => ty == "String",
-                (EventFieldType::Cedar(ty), Value::Int(_)) => ty == "Long",
-                (EventFieldType::Cedar(ty), Value::Bool(_)) => ty == "Boolean",
-                (EventFieldType::EntityTypes(types), Value::Entity { ty, .. }) => {
-                    let namespace = &signature.namespace()[..signature.namespace().len() - 1];
-                    types.iter().any(|declared| {
-                        declared == ty || format!("{}::{declared}", namespace.join("::")) == *ty
-                    })
-                }
-                _ => false,
-            };
-            assert!(
-                conforms,
-                "{}::{} field {} must match {ty:?}, got {value:?}",
-                event.action(),
-                event.kind(),
-                field.join(".")
-            );
-        }
+        assert_reserved_fields(event, signature, true);
     }
     let emitted: BTreeSet<_> = stored
         .iter()
@@ -386,11 +343,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
     let requests: Vec<_> = stored
         .iter()
         .filter(|event| event.kind() == "request")
-        .map(|event| {
-            event
-                .field_path(&["requestId".to_string()])
-                .expect("request has identifier")
-        })
+        .map(identifier)
         .collect();
     for (index, identifier) in requests.iter().enumerate() {
         assert!(
