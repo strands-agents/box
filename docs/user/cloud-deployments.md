@@ -6,7 +6,10 @@ Use it to prepare and check a deployment. It supplies configuration guidance, no
 
 ## Install and configure Box
 
-Install Box for the architecture reported by `uname -m`.
+Box publishes Linux packages only for ARM64 (`aarch64-unknown-linux-gnu`), built against Amazon Linux 2023.
+Choose a [release that includes Linux](https://github.com/strands-agents/box/releases) and follow its Linux download and checksum instructions.
+Use an ARM64 runtime, container, or MicroVM. Check that `uname -m` reports `aarch64`.
+
 Install `box`, `strands-box-contain-trampoline`, and `strands-box-sock-alias` from the same build in one directory.
 Both helpers must be regular executable files. Box refuses helper symlinks and files without executable permissions.
 Set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the environment that starts Box.
@@ -22,7 +25,7 @@ Installing dependencies cannot overcome an outer service restriction on those op
 
 | Requirement | Operator action | Reason |
 | --- | --- | --- |
-| Architecture | Match the Box executables and application image to the service architecture. Check `uname -m`. | Executables and system-call filters depend on the architecture. |
+| Architecture | Select ARM64 for the service, Box executables, and application image. Check `uname -m`. | Executables and system-call filters depend on the architecture. |
 | System libraries | Provide the dynamic loader and libraries required by your Box build. | A package name alone does not establish binary compatibility. |
 | Namespaces | Permit user, mount, process, interprocess communication, and hostname namespaces. Permit a private network namespace for default networking. | A user-namespace probe alone does not test the full setup. |
 | Identity and mounts | Permit identity mapping, bind mounts, private temporary filesystems, a process filesystem, and root replacement. | Box constructs a separate filesystem and process view. |
@@ -79,7 +82,7 @@ Configure each listener to match the service settings and check the hooks inside
 | Configuration | Operator action |
 | --- | --- |
 | Managed base | Record the managed base and its version separately from the application image digest. |
-| Architecture | Match the application and Box executables to the MicroVM architecture. |
+| Architecture | Select ARM64 for the MicroVM, application, and Box executables. |
 | Identity and capabilities | Check namespace and mount setup under the selected user and capability profile. |
 | Application | Configure the application listener and lifecycle-hook listener separately, for example on ports `8080` and `9000`. |
 | Lifecycle hooks | Handle ready, validate, run, resume, suspend, and terminate transitions. Track the active task across them. |
