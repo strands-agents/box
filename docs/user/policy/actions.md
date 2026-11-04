@@ -162,6 +162,10 @@ more:
 The request and outcome record the same `cwd` spelling. The command runs in the original filesystem
 directory.
 
+A program bound to a tool grammar raises its `Tool::<name>::Action` rather than `shell:spawn`.
+Grammar actions retain the original absolute `cwd` in decisions and history, including directories
+under the operator home. Use that absolute path in directory predicates for grammar actions.
+
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
 the shell's own programs, and a `shell:spawn` permit covers a program of the surrounding OS. A
