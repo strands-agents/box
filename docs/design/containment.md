@@ -457,7 +457,7 @@ That's also why a `[tool.<name>.filesystem]` table holds six lists: `read`, `wri
 `write_file`, `list`, and `deny`. Box refuses `exec` and `metadata` there, because the tool's sandbox
 already has both.
 
-A tool's sandbox has no route back to Box. Box takes the alias directory off its `PATH`, hides the
+A tool's sandbox has no route back to its own box. Box takes the alias directory off its `PATH`, hides the
 box directory that holds the aliases, and gives it no connect rule for the broker's socket. A tool
 can't ask Box to start another program in a sandbox of its own, or ask Strands Shell to act for the
 agent. What comes back is its output and its exit status. Its network traffic goes through the egress gateway, unless its
@@ -465,6 +465,9 @@ agent. What comes back is its output and its exit status. Its network traffic go
 access with the arguments the agent passes, and removes gateway checks, credential injection, and
 traffic records for it
 ([native egress is an operator-declared exception to the gateway](decisions.md#native-egress-is-an-operator-declared-leaf-escape)).
+
+Another box's broker socket can remain reachable beneath a writable directory.
+Apply the [placement and access guidance](../user/config.md#protect-other-boxes) to other boxes.
 
 <a id="local-mcp-servers"></a>
 ### A local MCP server's sandbox
@@ -520,7 +523,7 @@ argument skips the two things that make a tool's sandbox safe to widen:
 - **Policy admits each tool and each local MCP server:** the operator's `shell:spawn` permits
   decide which programs can start, and each decision admits one launch of one program. The agent's
   sandbox exists from the start of the run and runs model output for all of it.
-- **A tool's or server's sandbox has no route back to Box:** it holds no alias and no route to the
+- **A tool's or server's sandbox has no route back to its own box:** it holds no alias and no route to that
   broker. The agent holds both, so whatever it can do with its own system calls, it can combine with every request it makes
   through Strands Shell, Monty, and the MCP servers.
 

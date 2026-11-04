@@ -107,6 +107,43 @@ and remove the directory after `run` has exited to delete one. Do not remove the
 its `run` is alive: on macOS, the kernel kills a shell or Python call of that box whose program file
 loses a name during its security assessment.
 
+<a id="protect-other-boxes"></a>
+### Keep other boxes' configuration and state outside write access
+
+Keep each box's configuration, policy, and generated state in locations controlled by the operator.
+Do not grant a workload write access to another box's `box_dir`, configuration file (`box.toml`), or policy file (`policy.dw`).
+Keep each policy file outside every other box's filesystem grants.
+Review the filesystem lists for the agent, tools, and local MCP servers before starting a workload.
+
+A directory grant can include another box's files beneath that directory.
+For example, write access to `/work/projects` can include a second box's configuration under `/work/projects/other-box`.
+Box protects the configuration and policy that the current run loaded.
+It does not automatically discover and protect every other box's files.
+A directory name such as `.strands-box` alone provides no protection for another box.
+If a workload changes another box's configuration or policy, that box reads the changes on its next run.
+
+Write access that includes another running box's `box_dir` can also expose its broker socket, `run/box.sock`.
+Requests through that socket use the receiving box's policy.
+
+If a filesystem grant must enclose another box, add native exclusions through `filesystem.deny`.
+Exclude that box's `box_dir` and the directories that hold its configuration and policy.
+Apply these exclusions to the agent, each tool, and each local MCP server with the grant.
+These exclusions also block connections through the other box's `run/box.sock` path.
+On Linux, these directories must exist before startup.
+
+The startup output lists each filesystem grant, including a broad grant that encloses another box's directory.
+Inspect these paths for access to other boxes' files.
+The output reports the granted access and does not remove another box's files from it.
+The workload starts without waiting for you to approve that output.
+
+Restrict file operations through Strands Shell and Monty separately with [policy `forbid` rules](policy.md#common-rules).
+Protect each other box's `box_dir` and the directories that hold its configuration and policy.
+Cover each directory and its descendants for [`fs:read`, `fs:write`, `fs:delete`, and `fs:move`](policy/actions.md#filesystem).
+Also forbid `fs:move` on enclosing directories that could relocate these protected paths.
+
+A `forbid` overrides matching permits. Adding a narrower permit leaves any broader permit active.
+A native `filesystem.deny` entry does not restrict these requests through the box's trusted process.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:
