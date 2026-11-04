@@ -293,35 +293,23 @@ fn when_the_callback_panics_then_shutdown_reaps_the_separate_workload() {
 fn when_readiness_times_out_then_shutdown_reaps_the_separate_workload() {
     let tmp = tempfile::tempdir().unwrap();
     let (b, _workload) = descendant_fixture(tmp.path(), false);
-    let child = WorkloadChild(
-        Command::new(&b.box_bin)
-            .arg("run")
-            .current_dir(&b.ws)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut child = child;
-        let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !tmp.path().join("supervisor.ready").exists() {
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "the fixture supervisor exited before initialization"
-            );
-            assert!(
-                std::time::Instant::now() < startup_deadline,
-                "the fixture supervisor did not initialize"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!b.ready_marker().exists());
-        child.wait_for_ready(&b.ready_marker(), Duration::from_millis(100));
+        // Give the fixture its startup budget while exercising the helper's timeout cleanup.
+        b.spawn_meanwhile_with_timeouts(
+            "unused",
+            &[],
+            || panic!("callback must not run"),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
     }));
     assert!(
         super::super::panic_message(&result.unwrap_err())
             .contains("never touched the ready marker")
+    );
+    assert!(
+        tmp.path().join("supervisor.ready").exists() && tmp.path().join("workload.pid").exists(),
+        "the fixture supervisor did not initialize within its ten-second startup budget"
     );
     assert_shutdown_reaped_workload(tmp.path());
 }
