@@ -420,6 +420,8 @@ mod tests {
             bindings.declare(&shim, "node");
             bindings.declare(&shim, "cargo");
         }
+        let _original_shim = std::fs::File::open(host.path(RENAMED_MISE))
+            .expect("the replaced shim stays open so its file identity cannot be reused");
         host.replace(RENAMED_MISE);
         host.program(SECOND_MISE);
         std::fs::remove_file(host.path(LINKED_MISE)).expect("the old link is removed");

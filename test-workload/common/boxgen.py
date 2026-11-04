@@ -151,10 +151,9 @@ codex_binary = ""
 
 if AGENT == "claude":
     allowed = man.get("tools_allow", "Glob,Grep,Read,Write,Edit,Bash")
-    # A dimension may run the agent through a launcher instead of the binary: on
-    # Amazon Linux 2023 a hook execs /bin/sh, which is a symbolic link no grant may
-    # name, and a `#!/bin/sh` launcher's own interpreter chain brings it into the
-    # view under the spelling the child asks for.
+    # A dimension may run the agent through a launcher instead of the binary.
+    # Its manifest grants each interpreter's canonical path; Linux translation
+    # preserves the shebang spelling the agent's hook uses.
     prog = (plat_items("agent_program") or [P["CLAUDE"]])[0]
     agent_cmd = [prog, "--allowedTools", allowed] + plat_items("agent_args")
     agent_env = {
@@ -211,11 +210,10 @@ elif AGENT == "codex":
     if not launcher and os.environ.get("WL_CODEX_BINARY"):
         codex_binary = os.path.realpath(os.environ["WL_CODEX_BINARY"])
     if launcher:
-        # A dimension may run the agent through a launcher — a hook execs /bin/sh,
-        # which is a symbolic link on Amazon Linux 2023 that no grant may name, and
-        # a `#!/bin/sh` launcher's own interpreter chain brings it into the view
-        # (F49). When a launcher is named it carries the fixed arguments itself, so
-        # `command` is the launcher alone and `run -- …` still appends the prompt.
+        # A dimension may run the agent through a launcher. Its manifest grants
+        # the canonical interpreter; Linux translation preserves the /bin/sh
+        # spelling a hook uses (F49). The launcher carries the fixed arguments,
+        # so `command` is the launcher alone and `run -- …` appends the prompt.
         agent_cmd = [launcher[0]]
     elif codex_binary:
         agent_cmd = [codex_binary, "exec",
