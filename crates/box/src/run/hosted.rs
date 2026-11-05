@@ -456,14 +456,18 @@ impl McpLeafLauncher {
         .ok()
     }
 
-    /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
-    pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
-        let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
+    /// Prepare the server boundary with its effective launch arguments.
+    pub(crate) fn prepare(
+        &self,
+        server: &crate::record::config::mcp::McpServer,
+        received: &[String],
+    ) -> Result<Boundary, BoxError> {
+        let contained = self.record.contained_mcp.get(&server.name).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
-                reason: format!("no contained MCP server named {server:?}"),
+                reason: format!("no contained MCP server named {:?}", server.name),
             })
         })?;
-        let table = format!("[mcp.{server}]");
+        let table = format!("[mcp.{}]", server.name);
         let reach = self.approved.table(&table).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
                 reason: format!("{table} has no reach judged for this run"),
@@ -476,7 +480,7 @@ impl McpLeafLauncher {
             protected_sources: &self.protected_sources,
         };
         let egress = EgressMode::for_spec(&contained.spec);
-        Boundary::translate(
+        let boundary = Boundary::translate(
             &contained.spec,
             Launch {
                 table: &table,
@@ -489,7 +493,32 @@ impl McpLeafLauncher {
                 approved: Some(reach),
             },
             &site,
-        )
+        )?;
+        if !server.argument_wildcards {
+            return Ok(boundary);
+        }
+        if received.len() != boundary.arguments().len() {
+            return Err(ConfigError::Mcp {
+                name: server.name.clone(),
+                reason: "received argument count differs from the configured command".into(),
+            }
+            .into());
+        }
+        let arguments = contained
+            .spec
+            .fixed_arguments()
+            .iter()
+            .zip(boundary.arguments())
+            .zip(received)
+            .map(|((declared, expanded), received)| {
+                if declared == "*" {
+                    received.clone()
+                } else {
+                    expanded.clone()
+                }
+            })
+            .collect();
+        Ok(boundary.with_arguments(arguments))
     }
 
     /// Spawn the contained streaming leaf `boundary` describes.
@@ -799,16 +828,19 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
-        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
-            match record.contained_mcp.get(&server.name) {
-                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
-                    &contained.spec,
-                    &attachment,
-                )
-                .ok(),
-                None => Some(server.arguments().to_vec()),
-            }
-        })?;
+        let launched = |server: &crate::record::config::mcp::McpServer| match record
+            .contained_mcp
+            .get(&server.name)
+        {
+            Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                &contained.spec,
+                &attachment,
+            )
+            .ok(),
+            None => Some(server.arguments().to_vec()),
+        };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, launched)?;
+        crate::record::config::mcp::refuse_overlapping_wildcard_commands(&record.mcp, launched)?;
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge_with(
             record,
@@ -1019,6 +1051,8 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
             name: "codex".to_string(),
@@ -1232,6 +1266,7 @@ mod tests {
         record_with_mcp(
             root,
             vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "alpha".to_string(),
                 command: vec!["alpha-mcp".to_string()],
             }],
@@ -1588,6 +1623,7 @@ wait"#;
             &root,
             vec![
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "alpha".to_string(),
                     command: vec![
                         "/bin/sh".to_string(),
@@ -1599,6 +1635,7 @@ wait"#;
                     ],
                 },
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "beta".to_string(),
                     command: vec!["/bin/false".to_string()],
                 },
@@ -2166,11 +2203,16 @@ while :; do :; done"#
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 None,
             );
-            launcher.prepare("alpha").expect("unchanged grant");
+            let server = crate::record::config::mcp::McpServer {
+                name: "alpha".into(),
+                command: Vec::new(),
+                argument_wildcards: false,
+            };
+            launcher.prepare(&server, &[]).expect("unchanged grant");
             std::fs::rename(&granted, operator.join("moved")).expect("move granted file");
             std::fs::create_dir(&granted).expect("replace file grant with directory");
             let refusal = launcher
-                .prepare("alpha")
+                .prepare(&server, &[])
                 .err()
                 .expect("changed grant refused");
             let message = refusal.to_string();
@@ -2196,6 +2238,8 @@ while :; do :; done"#
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),

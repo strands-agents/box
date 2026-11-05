@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds nine keys, and the four inputs still stand
+//! # The configuration holds eleven keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
@@ -44,6 +44,10 @@
 //! reserved variable, so it cannot reach proxy routing, CA trust, or the fixed identity, and it
 //! makes no path reachable. `[agent.filesystem]` IS reach the policy does not judge, disclosed on
 //! stderr at startup; it grants no authority over which requests are governed.
+//!
+//! `file-attributes` lets each macOS write grant also set file times, which brings set-ID bits, the
+//! group, the owner, and ACLs with them. It widens only what the workload's own `write` lists allow,
+//! and each process discloses it, so it is part of the workload input and not a fifth one.
 //!
 //! `mcp` declares which local MCP servers exist, with a program and its argv. The configuration
 //! selects which servers can start, and `shell:spawn` decides each start. `mcp:call` decides each
@@ -193,14 +197,16 @@ fn the_config_record_carries_only_the_four_inputs() {
             "box_dir",
             "egress",
             "experimental_features",
+            "file_attributes",
+            "limits",
             "mcp",
             "name",
             "policy",
             "telemetry",
             "tool"
         ],
-        "the nine config keys include explicit experimental enforcement selection. \
-         `experimental-features` adds native policy checks without granting filesystem reach. \
+        "the eleven config keys include execution limits, explicit experimental enforcement selection, \
+         and `file-attributes`, which widens only the workload's own write grants. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }

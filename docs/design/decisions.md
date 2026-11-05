@@ -1333,6 +1333,52 @@ The warning names the executable and the write grant that reaches it. The cost i
 hidden: an operator who reads the warning and continues leaves that program replaceable by the
 workload.
 
+<a id="a-write-root-sets-file-attributes-only-when-selected"></a>
+### A macOS write root sets file times through `utimensat` and `setattrlist` only when `file-attributes` selects it, and then `setattrlist` reaches more
+
+A macOS write root names six write operations. `utimes` works, but `utimensat` and `setattrlist`,
+which `touch` and `cp -p` use, check the bare `file-write*` family, and no rule grants the times
+alone. The top-level `file-attributes = true` adds `file-write*` over each write root of
+every process and denies the four leaf operations that the root withholds (`chflags`, `chown`,
+`acl_set_file`, and Finder information), and every protection and refusal renders after it and
+still wins. The key is part of the workload input: it widens only what the workload's own `write`
+lists allow, and each process discloses it. It is off by default because tenet 1 outranks tenets 3
+and 7, so `touch` fails until the writer of `box.toml` selects it, and a box that runs as root
+[accepts it too](#file-attributes-is-accepted-when-the-box-runs-as-root). Linux accepts the key and renders nothing:
+`utimensat` already works there and Linux keeps refusing set-ID bits and ACLs, so one `box.toml`
+stays portable and the ignored key widens nothing. It is an ordinary key, not an experimental
+feature, because it is opt-in and changes only what the workload already reaches. A record that
+selects it is stored at version 25, or at a newer version when a Shell timeout is explicit,
+so a build that predates the key refuses the box
+(`the_file_attributes_key_cannot_hide_in_a_legacy_record`).
+
+A grant operation for each folder would confine the residual to named folders, but it adds an
+operation to the frozen grant model, and the folders that need times (the workspace and its
+temporary folder) are where the residual matters most. A selection for each process, as
+`native-filesystem-policy` has, would still cover the agent, which sets times itself (`touch`, and
+Kiro CLI's lock refresh), and the agent's workspace is where the residual matters most. So an MCP
+server that needs times only in its own cache gets the switch for every process. The cost is the
+residual.
+`with_the_switch_setattrlist_reaches_the_setuid_bit_the_group_and_the_owner_as_known_residuals`
+pins that `setattrlist` stores a set-ID bit, moves the group, and reaches the owner in a write root,
+and it also stores an ACL, which is measured but not pinned. In a box that runs as root, a
+set-user-ID file that the workload leaves would run as root for whoever starts it, so
+[host-backed effects](#host-backed-effects-refuse-what-a-write-cannot-produce) no longer bound what
+lands on real disk while the switch is on.
+
+<a id="file-attributes-is-accepted-when-the-box-runs-as-root"></a>
+### A box that runs as root accepts `file-attributes`, and the writer of `box.toml` decides
+
+Box applies `file-attributes = true` whatever its effective user ID, and it
+does not refuse the switch at startup when `geteuid()` is 0. A refusal at euid 0 would leave the
+profile unchanged and block the one case where the residual becomes privilege escalation, but it
+takes the choice from the writer of `box.toml`, who knows whether a root box runs work that needs
+file times, and that writer can keep the switch off for a root box until its own user opts in. The
+cost: with the switch on, a box that runs as root can leave a
+set-user-ID file owned by root on real disk, and any local user who reaches that folder can run it
+outside the sandbox. The startup disclosure and
+[file attributes on macOS](../user/security.md#file-attributes-on-macos) are the only guards.
+
 <a id="one-forbidden-path-list-and-each-row-states-its-rule"></a>
 ### One forbidden-path list, and each row states its own match rule
 
@@ -1563,7 +1609,10 @@ the cage: a set-user-ID bit written there lands on real disk and a process outsi
 and a symlink stores its target as given, so a reader outside the box would follow it. Each refusal is
 a deny-only limit beneath policy. Two costs: a script that runs `chmod 4755`, or links to an absolute
 path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that the file already
-carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
+carried. This does not cover the workload's own syscalls inside the cage: the sandbox refuses a
+`chmod` of a set-ID bit, but `setattrlist` stores one on macOS when
+[`file-attributes`](#a-write-root-sets-file-attributes-only-when-selected) is on, and `symlinkat` is
+not covered.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
 ### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
@@ -1662,10 +1711,12 @@ returns it once, under a size cap. It refuses the interactive frames, so a scrip
 `input()` cannot read. Status 0 means completed, 1 means the script raised, and 125 means a broker
 or interpreter fault. The interpreter stops a script after 2 minutes of execution time, from inside
 its own run loop, so `while True: pass` stops even when the script makes no OS call. Time suspended
-on the host does not count against that budget, so Box bounds the rest: 5 minutes of wall-clock time
-for each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
-MiB for each `os.urandom` call. Each of these bounds is less than the wall clock. A sleep is never
-shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
+on the host does not count against that budget, so Box adds a fixed outer wall-clock bound to direct
+Python calls, plus 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
+MiB for each `os.urandom` call. Python invoked through Shell shares the enclosing call's configured
+deadline and broker grace instead of a separate five-minute allowance. Monty's limits also apply;
+a shorter Shell deadline can expire first, although synchronous execution can delay its check.
+A sleep is never shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
 `a_sleep_longer_than_the_total_raises_at_once` pins. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which
@@ -1856,18 +1907,26 @@ changes the policy facade to buy something the box already owns.
 ## Credentials
 
 <a id="the-workload-holds-a-phantom-and-the-gateway-holds-the-secret"></a>
-### The workload holds a phantom token, and the gateway swaps in the real secret at the bound destination
+### The workload holds one phantom token for each credential, and the gateway swaps in the real secret at that credential's destinations
 
 For an `env://` binding the box mints a random phantom token and places that value, and never the real
 secret, in the workload's environment. The gateway holds the real secret and swaps the phantom for it
-only on a request to the destination the binding names. The phantom is a 256-bit random value, unique
-across the vault. At the bound destination the gateway clears the harness's own credential location
-before it writes the real secret, so the phantom does not ride out beside it. A phantom sent anywhere
-else is not rewritten, and needs no rewrite, because it is random and authenticates nothing: an
-upstream that receives one receives a useless value. The box opens one vault for each route, so an
-ambiguous match inside a vault is refused, and an overlap between two routes is caught at the gateway
-instead: a mutation collision is denied, and a strict phantom check refuses a mismatch. The workload
-can read the phantom and learn that a credential exists.
+only on a request to a destination that one of the credential's routes names. The phantom is a 256-bit
+random value, unique to one credential across the vault. At a bound destination the gateway clears the
+harness's own credential location before it writes the real secret, so the phantom does not ride out
+beside it. A phantom sent anywhere else is not rewritten, and needs no rewrite, because it is random and
+authenticates nothing: an upstream that receives one receives a useless value. The box opens one vault
+for each provisioned variable, and every route that names the variable shares that vault's one phantom,
+because the workload's variable can hold only one value
+(`one_variable_for_two_hosts_provisions_one_phantom_accepted_at_both`). One phantom for each
+destination lost, because the variable kept only the last one and a strict check then refused every
+other host. A caller-chosen phantom lost too, because the vault must mint every phantom itself. The
+cost: a phantom works at every destination of its credential, so it separates credentials, not hosts.
+Routes that name one variable must also share one `phantom_prefix`, and a load refuses a mismatch
+(`one_variable_with_two_phantom_prefixes_is_refused`). An ambiguous match inside a vault is refused,
+and an overlap between two vaults is caught at the gateway instead: a mutation collision is denied, and
+a strict phantom check refuses a mismatch. The workload can read the phantom and learn that a
+credential exists.
 
 <a id="the-box-is-the-credential-boundary"></a>
 ### The box is the credential boundary, so every process in a box gets every route

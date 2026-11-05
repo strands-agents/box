@@ -44,6 +44,8 @@ pub(crate) enum McpEntry {
         native_filesystem_policy: Option<bool>,
         /// What to start.
         command: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        argument_wildcards: bool,
         /// The initial working directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<PathBuf>,
@@ -91,6 +93,9 @@ pub(crate) struct McpServer {
 
     /// What to start, and the full command that selects it.
     pub(crate) command: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) argument_wildcards: bool,
 }
 
 impl McpServer {
@@ -102,6 +107,23 @@ impl McpServer {
     /// Its arguments, fixed by the operator's file.
     pub(crate) fn arguments(&self) -> &[String] {
         self.command.get(1..).unwrap_or_default()
+    }
+
+    pub(crate) fn has_argument_wildcards(&self) -> bool {
+        self.argument_wildcards && self.arguments().iter().any(|argument| argument == "*")
+    }
+
+    pub(crate) fn matches_arguments(&self, received: &[String], expanded: &[String]) -> bool {
+        let matches = |expected: &[String]| {
+            expected.len() == received.len()
+                && self.arguments().len() == received.len()
+                && self.arguments().iter().zip(expected).zip(received).all(
+                    |((declared, expected), received)| {
+                        (self.argument_wildcards && declared == "*") || expected == received
+                    },
+                )
+        };
+        matches(self.arguments()) || matches(expanded)
     }
 }
 
@@ -122,6 +144,7 @@ pub(crate) fn contained_specs(
                 env,
                 filesystem,
                 network,
+                ..
             } => Some((
                 name.clone(),
                 ContainedMcp {
@@ -150,7 +173,12 @@ pub(crate) fn partition(
     let mut http = Vec::new();
     for (name, entry) in entries {
         match entry {
-            McpEntry::Stdio { command, .. } => stdio.push(McpServer {
+            McpEntry::Stdio {
+                command,
+                argument_wildcards,
+                ..
+            } => stdio.push(McpServer {
+                argument_wildcards: *argument_wildcards,
                 name: name.clone(),
                 command: command.clone(),
             }),
@@ -185,9 +213,10 @@ pub(crate) fn for_command<'a>(
     launched: impl Fn(&McpServer) -> Option<Vec<String>>,
 ) -> Option<&'a McpServer> {
     servers.iter().find(|server| {
-        server.program() == program
+        !server.has_argument_wildcards()
+            && server.program() == program
             && launched(server)
-                .is_some_and(|launched| launched == arguments || server.arguments() == arguments)
+                .is_some_and(|launched| server.matches_arguments(arguments, &launched))
     })
 }
 
@@ -205,7 +234,10 @@ pub(crate) fn refuse_a_shared_command(
             .chain(arguments)
             .collect::<Vec<_>>();
         let spelling = spelled(&command);
-        if let Some(first) = commands.insert(command, server.name.as_str()) {
+        if let Some(first) = commands.insert(
+            (command, server.has_argument_wildcards()),
+            server.name.as_str(),
+        ) {
             return Err(ConfigError::Mcp {
                 name: server.name.clone(),
                 reason: format!(
@@ -215,6 +247,51 @@ pub(crate) fn refuse_a_shared_command(
                     server.name
                 ),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse wildcard commands that can match the same received arguments.
+pub(crate) fn refuse_overlapping_wildcard_commands(
+    servers: &[McpServer],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> Result<(), ConfigError> {
+    for (index, left) in servers.iter().enumerate() {
+        if !left.has_argument_wildcards() {
+            continue;
+        }
+        let Some(left_expanded) = launched(left) else {
+            continue;
+        };
+        for right in &servers[index + 1..] {
+            if !right.has_argument_wildcards() || left.program() != right.program() {
+                continue;
+            }
+            let Some(right_expanded) = launched(right) else {
+                continue;
+            };
+            let overlaps = [left.arguments(), &left_expanded].into_iter().any(|a| {
+                [right.arguments(), &right_expanded].into_iter().any(|b| {
+                    a.len() == b.len()
+                        && left
+                            .arguments()
+                            .iter()
+                            .zip(right.arguments())
+                            .zip(a.iter().zip(b))
+                            .all(|((left, right), (a, b))| left == "*" || right == "*" || a == b)
+                })
+            });
+            if overlaps {
+                return Err(ConfigError::Mcp {
+                    name: right.name.clone(),
+                    reason: format!(
+                        "`[mcp.{}]` and `[mcp.{}]` declare overlapping wildcard commands; \
+                         use fixed arguments that distinguish the servers",
+                        left.name, right.name,
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -533,6 +610,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wildcard_overlap_checks_allow_exact_entries_and_distinct_patterns() {
+        let first = McpServer {
+            argument_wildcards: true,
+            name: "first".into(),
+            command: words(&["server", "--token", "*"]),
+        };
+        for command in [
+            words(&["server", "--token", "abc"]),
+            words(&["server", "--other", "*"]),
+            words(&["server", "--token", "*", "extra"]),
+            words(&["other", "--token", "*"]),
+            words(&["server", "--token=*", "*"]),
+        ] {
+            let second = McpServer {
+                argument_wildcards: true,
+                name: "second".into(),
+                command,
+            };
+            assert!(
+                refuse_overlapping_wildcard_commands(&[first.clone(), second], as_declared).is_ok()
+            );
+        }
+        let second = McpServer {
+            argument_wildcards: true,
+            name: "second".into(),
+            command: words(&["server", "*", "abc"]),
+        };
+        let error =
+            refuse_overlapping_wildcard_commands(&[first, second], as_declared).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("[mcp.first]") && message.contains("[mcp.second]"));
+        assert!(message.contains("overlapping wildcard commands"));
+    }
+
     /// Two entries with one full command are refused.
     #[test]
     fn two_servers_with_one_full_command_are_refused() {
@@ -735,6 +847,7 @@ mod tests {
         assert_eq!(
             parsed,
             McpEntry::Stdio {
+                argument_wildcards: false,
                 native_filesystem_policy: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,

@@ -186,7 +186,11 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
 `[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
-A policy with no matching permit refuses the server at startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+A policy with no matching permit refuses the server at startup. For an enabled [MCP wildcard
+command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
+spaces. Its argument fields contain the same values, including the caller's values in wildcard
+positions.
+A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 

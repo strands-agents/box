@@ -34,7 +34,7 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `type` | string | required | `"stdio"`. |
-| `command` | string array | required | Element 0 is the program, and the rest are its arguments. The box places an alias named for the program in its `bin/`, on the agent's `PATH`. The harness runs this command, word for word, to reach the server. |
+| `command` | string array | required | Element 0 is the program, and the rest are its arguments. The box places an alias named for the program in its `bin/`, on the agent's `PATH`. Arguments match exactly unless you enable [argument wildcards](#argument-wildcards). |
 | `workspace` | path | the agent's workspace | The server's initial working directory. |
 | `env` | table | empty | Variables the server receives. The server also receives `PATH` and `HOME` from the host OS's shell that runs `box run`, unless `env` sets them, and a placeholder for each `env://` credential. |
 | `filesystem` | table | empty | The paths the server's own system calls reach. See [Filesystem](#filesystem). |
@@ -43,9 +43,9 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 The box starts the server when the agent's harness runs the server's full `command`, and only
 when policy permits `shell:spawn` for it. When an experimental tool grammar binds the server's
 program, the grammar's action decides the start in place of `shell:spawn`, as for a
-[spawn in the Shell](shell.md#shellspawn). The box runs the `command` and arguments from `box.toml`.
+[spawn in the Shell](shell.md#shellspawn). By default, the box runs the `command` and arguments from `box.toml`.
 
-The harness's command for the server must be the same words, in the same order, as `command`.
+Without argument wildcards, the harness's command must be the same words, in the same order, as `command`.
 The harness runs the alias with its arguments, and the box starts the server whose `command`
 matches. A harness entry that sets only the program reaches only a server whose `command` is the
 program alone. For a server whose `command` has arguments, set the same arguments in the harness.
@@ -88,6 +88,63 @@ run, so a harness with a fixed configuration passes the name, as written in `box
 
 A box whose servers share a program stores a newer record than earlier `box` builds read. An
 earlier build refuses that box directory.
+
+### Argument wildcards
+
+To let the caller supply an argument at runtime, set `argument_wildcards = true` on that
+stdio MCP entry and put `*` in the argument's position:
+
+```toml
+[mcp.example]
+type = "stdio"
+command = ["example-server", "--token", "*"]
+argument_wildcards = true
+```
+
+If the harness runs `example-server --token runtime-value`, Box matches the entry and starts
+`example-server --token runtime-value` after policy permits it. The same server filesystem and
+network settings still apply. Box supplies the configured executable and fixed arguments;
+the caller supplies the arguments in `*` positions. The matched entry selects the MCP server's
+configuration, and Box continues to mediate its MCP traffic.
+
+Any process in the workload can invoke the MCP alias and supply values for the `*` positions.
+The operator chooses those positions in `box.toml`; the workload cannot add wildcards.
+A `shell:spawn` permit that checks only the program matches every value in those positions.
+The server runs with its own configured permissions, which can exceed the workload's.
+For example, `["npx", "-y", "*"]` lets the caller choose the package that runs with those
+permissions. Put `*` only in positions whose values you intend the caller to choose.
+
+Only an argument equal to `*` is a wildcard. It accepts one argument, including an empty string.
+The executable, argument count, order, and every other argument must match. `--token=*` is
+literal text. To accept a changing argument such as `--token=value`, replace that entire argument
+with `*`.
+
+For a direct invocation of the MCP alias, Box matches the supplied argument array and copies each
+wildcard argument unchanged. For example, `["example-server", "--token", "abc"]` starts the server
+with `--token abc`. If the caller supplies the literal text `${TOKEN}`, Box passes that text unchanged.
+Fixed arguments keep Box's existing expansion. Policy checks the effective launch arguments.
+
+Strands Shell does not route external commands to declared MCP servers. Its command selection uses
+tool entries and agent execution grants. Invoke the MCP alias directly to use MCP command matching.
+
+Exact commands take priority over wildcard commands. An entry with `argument_wildcards = false`
+keeps its stars literal and participates in exact matching. For example,
+`["example-server", "--token", "fixed-value"]` wins over the wildcard example above when the
+caller supplies `fixed-value`. Other values select the wildcard entry.
+Box refuses to start if two wildcard commands could match the same request, including after
+configured expansion. Keep fixed arguments that distinguish those wildcard entries.
+
+The setting defaults to `false` on each server. With it omitted or false, `*` matches and
+launches as a literal star. Enabling it on one server leaves other servers unchanged.
+The feature applies only to stdio MCP commands, not agent or tool commands.
+`box policy generate-schema` refuses enabled wildcard commands because offline discovery has no
+caller to supply their arguments. Use a configuration with concrete arguments for that command.
+
+Enabling `argument_wildcards` on any server requires record version 26 or newer.
+Older builds refuse versions they do not support.
+Before returning to an older build, replace wildcard arguments with concrete values, disable the
+feature, and follow the [stored configuration rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback)
+for the other selected features.
 
 ### Filesystem
 

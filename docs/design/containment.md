@@ -231,6 +231,30 @@ naming it is `Other`, and so are `/`, `/Users`, and the operator home. A read gr
 reports `Forbidden` with `WholeFilesystem` or `CredentialStore`. The caller can treat a
 `SystemTree` refusal differently from every other refusal without its own copy of the rows.
 
+### File attributes in a macOS write folder
+
+A macOS write folder names six write operations: contents, create, unlink, extended attributes,
+mode, and times. `utimes` and `futimes` use the times operation. `utimensat`, which `touch` calls,
+and `setattrlist` check the whole write family instead, so a write folder refuses them. Nothing
+ordinary needs the flags, the owner, or the access control list, so the folder withholds them.
+
+The `file-attributes` switch grants the whole family over the folder and then denies again the four
+members the folder withholds: the flags, the owner, the access control list, and the Finder
+information. The set-ID operation and mounts lie outside the family, so the grant does not reach
+them, and `chmod` of a set-ID bit stays refused. The switch keeps the folder's own unlink and create
+denies and its no-execute-mapping rule, and every protection and refusal still wins, because it
+renders after the grant.
+`setattrlist` sets the times, the mode, the group, the owner, and the access control list through
+that one family check, and no rule tells them apart. So `touch` works, and a set-user-ID bit, a
+group, an owner (as far as the ownership check lets the caller), and an access control list can
+change through `setattrlist` too. The four leaf operations themselves (`chflags`, `chown`,
+`acl_set_file`, and Finder information) stay refused.
+[File attributes on macOS](../user/security.md#file-attributes-on-macos) states the residual risk
+for an operator, and
+[decisions.md](decisions.md#a-write-root-sets-file-attributes-only-when-selected) states why.
+
+Linux renders nothing for the switch.
+
 ### Linux root sandbox launches
 
 A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
@@ -287,10 +311,15 @@ same two rules:
 
 A process still can't read the information of its parent, a sibling, or any other process on the
 machine. That includes the `strands-box run` process that started the box.
+
+Signals follow the same line. A process can signal a child it started, so a harness can stop a
+program it no longer needs. It can't signal any other process, including the `strands-box run`
+process. A child runs under the same sandbox as its parent, so a signal gives no new reach.
 The rules are in
 [`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
-`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
-control outside the box shows the refusal comes from the sandbox.
+`CN-I-03` checks that a box can read and signal an own child, is refused its parent's information
+and a signal to another process, and a control outside the box shows the refusal comes from the
+sandbox.
 
 ### How you check a box's reach
 

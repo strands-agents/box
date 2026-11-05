@@ -294,8 +294,9 @@ part of what you have to trust.
 6. **It builds each sandbox's grants and discloses them**, each tool first and then the agent.
    Every direct filesystem grant is printed to stderr, because no `fs:*` decision will cover one
    ([direct filesystem reach is declared and
-   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). A tool that cannot be
-   translated refuses the box before the agent exists.
+   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). On macOS, the
+   `file-attributes` switch adds one line per sandbox that names what its write grants may set. A
+   tool that cannot be translated refuses the box before the agent exists.
 
    On Linux, preserved interpreter spellings appear under `interpreter aliases for configured access`,
    before the runtime-minimum section. Each line maps a spelling to the file the process's original grants already authorize.

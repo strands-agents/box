@@ -112,7 +112,10 @@ In tested macOS configurations, tools could write file contents but could not re
 
 **An operation can report success with incorrect timestamps.** It can also fail after writing some output. Check both file contents and timestamps when preservation matters.
 
-These results were observed on macOS 27.0.1 with Box revision `08bc940b`. A broader write rule restored timestamps but also permitted forbidden changes to file group ownership. It is not a safe workaround. See the [timestamp compatibility investigation](https://github.com/strands-agents/box/issues/89) for follow-up.
+The opt-in top-level [`file-attributes`](../user/config.md#file-attributes) key restores timestamps in write folders, and
+[its residual risk](../user/security.md#file-attributes-on-macos) is that `setattrlist` can then set the set-user-ID bit, the group, the owner, and an access control list. Without it, these results hold.
+
+These results were observed on macOS 27.0.1 with Box revision `08bc940b`, without the switch. The switch is the broader write rule that investigation measured, so it carries the change of group ownership that the investigation found, with the other residuals above. See the [timestamp compatibility investigation](https://github.com/strands-agents/box/issues/89) for follow-up.
 
 ### What the sandbox does not provide
 
