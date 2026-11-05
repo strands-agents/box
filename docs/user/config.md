@@ -538,6 +538,12 @@ This table holds the tool grammar for the program its `[tool]` runs, and it load
 `[experimental-features] tool-grammars = true`. The feature is experimental. A spawn of the
 program is decided as a grammar action in place of `shell:spawn`, as
 [`shell:spawn`](shell.md#shellspawn) states, and a user guide for tool grammars is coming later.
+`run` prints one line for each `[tool]` and stdio `[mcp.<name>]` whose program a grammar decides,
+so you can move its `shell:spawn` rules:
+
+```text
+strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
 
 Each of these is refused at startup, before any box state exists:
 

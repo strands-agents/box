@@ -285,7 +285,9 @@ part of what you have to trust.
    that cannot fire is refused at
    load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). It
    then binds each experimental tool grammar to the program file of each `[tool]` it covers, on
-   the file identity that the run opened.
+   the file identity that the run opened, declares each stdio `[mcp.<name>]` program, and prints one
+   line on stderr for each `[tool]` and stdio `[mcp.<name>]` that a grammar decides, because no `shell:spawn` rule applies to
+   that program any more.
 5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
    each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
    grant refuses the box here.

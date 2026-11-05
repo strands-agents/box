@@ -258,7 +258,7 @@ A refusal names the rule and says what to write instead.
 
 When a tool grammar binds a program, each spawn of it enters history as its grammar action and not as
 `shell:spawn`. A spawn that the binding refuses before any rule decides it, such as a bound file
-called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so a rule
+called by a name that no `[tool]` or `[mcp.<name>]` declares, enters history as a `shell:spawn` request, so a rule
 that counts attempts still sees it.
 
 ## Residual risk

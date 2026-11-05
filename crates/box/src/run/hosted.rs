@@ -611,7 +611,8 @@ impl HostedBox {
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
-    /// for it (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    /// for it, with each stdio `[mcp.<name>]` program declared
+    /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
         policy: PolicyEngine,
         record: &Record,
@@ -630,6 +631,24 @@ impl HostedBox {
                 command.opened(),
                 command.path(),
                 command.invoked(),
+                crate::record::config::grammar::called_name(spec),
+            )?;
+        }
+        for contained in record.contained_mcp.values() {
+            let spec = &contained.spec;
+            let Ok(program) =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+            else {
+                continue;
+            };
+            let Ok(opened) = crate::record::layout::open_without_following(program.granted_path())
+            else {
+                continue;
+            };
+            bindings.declare_tool(
+                &opened,
+                program.granted_path(),
+                program.invoked(),
                 crate::record::config::grammar::called_name(spec),
             )?;
         }
@@ -1143,6 +1162,56 @@ mod tests {
             .await
             .expect_err("the file at the path is not the file the run approved");
         assert!(refused.contains("[tool-grammar]"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn an_mcp_server_that_shares_a_bound_file_is_declared_under_its_own_name() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let server = home.path().join("git-mcp");
+        std::os::unix::fs::symlink(&program, &server).expect("a second name for the file");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "git-mcp".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        let args: Vec<String> = Vec::new();
+        let started = policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+
+        assert_eq!(
+            started,
+            Ok(()),
+            "the operator declared the name, so `shell:spawn` decides the start"
+        );
     }
 
     fn install_program(path: &Path) {

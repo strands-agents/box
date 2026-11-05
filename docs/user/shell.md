@@ -93,10 +93,12 @@ A program's filesystem lists bound its own file operations.
 When an experimental [tool grammar](config.md#toolnamegrammar) binds the program, Box decides the
 spawn as the grammar's action, such as `Tool::git::Action::"push"`, or as `unmodeled` when the
 grammar can't read the command, and `shell:spawn` doesn't decide it. A grammar binds the program
-file of each `[tool]` whose command runs its `program`, under that name. Box refuses a spawn of a
+file of each `[tool]` and each stdio `[mcp.<name>]` whose command runs its `program`, under that
+name. Box refuses a spawn of a
 bound file before any rule decides it, and no rule can permit it, in these cases:
 
-- The name the agent called the file by isn't a name that a `[tool]` declares for it.
+- The name the agent called the file by isn't a name that a `[tool]` or a stdio `[mcp.<name>]`
+  declares for it.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
   replaced, so `PATH` would find another file.

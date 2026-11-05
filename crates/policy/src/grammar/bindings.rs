@@ -120,7 +120,7 @@ pub(crate) enum GrammarCoverage<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CoverageRefusal {
     #[error(
-        "`{name}` runs `{}`, which a tool grammar covers, but no `[tool]` declares the name `{name}`",
+        "`{name}` runs `{}`, which a tool grammar covers, but no `[tool]` or `[mcp]` declares the name `{name}`",
         .program_path.display()
     )]
     UndeclaredName { name: String, program_path: PathBuf },
@@ -722,8 +722,8 @@ mod tests {
                     name: "python".to_string(),
                     program_path: PathBuf::from("/usr/local/bin/mise"),
                 },
-                "`python` runs `/usr/local/bin/mise`, which a tool grammar covers, but no `[tool]` \
-                 declares the name `python`",
+                "`python` runs `/usr/local/bin/mise`, which a tool grammar covers, but no `[tool]` or \
+                 `[mcp]` declares the name `python`",
             ),
             (
                 CoverageRefusal::ReplacedFile {

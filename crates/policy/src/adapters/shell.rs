@@ -1549,8 +1549,8 @@ mod tests {
                 &mise,
                 Some(format!(
                     "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
+                     `{mise}`, which a tool grammar covers, but no `[tool]` or `[mcp]` declares \
+                     the name `python`. No policy can permit it."
                 )),
             ),
             (
@@ -1559,8 +1559,8 @@ mod tests {
                 &mise,
                 Some(format!(
                     "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
+                     `{mise}`, which a tool grammar covers, but no `[tool]` or `[mcp]` declares \
+                     the name `python`. No policy can permit it."
                 )),
             ),
             (
