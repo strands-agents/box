@@ -257,9 +257,11 @@ The inert-rule check sorts each rule into one of three classes:
 A refusal names the rule and says what to write instead.
 
 When a tool grammar binds a program, each spawn of it enters history as its grammar action and not as
-`shell:spawn`. A spawn that the binding refuses before any rule decides it, such as a bound file
-called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so a rule
-that counts attempts still sees it.
+`shell:spawn`. When a program the Shell started ends, the grammar action's `::response` carries the
+exit status as `output.status`, the same as a `shell:spawn` response, so a rule can refuse a
+`git push` until a `cargo test` has passed. A spawn that the binding refuses before any rule decides it, such as a
+bound file called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so
+a rule that counts attempts still sees it.
 
 ## Residual risk
 
