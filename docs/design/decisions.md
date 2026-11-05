@@ -1809,7 +1809,10 @@ current-thread runtime on a dedicated worker thread), because the crate that alr
 `aws://PROFILE` owns every AWS credential path; the box crate injecting a resolver across a seam was
 rejected for splitting that ownership. The reserved tokens `aws://@instance-role` and
 `aws://@container-role`, and `aws://default`, were rejected, the last because `default` is a real
-profile and the overlap would be a silent identity substitution. The cost: the SDK, a runtime, and a
+profile and the overlap would be a silent identity substitution. The SDK's `sso` and
+`credentials-login` providers are compiled out (`default-features = false`) to keep the dependency
+surface small, so a bare `aws://` does not resolve an AWS SSO or `aws login` default profile; such a
+profile is refused, and the refusal names the missing provider. The cost: the SDK, a runtime, and a
 TLS stack link into the one process that holds every resolved plaintext; and a workload with write
 access to `~/.aws` can name a `credential_process` program the trusted process runs outside the
 sandbox, which is remote code execution. The shipped box exposes no setting that refuses a bare

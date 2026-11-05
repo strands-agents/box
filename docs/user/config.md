@@ -357,8 +357,8 @@ MCP server`. `protocol` on this table takes `http` alone; declare a remote MCP s
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
 (no profile) signs with the host's ambient identity and prints a warning on every signed request;
-[Credential sources](egress.md#credential-sources) describes the default chain, the warning, and the
-writable-`~/.aws` rule.
+[Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
+not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
 
 ## `[mcp.<name>]`
 

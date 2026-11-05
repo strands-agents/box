@@ -102,8 +102,14 @@ from the host, which ends in `.amazonaws.com` or `.api.aws`.
 A bare `aws://` with no profile signs with the host's **ambient** AWS identity. It resolves the AWS
 SDK default credential provider chain, in order: the `AWS_*` environment variables, the profile
 files (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2
-instance metadata. This is the same chain the AWS CLI and SDKs use. `aws://PROFILE` instead reads
-the static keys of one named profile and nothing else.
+instance metadata. `aws://PROFILE` instead reads the static keys of one named profile and nothing
+else.
+
+This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
+compiled out to keep the dependency surface small). A default profile from `aws configure sso` is
+refused, and the refusal names the missing provider. If your ambient identity is SSO, log in with a
+tool that writes static or session keys to `~/.aws/credentials`, or bind `aws://PROFILE` to a
+profile that carries keys.
 
 Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
 **every** request it signs that way:
