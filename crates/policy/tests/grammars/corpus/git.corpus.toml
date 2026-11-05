@@ -615,3 +615,10 @@ argv = ["git", "pull", "-s", "evil", "origin"]
 action = "pull"
 fields = { remote = "origin", strategy = "evil" }
 effects = ["network", "run_program"]
+
+# A dry run pushes nothing, so the pre-push hook that `--no-verify` skips guards nothing
+[[case]]
+argv = ["git", "push", "-n", "--no-verify", "origin", "main"]
+action = "push"
+fields = { dry_run = true, no_verify = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
