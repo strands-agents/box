@@ -31,10 +31,10 @@ VERSIONS = {"langchain": "1.4.8", "langchain-aws": "1.9.1", "langchain-core": "1
 PHASE_NAMES = ["premature", "recover", "repeat", "refund", "reply"]
 EXPECTED_STEPS = [
     ("premature", "read_order", "GET", "/orders/42", 200, False, "shipment_fixture_reads"),
-    ("premature", "dispatch_replacement", "POST", "/orders/42/dispatch", 403, True, "dispatch_requires_eligibility"),
-    ("recover", "check_eligibility", "GET", "/orders/42/eligibility", 200, False, "shipment_fixture_reads"),
-    ("recover", "dispatch_replacement", "POST", "/orders/42/dispatch", 201, False, "shipment_fixture_mutations"),
-    ("repeat", "dispatch_replacement", "POST", "/orders/42/dispatch", 403, True, "dispatch_closes_mutations"),
+    ("premature", "dispatch_replacement", "POST", "/orders/42/replacement", 403, True, "dispatch_requires_eligibility"),
+    ("recover", "check_eligibility", "GET", "/orders/42/replacement", 200, False, "shipment_fixture_reads"),
+    ("recover", "dispatch_replacement", "POST", "/orders/42/replacement", 201, False, "shipment_fixture_mutations"),
+    ("repeat", "dispatch_replacement", "POST", "/orders/42/replacement", 403, True, "dispatch_closes_mutations"),
     ("refund", "request_refund", "POST", "/orders/42/refund", 403, True, "dispatch_closes_mutations"),
 ]
 EFFECT = {"order_id": 42, "kind": "dispatch", "effect_id": "dispatch-42-001", "idempotency_key": "replacement-42"}
@@ -141,7 +141,7 @@ def verify(workload, service, decisions, exit_code, duration, timed_out, model, 
             "all_model_attempts_completed": workload.get("model_attempts") == workload.get("model_calls") == len(calls) and bool(calls),
             "expected_tool_sequence": observed_steps == [x[:6] for x in EXPECTED_STEPS] and workload.get("tool_attempts") == 6,
             "tool_destinations_match_fixture": len(steps) == 6 and all(x.get("host") == "127.0.0.1" and x.get("port") == fixture_port for x in steps),
-            "only_allowed_requests_reached_service": [(x.get("method"), x.get("path"), x.get("status")) for x in service.get("requests", [])] == [("GET", "/orders/42", 200), ("GET", "/orders/42/eligibility", 200), ("POST", "/orders/42/dispatch", 201)],
+            "only_allowed_requests_reached_service": [(x.get("method"), x.get("path"), x.get("status")) for x in service.get("requests", [])] == [("GET", "/orders/42", 200), ("GET", "/orders/42/replacement", 200), ("POST", "/orders/42/replacement", 201)],
             "exact_effect_and_resolution": service.get("effects") == [EFFECT] and service.get("resolution") == EFFECT,
             "one_dispatch_no_refund": service.get("effect_counts") == {"dispatch": 1, "refund": 0},
             "exact_tool_policy_bindings": len(service_rows) == len(EXPECTED_STEPS) and all(exact_decision(row, "127.0.0.1", fixture_port, expected[2], expected[3], "deny" if expected[5] else "permit", expected[6]) for row, expected in zip(service_rows, EXPECTED_STEPS)),

@@ -47,6 +47,15 @@ def run_scenario(name, output, binary):
     state = state_root / "state"
     with FixtureServer(eligibility_status=409 if name == "failed" else 200) as fixture:
         policy = (ROOT / "policy.dw").read_text().replace("port == 0", "port == " + str(fixture.port)).replace("port: 0", "port: " + str(fixture.port))
+        if name == "unrelated":
+            # Let the shared forbid rule decide a second order's eligibility.
+            # The backend remains limited to dispatching order 42.
+            policy += '\n@id("shipment_other_order_test")\n' + (
+                'permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)\n'
+                'when { context.input.host == "127.0.0.1" && context.input.port == '
+                + str(fixture.port) + ' && context.input.method == "POST" && '
+                'context.input.path == "/orders/43/replacement" };\n'
+            )
         (run / "policy.dw").write_text(policy)
         executable = str(Path(sys.executable).resolve())
         command = [executable, "-I", "-B", str(ROOT / "shipment-client.py"), "--service", fixture.base_url, "--scenario", name]
@@ -107,8 +116,9 @@ def run_scenario(name, output, binary):
                      "repeat_dispatch": (403, True), "competing_refund": (403, True)},
         "failed": {"read_customer_case": (200, False), "failed_eligibility": (409, False),
                    "dispatch_after_failed_check": (403, True)},
-        "unrelated": {"read_customer_case": (200, False), "unrelated_eligibility": (200, False),
-                      "dispatch_after_unrelated_check": (403, True)},
+        "unrelated": {"read_customer_case": (200, False), "other_order_before_check": (403, True),
+                      "unrelated_eligibility": (200, False),
+                      "dispatch_after_unrelated_check": (403, True), "other_order_after_check": (404, False)},
         "refund-first": {"read_customer_case": (200, False), "failed_refund": (400, False),
                          "refund_order": (201, False), "repeat_refund": (403, True),
                          "successful_eligibility": (200, False), "dispatch_after_refund": (403, True)},
@@ -118,14 +128,14 @@ def run_scenario(name, output, binary):
         checks[label] = step.get("status") == status and step.get("box_refused") is refused
     expected_service = [("GET", "/orders/42", 200)]
     if name == "shipment":
-        expected_service += [("GET", "/orders/42/eligibility", 200), ("POST", "/orders/42/dispatch", 201)]
+        expected_service += [("GET", "/orders/42/replacement", 200), ("POST", "/orders/42/replacement", 201)]
     elif name == "refund-first":
         expected_service += [("POST", "/orders/42/refund", 400), ("POST", "/orders/42/refund", 201),
-                             ("GET", "/orders/42/eligibility", 200)]
+                             ("GET", "/orders/42/replacement", 200)]
     elif name == "failed":
-        expected_service += [("GET", "/orders/42/eligibility", 409)]
+        expected_service += [("GET", "/orders/42/replacement", 409)]
     else:
-        expected_service += [("GET", "/orders/43/eligibility", 200)]
+        expected_service += [("GET", "/orders/43/replacement", 200), ("POST", "/orders/43/replacement", 404)]
     observed_service = [(x["method"], x["path"], x["status"]) for x in snapshot["requests"]]
     checks["only_permitted_requests_reached_service"] = observed_service == expected_service
     expected_effects = []
@@ -167,7 +177,7 @@ def run_scenario(name, output, binary):
     expected_rules = {
         "shipment": ["dispatch_requires_eligibility", "dispatch_closes_mutations", "dispatch_closes_mutations"],
         "failed": ["dispatch_requires_eligibility"],
-        "unrelated": ["dispatch_requires_eligibility"],
+        "unrelated": ["dispatch_requires_eligibility", "dispatch_requires_eligibility"],
         "refund-first": ["refund_closes_mutations", "refund_closes_mutations"],
     }[name]
     actual_rules = [d.get("strands.box.policy.rule") for d in decisions
@@ -179,8 +189,8 @@ def run_scenario(name, output, binary):
             ("POST", "/orders/42/refund", "permit", "shipment_fixture_mutations"),
             ("POST", "/orders/42/refund", "permit", "shipment_fixture_mutations"),
             ("POST", "/orders/42/refund", "deny", "refund_closes_mutations"),
-            ("GET", "/orders/42/eligibility", "permit", "shipment_fixture_reads"),
-            ("POST", "/orders/42/dispatch", "deny", "refund_closes_mutations"),
+            ("GET", "/orders/42/replacement", "permit", "shipment_fixture_reads"),
+            ("POST", "/orders/42/replacement", "deny", "refund_closes_mutations"),
         ]
         resource_prefix = "127.0.0.1:" + str(fixture.port)
         observed_decisions = [(d.get("http.request.method"), d.get("strands.box.policy.resource"),

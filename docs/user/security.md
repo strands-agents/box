@@ -29,7 +29,8 @@ workload reaches each of these directly. Policy is not asked, and the decision l
   the program runs. Its file operations are not decided.
 
 You own what `box.toml` grants. Review each path in `[agent.filesystem]` and each `[tool.<name>]`
-table, because direct reach raises no decision.
+table, because direct reach raises no decision. When adapting grants between macOS and Linux,
+see the [platform comparison](../design/platform-differences.md).
 
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
@@ -67,11 +68,13 @@ These protections cover the current box's files.
 Keep other boxes' configuration, policy, and generated state outside the workload's write access.
 Apply the [placement and access guidance](config.md#protect-other-boxes) to filesystem grants and requests through Strands Shell and Monty.
 
-**Cloud metadata protection is two `forbid` rules in your policy.** `metadata_hosts` refuses the
+**For gateway traffic, cloud metadata protection requires two `forbid` rules in your policy.** `metadata_hosts` refuses the
 metadata services by name. `metadata_addresses` refuses link-local and metadata addresses, checked
 on the address the gateway dials. Add both to the policy you wrote in
 [getting started](getting-started.md), and to any policy you write by hand. The example policies in
-the Box repository, under `examples/strands-box/`, carry both:
+the Box repository, under `examples/strands-box/`, carry both.
+
+Connections with [`contain_egress = false`](mcp.md#network) bypass these policy checks.
 
 ```dw
 @id("metadata_hosts")

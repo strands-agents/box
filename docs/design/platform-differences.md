@@ -89,7 +89,6 @@ That suggested change exposes file contents. Apply it only if that read access i
 
 ## Remaining qualification
 
-These differences describe the implementation. They do not qualify a Linux package for release.
-A release needs installation and workload checks on each selected deployment configuration.
+A Linux package supplies the binaries. Each deployment configuration still needs installation and workload checks.
 Setup privileges and successful workloads from one environment do not qualify another.
 See [Linux startup and qualification](linux-enforcement.md#startup-failures-and-qualification) for that boundary.
