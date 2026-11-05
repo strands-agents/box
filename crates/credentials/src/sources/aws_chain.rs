@@ -253,6 +253,7 @@ fn worker(receiver: Receiver<Request>, setup: SetupFn) {
 /// resolved once and reused, so the per-resolve rebuild never runs the SDK region chain, which
 /// would reach instance metadata on every request on a host with no configured region.
 fn real_setup() -> Result<ResolveFn> {
+    use aws_config::meta::region::ProvideRegion;
     use aws_smithy_http_client::{Builder, tls};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -269,7 +270,20 @@ fn real_setup() -> Result<ResolveFn> {
             tls::rustls_provider::CryptoMode::Ring,
         ))
         .build_https();
-    let region = configured_region();
+    // Resolve the region once from the environment, then the profile's `region =` key, then
+    // `us-east-1`. Both SDK providers read only variables and files, never instance metadata, so
+    // the per-resolve rebuild stays off the network. The profile key matters for an assume-role
+    // profile in GovCloud, China, or a VPC-endpoint-only subnet, whose STS endpoint is not
+    // `us-east-1`.
+    let region = runtime.block_on(async {
+        let env = aws_config::environment::EnvironmentVariableRegionProvider::new()
+            .region()
+            .await;
+        let profile = aws_config::profile::ProfileFileRegionProvider::new()
+            .region()
+            .await;
+        pick_region(env, profile)
+    });
     Ok(Box::new(move || {
         // `without_region` carries the Tokio sleep implementation (rt-tokio). A fresh config
         // re-reads the profile files; `.region` pins the region so the rebuild does not re-run the
@@ -321,29 +335,19 @@ fn resolve_once(
     ))
 }
 
-/// The region the chain resolves credentials under, read once from the environment.
+/// The chain region: the environment's, else the profile's, else `us-east-1` (the global STS
+/// default).
 ///
 /// The signing region comes from the route host, so this region only selects the STS endpoint for
-/// an assume-role or web-identity profile. Reading it here, rather than letting each rebuild run the
-/// SDK region chain, keeps the rebuild off instance metadata.
-fn configured_region() -> aws_config::Region {
-    region_from(
-        non_empty_env("AWS_REGION"),
-        non_empty_env("AWS_DEFAULT_REGION"),
-    )
-}
-
-/// `primary`, else `secondary`, else `us-east-1` (the global STS default).
-fn region_from(primary: Option<String>, secondary: Option<String>) -> aws_config::Region {
-    primary
-        .or(secondary)
-        .map(aws_config::Region::new)
+/// an assume-role or web-identity profile. The caller reads `env` and `profile` through the SDK
+/// providers, which reach only variables and files, so resolving the region never runs the SDK
+/// region chain and never reaches instance metadata.
+fn pick_region(
+    env: Option<aws_config::Region>,
+    profile: Option<aws_config::Region>,
+) -> aws_config::Region {
+    env.or(profile)
         .unwrap_or_else(|| aws_config::Region::new("us-east-1"))
-}
-
-/// A set, non-empty environment variable.
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// The full `: `-joined message chain of `error`, so a wrapped cause is not lost.
@@ -509,19 +513,22 @@ mod tests {
         );
     }
 
-    /// The chain region prefers `AWS_REGION`, then `AWS_DEFAULT_REGION`, then falls back to the
-    /// global `us-east-1`, so the per-resolve rebuild never runs the SDK region chain.
+    /// The chain region prefers the environment, then the profile's `region =` key, then falls back
+    /// to the global `us-east-1`. The profile key is what keeps an assume-role profile in GovCloud,
+    /// China, or a VPC-endpoint subnet calling the right STS endpoint.
     #[test]
-    fn region_prefers_primary_then_secondary_then_falls_back() {
+    fn region_prefers_env_then_profile_then_falls_back() {
+        let region = |name: &str| aws_config::Region::new(name.to_string());
         assert_eq!(
-            region_from(Some("eu-west-1".to_string()), Some("us-west-2".to_string())).as_ref(),
+            pick_region(Some(region("eu-west-1")), Some(region("us-gov-west-1"))).as_ref(),
             "eu-west-1"
         );
         assert_eq!(
-            region_from(None, Some("us-west-2".to_string())).as_ref(),
-            "us-west-2"
+            pick_region(None, Some(region("us-gov-west-1"))).as_ref(),
+            "us-gov-west-1",
+            "a profile region is honoured when no environment region is set"
         );
-        assert_eq!(region_from(None, None).as_ref(), "us-east-1");
+        assert_eq!(pick_region(None, None).as_ref(), "us-east-1");
     }
 
     // --- SdkChainProvider (worker + channel; fake resolver, no SDK) ----------
