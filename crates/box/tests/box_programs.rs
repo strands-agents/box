@@ -450,32 +450,33 @@ fn four_concurrent_requests_each_keep_their_own_state() {
     }
 }
 /// A stuck request does not block a healthy one.
-///
-/// The Lua interpreter never awaits, so it once pinned the runtime every request
-/// shared and a healthy sibling waited 27.73s. Each connection owns its thread now. Timed with
-/// bash's `SECONDS`, because the profile grants exec on the workload and the aliases and nothing
-/// else — there is no `date` in the cage.
 #[test]
 fn a_stuck_request_does_not_block_a_healthy_one() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("prog-stuck", PERMISSIVE).expect();
+    let box_ =
+        Request::with_config("prog-stuck", PERMISSIVE, "[limits]\nshell.timeout = 6\n").expect();
 
     let output = box_.bash(
         r#"
-zsh -c "lua -e 'while true do end'" &
-zsh -c "sleep 3"
 SECONDS=0
+zsh -c 'lua -e "local ready = assert(io.open(\"{box_home}/spinning\", \"w\")); ready:write(\"ready\"); ready:close(); while true do end"' &
+spinner=$!
+while [[ ! -s "{box_home}/spinning" ]]; do
+    (( SECONDS < 4 )) || { printf 'LUA_NOT_READY'; exit 1; }
+done
+# Lua's file close yields once; include its settling time in the measurement.
+zsh -c "sleep 0.1"
 zsh -c 'cd {box_home} && printf healthy > ok.txt && cat ok.txt'
 printf "|elapsed=%s" "$SECONDS"
+wait "$spinner"
+printf "|spinner_status=%s" "$?"
 "#,
     );
 
     let text = stdout(&output);
-    eprintln!(
-        "STUCK-SIBLING MEASURED: {text} (was 27.73s before each connection got its own thread)"
-    );
+    eprintln!("STUCK-SIBLING MEASURED: {text}");
 
     assert_workload_launched(&output, "the healthy request");
     assert!(
@@ -490,9 +491,14 @@ printf "|elapsed=%s" "$SECONDS"
         .parse()
         .expect("elapsed seconds parse");
     assert!(
-        elapsed < 15,
+        elapsed < 4,
         "a stuck request must not block a healthy one. If this regresses, the connections went \
          back onto one shared thread. elapsed={elapsed}s, output={output:?}"
+    );
+    assert!(
+        text.contains("|spinner_status=1")
+            && String::from_utf8_lossy(&output.stderr).contains("timeout"),
+        "the competing Lua request must run until its deadline: {output:?}"
     );
 }
 
