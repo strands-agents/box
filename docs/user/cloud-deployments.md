@@ -16,7 +16,6 @@ Release packages call the main executable `box`; source builds call it `strands-
 The helpers are `strands-box-contain-trampoline` and `strands-box-sock-alias`.
 Both helpers must be regular executable files. Box refuses helper symlinks and files without executable permissions.
 
-Set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the environment that starts Box.
 Use the [configuration reference](./config.md) to configure Box.
 
 [Native filesystem policy](./native-filesystem-policy.md) is macOS-only. A Linux build refuses a `box.toml` that enables it.

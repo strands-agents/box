@@ -81,7 +81,6 @@ The package is also notarized, so macOS runs a copy that you download in a brows
 ### Linux
 
 Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
-On Linux, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal before you start a workload.
 See [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
 
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
