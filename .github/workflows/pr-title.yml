@@ -7,7 +7,7 @@ on:
 
 jobs:
   validate-pr-title:
-    runs-on: ubuntu-24.04-arm
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 5
     permissions:
       pull-requests: read

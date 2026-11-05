@@ -54,7 +54,7 @@ jobs:
     name: Check access
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 5
     outputs:
       approval-env: ${{ steps.auth.outputs.approval-env }}
@@ -84,7 +84,7 @@ jobs:
       # Both needed to add the `strands-running` label to issues and PRs.
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 30
     steps:
       # The reviewer prompt comes from the commit this workflow runs from (the
@@ -135,7 +135,7 @@ jobs:
       issues: read
       pull-requests: read
       id-token: write # Required for OIDC
-    runs-on: ubuntu-latest
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 60
     steps:
       # Add environment setup here if an agent needs it (a Rust toolchain, a
@@ -160,7 +160,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 30
     steps:
       - name: Execute write operations

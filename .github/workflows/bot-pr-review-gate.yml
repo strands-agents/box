@@ -21,7 +21,7 @@ permissions:
 jobs:
   check-bot-reviews:
     name: 2 Approvers for Bots
-    runs-on: ubuntu-24.04-arm
+    runs-on: strands-agents_ubuntu-latest_4-core
     timeout-minutes: 5
     steps:
       - name: Enforce maintainer reviews for bot/agent PRs

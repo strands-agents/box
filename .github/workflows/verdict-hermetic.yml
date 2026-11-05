@@ -46,7 +46,7 @@ jobs:
     # row's own label and is not what these tests exercise. The deterministic suite
     # covers the per-OS behaviour; duplicating this leg would buy a second copy of
     # the same pure-function result.
-    runs-on: ubuntu-24.04-arm
+    runs-on: strands-agents_ubuntu-latest_4-core
     # Minutes, not tens of minutes: no box build, no cage, no subprocess. The cap
     # exists to catch a wedge, not to budget for real work.
     timeout-minutes: 15
