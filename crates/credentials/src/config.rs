@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::sources::AmbientFallbackPolicy;
+use crate::sources::{AmbientFallbackPolicy, AwsChainResolver};
 use crate::{Backend, RouteSpec};
 
 /// How a route that cannot be resolved is treated at open.
@@ -33,6 +33,9 @@ pub struct VaultConfig {
     /// The `credsd` socket a `credsd://` route connects to. `None` means the default
     /// resolution: `CREDSD_SOCKET`, else the platform default path.
     credsd_socket: Option<PathBuf>,
+    /// The box-supplied resolver for a bare `aws://` route (the AWS default credential chain).
+    /// `None` means a bare `aws://` route fails closed, rather than substitute an ambient identity.
+    aws_chain_resolver: Option<AwsChainResolver>,
 }
 
 impl VaultConfig {
@@ -46,7 +49,17 @@ impl VaultConfig {
             missing: MissingRoutePolicy::Skip,
             ambient: AmbientFallbackPolicy::default(),
             credsd_socket: None,
+            aws_chain_resolver: None,
         }
+    }
+
+    /// Supply the resolver the box built from the AWS SDK default credential chain.
+    ///
+    /// With no resolver, a bare `aws://` route is a hard failure, never an ambient substitute.
+    #[must_use]
+    pub fn aws_chain_resolver(mut self, resolver: AwsChainResolver) -> Self {
+        self.aws_chain_resolver = Some(resolver);
+        self
     }
 
     /// Declare the `credsd` socket every `credsd://` route in this vault connects to.
@@ -90,25 +103,29 @@ impl VaultConfig {
     }
 
     /// Split into the parts `open` consumes.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Backend,
-        String,
-        Vec<RouteSpec>,
-        MissingRoutePolicy,
-        AmbientFallbackPolicy,
-        Option<PathBuf>,
-    ) {
-        (
-            self.backend,
-            self.tenant,
-            self.routes,
-            self.missing,
-            self.ambient,
-            self.credsd_socket,
-        )
+    pub(crate) fn into_parts(self) -> VaultParts {
+        VaultParts {
+            backend: self.backend,
+            tenant: self.tenant,
+            routes: self.routes,
+            missing: self.missing,
+            ambient: self.ambient,
+            credsd_socket: self.credsd_socket,
+            aws_chain_resolver: self.aws_chain_resolver,
+        }
     }
+}
+
+/// The parts [`Vault::open`](crate::Vault::open) consumes from a [`VaultConfig`]. A struct, not a
+/// tuple, because the parts outgrew a readable tuple.
+pub(crate) struct VaultParts {
+    pub(crate) backend: Backend,
+    pub(crate) tenant: String,
+    pub(crate) routes: Vec<RouteSpec>,
+    pub(crate) missing: MissingRoutePolicy,
+    pub(crate) ambient: AmbientFallbackPolicy,
+    pub(crate) credsd_socket: Option<PathBuf>,
+    pub(crate) aws_chain_resolver: Option<AwsChainResolver>,
 }
 
 #[cfg(test)]
@@ -127,48 +144,68 @@ mod tests {
     /// The default is the soft tier: an absent secret is reported, not fatal.
     #[test]
     fn default_policy_skips_a_missing_route() {
-        let (_, tenant, routes, missing, _, _) = VaultConfig::new(Backend::local(), "tenant-a")
+        let parts = VaultConfig::new(Backend::local(), "tenant-a")
             .route(route("api.github.com"))
             .into_parts();
-        assert_eq!(tenant, "tenant-a");
-        assert_eq!(routes.len(), 1);
-        assert_eq!(missing, MissingRoutePolicy::Skip);
+        assert_eq!(parts.tenant, "tenant-a");
+        assert_eq!(parts.routes.len(), 1);
+        assert_eq!(parts.missing, MissingRoutePolicy::Skip);
     }
 
     /// `require_every_route` flips the switch the supervisors need.
     #[test]
     fn require_every_route_refuses_a_missing_route() {
-        let (_, _, _, missing, _, _) = VaultConfig::new(Backend::local(), "t")
+        let parts = VaultConfig::new(Backend::local(), "t")
             .require_every_route()
             .into_parts();
-        assert_eq!(missing, MissingRoutePolicy::Refuse);
+        assert_eq!(parts.missing, MissingRoutePolicy::Refuse);
     }
 
     /// The ambient-fallback default is allowed-with-warning; the switch tightens it to Deny.
     #[test]
     fn require_scoped_aws_profile_denies_ambient_fallback() {
-        let (_, _, _, _, default, _) = VaultConfig::new(Backend::local(), "t").into_parts();
-        assert_eq!(default, AmbientFallbackPolicy::AllowWithWarning);
+        let default = VaultConfig::new(Backend::local(), "t").into_parts();
+        assert_eq!(default.ambient, AmbientFallbackPolicy::AllowWithWarning);
 
-        let (_, _, _, _, tightened, _) = VaultConfig::new(Backend::local(), "t")
+        let tightened = VaultConfig::new(Backend::local(), "t")
             .require_scoped_aws_profile()
             .into_parts();
-        assert_eq!(tightened, AmbientFallbackPolicy::Deny);
+        assert_eq!(tightened.ambient, AmbientFallbackPolicy::Deny);
     }
 
     /// The credsd socket defaults to absent (default resolution) and the builder retains a path.
     #[test]
     fn credsd_socket_defaults_absent_and_is_retained_when_set() {
-        let (_, _, _, _, _, default) = VaultConfig::new(Backend::local(), "t").into_parts();
-        assert_eq!(default, None, "an unset socket means default resolution");
+        let default = VaultConfig::new(Backend::local(), "t").into_parts();
+        assert_eq!(
+            default.credsd_socket, None,
+            "an unset socket means default resolution"
+        );
 
-        let (_, _, _, _, _, set) = VaultConfig::new(Backend::local(), "t")
+        let set = VaultConfig::new(Backend::local(), "t")
             .credsd_socket("/var/run/credsd/credsd.sock")
             .into_parts();
         assert_eq!(
-            set.as_deref(),
+            set.credsd_socket.as_deref(),
             Some(std::path::Path::new("/var/run/credsd/credsd.sock"))
         );
+    }
+
+    /// The default-chain resolver defaults to absent and the builder retains one.
+    #[test]
+    fn aws_chain_resolver_defaults_absent_and_is_retained_when_set() {
+        let default = VaultConfig::new(Backend::local(), "t").into_parts();
+        assert!(
+            default.aws_chain_resolver.is_none(),
+            "no resolver means a bare aws:// route fails closed"
+        );
+
+        let set = VaultConfig::new(Backend::local(), "t")
+            .aws_chain_resolver(crate::AwsChainResolver::new(|| {
+                Err(crate::CredentialError::Credential("unused".into()))
+            }))
+            .into_parts();
+        assert!(set.aws_chain_resolver.is_some());
     }
 
     /// `routes` is `route` in bulk — the two produce the same declaration.
@@ -178,11 +215,11 @@ mod tests {
             .route(route("a.example.com"))
             .route(route("b.example.com"))
             .into_parts()
-            .2;
+            .routes;
         let many = VaultConfig::new(Backend::local(), "t")
             .routes([route("a.example.com"), route("b.example.com")])
             .into_parts()
-            .2;
+            .routes;
         assert_eq!(one, many);
     }
 }

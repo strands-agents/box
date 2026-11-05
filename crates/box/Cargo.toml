@@ -47,6 +47,26 @@ monty-types = "1.0.0"
 # proxy path. Same pin and features as `shell`, already in the lockfile via that crate, so
 # this adds no version the lockfile does not already hold.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# The AWS SDK default credential provider chain, behind a bare `aws://` reference. The box builds
+# the chain and injects a resolver into the vault through the `credentials` crate's sealed seam, so
+# that crate links no HTTP client of its own. `credentials-process` is enabled so the chain's
+# profile provider honors `credential_process` (an accepted residual: see
+# docs/design/decisions.md#aws-resolves-the-default-credential-chain).
+#
+# `client-hyper`/`rustls` are NOT enabled: they pull `rustls-aws-lc`, and the whole workspace uses
+# `ring`, so two crypto providers would make rustls' process-default ambiguous and panic the first
+# TLS handshake. The box instead builds the SDK's HTTP client itself, on `ring`, through
+# `aws-smithy-http-client`.
+aws-config = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "credentials-process",
+    "rt-tokio",
+] }
+aws-credential-types = "1"
+aws-smithy-http-client = { version = "1", default-features = false, features = [
+    "rustls-ring",
+    "rt-tokio",
+] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -97,10 +97,19 @@ names the route.
 hex characters. `box.toml` calls it a phantom. The workload can read it, and so learn that a
 credential exists, but the value authenticates nothing anywhere.
 
-**A named AWS profile is the only identity.** An `aws://` route never falls back to the ambient
+**A named AWS profile names its identity.** An `aws://PROFILE` route never falls back to the ambient
 `AWS_*` variables, and it refuses a profile that uses `credential_process`, because that would make
 the box's trusted process run a program a configuration file names
 ([a provider refuses an identity it can't honour](./decisions.md#a-provider-refuses-an-identity-it-cannot-honour)).
+
+**A bare `aws://` runs the AWS default credential provider chain.** It signs with whatever the chain
+resolves on the host, for a box deployed on AWS: environment variables, the profile files, web
+identity, the ECS or EKS container endpoint, then EC2 instance metadata (which also serves
+AgentCore). The identity is ambient and host-chosen rather than a scoped profile, so the box warns
+on each use, and a deployment that requires a scoped profile refuses it. Unlike `aws://PROFILE`, the
+chain honors `credential_process`, which runs a program from `~/.aws/config` in the trusted process;
+the owners accepted that risk (see the threat model), so grant write access to `~/.aws` only when
+you trust whatever can write there. [Signed routes](#signed-routes-aws) says how it resolves.
 
 ## On each request
 
@@ -212,8 +221,17 @@ from the host, which must end in `.amazonaws.com` or `.api.aws`, and refuses a h
 The process gets placeholder AWS keys so that an AWS SDK builds and signs its own request. The
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
-**`aws://` signs with static keys.** The vault resolves the profile's access key and secret key
-on each request.
+**`aws://PROFILE` signs with static keys.** The vault resolves the profile's access key and secret
+key on each request.
+
+**A bare `aws://` signs with the AWS default credential chain.** The box resolves it through the
+official AWS SDK default credential provider chain: environment, profiles (including
+`credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance metadata
+(which also serves AgentCore). The SDK runs in the box's `run` process, not in the credentials
+crate, which links no HTTP client of its own. The chain does not cache when called directly, so the
+box caches the credentials and refreshes them near expiry, and a steady stream of requests makes no
+extra endpoint call. A bare `aws://` route resolves once at startup, so a box on a host the chain
+cannot resolve fails fast rather than at the first request.
 
 <a id="credentials-in-a-leaf-box"></a>
 

@@ -17,6 +17,9 @@ pub(crate) use aws::{
     AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
     sign_request,
 };
+// The two names the box supplies to inject the SDK-backed default-chain resolver cross the crate
+// façade, so they are re-exported publicly here and again from `lib.rs`.
+pub use aws::{AwsChainCredentials, AwsChainResolver};
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
 pub(crate) use env::EnvSource;
 pub(crate) use file::FileSource;

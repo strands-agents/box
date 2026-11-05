@@ -17,10 +17,15 @@ pub enum Locator {
 }
 
 impl Locator {
-    /// Parse a URI-form reference (`op://…`, `env://VAR`, `file:///path`).
+    /// Parse a URI-form reference (`op://…`, `env://VAR`, `file:///path`, `aws://`).
+    ///
+    /// A bare `aws://` with no body is accepted and names the AWS default credential provider
+    /// chain; every other scheme still requires a non-empty body.
     pub fn parse_uri(s: &str) -> Result<Self> {
         match s.split_once("://") {
-            Some((scheme, rest)) if !scheme.is_empty() && !rest.is_empty() => {
+            Some((scheme, rest))
+                if !scheme.is_empty() && (!rest.is_empty() || scheme == AWS_SCHEME) =>
+            {
                 Ok(Locator::Uri(s.to_string()))
             }
             _ => Err(CredentialError::Credential(format!(
@@ -52,6 +57,9 @@ impl Locator {
 
 /// The reserved structured-form key naming the owning source (the routing tag), e.g. `"aws"`.
 const SOURCE_TAG: &str = "source";
+
+/// The one scheme whose body may be empty: a bare `aws://` names the default credential chain.
+const AWS_SCHEME: &str = "aws";
 
 impl std::fmt::Debug for Locator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

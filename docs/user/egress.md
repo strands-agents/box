@@ -54,7 +54,7 @@ when { context.input.host == "api.github.com" };
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
-| `secret.ref` | string | required | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `secret.ref` | string | required | Where the credential comes from: `env://NAME`, `aws://PROFILE`, or a bare `aws://` for the AWS default credential chain. See [Credential sources](#credential-sources). |
 | `secret.placement` | string | `header` | For `env://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
 | `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` with `placement = "header"`: the text before the credential. |
@@ -97,11 +97,21 @@ paths in policy.
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
+| `aws://` | The AWS SDK default credential provider chain: environment variables, then the profile files, then web identity, then the ECS or EKS container endpoint, then EC2 instance metadata (which also serves AgentCore). | On each request. The box caches the credentials and refreshes them on expiry. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The agent gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
 values, and the gateway signs each request to the destinations. The service and region come from
 the host, which ends in `.amazonaws.com` or `.api.aws`.
+
+A bare `aws://` signs with whatever the default credential chain finds on the host. The identity is
+not one you declared in `box.toml`, it changes with the host, and it is often broad, so the box
+prints a warning on each use and you should scope the route's destinations as tightly as the
+identity allows. The chain includes the profile files, so it honors `credential_process`, which
+runs a program named in `~/.aws/config` inside the box's trusted process: grant write access to
+`~/.aws` only when you trust whatever can write there. A deployment can refuse a bare `aws://` with
+`require_scoped_aws_profile`. Prefer `aws://PROFILE`, which names one profile and does not run a
+`credential_process`.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.

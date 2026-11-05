@@ -2,7 +2,7 @@
 
 use std::env;
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{AwsSessionCredentials, CredentialError, Locator, Result};
 
@@ -419,12 +419,14 @@ pub(crate) enum AwsAcquisition {
     Credsd(String),
     /// No scoped `profile` was declared; the ambient provider chain was used (allowed-with-warning).
     AmbientFallback,
+    /// Credentials came from the AWS default credential provider chain, through a bare `aws://`.
+    DefaultChain,
 }
 
 impl AwsAcquisition {
-    /// The operator-facing warning for this acquisition, if any. Present only for
-    /// [`AmbientFallback`](Self::AmbientFallback) — a scoped profile or a `credsd` environment names
-    /// its identity, so neither needs a warning.
+    /// The operator-facing warning for this acquisition, if any. A scoped profile or a `credsd`
+    /// environment names its identity, so neither warns. Ambient fallback and the default chain are
+    /// host-provided identities, so each warns.
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
@@ -432,7 +434,105 @@ impl AwsAcquisition {
                 "AWS ambient credential chain used (no scoped profile declared); \
                  prefer a declared scoped identity to shrink blast radius",
             ),
+            AwsAcquisition::DefaultChain => Some(
+                "AWS default credential provider chain used (aws://): the signing identity is \
+                 whatever the host provides (environment, profile, web identity, container, or \
+                 instance metadata), is not declared in box.toml, and may be broad; scope the \
+                 signed route's destination as tightly as the identity is broad",
+            ),
         }
+    }
+}
+
+/// The session credentials the box's resolver returns from the AWS default credential chain.
+///
+/// The box fills this from the AWS SDK. The crate maps it onto its own session-credential shape,
+/// with the session token present and the region left to the route host. Every field is wiped on
+/// drop, and `Debug` redacts the material. A `session_token` may be empty for a long-lived IAM user
+/// key the chain finds, so the crate treats an empty token as "no token" rather than refusing it.
+pub struct AwsChainCredentials {
+    /// The AWS access key id.
+    pub access_key_id: String,
+    /// The AWS secret access key.
+    pub secret_access_key: String,
+    /// The AWS session token. Empty when the chain resolved a long-lived key with none.
+    pub session_token: String,
+}
+
+impl zeroize::Zeroize for AwsChainCredentials {
+    fn zeroize(&mut self) {
+        self.access_key_id.zeroize();
+        self.secret_access_key.zeroize();
+        self.session_token.zeroize();
+    }
+}
+
+impl Drop for AwsChainCredentials {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl std::fmt::Debug for AwsChainCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsChainCredentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// The box-supplied resolver for a bare `aws://` reference: the AWS default credential provider
+/// chain.
+///
+/// Sealed: the box builds it with [`AwsChainResolver::new`] from a closure that calls the AWS SDK,
+/// so the `credentials` crate links no HTTP client of its own. A vault with no resolver injected
+/// refuses a bare `aws://` route, rather than substitute an ambient identity.
+pub struct AwsChainResolver {
+    resolve: Box<dyn Fn() -> Result<AwsChainCredentials> + Send + Sync>,
+}
+
+impl AwsChainResolver {
+    /// Build a resolver from a closure that resolves the default chain to session credentials.
+    pub fn new(resolve: impl Fn() -> Result<AwsChainCredentials> + Send + Sync + 'static) -> Self {
+        Self {
+            resolve: Box::new(resolve),
+        }
+    }
+
+    /// Resolve the default chain to the crate's own session-credential shape.
+    ///
+    /// An empty access key id or secret access key is refused, so the box never signs a malformed
+    /// SigV4 request. An empty session token maps to `None` (a long-lived key). The region is
+    /// `None`: the signing region comes from the route host, never from the credential.
+    pub(crate) fn resolve(&self) -> Result<AwsSessionCredentials> {
+        let mut material = (self.resolve)()?;
+        if material.access_key_id.is_empty() || material.secret_access_key.is_empty() {
+            return Err(CredentialError::Credential(
+                "the aws:// default-chain resolver returned credentials with an empty access key \
+                 id or secret access key"
+                    .to_string(),
+            ));
+        }
+        let session_token = match std::mem::take(&mut material.session_token) {
+            token if token.is_empty() => None,
+            token => Some(token),
+        };
+        // Move each field out rather than clone, so no transient second plaintext copy exists.
+        Ok(AwsSessionCredentials {
+            access_key_id: std::mem::take(&mut material.access_key_id),
+            secret_access_key: std::mem::take(&mut material.secret_access_key),
+            session_token,
+            region: None,
+        })
+    }
+}
+
+impl std::fmt::Debug for AwsChainResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The closure holds no state the crate can render; keep a stable, secret-free line.
+        f.debug_struct("AwsChainResolver").finish()
     }
 }
 
@@ -578,6 +678,14 @@ impl AwsSource {
             credentials: Zeroizing::new(credentials),
             acquisition,
         })
+    }
+
+    /// Whether `loc` is a bare `aws://` reference, which names the AWS default credential chain.
+    ///
+    /// Only the URI form with an empty body is the chain. `aws://<profile>` and the structured form
+    /// are a scoped or ambient profile resolved by [`resolve`](Self::resolve).
+    pub(crate) fn is_default_chain(loc: &Locator) -> bool {
+        matches!(loc, Locator::Uri(uri) if uri.split_once("://") == Some((AWS_SOURCE_TAG, "")))
     }
 
     /// Extract the optional scoped `profile` from either locator form.
@@ -1037,14 +1145,104 @@ mod tests {
         }
     }
 
-    /// Bare `aws://` cannot be written: `parse_uri` rejects an empty body, so the URI form has no
-    /// spelling for "use whatever credentials are ambient". Ambient stays reachable only
-    /// through the structured form, and only when the policy permits it.
+    // --- bare aws:// default credential chain --------------------------------
+
+    /// A bare `aws://` is the default chain; a profile and the structured form are not.
     #[test]
-    fn the_uri_form_cannot_request_ambient_credentials() {
+    fn a_bare_aws_uri_is_the_default_chain() {
+        assert!(AwsSource::is_default_chain(
+            &Locator::parse_uri("aws://").unwrap()
+        ));
+        assert!(!AwsSource::is_default_chain(
+            &Locator::parse_uri("aws://prod").unwrap()
+        ));
+        assert!(!AwsSource::is_default_chain(&structured(&[(
+            "source", "aws"
+        )])));
+    }
+
+    /// The default-chain acquisition warns, and names the `aws://` surface.
+    #[test]
+    fn the_default_chain_acquisition_warns() {
+        let warning = AwsAcquisition::DefaultChain
+            .warning()
+            .expect("the default chain warns");
+        assert!(warning.contains("aws://"), "{warning}");
+    }
+
+    /// The resolver maps the box's credentials onto the crate's shape: token present, region none.
+    #[test]
+    fn the_resolver_maps_credentials_token_present_region_none() {
+        let resolver = AwsChainResolver::new(|| {
+            Ok(AwsChainCredentials {
+                access_key_id: "ASIAEXAMPLE".to_string(),
+                secret_access_key: "secret".to_string(),
+                session_token: "token".to_string(),
+            })
+        });
+        let creds = resolver.resolve().expect("the fake resolver answers");
+        assert_eq!(creds.access_key_id, "ASIAEXAMPLE");
+        assert_eq!(creds.session_token.as_deref(), Some("token"));
+        assert_eq!(creds.region, None, "the signing region comes from the host");
+    }
+
+    /// An empty session token maps to `None` (a long-lived key the chain found), not a refusal.
+    #[test]
+    fn the_resolver_maps_an_empty_session_token_to_none() {
+        let resolver = AwsChainResolver::new(|| {
+            Ok(AwsChainCredentials {
+                access_key_id: "AKIAEXAMPLE".to_string(),
+                secret_access_key: "secret".to_string(),
+                session_token: String::new(),
+            })
+        });
+        let creds = resolver.resolve().expect("a long-lived key resolves");
+        assert_eq!(creds.session_token, None);
+    }
+
+    /// An empty key id or secret from the box's resolver is refused, so the box never signs a
+    /// malformed request.
+    #[test]
+    fn the_resolver_refuses_an_empty_key_or_secret() {
+        for (id, secret) in [("", "secret"), ("ASIA", "")] {
+            let resolver = AwsChainResolver::new(move || {
+                Ok(AwsChainCredentials {
+                    access_key_id: id.to_string(),
+                    secret_access_key: secret.to_string(),
+                    session_token: "token".to_string(),
+                })
+            });
+            let err = resolver
+                .resolve()
+                .expect_err("an empty field must be refused");
+            assert!(!err.is_soft());
+            assert!(err.to_string().contains("empty access key"), "{err}");
+        }
+    }
+
+    /// The box's credentials redact in `Debug`, so a log never carries the material.
+    #[test]
+    fn chain_credentials_redact_in_debug() {
+        let creds = AwsChainCredentials {
+            access_key_id: "ASIAEXAMPLE".to_string(),
+            secret_access_key: "topsecret".to_string(),
+            session_token: "tok".to_string(),
+        };
+        let rendered = format!("{creds:?}");
+        assert!(rendered.contains("[REDACTED]"));
         assert!(
-            Locator::parse_uri("aws://").is_err(),
-            "an empty profile body must not parse"
+            !rendered.contains("topsecret"),
+            "material leaked: {rendered}"
+        );
+    }
+
+    /// A bare `aws://` parses now and names the default chain; the structured form still omits the
+    /// profile for the ambient-fallback path.
+    #[test]
+    fn the_uri_form_names_the_default_chain() {
+        assert!(
+            Locator::parse_uri("aws://").is_ok(),
+            "a bare aws:// now parses as the default chain"
         );
         // The structured form can omit the profile, which is what ambient fallback means.
         assert_eq!(

@@ -177,6 +177,7 @@ a request that does.
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| The AWS default chain | `aws://` | Signs each request with SigV4, from whatever the AWS SDK default credential chain resolves (environment, profiles, web identity, container, or instance metadata), resolved through the AWS SDK |
 
 ### The placeholder swap
 
@@ -226,6 +227,16 @@ the request with SigV4. It reads the service and the region from the host, for e
 and `us-west-2` from `bedrock-runtime.us-west-2.amazonaws.com`, and refuses a host it can't read
 them from. The process gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so
 an AWS SDK builds its request, and the gateway replaces the signature.
+
+A signed route reads its credentials one of two ways. `aws://PROFILE` reads a named profile's
+static keys. A bare `aws://` runs the AWS SDK default credential provider chain — environment
+variables, the profile files (including `credential_process`), web identity, the ECS or EKS
+container endpoint, then EC2 instance metadata (which also serves AgentCore). The SDK runs in the
+box's trusted process, which caches the credentials and refreshes them on expiry. A bare `aws://`
+signs with an ambient, host-chosen identity that is not declared in `box.toml`, and the chain's
+profile provider will run a `credential_process` program from `~/.aws/config` inside the trusted
+process, so the owners accepted its risks (see the threat model) and a deployment can refuse it with
+`require_scoped_aws_profile`.
 
 ## Example: a GitHub API request
 

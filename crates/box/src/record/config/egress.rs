@@ -1619,16 +1619,35 @@ mod tests {
         }
     }
 
-    /// The two deliverable schemes still load.
+    /// The deliverable schemes still load, including a bare `aws://`, which names the AWS default
+    /// credential chain and signs in-boundary like any other aws reference.
     #[test]
     fn a_deliverable_credential_scheme_is_accepted() {
         let variable = present_variable();
-        for locator in [format!("env://{variable}"), "aws://prod".to_string()] {
+        for locator in [
+            format!("env://{variable}"),
+            "aws://prod".to_string(),
+            "aws://".to_string(),
+        ] {
             load(&format!(
-                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {locator:?}"
+                "[egress.a]\ndestinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = {locator:?}"
             ))
             .unwrap_or_else(|error| panic!("{locator} must be accepted: {error}"));
         }
+    }
+
+    /// A bare `aws://` signs in-boundary and mints no placeholder, so `secret.inject` is refused
+    /// beside it, exactly like a scoped `aws://` profile.
+    #[test]
+    fn a_bare_aws_reference_signs_in_boundary() {
+        let entry: EgressEntry = toml::from_str(
+            "destinations = [\"bedrock.us-east-1.amazonaws.com\"]\nsecret.ref = \"aws://\"",
+        )
+        .expect("the bare aws:// entry parses");
+        assert!(
+            EgressEntry::signs_in_boundary(entry.secret.as_ref().unwrap()),
+            "a bare aws:// must sign in-boundary"
+        );
     }
 
     /// A reserved or unset variable is refused when the binding is built, not when the
