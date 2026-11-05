@@ -251,10 +251,13 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   `https_proxy`, `NO_PROXY`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
   `NODE_USE_ENV_PROXY`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
   `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
-- **Names that make a runtime load code, refused:** `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `RUBYOPT`,
-  `PERL5LIB`, `PERL5OPT`, `GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, and every
-  name that starts with `LD_`, `DYLD_`, or `PYTHON`. The prefixes are refused as a family, so a
-  name that loads no code, such as `PYTHONUNBUFFERED`, is refused too.
+- **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
+  own aliases run in the box, so their loader would read the value too. A runtime's own option
+  variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,
+  are the operator's to set, and they reach only the process whose table names them. The `zsh`,
+  `bash`, `sh`, `python3`, and `python` aliases run in Box and do not read them, so a shell or
+  Python option variable reaches a real interpreter that the table runs or spawns, and not an
+  alias call.
 - **`HOME`:** an absolute path. It stays the operator's own home unless `[agent] env.HOME` names
   another directory; the example names `strands-home`, so the CLI reads its settings and writes its
   sessions there. A home inside `box_dir` is refused with ``` `env.HOME` is <path>, which lies in
@@ -266,8 +269,10 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   directory rather than above it, or omit `env.HOME` for the operator's own home```.
 - **`TMPDIR`:** an absolute path.
 
-A name from the first two kinds is refused with ``` `env` name "<name>" is set by the box itself,
-so a table cannot claim it```.
+A name Box sets is refused with ``` `env` name "<name>" is set by the box itself, so a table
+cannot claim it```. A dynamic-loader name is refused with ``` `env` name "<name>" is read by the
+dynamic loader of every program in the box, Box's own aliases included, so a table cannot set
+it```.
 
 `TERM` and `COLORTERM` reach the process only when `env` names them, so a program that picks colors
 from them renders plain otherwise. The example names `TERM`; an operator who wants a program's
@@ -545,11 +550,13 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 |---|---|---|
 | A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
-| A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
-| The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+| A command has more than one hard link, which are filesystem names for the same file, and Box can't rule out that the user that runs Box can write it. | `has <n> hard links, and the user that runs Box may be able to write it` | Use a copy with one filesystem name, or install the command so that this user can't write it. |
+| The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
 
-Box also refuses legitimate system executables that have multiple hard links. File ownership and
-permissions do not waive the requirement for exactly one hard link.
+Box accepts a command with more than one hard link when the user that runs Box can't write it
+through any name. The file belongs to another user, such as `root`, has no group or other write
+permission, and no access-control entry lets this user write it. Most system programs are like
+this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. Reads still require the applicable policy permission.

@@ -668,7 +668,11 @@ impl Boundary {
                 }
                 .into());
             }
-            containment = containment.require_file_identity(command.path(), command.opened())?;
+            containment = if command.has_several_names() {
+                containment.require_command_identity(command.path(), command.opened())?
+            } else {
+                containment.require_file_identity(command.path(), command.opened())?
+            };
         }
 
         containment = protect_authorities(
@@ -2081,6 +2085,64 @@ mod tests {
         assert!(
             cells(&translate(None)).contains(&refusal),
             "a table judged now subtracts the directory holding the source"
+        );
+    }
+
+    /// **A tool whose program has one name keeps the identity requirement it had before
+    /// `command_identities`.** Only a program with several names travels in that list, so a sandbox
+    /// helper built without it still loads every other box.
+    #[test]
+    fn a_tool_program_with_one_name_keeps_its_identity_requirement() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let record = Record {
+            tool: BTreeMap::from([("t".to_string(), spec.clone())]),
+            ..fixture.record.clone()
+        };
+        let approved = crate::test_support::with_operator_home(fixture.operator.path(), || {
+            ApprovedReach::judge(&record, &[])
+        })
+        .expect("every table is judged");
+        let command = approved
+            .commands()
+            .get("[tool.t]")
+            .expect("[tool.t] command");
+        assert!(!command.has_several_names(), "{}", command.path().display());
+        let fallback = fixture.path("project");
+        let boundary = crate::test_support::with_operator_home(fixture.operator.path(), || {
+            Boundary::translate(
+                &spec,
+                Launch {
+                    table: "[tool.t]",
+                    trailing: &[],
+                    fallback_workspace: &fallback,
+                    shebang_interpreters: ShebangInterpreters::Granted,
+                    runtime_reach: RuntimeReach::Leaf,
+                    argument_zero: None,
+                    egress: EgressMode::Gateway,
+                    approved: approved.table("[tool.t]"),
+                },
+                &Site {
+                    attachment: &fixture.attachment,
+                    layout: &fixture.root,
+                    stored: &record,
+                    protected_sources: &[],
+                },
+            )
+        })
+        .expect("[tool.t] translates");
+        let config: serde_json::Value =
+            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+
+        assert!(config.get("command_identities").is_none(), "{config}");
+        let program = command.path().to_str().expect("UTF-8 path");
+        assert!(
+            config["identity_requirements"]
+                .as_array()
+                .expect("identity requirements")
+                .iter()
+                .any(|entry| entry["path"] == program),
+            "{program}: {config}"
         );
     }
 

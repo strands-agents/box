@@ -3601,6 +3601,63 @@ fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     assert_eq!(std::fs::read(alias).unwrap(), original);
 }
 
+/// A root-owned host program with several names that the user that runs Box cannot write, and the
+/// arguments that make it print.
+fn system_program_with_several_names() -> Option<(&'static str, &'static str)> {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return None;
+    }
+    [("id", "-u"), ("unzip", "-v"), ("bzip2", "--help")]
+        .into_iter()
+        .find(|(name, _)| {
+            std::fs::symlink_metadata(std::path::Path::new("/usr/bin").join(name)).is_ok_and(
+                |metadata| {
+                    metadata.is_file()
+                        && metadata.nlink() > 1
+                        && metadata.uid() == 0
+                        && metadata.mode() & 0o022 == 0
+                },
+            )
+        })
+}
+
+#[test]
+fn a_root_owned_configured_command_with_several_names_runs() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let Some((name, argument)) = system_program_with_several_names() else {
+        if cfg!(target_os = "macos") {
+            panic!(
+                "macOS ships a root-owned id, unzip, or bzip2 with several names, so a skip there \
+                 hides a regression"
+            );
+        }
+        println!("skipping: no root-owned id, unzip, or bzip2 with several names in /usr/bin");
+        return;
+    };
+    let policy = format!(
+        "permit(principal, action == Box::Action::\"shell:exec\", resource);\n\
+         permit(principal, action == Box::Action::\"shell:spawn\", resource) \
+         when {{ context.input.program == \"{name}\" }};\n\
+         permit(principal, action == Box::Action::\"fs:read\", resource);\n"
+    );
+    let tool = format!("[tool.{name}]\ncommand = [\"/usr/bin/{name}\"]\n");
+    let box_ = Request::with_config("cmd-several-names", &policy, &tool).expect();
+
+    let output = box_.bash(&format!("zsh -lc \"{name} {argument}\""));
+
+    assert!(output.status.success(), "/usr/bin/{name}: {output:?}");
+    assert!(
+        !format!("{}{}", stdout(&output), stderr(&output))
+            .trim()
+            .is_empty(),
+        "/usr/bin/{name}: {output:?}"
+    );
+}
+
 #[test]
 fn native_write_grants_cannot_reach_a_configured_command() {
     if !fixture::namespace_launcher_is_usable() {

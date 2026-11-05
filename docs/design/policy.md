@@ -230,7 +230,8 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
-tool programs with multiple hard links or overlap with direct writable grants.
+tool programs that have more than one hard link and that its user can write, or that overlap with
+direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
 When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also
 refuses wildcard commands that can select different servers for the same request.

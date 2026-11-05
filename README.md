@@ -183,7 +183,7 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ```
 
 The downloader selects macOS Apple silicon or Linux ARM64 archives. For Linux, select a release
-that includes `box-<version>-aarch64-unknown-linux-gnu.tar.gz` and its `SHA256SUMS.txt` entry.
+that includes `box-<version>-linux-arm64.tar.gz` and its `SHA256SUMS.txt` entry.
 Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
 the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
 
