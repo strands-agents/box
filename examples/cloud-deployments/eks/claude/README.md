@@ -33,7 +33,8 @@ Box checks their HTTP requests before forwarding permitted requests to the mock 
 
 The [policy](deployment_policy.py) uses Dogwood, Box's policy language, to count failed deployment responses (HTTP status codes 400 through 599).
 The mock service returns 503 for its first three deployment requests and 201 afterward. Box enforces the cooldown.
-Status checks and blocked retries do not extend the cooldown. Later failures can start another cooldown.
+Status checks and blocked retries do not extend the cooldown.
+After the ten-minute cooldown, Box needs three new failures within five minutes to start another cooldown.
 
 The supplied client makes one call at a time. Each box has its own policy history.
 The rule does not coordinate limits across boxes or cancel requests already in flight when the third failure arrives.
@@ -71,7 +72,8 @@ The test report records these shorter durations. Use the full check to test the 
 
 To test whether later failures start another cooldown, run the command below.
 It uses a mock service that always returns deployment failures, a thirty-second failure window, and a three-second cooldown.
-It checks that the fourth and fifth failures each start another cooldown while status checks remain available.
+The failure window lasts longer than the cooldown in this test, so earlier failures still count.
+The test checks that the fourth and fifth failures each start another cooldown while status checks remain available.
 
 ```sh
 python3.12 test_deployment_policy.py --box-binary /absolute/path/to/box \
