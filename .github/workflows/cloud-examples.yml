@@ -42,3 +42,5 @@ jobs:
         run: python run-tests.py
       - name: Test EKS Job receipts without a cluster
         run: python examples/cloud-deployments/eks/test_run.py
+      - name: Test Strands delegation without model access
+        run: python -m unittest discover -s examples/cloud-deployments/eks/strands/tests -v

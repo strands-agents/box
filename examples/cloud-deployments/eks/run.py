@@ -11,7 +11,7 @@ import time
 
 COMMAND_TIMEOUT_SECONDS = 30
 DIAGNOSTIC_TIMEOUT_SECONDS = 10
-JOB_WAIT_SECONDS = {"scripted": 360, "claude": 960}
+JOB_WAIT_SECONDS = {"scripted": 360, "claude": 960, "strands": 660}
 POLL_INTERVAL_SECONDS = 3
 
 
@@ -20,8 +20,12 @@ def manifest(args):
         raise ValueError('Use a Kubernetes namespace name containing lowercase letters, digits, and hyphens.')
     if not args.image or any(x.isspace() for x in args.image):
         raise ValueError('Provide the image you built and pushed to your registry.')
-    if args.mode == 'claude' and (not args.service_account or not args.region):
-        raise ValueError('Claude requires --service-account and --region.')
+    if args.mode in ('claude', 'strands') and (not args.service_account or not args.region):
+        raise ValueError('Model examples require --service-account and --region.')
+    if args.mode == 'strands' and not re.fullmatch(
+            r'arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+',
+            args.expected_role_arn or ''):
+        raise ValueError('Strands requires --expected-role-arn from its Pod Identity stack.')
     container = {
         'name': 'workload', 'image': args.image,
         'securityContext': {
@@ -30,38 +34,52 @@ def manifest(args):
             'capabilities': {'drop': ['ALL']},
             'seccompProfile': {'type': 'Unconfined'}, 'procMount': 'Unmasked',
         },
-        'resources': {'requests': {'cpu': '250m', 'memory': '512Mi' if args.mode == 'claude' else '256Mi'},
-                      'limits': {'cpu': '1', 'memory': '2Gi' if args.mode == 'claude' else '1Gi'}},
+        'resources': {'requests': {'cpu': '250m', 'memory': '512Mi' if args.mode in ('claude', 'strands') else '256Mi'},
+                      'limits': {'cpu': '1', 'memory': '2Gi' if args.mode in ('claude', 'strands') else '1Gi'}},
     }
     pod = {'restartPolicy': 'Never', 'hostUsers': False, 'automountServiceAccountToken': False,
            'securityContext': {'fsGroup': 991}, 'nodeSelector': {'kubernetes.io/arch': 'arm64'},
            'containers': [container]}
     if args.image_pull_secret:
         pod['imagePullSecrets'] = [{'name': args.image_pull_secret}]
-    if args.mode == 'claude':
+    if args.mode in ('claude', 'strands'):
         pod['serviceAccountName'] = args.service_account
         container['env'] = [{'name': 'AWS_REGION', 'value': args.region},
                             {'name': 'AWS_DEFAULT_REGION', 'value': args.region},
                             {'name': 'BEDROCK_MODEL_ID', 'value': args.model},
                             {'name': 'AWS_EC2_METADATA_DISABLED', 'value': 'true'}]
+    if args.mode == 'strands':
+        container['securityContext'].update(runAsUser=1000, runAsGroup=1000, readOnlyRootFilesystem=True)
+        pod['securityContext']['fsGroup'] = 1000
+        paths = {'evidence': '/evidence', 'temporary': '/tmp', 'box-state': '/var/tmp', 'home': '/home/agent'}
+        pod['volumes'] = [{'name': name, 'emptyDir': {}} for name in paths]
+        container['volumeMounts'] = [{'name': name, 'mountPath': path} for name, path in paths.items()]
+        container['env'].append({'name': 'EXPECTED_ROLE_ARN', 'value': args.expected_role_arn})
+        container['args'] = ['--mode', args.fixture, '--auth', 'pod-identity']
     return {'apiVersion': 'batch/v1', 'kind': 'Job',
             'metadata': {'generateName': 'box-' + args.mode + '-', 'namespace': args.namespace},
-            'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 900 if args.mode == 'claude' else 300,
+            'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': {'scripted': 300, 'claude': 900, 'strands': 600}[args.mode],
                      'template': {'spec': pod}}}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
-    parser.add_argument('--mode', choices=['scripted', 'claude'], default='scripted')
+    parser.add_argument('--mode', choices=['scripted', 'claude', 'strands'], default='scripted')
     parser.add_argument('--namespace', default='box-demo')
     parser.add_argument('--context', help='Kubernetes context; otherwise use your current context.')
     parser.add_argument('--image-pull-secret')
     parser.add_argument('--service-account')
     parser.add_argument('--region')
-    parser.add_argument('--model', default='us.anthropic.claude-sonnet-4-6')
+    parser.add_argument('--model', help='Bedrock inference profile; defaults depend on --mode.')
+    parser.add_argument('--fixture', choices=['baseline', 'alternate'], default='baseline',
+                        help='Release-note input for the Strands example.')
+    parser.add_argument('--expected-role-arn', help='RoleArn output from the Strands Pod Identity stack.')
     parser.add_argument('--render', action='store_true', help='Print the Job without connecting to Kubernetes.')
     args = parser.parse_args()
+    if args.model is None:
+        args.model = ('global.anthropic.claude-sonnet-4-5-20250929-v1:0' if args.mode == 'strands'
+                      else 'us.anthropic.claude-sonnet-4-6')
     try:
         job = manifest(args)
     except ValueError as error:
@@ -130,8 +148,20 @@ def main():
     (dest / 'pods.json').write_text(pods.stdout)
     try:
         result = json.loads(logs.stdout)
+        if not isinstance(result, dict):
+            raise ValueError('The workload result must be an object.')
         state = result.get('state', result)
-    except json.JSONDecodeError:
+        if not isinstance(state, dict):
+            raise ValueError('The workload state must be an object.')
+        if args.mode == 'strands':
+            checks = state.get('checks')
+            full_receipt = state.get('receipt')
+            if (state.get('passed') is not True or not isinstance(checks, dict) or not checks
+                    or any(value is not True for value in checks.values())
+                    or not isinstance(full_receipt, dict) or full_receipt.get('passed') is not True):
+                state = {'passed': False, 'checks': checks if isinstance(checks, dict) else {},
+                         'error': state.get('error') or 'The complete Strands receipt did not pass verification.'}
+    except ValueError:
         state = {'passed': False, 'error': 'The container did not emit a JSON result. Inspect pods.json and stderr.txt.'}
     receipt.update(passed=bool(polling_error is None and logs.returncode == 0
                               and current.get('status', {}).get('succeeded') and state.get('passed')),
