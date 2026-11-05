@@ -191,10 +191,10 @@ Record the source revision, source changes, and signed executable hash beside th
 The test package requires the binary path and bounds each workload to 60 seconds.
 Ordinary workspace tests do not need a signing identity.
 
-The required native CI job builds the feature and runs adapter and configuration tests.
+The required macOS unit-test job builds the feature and runs adapter and configuration tests.
 It tests the receipt checker and reports receipt freshness as informational.
 An outdated or invalid receipt does not fail the job.
-The job summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
+Its summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
 That signed suite does not run in this job.
 Pull requests can merge without fresh signed native test evidence.
 The manual signed suite and receipt tool remain available.
@@ -223,10 +223,10 @@ python3 test-native-filesystem/receipt.py \
 Review the receipt with the test log.
 If you need a current receipt, relevant source changes require a new build and signed run.
 The receipt covers workspace package sources and assets, build configuration, lockfiles,
-the native test package, its shared capture helper, and the native workflow.
+the native test package, its shared capture helper, and the unit-test workflow.
 Cargo supplies the workspace package list, including nested packages.
 Separate crate tests, examples, benchmarks, documentation, and unrelated workflows do not invalidate that receipt.
-The required native workflow also runs startup-refusal tests with and without the Cargo feature.
+The required macOS unit-test job also runs startup-refusal tests with and without the Cargo feature.
 
 
 ## Run real-agent workloads

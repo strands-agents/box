@@ -107,6 +107,11 @@ jobs:
       - name: Build strands-box and the containment trampoline
         run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
 
+      # The macOS downloader tests share this runner instead of taking their own.
+      - name: Check downloader behavior (macos only)
+        if: ${{ startsWith(matrix.os, 'macos') }}
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
+
       - name: Test filesystem modes on a supported backend
         run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
 
