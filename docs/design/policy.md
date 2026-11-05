@@ -131,14 +131,15 @@ A metadata read is an operation that happened once the workload has its answer, 
 `test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
 an existing folder is a `::response`, not a `::error`. A check of a path that can't be resolved,
 such as one under a missing folder or under a folder the surrounding OS won't let Box search, is
-also a `::response`, although the reachable paths check refuses it. Box records it as a
-`::response` only when the path is inside the reachable paths, has no `.` or `..` component,
-crosses no symbolic link in a folder Box can see, and isn't in Box's own state. Any other check that Box itself refuses stays a
-`::error`, so it can't satisfy a precondition keyed on `::response`: the reach floor refuses it, or
-a guard refuses it because a path
-changed between the decision and the check (in the Shell, any change to the namespace; in Python, a
-symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
-counts denied attempts too.
+also a `::response`, although the reachable paths check refuses it. Box classifies that case with
+the same no-follow directory walk the interpreters use, and records `::response` only when that walk
+answers about the path and the path isn't in Box's own state. Shell and Monty resolve `.` and `..`
+before Reach sees the path; a symbolic link or an overlong component stays a `::error`. Any other
+check that Box itself refuses stays a `::error`, so it can't satisfy a precondition keyed on
+`::response`: the reach floor refuses it, or a guard refuses it because a path changed between the
+decision and the check (in the Shell, any change to the namespace; in Python, a symbolic link
+swapped into the path). A cap on attempts counts `::request` instead, because that counts denied
+attempts too.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
