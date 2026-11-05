@@ -88,8 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 The script verifies the checksum and unpacks Box and its helpers into `./box-core`. Keep that directory together.
 The version command prints `strands-box` followed by the release version.
 
-If Box requests Linux consent at startup, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal.
-See [Linux setup requirements](../design/linux-enforcement.md#startup-failures-and-qualification) for startup constraints.
+See [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
 
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
 For deployment examples, see [Amazon EKS](tutorials/eks.md) and [AgentCore Runtime](tutorials/agentcore-runtime.md).
@@ -106,6 +105,8 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
+
+On Linux, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal before you start a workload.
 
 ## Step 2. Install the Strands CLI
 
