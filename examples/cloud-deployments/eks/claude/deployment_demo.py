@@ -18,6 +18,17 @@ from deployment_service import DeploymentService
 HERE = Path(__file__).resolve().parent
 
 
+def _policy_path(path):
+    """Spell paths under the controller's home as Box records them."""
+    for operator_home in (Path.home(), Path.home().resolve()):
+        try:
+            relative = path.relative_to(operator_home)
+        except ValueError:
+            continue
+        return "~" if relative == Path(".") else "~/" + relative.as_posix()
+    return str(path)
+
+
 def configure(root, command, service_url, *, model_host=None, failure_window=300, cooldown=600):
     """Write one Box configuration shared by the agent and deterministic check."""
     root.mkdir(parents=True, exist_ok=True)
@@ -30,12 +41,13 @@ def configure(root, command, service_url, *, model_host=None, failure_window=300
     interpreter = str(Path(sys.executable).resolve())
     service = urlsplit(service_url)
     policy = deployment_policy(service.hostname, service.port, failure_window, cooldown)
+    policy_home = _policy_path(home)
     environment = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "AWS_EC2_METADATA_DISABLED": "true"}
     policy += f"""
 @id("agent_state")
 permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
-when {{ context.input.path == {json.dumps(str(home))} || context.input.path like {json.dumps(str(home) + '/*')} }};
+when {{ context.input.path == {json.dumps(policy_home)} || context.input.path like {json.dumps(policy_home + '/*')} }};
 @id("deployment_tools_start")
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when {{ context.input.program == "deployment-tools" }};

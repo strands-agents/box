@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'examples/cloud-deployments/**'
+      - 'crates/policy/**'
       - '.github/workflows/cloud-examples.yml'
   push:
     branches: [main]
     paths:
       - 'examples/cloud-deployments/**'
+      - 'crates/policy/**'
       - '.github/workflows/cloud-examples.yml'
   workflow_dispatch:
 

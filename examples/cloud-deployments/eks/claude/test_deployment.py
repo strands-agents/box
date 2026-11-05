@@ -6,12 +6,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
 from check_deployment import verify
 from deployment_policy import deployment_policy
+from deployment_demo import configure
 from deployment_service import DeploymentService
 import deployment_tools
 
@@ -177,6 +179,38 @@ class DeploymentToolsTests(unittest.TestCase):
             self.assertTrue(replies[5]['result']['isError'])
             self.assertEqual(len(proxy.requests), 2)
             self.assertEqual([row['status'] for row in service.receipts], [503, 200])
+
+
+class DeploymentConfigurationTests(unittest.TestCase):
+    def assert_state_policy(self, root, operator_home, expected):
+        with patch('deployment_demo.Path.home', return_value=operator_home):
+            configure(root, [sys.executable, '-c', 'pass'], 'http://127.0.0.1:8080')
+        policy = (root / 'policy.dw').read_text()
+        self.assertIn('context.input.path == ' + json.dumps(expected), policy)
+        self.assertIn('context.input.path like ' + json.dumps(expected + '/*'), policy)
+
+    def test_state_under_operator_home_uses_home_relative_policy_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            operator_home = Path(directory) / 'operator'
+            self.assert_state_policy(operator_home / 'example', operator_home, '~/example/home')
+
+    def test_state_at_operator_home_uses_tilde_without_trailing_slash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'example'
+            self.assert_state_policy(root, root / 'home', '~')
+
+    def test_similar_home_prefix_remains_an_absolute_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'operator-other' / 'example'
+            self.assert_state_policy(root, Path(directory) / 'operator', str(root / 'home'))
+
+    def test_state_under_resolved_home_uses_home_relative_policy_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actual_home = Path(directory) / 'actual'
+            actual_home.mkdir()
+            operator_home = Path(directory) / 'alias'
+            operator_home.symlink_to(actual_home, target_is_directory=True)
+            self.assert_state_policy(actual_home / 'example', operator_home, '~/example/home')
 
 
 class DeploymentPolicyTests(unittest.TestCase):
