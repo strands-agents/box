@@ -88,32 +88,29 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-The stored version is the highest version required by the selected settings:
-
-| Setting | Required version |
-|---|---|
-| No experimental feature, process override, or setting below | 21 |
-| An enabled experimental feature | 22 |
-| An explicit process override | 23 |
-| Two stdio MCP servers sharing one program | 24 |
-| [`file-attributes = true`](config.md#file-attributes) | 25 |
-| A numeric `limits.shell.timeout`, including `30` | 26 |
-| `limits.shell.timeout = false` | 27 |
-| An explicit `limits.python.timeout`, including `120` and `false` | 28 |
-
-Each version retains the other selected settings.
-Older binaries refuse unsupported versions rather than silently losing the selection.
+When both execution timeouts are omitted, `file-attributes` is `false`, and MCP argument wildcards
+are disabled, configurations without process overrides retain version 21 when disabled and
+version 22 when enabled.
+An explicit process override requires record version 23.
+Two stdio MCP servers that share a program require record version 24.
+Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
+Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requires version 26.
+An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
+An explicit `limits.python.timeout` requires record version 28, including `120` and `false`.
+When a configuration selects more than one of these features, it uses the highest required version
+and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
-Before returning to a binary that supports only version 21, remove all process overrides and both
-execution timeouts, give each stdio MCP server its own program, and set `file-attributes` to `false`.
-Run once with the native-capable build before returning to an older binary.
+Remove all process overrides and both execution timeouts, give each stdio MCP server its own
+program, and set `file-attributes` to `false` before returning to a binary that supports only
+version 21.
+If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
+`argument_wildcards` on each server too.
+Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing record.
-To return from version 28, remove `limits.python.timeout` and run once with
-the current build before switching binaries.
-To return from version 27 to a build that supports version 26, set a numeric Shell
-timeout and run once with the current build before switching binaries.
+Changing TOML alone does not rewrite an existing record.
+To return from version 28, remove `limits.python.timeout` and run once with the current build
+before switching binaries.
 
 ## FAQ
 

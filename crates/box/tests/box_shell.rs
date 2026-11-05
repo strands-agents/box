@@ -1948,13 +1948,15 @@ fn nested_python_obeys_the_earlier_deadline_without_late_effects() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    for (name, shell_timeout, python_timeout, delay, pipeline) in [
-        ("shell", "3", "false", 2, ""),
-        ("pipeline", "3", "false", 2, " | cat"),
-        ("python", "false", "1", 0, ""),
+    for (name, shell_timeout, python_timeout, delay, pipeline, status) in [
+        ("shell", "3", "false", 2, "", 1),
+        ("pipeline", "3", "false", 2, " | cat", 1),
+        ("substitution", "3", "false", 2, "", 1),
+        ("python", "false", "1", 0, "", 1),
+        ("python-pipeline", "false", "1", 0, " | cat", 0),
     ] {
         let box_ = Request::with_config(
-            &format!("monty-nested-{name}"),
+            &format!("nested-{name}"),
             PYTHON_POLICY,
             &format!(
                 "[limits]\nshell.timeout = {shell_timeout}\npython.timeout = {python_timeout}\n"
@@ -1976,10 +1978,12 @@ while time.monotonic() < finish:
 Path({late:?}).write_text("late")
 "#,
         );
-        let command = format!(
-            "sleep {delay}; python3 -c '{}'{pipeline}",
-            source.replace('\'', "'\\''"),
-        );
+        let python = format!("python3 -c '{}'", source.replace('\'', "'\\''"));
+        let command = if name == "substitution" {
+            format!("sleep {delay}; printf '%s' \"$({python})\" > {late:?}")
+        } else {
+            format!("sleep {delay}; {python}{pipeline}")
+        };
         let output = bounded_bash(
             &box_,
             &format!(
@@ -1994,7 +1998,6 @@ python3 -c "print('STILL_SERVING')"
         );
 
         assert!(output.status.success(), "{name}: {output:?}");
-        let status = if pipeline.is_empty() { 1 } else { 0 };
         assert_eq!(
             stdout(&output),
             format!("status={status}\nSTILL_SERVING\n"),

@@ -245,10 +245,11 @@ refused file operation fails the command the way the operation's own error would
 
 **Each call uses the operator's execution limit.** The operator sets
 [`limits.shell.timeout`](../user/config.md#limits), keeps the 30-second default, or selects
-`false` for unlimited execution. A finite limit gives the broker a backup deadline five seconds
-later, so the Shell can finish and report its result. Output resets neither deadline.
-With `false`, neither execution deadline is installed; cancellation, client disconnect, and
-broker shutdown can still end the call when the interpreter returns control.
+`false` to disable this limit. The allowance covers the entire Shell call, including Python it
+runs through Monty. A finite limit gives the broker a backup deadline five seconds later, so the
+Shell can finish and report its result. Output resets neither deadline. With `false`, neither
+execution deadline is installed; cancellation, client disconnect, and broker shutdown can still
+end the call when the interpreter returns control.
 
 While a Shell call runs, the connection's idle timer is suspended, and the Shell alias waits for
 the broker's result without a separate response deadline. Connection and write operations retain
@@ -257,6 +258,13 @@ their own transport timeouts.
 **Nested Python shares the remaining Shell allowance.** Monty uses the earlier of the Shell
 deadline and its own [Python deadline](../user/monty.md#limits-and-exit-statuses), including time spent
 asleep or waiting for Box to answer a call. It checks this budget during computation.
+
+**Deadline checks depend on the interpreter returning control.** Monty runs synchronous Python
+code on the same thread that checks the Shell and broker deadlines, so a VM turn can delay those
+checks. The Shell checks its deadline again when a command task finishes; the broker does the
+same before returning a call result. These checks reject a late result, but neither interrupt
+synchronous work nor undo effects already performed.
+
 Cancellation still depends on the interpreter returning control. With both timeouts disabled,
 a Python busy loop can prevent shutdown. A broker that stops making progress can leave an alias
 waiting; the alias's wait is not proof that the call has stopped.

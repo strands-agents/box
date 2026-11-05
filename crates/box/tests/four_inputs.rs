@@ -205,8 +205,8 @@ fn the_config_record_carries_only_the_four_inputs() {
             "telemetry",
             "tool"
         ],
-        "the eleven config keys include execution limits, explicit experimental enforcement, and \
-         `file-attributes`, which widens only the workload's own write grants. \
+        "the eleven config keys include execution limits, explicit experimental enforcement selection, \
+         and `file-attributes`, which widens only the workload's own write grants. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }

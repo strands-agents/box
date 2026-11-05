@@ -249,6 +249,7 @@ mod tests {
 
     fn declared(name: &str) -> crate::record::config::mcp::McpServer {
         crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: name.to_string(),
             command: vec![name.to_string()],
         }

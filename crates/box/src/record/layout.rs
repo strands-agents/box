@@ -4614,6 +4614,7 @@ mod tests {
     fn one_alias_serves_every_server_on_one_program() {
         let (layout, _fixture) = layout("codex");
         let server = |name: &str, command: &[&str]| crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: name.to_string(),
             command: command.iter().map(ToString::to_string).collect(),
         };

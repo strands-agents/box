@@ -43,8 +43,9 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
+    /// The Python interpreter's own bound on one submitted Python call.
     pub(super) python_timeout: Option<Duration>,
-    /// The Shell's own bound on one command.
+    /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
     /// timeout normally fires first (and reports an `Exit`); this catches a Call that outlives it
@@ -209,10 +210,7 @@ impl ShellSpec {
             let governed = governed.clone();
             let egress = egress.clone();
             let recorder = Arc::clone(&recorder);
-            let deadline = strands_shell::io::CURRENT_PROCESS
-                .try_with(|process| process.borrow().deadline)
-                .ok()
-                .flatten();
+            let deadline = strands_shell::io::with_process(|process| process.deadline);
             Box::pin(async move {
                 let outcome = crate::run::broker::python::CALL_DEADLINE
                     .scope(

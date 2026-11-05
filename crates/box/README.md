@@ -73,9 +73,9 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **ten**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, and `[limits]`. `name` and `box_dir`
+`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
@@ -86,7 +86,7 @@ which requests are governed.
 
 `[limits]` accepts `shell.timeout` and `python.timeout`, each a positive integer number of seconds
 or `false` to disable its execution timeout. Shell defaults to 30 seconds; Python defaults to 120.
-For ten minutes, set either key to `600`; for unlimited execution, set it to `false`.
+For ten minutes, set either key to `600`; to disable that deadline, set it to `false`.
 The nested tables `[limits.shell]` and `[limits.python]` accept the same values under `timeout`.
 Each allowance covers one call. Python inside Shell also shares the Shell call's remaining allowance.
 Invalid or unrepresentable durations are load errors.
@@ -151,6 +151,13 @@ program in its own contained leaf box, once `shell:spawn` permits it. The first 
 exposes the server after its schema is accepted and the complete policy bundle is ready. Each tool
 call uses its generated `<normalized-server>::Action::"<tool>"` action. Other MCP methods use
 `Box::Action::"mcp:call"`.
+
+`[mcp.<name>] argument_wildcards = true` lets that local MCP `command` use `"*"`
+for one complete argument. For example, `command = ["server", "--token", "*"]` accepts the
+harness's token argument and starts the server with that value after `shell:spawn` permits the
+effective command. The program, argument count, and fixed arguments must still match. This flag
+defaults to false. See [argument wildcards](../../docs/user/mcp.md#argument-wildcards) for the
+matching rules and offline schema generation limit.
 
 For example, server `issues-mcp` and tool `SearchIssues` use
 `issues_mcp::Action::"SearchIssues"`. Run `strands-box policy generate-schema` and copy the
@@ -321,7 +328,8 @@ unambiguous credential.
 
 An `env://` credential mints one phantom and places it in the workload's
 environment under that name; the real secret is read by the box and never crosses
-the boundary, and the proxy swaps the phantom back at the edge.
+the boundary, and the proxy swaps the phantom back at the edge. Every destination that names
+one variable, in one route or in several, shares that one phantom.
 
 **Every process in the box gets every route.** The agent, each tool, and each MCP server receive
 every phantom and every signing placeholder the box provisions. No table selects a subset, because
