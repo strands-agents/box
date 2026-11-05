@@ -77,8 +77,8 @@ fn a_policy_naming_a_grammar_action_starts_with_its_grammar_and_the_switch() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         version,
-        Some(25),
-        "a grammar box carries its own record version"
+        Some(21),
+        "a grammar box keeps the ordinary record version"
     );
     assert!(
         stderr(&output).contains("[tool.git] grammar: the Shell still decides a spawn of `git`"),

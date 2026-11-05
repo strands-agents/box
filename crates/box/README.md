@@ -97,8 +97,8 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 | `filesystem` | The direct reach of this process's own filesystem calls |
 | `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
 
-`tool_grammars.rs` pins the `tool-grammars` switch, record version 25, the startup warning for each
-grammar, and the startup refusals.
+`tool_grammars.rs` pins the `tool-grammars` switch, the startup warning for each grammar, and the
+startup refusals.
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

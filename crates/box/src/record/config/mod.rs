@@ -589,8 +589,6 @@ const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
-/// The record version of a record that selects `tool-grammars`.
-const GRAMMAR_RECORD_VERSION: u32 = 25;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,9 +634,7 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if features.tool_grammars {
-        GRAMMAR_RECORD_VERSION
-    } else if crate::record::config::mcp::shares_a_program(mcp) {
+    if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
         process_record_version(features, specs)
@@ -886,7 +882,6 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
-            GRAMMAR_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1527,8 +1522,7 @@ native-filesystem-policy = false
         );
     }
 
-    #[test]
-    fn a_record_that_selects_tool_grammars_carries_its_own_version() {
+    fn grammar_record() -> Record {
         let file = load(&format!(
             "{GIT_TOOL}[experimental-features]\ntool-grammars = true\n"
         ))
@@ -1536,28 +1530,48 @@ native-filesystem-policy = false
         let mut stored = record(None, BTreeMap::new());
         stored.experimental_features.tool_grammars = true;
         stored.tool = file.tool.clone();
-        let forged = toml::to_string(&stored).expect("the record writes");
-        assert!(matches!(
-            Record::parse(&forged, Path::new("record.toml")),
-            Err(ConfigError::RecordVersion {
-                found: RECORD_VERSION,
-                expected: GRAMMAR_RECORD_VERSION
-            })
-        ));
+        stored
+    }
 
-        stored.version = GRAMMAR_RECORD_VERSION;
+    #[test]
+    fn a_record_that_selects_tool_grammars_keeps_its_ordinary_version() {
+        let mut stored = grammar_record();
         let encoded = toml::to_string(&stored).expect("the record writes");
         assert_eq!(
             Record::parse(&encoded, Path::new("record.toml")).expect("the record reads"),
             stored
         );
+
         stored.experimental_features.tool_grammars = false;
-        stored.version = RECORD_VERSION;
         let hidden = toml::to_string(&stored).expect("the record writes");
         assert!(
             Record::parse(&hidden, Path::new("record.toml")).is_err(),
             "a stored grammar needs the switch"
         );
+    }
+
+    /// A build that has no `grammar` field or `tool-grammars` key reads each one as a key it does
+    /// not know, and refuses the record.
+    #[test]
+    fn a_grammar_record_is_refused_where_its_keys_are_unknown() {
+        let encoded = toml::to_string(&grammar_record()).expect("the record writes");
+        assert!(encoded.contains("[tool.git.grammar]"), "{encoded}");
+        assert!(encoded.contains("tool-grammars = true"), "{encoded}");
+
+        for (known, unknown) in [
+            ("[tool.git.grammar]", "[tool.git.unknown]"),
+            ("tool-grammars = true", "unknown-feature = true"),
+        ] {
+            let older = encoded.replace(known, unknown);
+
+            let error = Record::parse(&older, Path::new("record.toml"))
+                .expect_err("an unknown record key is refused");
+
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{unknown}: {error}"
+            );
+        }
     }
 
     // ── The four inputs ────────────────────────────────────────────────────────
@@ -2062,7 +2076,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, GRAMMAR_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

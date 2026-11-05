@@ -510,9 +510,8 @@ Each of these is refused at startup, before any box state exists:
 - A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
   policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
 
-A box that turns `tool-grammars` on writes record version 25, so an older build refuses the box
-rather than misread it. To go back to an older build, turn the switch off and remove every
-`grammar` table, then start the box once with this build.
+An older build refuses a box that uses a grammar, so before you go back to one, turn
+`tool-grammars` off, remove every `grammar` table, and start the box once with this build.
 
 ## `[egress.<name>]`
 
