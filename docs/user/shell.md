@@ -131,6 +131,24 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 2. An [`[agent.filesystem] exec`](#agentfilesystem-exec) entry.
 3. Neither: the program is refused with status `126`.
 
+### `limits.shell.timeout`
+
+Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
+`[limits]` to allow ten minutes, or `shell.timeout = false` to disable this limit. See
+[`[limits]`](config.md#limits) for the accepted values.
+
+The allowance covers the full text sent in one call, including multiple commands, pipelines,
+Python called inside the Shell, and programs the Shell starts. Each new call receives a fresh
+allowance. Output leaves its deadline unchanged. The Shell alias waits for the broker's result.
+
+With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
+Calls remain cancellable, and connection and write operations retain their transport timeouts.
+
+Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply to
+Python called inside the Shell, including with `shell.timeout = false`. Synchronous Python
+execution can delay timeout reporting. The direct `python` and `python3` aliases use their
+[own limits](monty.md#limits-and-exit-statuses).
+
 ### `[tool.<name>]`
 
 | Key | Type | Default | Meaning |
@@ -208,7 +226,10 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
+| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
+| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box: the call deadline exceeds this platform's clock range` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |

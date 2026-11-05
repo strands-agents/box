@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries ten keys. `name` and `box_dir` are required.
+The file carries eleven keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -82,8 +82,9 @@ The file carries ten keys. `name` and `box_dir` are required.
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
+| `[limits]` | table | Execution limits for Strands Shell. |
 
-The example uses five of the ten: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -158,8 +159,9 @@ file-attributes = true
 
 The default is `false`, and the switch applies to the agent, every tool, and every local MCP server
 in the box. It has no effect on Linux, which accepts the key. With the switch off, the box renders
-no rule for it. A box that sets it stores its record at version 25, so an older build refuses to
-resume it.
+no rule for it. A box that sets it stores its record at version 25 or newer, depending on its
+[other configured features](native-filesystem-policy.md#stored-configuration-and-rollback).
+An older build refuses a version it does not support.
 
 With the switch on, a process in a write folder can set the times of a file there. It can also set
 the file's set-user-ID and set-group-ID bits, change its group, store an access control list on it,
@@ -174,6 +176,25 @@ still fails to restore the owner and the flags. Extract it with `tar -x --no-mac
 The box prints one line for each process the switch applies to, in the startup disclosure:
 `strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
 group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+
+## `[limits]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
+
+To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
+`[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
+Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
+Connection and write operations retain their transport timeouts.
+Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
+are load errors.
+
+This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
+inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
+with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
+See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
+[stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
 
 ## `[experimental-features]`
 
@@ -227,10 +248,13 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   `https_proxy`, `NO_PROXY`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
   `NODE_USE_ENV_PROXY`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
   `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
-- **Names that make a runtime load code, refused:** `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `RUBYOPT`,
-  `PERL5LIB`, `PERL5OPT`, `GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, and every
-  name that starts with `LD_`, `DYLD_`, or `PYTHON`. The prefixes are refused as a family, so a
-  name that loads no code, such as `PYTHONUNBUFFERED`, is refused too.
+- **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
+  own aliases run in the box, so their loader would read the value too. A runtime's own option
+  variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,
+  are the operator's to set, and they reach only the process whose table names them. The `zsh`,
+  `bash`, `sh`, `python3`, and `python` aliases run in Box and do not read them, so a shell or
+  Python option variable reaches a real interpreter that the table runs or spawns, and not an
+  alias call.
 - **`HOME`:** an absolute path. It stays the operator's own home unless `[agent] env.HOME` names
   another directory; the example names `strands-home`, so the CLI reads its settings and writes its
   sessions there. A home inside `box_dir` is refused with ``` `env.HOME` is <path>, which lies in
@@ -242,8 +266,10 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   directory rather than above it, or omit `env.HOME` for the operator's own home```.
 - **`TMPDIR`:** an absolute path.
 
-A name from the first two kinds is refused with ``` `env` name "<name>" is set by the box itself,
-so a table cannot claim it```.
+A name Box sets is refused with ``` `env` name "<name>" is set by the box itself, so a table
+cannot claim it```. A dynamic-loader name is refused with ``` `env` name "<name>" is read by the
+dynamic loader of every program in the box, Box's own aliases included, so a table cannot set
+it```.
 
 `TERM` and `COLORTERM` reach the process only when `env` names them, so a program that picks colors
 from them renders plain otherwise. The example names `TERM`; an operator who wants a program's
@@ -521,11 +547,13 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 |---|---|---|
 | A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
-| A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
-| The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+| A command has more than one hard link, which are filesystem names for the same file, and Box can't rule out that the user that runs Box can write it. | `has <n> hard links, and the user that runs Box may be able to write it` | Use a copy with one filesystem name, or install the command so that this user can't write it. |
+| The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
 
-Box also refuses legitimate system executables that have multiple hard links. File ownership and
-permissions do not waive the requirement for exactly one hard link.
+Box accepts a command with more than one hard link when the user that runs Box can't write it
+through any name. The file belongs to another user, such as `root`, has no group or other write
+permission, and no access-control entry lets this user write it. Most system programs are like
+this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. Reads still require the applicable policy permission.
@@ -771,6 +799,7 @@ relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
 and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
+An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

@@ -138,9 +138,11 @@ The feature applies only to stdio MCP commands, not agent or tool commands.
 `box policy generate-schema` refuses enabled wildcard commands because offline discovery has no
 caller to supply their arguments. Use a configuration with concrete arguments for that command.
 
-Enabling `argument_wildcards` on any server stores record version 26. Older builds refuse that record.
+Enabling `argument_wildcards` on any server requires record version 26 or newer.
+Older builds refuse versions they do not support.
 Before returning to an older build, replace wildcard arguments with concrete values, disable the
-feature, and run the current build once to write a compatible record.
+feature, and follow the [stored configuration rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback)
+for the other selected features.
 
 ### Filesystem
 

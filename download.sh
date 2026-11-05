@@ -30,8 +30,8 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 host_os="$(uname -s)"
 host_arch="$(uname -m)"
 case "$host_os:$host_arch" in
-    Darwin:arm64|Darwin:aarch64) triple="aarch64-apple-darwin" ;;
-    Linux:arm64|Linux:aarch64) triple="aarch64-unknown-linux-gnu" ;;
+    Darwin:arm64|Darwin:aarch64) package="aarch64-apple-darwin"; platform="macOS ARM64" ;;
+    Linux:arm64|Linux:aarch64) package="linux-arm64"; platform="Linux ARM64" ;;
     *) die "unsupported platform: ${host_os}/${host_arch}. Downloads support macOS on Apple silicon and Linux ARM64." ;;
 esac
 
@@ -73,7 +73,7 @@ case "$VERSION" in
     *) die "version '$VERSION' must start with 'v' (e.g. v0.1.0)" ;;
 esac
 
-asset="box-${VERSION}-${triple}.tar.gz"
+asset="box-${VERSION}-${package}.tar.gz"
 base_url="https://github.com/${REPO}/releases/download/${VERSION}"
 
 staged=""
@@ -83,6 +83,30 @@ trap 'exit 130' INT
 trap 'exit 129' HUP
 trap 'exit 143' TERM
 
+log "Downloading SHA256SUMS.txt..."
+fetch "${base_url}/SHA256SUMS.txt" "${tmp}/SHA256SUMS.txt" \
+    || die "failed to download SHA256SUMS.txt.
+Check connectivity and whether this release is published:
+https://github.com/${REPO}/releases/tag/${VERSION}
+To select another release, set BOX_VERSION=vX.Y.Z."
+
+checksum_for() {
+    awk -v a="$1" '{n=$2; sub(/^\*/, "", n); if (n==a) print $1}' "${tmp}/SHA256SUMS.txt"
+}
+expected="$(checksum_for "$asset")"
+# Older releases use the Rust target name for the Linux archive.
+if [ -z "$expected" ] && [ "$host_os" = Linux ]; then
+    legacy_asset="box-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+    expected="$(checksum_for "$legacy_asset")"
+    if [ -n "$expected" ]; then
+        asset="$legacy_asset"
+    fi
+fi
+[ -n "$expected" ] || die "no SHA256SUMS.txt entry for ${asset}.
+Check whether this release includes ${platform}:
+https://github.com/${REPO}/releases/tag/${VERSION}
+To select another release, set BOX_VERSION=vX.Y.Z."
+
 log "Downloading ${asset}..."
 fetch "${base_url}/${asset}" "${tmp}/${asset}" \
     || die "could not download ${asset}.
@@ -90,12 +114,6 @@ Check connectivity and whether this release includes the asset:
 https://github.com/${REPO}/releases/tag/${VERSION}
 To select another release, set BOX_VERSION=vX.Y.Z."
 
-log "Downloading SHA256SUMS.txt..."
-fetch "${base_url}/SHA256SUMS.txt" "${tmp}/SHA256SUMS.txt" \
-    || die "failed to download SHA256SUMS.txt"
-
-expected="$(awk -v a="$asset" '{n=$2; sub(/^\*/, "", n); if (n==a) print $1}' "${tmp}/SHA256SUMS.txt")"
-[ -n "$expected" ] || die "no SHA256SUMS.txt entry for ${asset}"
 actual="$(sha256_of "${tmp}/${asset}")"
 [ "$expected" = "$actual" ] || die "checksum mismatch for ${asset} (expected ${expected}, got ${actual})"
 log "Checksum verified."
@@ -147,7 +165,7 @@ Destination files have been extracted; use a fresh BOX_DOWNLOAD_DIR to retain a 
 fi
 
 log ""
-log "Downloaded box ${VERSION} (${triple}) into ${DOWNLOAD_DIR}."
+log "Downloaded box ${VERSION} (${platform}) into ${DOWNLOAD_DIR}."
 log "Nothing was installed: your PATH and system directories are untouched."
 log ""
 log "Write a box.toml and a policy, then run the box by path:"

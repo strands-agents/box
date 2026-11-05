@@ -48,8 +48,11 @@ A new run rebuilds the package. Keep the hashes from the publication run.
 With `publish_linux=true`, both channels publish these files, with the selected tag in place of `<tag>`:
 
 - `box-<tag>-aarch64-apple-darwin.tar.gz`
-- `box-<tag>-aarch64-unknown-linux-gnu.tar.gz`
+- `box-<tag>-linux-arm64.tar.gz`
 - `SHA256SUMS.txt`
+
+The Linux archive uses the customer-facing name `linux-arm64`. Compilation and intermediate workflow artifacts retain the Rust target `aarch64-unknown-linux-gnu`.
+Build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
 
 For a macOS-only stable release, the bundle omits the Linux archive and its checksum entry.
 Its release notes omit Linux installation instructions. Linux builds and checks still run.
@@ -69,6 +72,9 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
+The downloader reads `SHA256SUMS.txt` from the selected release before downloading its archive.
+It prefers `box-<tag>-linux-arm64.tar.gz`. If that entry is absent, it accepts the older `box-<tag>-aarch64-unknown-linux-gnu.tar.gz` entry from the same release.
+A failed download or checksum for the selected archive stops the operation.
 The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
 The package requires glibc 2.34 or newer and the GCC runtime library, `libgcc_s.so.1`.
 Before replacing files, it runs the candidate's `box --version` inside an existing destination, or beside a new destination.

@@ -136,9 +136,8 @@ the same four plus `network`. One translator turns each of them into a set of sa
   value)`. It uses the same checks as `box.toml` loading, except that it cannot reject a `HOME` in
   or above `box_dir` without knowing `box_dir`. The error's `kind()` returns an `EnvRefusal`.
   `InvalidName` means the name is invalid. `SetByBox` identifies a name Box supplies. `LoadsCode`
-  identifies a name in a family that can make a runtime load code, such as `PYTHON*`. Box rejects
-  the whole family, so `PYTHONUNBUFFERED` gets `LoadsCode` even though that member need not load
-  code. `NotAbsolute` identifies a relative `HOME` or `TMPDIR`. Callers can use these kinds to drop
+  identifies a dynamic-loader variable whose name starts with `LD_` or `DYLD_`. Box rejects
+  both families, so `LD_BIND_NOW` gets `LoadsCode` even though that variable need not load code. `NotAbsolute` identifies a relative `HOME` or `TMPDIR`. Callers can use these kinds to drop
   Box-supplied names and reject names that load code without copying Box's lists. This check does
   not cover a credential's `env://` name, for which Box also refuses `HOME` and `PATH`.
 
@@ -479,9 +478,11 @@ box's trusted process](decisions.md#a-host-binary-runs-in-a-contained-leaf-box).
 
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
-execution. Box refuses command files with multiple hard links because another name could expose the
-same contents to writes. This conservative rule also refuses legitimate system executables with
-multiple hard links, regardless of their owner or file permissions.
+execution. Box refuses a command file with multiple hard links when the user running Box can write
+it. Another name could expose the same contents to writes. Box accepts multiple names for a file
+that this user cannot write through any name, such as a root-owned system program. The kernel
+refuses writes through each name. Before each launch of a program with multiple names, Box requires
+the same link count, owner, group, and mode, and checks again that this user cannot write the file.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity. Direct
 writable-grant refusals and the broker's mutation checks protect the program's contents. This

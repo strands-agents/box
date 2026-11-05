@@ -1350,8 +1350,11 @@ A caller can load authority before the sandbox applies, for example a certificat
 the opened regular file and its canonical path to one of two configuration methods. Both record the
 device and inode, require the file to have one filesystem name, and revalidate path and identity at
 each backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant. A
-backend may make the file non-executable if it cannot preserve both write subtraction and
+writable grant; the other grants no access at all, for a file outside every writable grant.
+
+A third method pins a configured tool's program. It records the file's link count and requires the
+same count during revalidation. Box accepts a program with several names only when the user running
+Box cannot write it through any name. A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
@@ -1394,8 +1397,9 @@ it](#file-attributes-is-accepted-when-the-box-runs-as-root).
 Linux accepts the key without rendering a grant. `utimensat` already works there, and Linux
 continues to refuse set-ID bits and ACLs. One `box.toml` therefore stays portable without widening
 Linux access. It is an ordinary key, not an experimental feature, because it is opt-in and changes
-only what the workload already reaches. Box stores a record that selects the key at version 25. A
-build that predates the key therefore refuses the box, as
+only what the workload already reaches. Box stores a record that selects the key at version 25,
+or at a newer version when a Shell timeout is explicit. A build that predates the key therefore
+refuses the box, as
 `the_file_attributes_key_cannot_hide_in_a_legacy_record` checks.
 
 A grant operation per folder would confine the residual risk to named folders, but it would add an
@@ -1767,10 +1771,14 @@ means a broker or interpreter fault.
 
 The interpreter stops a script after 2 minutes of execution time, from inside its own run loop, so
 `while True: pass` stops even when the script makes no OS call. Time suspended on the surrounding OS
-does not count against that budget. Box imposes separate limits: 5 minutes of wall-clock time for
-each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1 MiB
-for each `os.urandom` call. Each of these bounds is less than the wall clock. Box never shortens a
-sleep. A sleep that would exceed the total raises `TimeoutError` before waiting, as
+does not count against that budget. Box adds a fixed outer wall-clock limit to direct Python calls,
+plus limits of 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1 MiB
+for each `os.urandom` call.
+
+Python invoked through Shell shares the enclosing call's configured deadline and broker grace
+period. It does not receive a separate five-minute allowance. Monty's limits also apply. A shorter
+Shell deadline can expire first, although synchronous execution can delay its check. Box never
+shortens a sleep. A sleep that would exceed the total raises `TimeoutError` before waiting, as
 `a_sleep_longer_than_the_total_raises_at_once` checks. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which

@@ -15,6 +15,7 @@
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
+//! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -26,6 +27,7 @@ pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
 pub(crate) mod grammar;
+pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -51,6 +53,7 @@ use self::egress::{
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -469,6 +472,7 @@ impl RunContract {
                 version: record_version(
                     self.file.file_attributes,
                     &self.file.experimental_features,
+                    &self.file.limits,
                     self.file
                         .agent
                         .iter()
@@ -478,6 +482,7 @@ impl RunContract {
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
+                limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -543,6 +548,9 @@ pub(crate) struct Record {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub(crate) file_attributes: bool,
+    /// The operator-selected execution limits.
+    #[serde(default, skip_serializing_if = "Limits::is_default")]
+    pub(crate) limits: Limits,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -616,6 +624,8 @@ const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 /// rather than resuming it without the write grants it was configured with.
 const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
+/// The record version that preserves configured execution limits.
+const LIMITS_RECORD_VERSION: u32 = 27;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,10 +669,13 @@ impl ExperimentalFeatures {
 fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
+    limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if mcp.iter().any(|server| server.argument_wildcards) {
+    if !limits.is_default() {
+        LIMITS_RECORD_VERSION
+    } else if mcp.iter().any(|server| server.argument_wildcards) {
         MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
     } else if file_attributes {
         FILE_ATTRIBUTES_RECORD_VERSION
@@ -914,8 +927,9 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
-            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -932,6 +946,7 @@ impl Record {
         let expected = record_version(
             record.file_attributes,
             &record.experimental_features,
+            &record.limits,
             record
                 .agent
                 .iter()
@@ -1175,6 +1190,9 @@ struct ConfigFile {
     /// and ACLs. Linux accepts the key and renders nothing for it.
     #[serde(default, rename = "file-attributes")]
     file_attributes: bool,
+    /// The execution limits for hosted interpreters.
+    #[serde(default)]
+    limits: Limits,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1337,6 +1355,7 @@ mod tests {
             record_version(
                 stored.file_attributes,
                 &stored.experimental_features,
+                &stored.limits,
                 std::iter::empty(),
                 &stored.mcp
             ),
@@ -1460,6 +1479,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1472,6 +1492,133 @@ mod tests {
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn shell_limits_round_trip_in_the_required_record_version() {
+        for (limits, timeout, explicit) in [
+            ("", Some(30), false),
+            ("[limits]\n", Some(30), false),
+            ("[limits.shell]\n", Some(30), false),
+            ("[limits]\nshell.timeout = 30\n", Some(30), true),
+            ("[limits.shell]\ntimeout = 30\n", Some(30), true),
+            ("[limits]\nshell.timeout = 600\n", Some(600), true),
+            ("[limits.shell]\ntimeout = 600\n", Some(600), true),
+            ("[limits]\nshell.timeout = false\n", None, true),
+            ("[limits.shell]\ntimeout = false\n", None, true),
+        ] {
+            for file_attributes in [false, true] {
+                let version = match (explicit, file_attributes) {
+                    (true, _) => 27,
+                    (false, true) => 25,
+                    (false, false) => 21,
+                };
+                let body = format!("file-attributes = {file_attributes}\n{limits}");
+                let configured = load(&body).unwrap();
+                assert_eq!(
+                    configured.limits.shell.timeout(),
+                    timeout.map(std::time::Duration::from_secs),
+                    "{body}"
+                );
+                let mut stored = pinned_record(&body);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.limits, configured.limits);
+                assert_eq!(stored.version, version, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("[limits"), explicit, "{body}");
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored,
+                    "{body}"
+                );
+                for found in 21..=27 {
+                    if found == version {
+                        continue;
+                    }
+                    stored.version = found;
+                    assert!(
+                        matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion {
+                                found: refused,
+                                expected,
+                            }) if refused == found && expected == version
+                        ),
+                        "{body}: version {found}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_limits_preserve_other_versioned_record_fields() {
+        let mut spec = agent(&["/bin/true"]);
+        for (timeout, argument_wildcards) in [
+            ("600", false),
+            ("600", true),
+            ("false", false),
+            ("false", true),
+        ] {
+            let shared_program = SHARED_PROGRAM.replace(
+                "type = \"stdio\"\n",
+                &format!("type = \"stdio\"\nargument_wildcards = {argument_wildcards}\n"),
+            );
+            let shared = pinned_record(&shared_program);
+            let limits: Limits =
+                toml::from_str(&format!("[shell]\ntimeout = {timeout}\n")).unwrap();
+            for file_attributes in [false, true] {
+                for native_filesystem_policy in [false, true] {
+                    let features = ExperimentalFeatures {
+                        native_filesystem_policy,
+                        tool_grammars: true,
+                    };
+                    for override_value in [None, Some(false)] {
+                        spec.native_filesystem_policy = override_value;
+                        for servers in [&[][..], shared.mcp.as_slice()] {
+                            assert_eq!(
+                                record_version(
+                                    file_attributes,
+                                    &features,
+                                    &limits,
+                                    std::iter::once(&spec),
+                                    servers,
+                                ),
+                                27
+                            );
+                        }
+                    }
+                }
+                let body = format!(
+                    "file-attributes = {file_attributes}\n\
+                     {shared_program}\n[limits.shell]\ntimeout = {timeout}\n"
+                );
+                let mut stored = pinned_record(&body);
+                stored.experimental_features.tool_grammars = true;
+                stored.tool = grammar_record().tool;
+                assert_eq!(stored.version, 27);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.mcp, shared.mcp);
+                assert_eq!(stored.contained_mcp, shared.contained_mcp);
+                assert_eq!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                    stored
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_limits_are_refused_in_configuration_and_stored_records() {
+        let body = "[limits.shell]\ntimeout = true\n";
+        let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+        let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
+        let mut stored = record(None, BTreeMap::new());
+        stored.version = LIMITS_RECORD_VERSION;
+        let text = format!("{}\n{body}", stored.to_toml().unwrap());
+        let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
     }
 
     #[test]
@@ -2276,10 +2423,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [
-            RECORD_VERSION - 1,
-            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION + 1,
-        ] {
+        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2372,15 +2516,14 @@ env = {}
     }
 
     #[test]
-    fn a_loader_hook_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
+    fn a_dynamic_loader_name_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
         use super::env::refused_name;
         use crate::EnvRefusal;
-        for prefix in LOADER_HOOK_PREFIXES {
-            let name = format!("{prefix}ANY");
-            assert_eq!(refused_name(&name), Some(EnvRefusal::LoadsCode), "{name}");
+        for name in ["LD_ANY", "DYLD_ANY"] {
+            assert_eq!(refused_name(name), Some(EnvRefusal::LoadsCode), "{name}");
         }
-        for hook in LOADER_HOOKS {
-            assert_eq!(refused_name(hook), Some(EnvRefusal::LoadsCode), "{hook}");
+        for name in ["PYTHONANY", "NODE_OPTIONS", "BASH_ENV"] {
+            assert_eq!(refused_name(name), None, "{name}");
         }
         for name in ["HTTPS_PROXY", "OTEL_EXPORTER_OTLP_ENDPOINT", "PWD", "USER"] {
             assert_eq!(refused_name(name), Some(EnvRefusal::SetByBox), "{name}");
