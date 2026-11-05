@@ -119,6 +119,7 @@ python3 examples/cloud-deployments/gcp/deploy.py cleanup \
 ```
 
 Cleanup checks each resource's ownership marker before removal.
+It continues if serial output is unavailable, so a stopped VM can still be removed.
 It removes the VM, boot disk, network, subnet, service account, custom role, and role binding.
 It keeps local evidence and leaves shared project APIs enabled.
 Use cleanup after a failed deployment too. Keep the deployment receipt until cleanup succeeds.
@@ -140,6 +141,7 @@ The temporal policy applies to HTTP requests through Box's gateway.
 Each run has separate Box history. The cooldown is not a shared quota across VMs or concurrent agents.
 The model check stops before cooldown expiry. The separate policy check verifies expiry.
 The controller does not refresh its token during a run and requires sufficient token lifetime before it starts.
+It retains up to 4 MiB of standard output and 1 MiB of standard error for each Box run.
 This example does not establish support for Google Kubernetes Engine, Cloud Run, x86-64 Linux, or other VM images.
 
 The [source revision](deploy.py), [dependency lock](dependency-lock.txt), and [startup script](setup-vm.sh) define the build.

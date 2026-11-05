@@ -11,6 +11,7 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -160,6 +161,77 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(self.cloud.resources, {})
                 self.assertEqual(self.cloud.bindings, [])
                 self.assertTrue(json.loads(receipt.read_text())["cleaned_up"])
+
+    def test_cleanup_survives_unavailable_serial_output_and_still_checks_ownership(self):
+        state = self.create()
+        self.cloud.resources[("instance", state["name"])]["status"] = "TERMINATED"
+
+        def unavailable_serial(project, *args, **kwargs):
+            if args[:3] == ("compute", "instances", "get-serial-port-output"):
+                raise RuntimeError("Serial output is unavailable for this stopped VM")
+            return self.cloud(project, *args, **kwargs)
+
+        with patch.object(deploy, "gcloud", unavailable_serial):
+            original = self.cloud.resources[("instance", state["name"])]["description"]
+            self.cloud.resources[("instance", state["name"])]["description"] = "another deployment"
+            with self.assertRaisesRegex(RuntimeError, "ownership marker"):
+                deploy.cleanup(state, self.receipt)
+            self.assertEqual(self.cloud.deleted, [])
+            self.cloud.resources[("instance", state["name"])]["description"] = original
+            deploy.cleanup(state, self.receipt)
+
+        self.assertEqual(len(self.cloud.deleted), 6)
+        self.assertEqual(self.cloud.resources, {})
+        self.assertEqual(self.cloud.bindings, [])
+        self.assertTrue(json.loads(self.receipt.read_text())["cleaned_up"])
+
+    def test_concurrent_deployment_cannot_replace_the_owners_receipt(self):
+        both_preflight = threading.Barrier(2)
+        first_finished = threading.Event()
+        outcomes, create_attempts = {}, []
+
+        def concurrent_cloud(project, *args, **kwargs):
+            if args[:2] == ("compute", "images"):
+                both_preflight.wait(timeout=5)
+                if threading.current_thread().name == "second":
+                    if not first_finished.wait(timeout=5):
+                        raise RuntimeError("The first deployment did not finish")
+            for prefix in Cloud.PREFIXES:
+                if args[:len(prefix)] == prefix and args[len(prefix)] == "create":
+                    create_attempts.append(threading.current_thread().name)
+                    break
+            if args[:3] == ("compute", "networks", "create") and ("network", args[3]) in self.cloud.resources:
+                raise RuntimeError("The network already exists")
+            return self.cloud(project, *args, **kwargs)
+
+        def attempt():
+            name = threading.current_thread().name
+            try:
+                deploy.deploy(self.args, self.receipt)
+                outcomes[name] = None
+            except Exception as error:
+                outcomes[name] = error
+            finally:
+                if name == "first":
+                    first_finished.set()
+
+        with patch.object(deploy, "gcloud", concurrent_cloud):
+            threads = [threading.Thread(target=attempt, name=name) for name in ("first", "second")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+
+        self.assertIsNone(outcomes["first"])
+        self.assertIsInstance(outcomes["second"], (FileExistsError, RuntimeError))
+        self.assertEqual(create_attempts, ["first"] * 6)
+        state = json.loads(self.receipt.read_text())
+        self.assertEqual(set(state["created"]), set(Cloud.PREFIXES.values()))
+        self.assertTrue(all(resource["description"] == state["marker"] for resource in self.cloud.resources.values()))
+        deploy.cleanup(state, self.receipt)
+        self.assertEqual(self.cloud.resources, {})
+        self.assertEqual(self.cloud.bindings, [])
 
     def test_cleanup_preserves_other_role_members(self):
         state = self.create()

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import threading
 import time
 import urllib.request
 from urllib.parse import urlsplit
@@ -115,23 +116,53 @@ def metadata_token(minimum_lifetime):
 
 
 def execute(box, root, timeout, token=None):
-    """Run Box without inherited cloud credentials and redact its output."""
+    """Run Box with bounded output, a process-group deadline, and a redacted token."""
     environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "EXPERIMENTAL_LINUX_SUPPORT": "TRUE"}
     if token:
         environment["GOOGLE_TOKEN"] = token
     started = time.monotonic()
     process = subprocess.Popen([str(box), "run", "--config", str(root / "box.toml")],
-        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    buffers = [bytearray(), bytearray()]
+    limits = (4 * 1024 * 1024, 1024 * 1024)
+    secret = token.encode() if token else b""
+    lookahead = max(0, len(secret) - 1)
+
+    def drain(pipe, buffer, limit):
+        with pipe:
+            while chunk := pipe.read(65536):
+                buffer.extend(chunk[:max(0, limit - len(buffer))])
+
+    readers = [threading.Thread(target=drain, args=(pipe, buffer, limit + lookahead), daemon=True)
+               for pipe, buffer, limit in zip((process.stdout, process.stderr), buffers, limits)]
+    for reader in readers:
+        reader.start()
     expired = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         expired = True
         os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-    if token:
-        stdout, stderr = stdout.replace(token, "[REDACTED]"), stderr.replace(token, "[REDACTED]")
+        process.wait(timeout=10)
+    for reader in readers:
+        reader.join(10)
+    def captured(buffer, limit):
+        raw = bytes(buffer)
+        end = min(limit, len(raw))
+        if secret:
+            # Include the rest of a token crossing the cutoff before redaction.
+            for match in re.finditer(re.escape(secret), raw):
+                if match.start() >= limit:
+                    break
+                end = max(end, match.end())
+            raw = raw[:end].replace(secret, b"[REDACTED]")
+        else:
+            raw = raw[:end]
+        encoded = raw.decode(errors="replace").encode()[:limit]
+        return encoded.decode(errors="ignore")
+
+    stdout, stderr = (captured(buffer, limit) for buffer, limit in zip(buffers, limits))
     (root / "stdout.txt").write_text(stdout)
     (root / "stderr.txt").write_text(stderr)
     return process.returncode, expired, stdout, stderr, time.monotonic() - started

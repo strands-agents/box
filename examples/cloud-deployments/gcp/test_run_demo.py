@@ -242,5 +242,89 @@ class StartupEvidenceTests(unittest.TestCase):
             self.assertEqual(receipts[1]["probe_exit_code"], 2)
 
 
+class ExecutionTests(unittest.TestCase):
+    def execute_fixture(self, program, *, timeout=5, token=None):
+        with tempfile.TemporaryDirectory(prefix="box-gcp-execute-test-") as temporary:
+            root = Path(temporary)
+            binary = root / "fixture"
+            binary.write_text(f"#!{sys.executable}\n" + program)
+            binary.chmod(0o755)
+            result = demo.execute(binary, root, timeout, token)
+            saved = [(root / name).read_text() for name in ("stdout.txt", "stderr.txt")]
+            return result, saved
+
+    def test_output_capture_stays_bounded_while_both_streams_drain(self):
+        for invalid_utf8 in (False, True):
+            with self.subTest(invalid_utf8=invalid_utf8):
+                output_byte, error_byte = (255, 255) if invalid_utf8 else (79, 69)
+                result, saved = self.execute_fixture(
+                    "import sys\n"
+                    f"sys.stdout.buffer.write(bytes([{output_byte}]) * (6 * 1024 * 1024))\n"
+                    f"sys.stderr.buffer.write(bytes([{error_byte}]) * (2 * 1024 * 1024))\n"
+                )
+                code, expired, output, errors, _ = result
+                self.assertEqual(code, 0)
+                self.assertFalse(expired)
+                self.assertLessEqual(len(output.encode("utf-8")), 4 * 1024 * 1024)
+                self.assertLessEqual(len(errors.encode("utf-8")), 1024 * 1024)
+                if invalid_utf8:
+                    self.assertTrue("\ufffd" in output and "\ufffd" in errors)
+                else:
+                    self.assertEqual(len(output), 4 * 1024 * 1024)
+                    self.assertEqual(len(errors), 1024 * 1024)
+                self.assertEqual(saved, [output, errors])
+
+    def test_captured_and_saved_streams_redact_the_injected_token(self):
+        token = "synthetic-controller-test-token"
+        result, saved = self.execute_fixture(
+            "import os, sys\n"
+            "token = os.environ['GOOGLE_TOKEN']\n"
+            "print('output ' + token, flush=True)\n"
+            "print('error ' + token, file=sys.stderr, flush=True)\n",
+            token=token,
+        )
+        code, expired, output, errors, _ = result
+        self.assertEqual(code, 0)
+        self.assertFalse(expired)
+        self.assertEqual(output, "output [REDACTED]\n")
+        self.assertEqual(errors, "error [REDACTED]\n")
+        self.assertEqual(saved, [output, errors])
+        self.assertNotIn(token, output + errors)
+
+    def test_token_crossing_either_capture_limit_remains_redacted(self):
+        token = "synthetic-controller-boundary-token"
+        for stream, limit in (("stdout", 4 * 1024 * 1024), ("stderr", 1024 * 1024)):
+            with self.subTest(stream=stream):
+                result, saved = self.execute_fixture(
+                    "import os, sys\n"
+                    "token = os.environ['GOOGLE_TOKEN']\n"
+                    f"sys.{stream}.write('X' * ({limit} - len(token) + 1) + token)\n",
+                    token=token,
+                )
+                code, expired, output, errors, _ = result
+                self.assertEqual(code, 0)
+                self.assertFalse(expired)
+                captured = output if stream == "stdout" else errors
+                self.assertLessEqual(len(captured), limit)
+                self.assertFalse(token[:-1] in captured, "Capture retained an unredacted token prefix")
+                self.assertTrue("[REDACTED]" in captured, "Capture lost the redaction marker")
+                self.assertEqual(saved, [output, errors])
+
+    def test_timeout_kills_the_child_and_preserves_its_partial_output(self):
+        result, saved = self.execute_fixture(
+            "import os, time\n"
+            "print(os.getpid(), flush=True)\n"
+            "time.sleep(30)\n",
+            timeout=0.5,
+        )
+        code, expired, output, errors, duration = result
+        self.assertTrue(expired)
+        self.assertEqual(code, -signal.SIGKILL)
+        self.assertLess(duration, 5)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(output.strip()), 0)
+        self.assertEqual(saved, [output, errors])
+
+
 if __name__ == "__main__":
     unittest.main()

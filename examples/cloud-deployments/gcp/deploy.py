@@ -33,11 +33,15 @@ def gcloud(project, *arguments, optional=False, raw=False):
     return result.stdout if raw else json.loads(result.stdout or "null")
 
 
-def save(path, value):
+def save(path, value, *, exclusive=False):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
+    with tempfile.TemporaryDirectory(prefix=".receipt-", dir=path.parent) as directory:
+        temporary = Path(directory) / "value.json"
+        temporary.write_text(json.dumps(value, indent=2) + "\n")
+        if exclusive:
+            path.hardlink_to(temporary)
+        else:
+            temporary.replace(path)
 
 
 def resource_commands(state):
@@ -110,7 +114,7 @@ def deploy(args, receipt):
     startup = (EXAMPLE / "setup-vm.sh").read_text()
     if max(len(encoded), len(config), len(startup)) > 250_000 or sum(map(len, (encoded, config, startup))) > 500_000:
         raise RuntimeError("Example payload exceeds Compute Engine metadata limits.")
-    save(receipt, state)
+    save(receipt, state, exclusive=True)
 
     def create(kind, *command):
         state["created"].append(kind)
@@ -206,7 +210,10 @@ def status(state, receipt):
 
 def cleanup(state, receipt):
     project, name, zone = state["project"], state["name"], state["zone"]
-    status(state, receipt)
+    try:
+        status(state, receipt)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"Could not save results before cleanup: {error}. Continuing with ownership checks.", file=sys.stderr)
     for kind in reversed(state["created"]):
         resource = owned_resource(state, kind)
         if resource is None or resource.get("deleted"):
