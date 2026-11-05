@@ -9,7 +9,6 @@ import sys
 import threading
 import unittest
 from unittest.mock import patch
-from urllib.parse import urlsplit
 
 from check_deployment import verify
 from deployment_policy import deployment_policy
@@ -20,7 +19,9 @@ import deployment_tools
 class ProxyFixture:
     """Forward local fixture traffic or return one configured proxy response."""
 
-    def __init__(self, status=None, body=b'{}', refused=False):
+    def __init__(self, status=None, body=b'{}', refused=False, *, upstream_port=None):
+        if status is None and (type(upstream_port) is not int or not 1 <= upstream_port <= 65535):
+            raise ValueError('a forwarding fixture requires its service port')
         self.requests = []
         owner = self
 
@@ -33,14 +34,18 @@ class ProxyFixture:
                 data = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 code, response = status, body
                 if code is None:
-                    target = urlsplit(self.path)
-                    connection = http.client.HTTPConnection(target.hostname, target.port, timeout=3)
-                    try:
-                        connection.request(self.command, target.path, body=data)
-                        upstream = connection.getresponse()
-                        code, response = upstream.status, upstream.read()
-                    finally:
-                        connection.close()
+                    route = {'POST': '/deployments/checkout', 'GET': '/deployments/checkout/status'}[self.command]
+                    expected = 'http://127.0.0.1:' + str(upstream_port) + route
+                    if self.path != expected:
+                        code, response = 403, b'fixture destination refused'
+                    else:
+                        connection = http.client.HTTPConnection('127.0.0.1', upstream_port, timeout=3)
+                        try:
+                            connection.request(self.command, route, body=data)
+                            upstream = connection.getresponse()
+                            code, response = upstream.status, upstream.read()
+                        finally:
+                            connection.close()
                 self.send_response(code)
                 self.send_header('Content-Length', str(len(response)))
                 if refused:
@@ -100,7 +105,7 @@ class DeploymentServiceTests(unittest.TestCase):
 
 class DeploymentToolsTests(unittest.TestCase):
     def test_no_proxy_never_bypasses_the_explicit_proxy(self):
-        with DeploymentService() as service, ProxyFixture() as proxy:
+        with DeploymentService() as service, ProxyFixture(upstream_port=service.port) as proxy:
             with patch.dict(os.environ, {'HTTP_PROXY': proxy.url, 'NO_PROXY': '*', 'no_proxy': '*'}, clear=True):
                 result = deployment_tools.request(service.url, 'POST', '/deployments/checkout')
             self.assertEqual(result['status'], 503)
@@ -108,6 +113,15 @@ class DeploymentToolsTests(unittest.TestCase):
             self.assertEqual(proxy.requests, [('POST', service.url + '/deployments/checkout',
                                                '127.0.0.1:' + str(service.port))])
             self.assertEqual(len(service.receipts), 1)
+
+    def test_proxy_cannot_forward_to_another_fixture_service(self):
+        with DeploymentService() as service, DeploymentService() as other:
+            with ProxyFixture(upstream_port=service.port) as proxy:
+                with patch.dict(os.environ, {'HTTP_PROXY': proxy.url}, clear=True):
+                    result = deployment_tools.request(other.url, 'POST', '/deployments/checkout')
+                self.assertEqual(result['status'], 403)
+                self.assertEqual(service.receipts, [])
+                self.assertEqual(other.receipts, [])
 
     def test_proxy_refusal_never_reaches_the_service(self):
         with DeploymentService() as service, ProxyFixture(403, b'policy denied', True) as proxy:
@@ -147,7 +161,7 @@ class DeploymentToolsTests(unittest.TestCase):
             {'jsonrpc': '2.0', 'id': 5, 'method': 'tools/call', 'params': {'name': 'deploy_checkout', 'arguments': {'path': '/other'}}},
             {'jsonrpc': '2.0', 'id': 6, 'method': 'tools/call', 'params': {'name': 'other', 'arguments': {}}},
         ]
-        with DeploymentService() as service, ProxyFixture() as proxy:
+        with DeploymentService() as service, ProxyFixture(upstream_port=service.port) as proxy:
             process = subprocess.run([sys.executable, str(Path(deployment_tools.__file__)), service.url],
                 input=''.join(json.dumps(frame) + '\n' for frame in frames), text=True, capture_output=True,
                 env={**os.environ, 'HTTP_PROXY': proxy.url, 'NO_PROXY': '*'}, timeout=10)
