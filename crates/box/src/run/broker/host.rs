@@ -258,14 +258,6 @@ impl Drop for BrokerHost {
 }
 
 impl ShellSpec {
-    fn mcp_argument_wildcards(&self) -> bool {
-        #[cfg(unix)]
-        if let Some(launcher) = self.mcp_leaf_launcher.as_deref() {
-            return launcher.argument_wildcards();
-        }
-        false
-    }
-
     /// `server`'s arguments as its start passes them, or `None` when they do not expand.
     fn launched_arguments(
         &self,
@@ -300,9 +292,7 @@ fn authorize_mcp_start(
     };
     let program_path = reported(program_path);
     let cwd = reported(working_directory);
-    let command_arguments = if spec.mcp_argument_wildcards()
-        && server.arguments().iter().any(|argument| argument == "*")
-    {
+    let command_arguments = if server.has_argument_wildcards() {
         arguments
     } else {
         server.arguments()
@@ -363,7 +353,7 @@ async fn start_mcp_server(
         && launcher.contains(&server.name)
     {
         let boundary = launcher
-            .prepare(&server.name, received)
+            .prepare(server, received)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let credential_reads = launcher.credential_reads(&server.name, Path::new(home));
         authorize_mcp_start(
@@ -815,7 +805,6 @@ async fn serve_transport(
                             server,
                             arguments,
                             |declared| spec.launched_arguments(declared),
-                            spec.mcp_argument_wildcards(),
                         ) {
                             Ok(admitted) => admitted,
                             Err(error) => {
@@ -1787,6 +1776,7 @@ done"#;
         )
         .expect("MCP schema generates");
         let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: "test-mcp".to_string(),
             command,
         }]);
@@ -3084,6 +3074,7 @@ id=$(printf '%s\n' "$list" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"PrivateSearch","inputSchema":{"type":"object"}}]}}\n' "$id"
 while test ! -e "$1"; do sleep 0.01; done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -3397,6 +3388,7 @@ done"#,
                 list_calls.display()
             );
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec!["/bin/sh".to_string(), "-c".to_string(), script],
             }]);
@@ -3551,6 +3543,7 @@ case "$frame" in
 esac
 done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),

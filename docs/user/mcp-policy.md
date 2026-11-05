@@ -73,7 +73,7 @@ Add each server to the harness's own MCP configuration.
 
 - **A `stdio` server:** set its command to the server's full `command` from `box.toml`: the
   program, then every argument, in the same order. The harness runs the alias with those arguments,
-  and the box starts the server whose `command` matches. With argument wildcards enabled, supply
+  and the box starts the server whose `command` matches. With `argument_wildcards = true` on that server, supply
   the runtime value for each `*` position.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.

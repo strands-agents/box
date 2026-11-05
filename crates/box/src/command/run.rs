@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use policy::Policy;
+use policy::{Policy, ToolGrammars};
 
 use crate::error::{BoxError, ConfigError, DaemonError};
 use crate::record::config::process::ProcessSpec;
@@ -30,6 +30,7 @@ struct LockedRun {
     /// The arguments `run` appends to `[agent] command`.
     trailing: Vec<String>,
     policy: Option<Policy>,
+    grammars: ToolGrammars,
     sources: Vec<AuthoritySource>,
     owned: Lock,
 }
@@ -119,7 +120,8 @@ async fn hosted(
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
     let operator = crate::record::config::policy_operator()?;
-    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources) {
+    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
+    {
         Ok(engine) => {
             for warning in engine.warnings() {
                 eprintln!("strands-box: warning: {warning}");
@@ -158,6 +160,16 @@ async fn hosted(
         .clone()
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
+    let _grammar_bindings = HostedBox::bind_tool_grammars(&policy, &locked.record)?;
+    for (label, spec) in &locked.record.tool {
+        if spec.grammar.is_some() {
+            eprintln!(
+                "strands-box: warning: [tool.{label}] grammar: the Shell still decides a spawn of \
+                 `{}` as `shell:spawn`, so a rule on an action of this grammar does not fire yet",
+                crate::record::config::grammar::called_name(spec)
+            );
+        }
+    }
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -284,6 +296,7 @@ fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
         workspace,
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
+        grammars: request.grammars,
         sources: request.sources,
         owned,
     })
@@ -323,6 +336,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -349,6 +363,7 @@ mod tests {
                 ..Filesystem::default()
             },
             network: None,
+            grammar: None,
         }
     }
 

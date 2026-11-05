@@ -44,6 +44,8 @@ pub(crate) enum McpEntry {
         native_filesystem_policy: Option<bool>,
         /// What to start.
         command: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        argument_wildcards: bool,
         /// The initial working directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<PathBuf>,
@@ -91,6 +93,9 @@ pub(crate) struct McpServer {
 
     /// What to start, and the full command that selects it.
     pub(crate) command: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) argument_wildcards: bool,
 }
 
 impl McpServer {
@@ -105,21 +110,16 @@ impl McpServer {
     }
 
     pub(crate) fn has_argument_wildcards(&self) -> bool {
-        self.arguments().iter().any(|argument| argument == "*")
+        self.argument_wildcards && self.arguments().iter().any(|argument| argument == "*")
     }
 
-    pub(crate) fn matches_arguments(
-        &self,
-        received: &[String],
-        expanded: &[String],
-        wildcards: bool,
-    ) -> bool {
+    pub(crate) fn matches_arguments(&self, received: &[String], expanded: &[String]) -> bool {
         let matches = |expected: &[String]| {
             expected.len() == received.len()
                 && self.arguments().len() == received.len()
                 && self.arguments().iter().zip(expected).zip(received).all(
                     |((declared, expected), received)| {
-                        (wildcards && declared == "*") || expected == received
+                        (self.argument_wildcards && declared == "*") || expected == received
                     },
                 )
         };
@@ -144,6 +144,7 @@ pub(crate) fn contained_specs(
                 env,
                 filesystem,
                 network,
+                ..
             } => Some((
                 name.clone(),
                 ContainedMcp {
@@ -154,6 +155,7 @@ pub(crate) fn contained_specs(
                         env: env.clone(),
                         filesystem: filesystem.clone(),
                         network: (!network.is_default()).then(|| network.clone()),
+                        grammar: None,
                     },
                 },
             )),
@@ -171,7 +173,12 @@ pub(crate) fn partition(
     let mut http = Vec::new();
     for (name, entry) in entries {
         match entry {
-            McpEntry::Stdio { command, .. } => stdio.push(McpServer {
+            McpEntry::Stdio {
+                command,
+                argument_wildcards,
+                ..
+            } => stdio.push(McpServer {
+                argument_wildcards: *argument_wildcards,
                 name: name.clone(),
                 command: command.clone(),
             }),
@@ -206,9 +213,10 @@ pub(crate) fn for_command<'a>(
     launched: impl Fn(&McpServer) -> Option<Vec<String>>,
 ) -> Option<&'a McpServer> {
     servers.iter().find(|server| {
-        server.program() == program
+        !server.has_argument_wildcards()
+            && server.program() == program
             && launched(server)
-                .is_some_and(|launched| server.matches_arguments(arguments, &launched, false))
+                .is_some_and(|launched| server.matches_arguments(arguments, &launched))
     })
 }
 
@@ -226,7 +234,10 @@ pub(crate) fn refuse_a_shared_command(
             .chain(arguments)
             .collect::<Vec<_>>();
         let spelling = spelled(&command);
-        if let Some(first) = commands.insert(command, server.name.as_str()) {
+        if let Some(first) = commands.insert(
+            (command, server.has_argument_wildcards()),
+            server.name.as_str(),
+        ) {
             return Err(ConfigError::Mcp {
                 name: server.name.clone(),
                 reason: format!(
@@ -602,6 +613,7 @@ mod tests {
     #[test]
     fn wildcard_overlap_checks_allow_exact_entries_and_distinct_patterns() {
         let first = McpServer {
+            argument_wildcards: true,
             name: "first".into(),
             command: words(&["server", "--token", "*"]),
         };
@@ -613,6 +625,7 @@ mod tests {
             words(&["server", "--token=*", "*"]),
         ] {
             let second = McpServer {
+                argument_wildcards: true,
                 name: "second".into(),
                 command,
             };
@@ -621,6 +634,7 @@ mod tests {
             );
         }
         let second = McpServer {
+            argument_wildcards: true,
             name: "second".into(),
             command: words(&["server", "*", "abc"]),
         };
@@ -833,6 +847,7 @@ mod tests {
         assert_eq!(
             parsed,
             McpEntry::Stdio {
+                argument_wildcards: false,
                 native_filesystem_policy: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,

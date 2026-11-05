@@ -15,38 +15,28 @@ pub(crate) fn admit_server<'a>(
     program: &str,
     arguments: &[String],
     launched: impl Fn(&McpServer) -> Option<Vec<String>>,
-    wildcards: bool,
 ) -> io::Result<&'a McpServer> {
     use crate::record::config::mcp::{for_command, on_program};
 
-    if wildcards {
-        if let Some(server) = declared.iter().find(|server| {
-            !server.has_argument_wildcards()
-                && server.program() == program
-                && launched(server)
-                    .is_some_and(|expanded| server.matches_arguments(arguments, &expanded, false))
-        }) {
-            return Ok(server);
+    if let Some(server) = for_command(declared, program, arguments, &launched) {
+        return Ok(server);
+    }
+    let mut matches = declared.iter().filter(|server| {
+        server.has_argument_wildcards()
+            && server.program() == program
+            && launched(server)
+                .is_some_and(|expanded| server.matches_arguments(arguments, &expanded))
+    });
+    if let Some(server) = matches.next() {
+        if let Some(other) = matches.next() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "MCP command matches multiple servers: {}, {}; no server starts",
+                    server.name, other.name
+                ),
+            ));
         }
-        let mut matches = declared.iter().filter(|server| {
-            server.has_argument_wildcards()
-                && server.program() == program
-                && launched(server)
-                    .is_some_and(|expanded| server.matches_arguments(arguments, &expanded, true))
-        });
-        if let Some(server) = matches.next() {
-            if let Some(other) = matches.next() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "MCP command matches multiple servers: {}, {}; no server starts",
-                        server.name, other.name
-                    ),
-                ));
-            }
-            return Ok(server);
-        }
-    } else if let Some(server) = for_command(declared, program, arguments, &launched) {
         return Ok(server);
     }
     let received = std::iter::once(program.to_string())
@@ -245,14 +235,17 @@ mod tests {
     fn declared() -> Vec<McpServer> {
         let servers = vec![
             McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec!["issues-mcp".to_string()],
             },
             McpServer {
+                argument_wildcards: false,
                 name: "aws-mcp".to_string(),
                 command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
             },
             McpServer {
+                argument_wildcards: false,
                 name: "fetch".to_string(),
                 command: vec!["uvx".to_string(), "mcp-server-fetch".to_string()],
             },
@@ -288,27 +281,26 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        admit_server(
-            &declared(),
-            program,
-            &arguments,
-            |server| Some(server.arguments().to_vec()),
-            false,
-        )
+        admit_server(&declared(), program, &arguments, |server| {
+            Some(server.arguments().to_vec())
+        })
         .cloned()
     }
 
     #[test]
     fn wildcard_matching_skips_only_whole_star_arguments_after_opt_in() {
         let servers = vec![McpServer {
+            argument_wildcards: true,
             name: "test".into(),
             command: words(&["server", "--token", "*", "prefix*", "*"]),
         }];
+        let mut literal = servers.clone();
+        literal[0].argument_wildcards = false;
         let launch = |server: &McpServer| Some(server.arguments().to_vec());
         for value in ["runtime", "", "${ANYTHING:-default}", "two words", "*"] {
             let args = words(&["--token", value, "prefix*", "second"]);
-            assert!(admit_server(&servers, "server", &args, launch, true).is_ok());
-            assert!(admit_server(&servers, "server", &args, launch, false).is_err());
+            assert!(admit_server(&servers, "server", &args, launch).is_ok());
+            assert!(admit_server(&literal, "server", &args, launch).is_err());
         }
         for (program, args) in [
             ("other", words(&["--token", "x", "prefix*", "y"])),
@@ -317,18 +309,20 @@ mod tests {
             ("server", words(&["--token", "x", "prefix*"])),
             ("server", words(&["--token", "x", "prefix*", "y", "extra"])),
         ] {
-            assert!(admit_server(&servers, program, &args, launch, true).is_err());
+            assert!(admit_server(&servers, program, &args, launch).is_err());
         }
-        assert!(admit_server(&servers, "server", servers[0].arguments(), launch, false).is_ok());
+        assert!(admit_server(&literal, "server", literal[0].arguments(), launch).is_ok());
     }
 
     #[test]
     fn wildcard_matching_refuses_ambiguity_and_keeps_fixed_argument_expansion() {
         let one = McpServer {
+            argument_wildcards: true,
             name: "one".into(),
             command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}", "*"]),
         };
         let other = McpServer {
+            argument_wildcards: true,
             name: "other".into(),
             command: words(&["server", "*", "value"]),
         };
@@ -347,17 +341,14 @@ mod tests {
             words(&["${OTEL_EXPORTER_OTLP_PROTOCOL}", "value"]),
             words(&["http/protobuf", "value"]),
         ] {
-            assert!(
-                admit_server(std::slice::from_ref(&one), "server", &args, launch, true).is_ok()
-            );
+            assert!(admit_server(std::slice::from_ref(&one), "server", &args, launch).is_ok());
         }
         assert!(
             admit_server(
                 std::slice::from_ref(&one),
                 "server",
                 &words(&["wrong", "value"]),
-                launch,
-                true
+                launch
             )
             .is_err()
         );
@@ -366,8 +357,7 @@ mod tests {
                 std::slice::from_ref(&one),
                 "server",
                 &words(&["http/protobuf", "value"]),
-                |_| None,
-                true
+                |_| None
             )
             .is_err()
         );
@@ -376,23 +366,24 @@ mod tests {
             "server",
             &words(&["http/protobuf", "value"]),
             launch,
-            true,
         )
         .unwrap_err();
         assert!(error.to_string().contains("multiple servers"));
 
         let patterns = [
             McpServer {
+                argument_wildcards: true,
                 name: "one".into(),
                 command: words(&["server", "*", "value"]),
             },
             McpServer {
+                argument_wildcards: true,
                 name: "two".into(),
                 command: words(&["server", "*", "*"]),
             },
         ];
         assert!(
-            admit_server(&patterns, "server", &words(&["*", "value"]), launch, true)
+            admit_server(&patterns, "server", &words(&["*", "value"]), launch)
                 .unwrap_err()
                 .to_string()
                 .contains("multiple servers")
@@ -402,10 +393,12 @@ mod tests {
     #[test]
     fn exact_commands_win_over_wildcards_in_either_declaration_order() {
         let exact = McpServer {
+            argument_wildcards: true,
             name: "exact".into(),
             command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}"]),
         };
         let wildcard = McpServer {
+            argument_wildcards: true,
             name: "wildcard".into(),
             command: words(&["server", "*"]),
         };
@@ -426,17 +419,58 @@ mod tests {
         ] {
             for value in ["${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf"] {
                 assert_eq!(
-                    admit_server(&servers, "server", &words(&[value]), launch, true)
+                    admit_server(&servers, "server", &words(&[value]), launch)
                         .unwrap()
                         .name,
                     "exact",
                 );
             }
             assert_eq!(
-                admit_server(&servers, "server", &words(&["other"]), launch, true)
+                admit_server(&servers, "server", &words(&["other"]), launch)
                     .unwrap()
                     .name,
                 "wildcard",
+            );
+        }
+    }
+
+    #[test]
+    fn literal_star_entry_remains_exact_beside_an_enabled_pattern() {
+        let pattern = McpServer {
+            name: "pattern".into(),
+            command: words(&["server", "--token", "*"]),
+            argument_wildcards: true,
+        };
+        let literal = McpServer {
+            name: "literal".into(),
+            argument_wildcards: false,
+            ..pattern.clone()
+        };
+        for servers in [[pattern.clone(), literal.clone()], [literal, pattern]] {
+            let launch = |server: &McpServer| Some(server.arguments().to_vec());
+            crate::record::config::mcp::refuse_a_shared_command(&servers, launch).unwrap();
+            crate::record::config::mcp::refuse_overlapping_wildcard_commands(&servers, launch)
+                .unwrap();
+            for (value, selected) in [("*", "literal"), ("runtime", "pattern")] {
+                assert_eq!(
+                    admit_server(&servers, "server", &words(&["--token", value]), launch)
+                        .unwrap()
+                        .name,
+                    selected
+                );
+            }
+            let only_literal = servers
+                .iter()
+                .find(|server| !server.argument_wildcards)
+                .unwrap();
+            assert!(
+                admit_server(
+                    std::slice::from_ref(only_literal),
+                    "server",
+                    &words(&["--token", "runtime"]),
+                    launch
+                )
+                .is_err()
             );
         }
     }
@@ -546,16 +580,13 @@ mod tests {
     #[test]
     fn a_launch_by_the_program_alone_is_refused_when_the_command_has_arguments() {
         let servers = vec![McpServer {
+            argument_wildcards: false,
             name: "aws-mcp".to_string(),
             command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
         }];
-        let refusal = admit_server(
-            &servers,
-            "uvx",
-            &[],
-            |server| Some(server.arguments().to_vec()),
-            false,
-        )
+        let refusal = admit_server(&servers, "uvx", &[], |server| {
+            Some(server.arguments().to_vec())
+        })
         .expect_err("the program alone is not the declared command");
         assert_eq!(
             refusal.to_string(),
@@ -571,7 +602,6 @@ mod tests {
             "uvx",
             &words(&["mcp-server-fetch"]),
             |server| (server.name != "fetch").then(|| server.arguments().to_vec()),
-            false,
         )
         .expect_err("a command that does not expand matches nothing")
         .to_string();

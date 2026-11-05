@@ -14,6 +14,7 @@
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -24,6 +25,7 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod grammar;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -34,7 +36,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use policy::{Policy, PolicyEngine};
+use policy::{Policy, PolicyEngine, ToolGrammars};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
@@ -84,10 +86,9 @@ pub(super) const INJECT_ALWAYS: &str = "always";
 pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxError> {
     let file = ConfigFile::read(path)?;
     let servers = mcp::from_entries(&file.mcp)?;
-    if file.experimental_features.mcp_argument_wildcards
-        && let Some(server) = servers
-            .iter()
-            .find(|server| server.arguments().iter().any(|arg| arg == "*"))
+    if let Some(server) = servers
+        .iter()
+        .find(|server| server.has_argument_wildcards())
     {
         return Err(ConfigError::Mcp {
             name: server.name.clone(),
@@ -274,6 +275,7 @@ pub(crate) struct RunContract {
     box_directory: PathBuf,
     workspace: PathBuf,
     file: ConfigFile,
+    grammars: ToolGrammars,
 }
 
 impl RunContract {
@@ -281,6 +283,7 @@ impl RunContract {
     pub(crate) fn read(path: &Path, invocation: &Path) -> Result<Self, BoxError> {
         let (source, text) = AuthoritySource::read(path, "configuration")?;
         let file = ConfigFile::parse(&text, source.path())?;
+        let grammars = grammar::tool_grammars(&file.tool)?;
         let box_directory = file.box_dir.clone();
         if !box_directory.is_absolute() {
             return Err(ConfigError::Contract {
@@ -322,6 +325,7 @@ impl RunContract {
             box_directory,
             workspace,
             file,
+            grammars,
         })
     }
 
@@ -398,16 +402,15 @@ impl RunContract {
     ) -> Result<ConfigureRequest, BoxError> {
         let policy_path = self.file.policy_path(self.source.path());
         let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&self.file.mcp)?;
-        if self.file.experimental_features.mcp_argument_wildcards {
-            mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
-                Some(server.arguments().to_vec())
-            })?;
-        }
+        mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
+            Some(server.arguments().to_vec())
+        })?;
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
             mcp_servers.is_empty(),
             &policy_operator()?,
+            &self.grammars,
         )?;
         if let Some(source) = &policy_source
             && crate::record::layout::lies_within(source.path(), root.root())
@@ -464,6 +467,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    self.file.file_attributes,
                     &self.file.experimental_features,
                     self.file
                         .agent
@@ -473,6 +477,7 @@ impl RunContract {
                     &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                file_attributes: self.file.file_attributes,
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -486,6 +491,7 @@ impl RunContract {
                 telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
             },
             policy,
+            grammars: self.grammars,
             sources,
         })
     }
@@ -498,6 +504,9 @@ pub(crate) struct ConfigureRequest {
 
     /// The record to store, from which every later verb rebuilds the above.
     pub(crate) record: Record,
+
+    /// The tool grammars the record's `[tool.<name>.grammar]` tables hold, checked.
+    pub(crate) grammars: ToolGrammars,
 
     /// The loaded source identities that the interpreters protect from mutation.
     pub(crate) sources: Vec<AuthoritySource>,
@@ -526,6 +535,14 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// Whether each macOS write grant may also set file attributes.
+    #[serde(
+        default,
+        rename = "file-attributes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) file_attributes: bool,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -590,12 +607,15 @@ pub(crate) struct Record {
 /// key.
 pub(crate) const RECORD_VERSION: u32 = 21;
 
-/// Version 22 prevents older builds from resuming a box without its selected enforcement.
+/// Version 22 prevents older builds from resuming a box without each experimental feature it selects.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
-const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 25;
+/// The record version of a record that selects `file-attributes`, so an older build refuses the box
+/// rather than resuming it without the write grants it was configured with.
+const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
+const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,12 +624,12 @@ pub(crate) struct ExperimentalFeatures {
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) mcp_argument_wildcards: bool,
+    pub(crate) tool_grammars: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.mcp_argument_wildcards
+        !self.native_filesystem_policy && !self.tool_grammars
     }
 
     fn record_version(&self) -> u32 {
@@ -637,12 +657,15 @@ impl ExperimentalFeatures {
 
 /// The record version for what a record holds.
 fn record_version<'a>(
+    file_attributes: bool,
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if features.mcp_argument_wildcards {
+    if mcp.iter().any(|server| server.argument_wildcards) {
         MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+    } else if file_attributes {
+        FILE_ATTRIBUTES_RECORD_VERSION
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
@@ -892,6 +915,7 @@ impl Record {
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -906,6 +930,7 @@ impl Record {
             source,
         })?;
         let expected = record_version(
+            record.file_attributes,
             &record.experimental_features,
             record
                 .agent
@@ -944,6 +969,10 @@ impl Record {
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
+            )?;
+            tool.validate_grammar_selection(
+                &format!("[tool.{label}]"),
+                self.experimental_features.tool_grammars,
             )?;
         }
         for (name, contained) in &self.contained_mcp {
@@ -1016,11 +1045,14 @@ fn valid_box_identity(identity: &str) -> bool {
     })
 }
 
-/// The policy that the configuration at `path` selects, read as `run` reads it, and whether `run`
-/// validates it completely.
-pub(crate) fn read_checked_policy(path: &Path) -> Result<(Option<Policy>, bool), BoxError> {
+/// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
+/// validates it completely, and the tool grammars it validates against.
+pub(crate) fn read_checked_policy(
+    path: &Path,
+) -> Result<(Option<Policy>, bool, ToolGrammars), BoxError> {
     let (source, text) = AuthoritySource::read(path, "configuration")?;
     let file = ConfigFile::parse(&text, source.path())?;
+    let grammars = grammar::tool_grammars(&file.tool)?;
     let (mcp_servers, _) = crate::record::config::mcp::partition(&file.mcp)?;
     let policy = match file.policy_path(source.path()) {
         Some(policy_path) => {
@@ -1032,7 +1064,7 @@ pub(crate) fn read_checked_policy(path: &Path) -> Result<(Option<Policy>, bool),
         }
         None => None,
     };
-    Ok((policy, mcp_servers.is_empty()))
+    Ok((policy, mcp_servers.is_empty(), grammars))
 }
 
 /// The operator a policy loads for, anchored at the operator's own home.
@@ -1046,6 +1078,7 @@ fn read_authored_policy(
     path: Option<&Path>,
     validate_complete_schema: bool,
     operator: &policy::Operator,
+    grammars: &ToolGrammars,
 ) -> Result<(Option<Policy>, Option<AuthoritySource>), BoxError> {
     let Some(path) = path else {
         return Ok((None, None));
@@ -1056,7 +1089,7 @@ fn read_authored_policy(
         text,
     };
     let validation = if validate_complete_schema {
-        PolicyEngine::validate(operator, std::slice::from_ref(&source))
+        PolicyEngine::validate_with_grammars(operator, std::slice::from_ref(&source), grammars)
     } else {
         PolicyEngine::validate_staged(std::slice::from_ref(&source))
     };
@@ -1138,6 +1171,10 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// Whether each macOS write grant may also set file times, set-ID bits, the group, the owner,
+    /// and ACLs. Linux accepts the key and renders nothing for it.
+    #[serde(default, rename = "file-attributes")]
+    file_attributes: bool,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1227,6 +1264,10 @@ impl ConfigFile {
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
             )?;
+            tool.validate_grammar_selection(
+                &format!("[tool.{label}]"),
+                self.experimental_features.tool_grammars,
+            )?;
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
@@ -1272,29 +1313,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_wildcards_require_opt_in_and_an_enabled_record_version() {
-        let base = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n";
-        for flag in [
-            "",
-            "[experimental-features]\nmcp-argument-wildcards = false\n",
-        ] {
+    fn mcp_wildcards_require_per_server_opt_in_and_an_enabled_record_version() {
+        let base = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\ncommand = [\"server\", \"*\"]\n";
+        for flag in ["", "argument_wildcards = false\n"] {
             let config =
                 ConfigFile::parse(&format!("{base}{flag}"), Path::new("box.toml")).unwrap();
-            assert!(!config.experimental_features.mcp_argument_wildcards);
+            assert!(!mcp::from_entries(&config.mcp).unwrap()[0].argument_wildcards);
         }
-        let enabled = format!("{base}[experimental-features]\nmcp-argument-wildcards = true\n");
-        assert!(
-            ConfigFile::parse(&enabled, Path::new("box.toml"))
-                .unwrap()
-                .experimental_features
-                .mcp_argument_wildcards
-        );
+        let config = ConfigFile::parse(
+            &format!("{base}argument_wildcards = true\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
         let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        stored.mcp[0].argument_wildcards = false;
         let original = toml::to_string(&stored).unwrap();
-        assert!(!original.contains("mcp-argument-wildcards"));
-        stored.experimental_features.mcp_argument_wildcards = true;
+        assert!(!original.contains("argument_wildcards"));
+        stored.mcp[0].argument_wildcards = true;
         assert_eq!(
             record_version(
+                stored.file_attributes,
                 &stored.experimental_features,
                 std::iter::empty(),
                 &stored.mcp
@@ -1309,9 +1350,34 @@ mod tests {
             Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).unwrap(),
             stored
         );
-        stored.experimental_features.mcp_argument_wildcards = false;
+        stored.version = 25;
+        assert!(matches!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion { found: 25, .. })
+        ));
+        stored.mcp[0].argument_wildcards = false;
         stored.version = RECORD_VERSION;
         assert_eq!(toml::to_string(&stored).unwrap(), original);
+    }
+
+    #[test]
+    fn argument_wildcards_are_only_a_stdio_mcp_setting() {
+        for entry in [
+            "[agent]\ncommand = [\"server\"]",
+            "[tool.server]\ncommand = [\"server\"]",
+            "[mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]",
+        ] {
+            let text = format!(
+                "name = \"test\"\nbox_dir = \"/var/lib/box\"\n{entry}\nargument_wildcards = true\n"
+            );
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{entry}"
+            );
+        }
+        let old = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [experimental-features]\nmcp-argument-wildcards = true\n";
+        assert!(ConfigFile::parse(old, Path::new("box.toml")).is_err());
     }
 
     #[test]
@@ -1319,8 +1385,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("box.toml");
         let config = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
-            [experimental-features]\nmcp-argument-wildcards = true\n\
-            [mcp.test]\ntype = \"stdio\"\ncommand = [\"server\", \"*\"]\n";
+            [mcp.test]\ntype = \"stdio\"\nargument_wildcards = true\n\
+            command = [\"server\", \"*\"]\n";
         std::fs::write(&path, config).unwrap();
         let error = read_mcp_servers(&path).unwrap_err().to_string();
         assert!(
@@ -1384,6 +1450,7 @@ mod tests {
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         }
     }
 
@@ -1392,6 +1459,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1493,6 +1561,76 @@ native-filesystem-policy = false
     }
 
     #[test]
+    fn the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(!absent.file_attributes);
+        let enabled = ConfigFile::parse(
+            &format!("file-attributes = true\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(enabled.file_attributes);
+        assert!(enabled.experimental_features.is_disabled());
+        let disabled = ConfigFile::parse(
+            &format!("file-attributes = false\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(!disabled.file_attributes);
+    }
+
+    #[test]
+    fn file_attributes_is_refused_as_an_experimental_feature_and_when_misspelled() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("{required}[experimental-features]\nfile-attributes = true\n"),
+            format!("file-attribute = true\n{required}"),
+            format!("file_attributes = true\n{required}"),
+            format!("file-attributes = \"yes\"\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_attributes_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.file_attributes = true;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("file-attributes = true"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: FILE_ATTRIBUTES_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = FILE_ATTRIBUTES_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("file-attributes"), "{ordinary}");
+    }
+
+    #[test]
     fn native_enforcement_cannot_hide_in_a_legacy_record() {
         let mut ordinary = record(None, BTreeMap::new());
         let original = toml::to_string(&ordinary).unwrap();
@@ -1514,6 +1652,126 @@ native-filesystem-policy = false
         let encoded = toml::to_string(&ordinary).unwrap();
         let restored = Record::parse(&encoded, Path::new("record.toml"));
         assert_eq!(restored.unwrap(), ordinary);
+    }
+
+    const GIT_TOOL: &str = "name = \"codex\"\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+        [tool.git.grammar]\nformat = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+        [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+
+    #[test]
+    fn a_tool_grammar_needs_the_tool_grammars_switch() {
+        let error = load(GIT_TOOL).expect_err("the switch is off");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `[tool.git]` table: `grammar` is experimental: set `tool-grammars = true` in \
+             `[experimental-features]` to load it"
+        );
+        let file = load(&format!(
+            "{GIT_TOOL}[experimental-features]\ntool-grammars = true\n"
+        ))
+        .expect("the switch is on");
+        assert!(file.tool["git"].grammar.is_some());
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_the_agent() {
+        let error = load(
+            "[experimental-features]\ntool-grammars = true\n[agent]\ncommand = [\"/bin/true\"]\n\
+             [agent.grammar]\nformat = 1\n",
+        )
+        .expect_err("only a tool takes a grammar");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid `[agent]` table: `grammar` is refused on `[agent]`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_record_without_tool_grammars_writes_no_tool_grammars_key() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.native_filesystem_policy = true;
+        stored.version = EXPERIMENTAL_RECORD_VERSION;
+
+        let encoded = toml::to_string(&stored).expect("the record writes");
+
+        assert!(
+            encoded.contains("native-filesystem-policy = true"),
+            "{encoded}"
+        );
+        assert!(!encoded.contains("tool-grammars"), "{encoded}");
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_an_mcp_server() {
+        let text = format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n[experimental-features]\n\
+             tool-grammars = true\n[mcp.alpha]\ntype = \"stdio\"\n\
+             command = [\"fake-alpha-mcp\"]\n[mcp.alpha.grammar]\nformat = 1\n"
+        );
+
+        let error = ConfigFile::parse(&text, Path::new("box.toml"))
+            .expect_err("an MCP server takes no grammar");
+
+        assert!(
+            error.to_string().contains("unknown field `grammar`"),
+            "{error}"
+        );
+    }
+
+    fn grammar_record() -> Record {
+        let file = load(&format!(
+            "{GIT_TOOL}[experimental-features]\ntool-grammars = true\n"
+        ))
+        .expect("the switch is on");
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.tool_grammars = true;
+        stored.tool = file.tool.clone();
+        stored
+    }
+
+    #[test]
+    fn a_record_that_selects_tool_grammars_keeps_its_ordinary_version() {
+        let mut stored = grammar_record();
+        let encoded = toml::to_string(&stored).expect("the record writes");
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).expect("the record reads"),
+            stored
+        );
+
+        stored.experimental_features.tool_grammars = false;
+        let hidden = toml::to_string(&stored).expect("the record writes");
+        assert!(
+            Record::parse(&hidden, Path::new("record.toml")).is_err(),
+            "a stored grammar needs the switch"
+        );
+    }
+
+    /// A build that has no `grammar` field or `tool-grammars` key reads each one as a key it does
+    /// not know, and refuses the record.
+    #[test]
+    fn a_grammar_record_is_refused_where_its_keys_are_unknown() {
+        let encoded = toml::to_string(&grammar_record()).expect("the record writes");
+        assert!(encoded.contains("[tool.git.grammar]"), "{encoded}");
+        assert!(encoded.contains("tool-grammars = true"), "{encoded}");
+
+        for (known, unknown) in [
+            ("[tool.git.grammar]", "[tool.git.unknown]"),
+            ("tool-grammars = true", "unknown-feature = true"),
+        ] {
+            let older = encoded.replace(known, unknown);
+
+            let error = Record::parse(&older, Path::new("record.toml"))
+                .expect_err("an unknown record key is refused");
+
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{unknown}: {error}"
+            );
+        }
     }
 
     // ── The four inputs ────────────────────────────────────────────────────────

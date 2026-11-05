@@ -639,7 +639,7 @@ fn wildcard_slots_launch_received_values_without_expanding_them() {
         );
     box_.install_server(&alpha);
     box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
-    box_.set_argument_wildcards(true);
+    box_.set_argument_wildcards("alpha", true);
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let received = [
@@ -680,7 +680,7 @@ fn wildcard_arguments_remain_literal_without_opt_in() {
         box_.install_server(&alpha);
         box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
         if let Some(enabled) = enabled {
-            box_.set_argument_wildcards(enabled);
+            box_.set_argument_wildcards("alpha", enabled);
         }
         let mut run = box_.spawn();
         run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
@@ -724,7 +724,7 @@ fn wildcard_launches_require_policy_to_permit_the_effective_command() {
             );
         }
         box_.write_workspace_as_authored(&policy, &[alpha], BLOCKING_WORKLOAD);
-        box_.set_argument_wildcards(true);
+        box_.set_argument_wildcards("alpha", true);
         let mut run = box_.spawn();
         run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
         let refusal = box_.invoke_refused_open_with("alpha-mcp", &["from-harness"], SHUTDOWN);
@@ -746,38 +746,41 @@ fn exact_and_wildcard_commands_select_their_own_server_configuration() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = RuntimeMcpBox::new("mcp-star-exact");
-    let alpha = Server::new("alpha", "shared-mcp", "read", DiscoveryBehavior::Ready)
-        .launched_through("shared-mcp", vec!["*".into()])
-        .with_env("SELECTED_SERVER", "wildcard");
-    let beta = Server::new("beta", "shared-mcp", "write", DiscoveryBehavior::Ready)
-        .launched_through("shared-mcp", vec!["specific".into()])
-        .with_env("SELECTED_SERVER", "exact");
-    box_.install_server(&alpha);
-    box_.write_workspace(
-        &call_policy(&["alpha", "beta"]),
-        &[alpha, beta],
-        BLOCKING_WORKLOAD,
-    );
-    box_.set_argument_wildcards(true);
-    let mut run = box_.spawn();
-    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
-    for (value, selected) in [("other", "wildcard"), ("specific", "exact")] {
-        let mut client = box_.open_client_with("shared-mcp", &[value]);
-        client.initialize_and_activate(json!(selected), STARTUP);
-        let environment: serde_json::Value =
-            serde_json::from_str(&box_.trace("shared-mcp", "environment")).unwrap();
-        assert_eq!(environment["SELECTED_SERVER"], selected);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&box_.trace("shared-mcp", "argv")).unwrap(),
-            json!([value]),
+    for exact_value in ["specific", "*"] {
+        let box_ = RuntimeMcpBox::new("mcp-star-exact");
+        let alpha = Server::new("alpha", "shared-mcp", "read", DiscoveryBehavior::Ready)
+            .launched_through("shared-mcp", vec!["*".into()])
+            .with_env("SELECTED_SERVER", "wildcard");
+        let beta = Server::new("beta", "shared-mcp", "write", DiscoveryBehavior::Ready)
+            .launched_through("shared-mcp", vec![exact_value.into()])
+            .with_env("SELECTED_SERVER", "exact");
+        box_.install_server(&alpha);
+        box_.write_workspace(
+            &call_policy(&["alpha", "beta"]),
+            &[alpha, beta],
+            BLOCKING_WORKLOAD,
         );
-        drop(client);
+        box_.set_argument_wildcards("alpha", true);
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        for (value, selected) in [("other", "wildcard"), (exact_value, "exact")] {
+            let mut client = box_.open_client_with("shared-mcp", &[value]);
+            client.initialize_and_activate(json!(selected), STARTUP);
+            let environment: serde_json::Value =
+                serde_json::from_str(&box_.trace("shared-mcp", "environment")).unwrap();
+            assert_eq!(environment["SELECTED_SERVER"], selected);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&box_.trace("shared-mcp", "argv"))
+                    .unwrap(),
+                json!([value]),
+            );
+            drop(client);
+        }
+        assert_eq!(box_.invocation_count("shared-mcp"), 2);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(output.status.success(), "{output:?}");
     }
-    assert_eq!(box_.invocation_count("shared-mcp"), 2);
-    box_.release_workload();
-    let output = run.wait(SHUTDOWN);
-    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]
@@ -800,7 +803,8 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
             &[alpha, beta],
             BLOCKING_WORKLOAD,
         );
-        box_.set_argument_wildcards(true);
+        box_.set_argument_wildcards("alpha", true);
+        box_.set_argument_wildcards("beta", true);
         box_.release_workload();
         let output = box_.spawn_attempt().wait(SHUTDOWN);
         assert!(!output.status.success(), "{output:?}");
@@ -813,7 +817,7 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
         assert!(!box_.workload_path("workload.started").exists());
         assert_eq!(box_.invocation_count("shared-mcp"), 0);
 
-        box_.set_argument_wildcards(false);
+        box_.set_argument_wildcards("alpha", false);
         let output = box_.spawn_attempt().wait(SHUTDOWN);
         assert!(output.status.success(), "{output:?}");
         assert!(box_.workload_path("workload.started").exists());

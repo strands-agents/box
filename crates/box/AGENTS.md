@@ -147,7 +147,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   The test is **authority**, not spelling. A key may name a host path and still not be an input.
   A key that decides *which requests are governed*, or grants a reach policy does not judge, is
-  a fifth input whatever it is called.
+  a fifth input whatever it is called. A key that widens only what the workload's own grants
+  allow, and is disclosed with them, is part of the workload, as `file-attributes` is.
 
   Two more are ambient
   dependencies the process makes visible — `$HOME` (which must stay ambient, or it becomes the
@@ -155,8 +156,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **nine** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, and `experimental-features`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **ten** keys — `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, and `file-attributes`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -237,12 +238,15 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries nine top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
-  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`, and
-  `[experimental-features]`.** The experimental setting selects native file checks.
-  It adds no authority beyond the authored policy. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is five fields — `command`, `workspace`, `env`,
-  `filesystem`, and `native-filesystem-policy` — and `filesystem` holds the path lists: eight for `[agent]`, six
+  **`box.toml` carries ten top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
+  `[experimental-features]`, and `file-attributes`.** The experimental settings select native file
+  checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
+  no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
+  workload input, and each process discloses it. `[agent]` and each
+  `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
+  `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS
@@ -837,6 +841,17 @@ argue it as an addition and note what `ls` cannot mean any more: there is no set
 the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
+
+- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
+  refuses directory write grants, but Shell and Python requests execute in the trusted process.
+  They pass policy and `Reach` checks without becoming containment authorizations.
+  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
+  identity. A root launch therefore retains root ownership on permitted new files.
+  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
+  does not establish closure of the broader ownership finding.
+  The Shell's symlink path still requires source read/write and destination write permission.
+  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
+  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not

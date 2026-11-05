@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries nine keys. `name` and `box_dir` are required.
+The file carries ten keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -80,9 +80,10 @@ The file carries nine keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[experimental-features]` | table | Optional native filesystem policy checks and MCP argument wildcards. Disabled by default. |
+| `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
 
-The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the ten: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -144,6 +145,36 @@ Also forbid `fs:move` on enclosing directories that could relocate these protect
 A `forbid` overrides matching permits. Adding a narrower permit leaves any broader permit active.
 A native `filesystem.deny` entry does not restrict these requests through the box's trusted process.
 
+## `file-attributes`
+
+On macOS, a write folder refuses most calls that set a file's times: `utimensat`, which `touch`
+calls, and `setattrlist`, which `cp -p` and `rsync -t` use. Only `utimes` works. So `touch`,
+`cp -p`, and `rsync -t` fail with `Operation not permitted`. The `file-attributes` switch lets a
+write folder set them. The key goes at the top of the file, above the first table:
+
+```toml
+file-attributes = true
+```
+
+The default is `false`, and the switch applies to the agent, every tool, and every local MCP server
+in the box. It has no effect on Linux, which accepts the key. With the switch off, the box renders
+no rule for it. A box that sets it stores its record at version 25, so an older build refuses to
+resume it.
+
+With the switch on, a process in a write folder can set the times of a file there. It can also set
+the file's set-user-ID and set-group-ID bits, change its group, store an access control list on it,
+and, in a box that runs as root, give it to another user. macOS has no rule that allows the times
+and refuses these. See
+[file attributes on macOS](security.md#file-attributes-on-macos) for what that means and how to
+undo it. Flags such as `uchg`, ownership changes through `chown`, and `chmod` of the set-ID bits stay
+refused. A path outside the write folders, and a file the box protects, stay unwritable. `tar -x`
+restores times with the switch, but an archive that macOS `tar` made with its default metadata
+still fails to restore the owner and the flags. Extract it with `tar -x --no-mac-metadata`.
+
+The box prints one line for each process the switch applies to, in the startup disclosure:
+`strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
+group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:
@@ -158,15 +189,8 @@ Signed macOS releases include the adapter, but leave it disabled until you selec
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
-To accept caller-supplied values in whole-argument `*` positions of stdio MCP commands:
-
-```toml
-[experimental-features]
-mcp-argument-wildcards = true
-```
-
-This setting also defaults to `false`. See [MCP argument wildcards](mcp.md#argument-wildcards)
-for matching, launch behavior, and record compatibility.
+`tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
+by default.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -179,6 +203,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
+| `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
@@ -304,13 +329,23 @@ mounted aliases, and enclosing directories.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. On macOS, add `read` to permit reads. Linux requires explicit read access across the entire write scope. |
+| `write` | Write the path. On macOS, add `read` to permit reads, and setting a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
 | `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
 | `list` | List the directory without content access on macOS. Linux refuses this list. |
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
+
+On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
+Run Box as a non-root account to grant sandbox directory writes.
+Root launches support explicitly granted existing-file writes and read-only directory access.
+Private `/tmp` storage remains writable and separate from the surrounding OS.
+The same restriction applies when a container maps a non-root account to user ID zero.
+
+These filesystem lists govern sandbox access.
+Shell and Python requests through Box use separate policy and reach checks in the trusted process.
+This restriction does not change their file ownership or permission to create files.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
@@ -331,15 +366,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Supported |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
+| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
@@ -528,6 +563,34 @@ policy permits the operation. Reads still require the applicable policy permissi
 End every active run before installation updates. Update the installation from the surrounding OS.
 Start a new run to validate the updated files.
 
+## `[tool.<name>.grammar]`
+
+This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
+`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
+action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
+grammars is coming later.
+
+Each of these is refused at startup, before any box state exists:
+
+- A grammar while `tool-grammars` is off: ``invalid `[tool.git]` table: `grammar` is
+  experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
+- A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
+  grammar on `[mcp.<name>]` is an unknown field there.
+- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
+  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
+  `command` runs "gh"; ...``.
+- Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
+  `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
+- Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
+  both have `name = "git"`; give each grammar its own name``.
+- A grammar that breaks a rule of the grammar format. Each refusal names the key, as a path in
+  `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
+- A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
+  policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+
+An older build refuses a box that uses a grammar, so before you go back to one, turn
+`tool-grammars` off, remove every `grammar` table, and start the box once with this build.
+
 ## `[egress.<name>]`
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
@@ -596,6 +659,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
+| `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
@@ -705,7 +769,8 @@ A refusal of the file's shape happens at parse, before any box state exists: an 
 absent or invalid `name`, an absent or relative `box_dir`, an empty or relative `command` program, a
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
-overlapping or all-hosts egress destination, a secretless egress entry, and a literal egress secret.
+overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
+and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

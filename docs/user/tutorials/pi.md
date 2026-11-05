@@ -463,8 +463,9 @@ that call ends the Node process at once, so the box prints its startup lines and
 nothing from pi and exit status `139`. The preload file makes the title setter do nothing, which
 is a workaround for a Box limitation.
 
-**File timestamps, in `box-preload.mjs`.** Box does not let the agent change file timestamps
-inside a write grant ([file timestamps may not be
+**File timestamps, in `box-preload.mjs`.** Without the
+[`file-attributes`](../config.md#file-attributes) switch, Box does not let the agent change file
+timestamps inside a write grant ([file timestamps may not be
 preserved](../../design/macos-enforcement.md#file-timestamps-may-not-be-preserved)). pi's
 credential store probes the timestamp precision of its lock file through that call, and stops when
 the call fails:

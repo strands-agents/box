@@ -254,9 +254,10 @@ because the agent cannot read `box.toml`. The broker also records the refusal as
 denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
 records. By default, the arguments only select among the servers the operator declared.
 
-With [argument wildcards](../user/mcp.md#argument-wildcards) enabled, a configured argument equal
+With `argument_wildcards = true` on a stdio MCP entry, a configured argument equal
 to `*` skips that position's comparison. The executable, argument count, and other arguments
-still match. Commands without wildcards take priority. Otherwise, exactly one wildcard command
+still match. Each entry defaults to literal argument matching. Exact commands, including literal
+stars on entries without the opt-in, take priority. Otherwise, exactly one wildcard command
 must match. Box refuses overlapping wildcard entries before the workload starts, checking both
 the authored and expanded forms. The launcher expands the configured arguments,
 then replaces only the star positions with received values. Received text is not expanded again.

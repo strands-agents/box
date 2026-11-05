@@ -89,21 +89,21 @@ earlier build refuses that box directory.
 
 ### Argument wildcards
 
-To let the caller supply an argument at runtime, enable this feature and put `*` in that
-argument's position:
+To let the caller supply an argument at runtime, set `argument_wildcards = true` on that
+stdio MCP entry and put `*` in the argument's position:
 
 ```toml
-[experimental-features]
-mcp-argument-wildcards = true
-
 [mcp.example]
 type = "stdio"
 command = ["example-server", "--token", "*"]
+argument_wildcards = true
 ```
 
 If the harness runs `example-server --token runtime-value`, Box matches the entry and starts
 `example-server --token runtime-value` after policy permits it. The same server filesystem and
-network settings still apply.
+network settings still apply. Box supplies the configured executable and fixed arguments;
+the caller supplies the arguments in `*` positions. The matched entry selects the MCP server's
+configuration, and Box continues to mediate its MCP traffic.
 
 Any process in the workload can invoke the MCP alias and supply values for the `*` positions.
 The operator chooses those positions in `box.toml`; the workload cannot add wildcards.
@@ -117,22 +117,28 @@ The executable, argument count, order, and every other argument must match. `--t
 literal text. To accept a changing argument such as `--token=value`, replace that entire argument
 with `*`.
 
-Box copies received values into the wildcard positions without expanding them. A received
-`${TOKEN}` stays that literal text. Fixed arguments keep Box's existing expansion.
-Policy checks the effective launch arguments.
+For a direct invocation of the MCP alias, Box matches the supplied argument array and copies each
+wildcard argument unchanged. For example, `["example-server", "--token", "abc"]` starts the server
+with `--token abc`. If the caller supplies the literal text `${TOKEN}`, Box passes that text unchanged.
+Fixed arguments keep Box's existing expansion. Policy checks the effective launch arguments.
 
-Commands with no `*` take priority over wildcard commands. For example,
+Strands Shell does not route external commands to declared MCP servers. Its command selection uses
+tool entries and agent execution grants. Invoke the MCP alias directly to use MCP command matching.
+
+Exact commands take priority over wildcard commands. An entry with `argument_wildcards = false`
+keeps its stars literal and participates in exact matching. For example,
 `["example-server", "--token", "fixed-value"]` wins over the wildcard example above when the
 caller supplies `fixed-value`. Other values select the wildcard entry.
 Box refuses to start if two wildcard commands could match the same request, including after
 configured expansion. Keep fixed arguments that distinguish those wildcard entries.
 
-The setting defaults to `false`. Without it, `*` matches and launches as a literal star.
+The setting defaults to `false` on each server. With it omitted or false, `*` matches and
+launches as a literal star. Enabling it on one server leaves other servers unchanged.
 The feature applies only to stdio MCP commands, not agent or tool commands.
 `box policy generate-schema` refuses enabled wildcard commands because offline discovery has no
 caller to supply their arguments. Use a configuration with concrete arguments for that command.
 
-Enabling this feature stores record version 25. Older builds refuse that record.
+Enabling `argument_wildcards` on any server stores record version 26. Older builds refuse that record.
 Before returning to an older build, replace wildcard arguments with concrete values, disable the
 feature, and run the current build once to write a compatible record.
 
