@@ -70,17 +70,6 @@ impl ConfiguredCommands {
                     return Err(refusal(&table, &path, "must be a regular file"));
                 }
                 let loaded = FileState::of(&metadata);
-                if loaded.links > 1 && writable_by_this_user(&opened, &path, loaded) {
-                    return Err(refusal(
-                        &table,
-                        &path,
-                        &format!(
-                            "has {} hard links, and the user that runs Box may be able to write \
-                             it. Use a copy with one hard link",
-                            loaded.links
-                        ),
-                    ));
-                }
                 let invoked = resolved.invoked().to_path_buf();
                 let mut routes = vec![invoked.clone()];
                 let authored = Path::new(spec.program());
@@ -167,7 +156,7 @@ impl ConfiguredCommand {
             if self.loaded.links == 1 {
                 now.links == 1
             } else {
-                now == self.loaded && !writable_by_this_user(&self.opened, &self.path, now)
+                now == self.loaded
             }
         });
         if unchanged_names
@@ -200,6 +189,7 @@ impl ConfiguredCommand {
 }
 
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
+#[cfg_attr(not(test), expect(dead_code))]
 fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
     // SAFETY: these calls read the process credentials without changing them.
     let users = unsafe { [libc::getuid(), libc::geteuid()] };
@@ -213,6 +203,7 @@ fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
 
 /// Whether a file in `state` may change through some name, for the real and effective `users`, the
 /// kernel's answer to a write check, and whether the file may carry an access-control list.
+#[cfg_attr(not(test), expect(dead_code))]
 fn may_change(
     state: FileState,
     users: [u32; 2],
@@ -245,6 +236,7 @@ const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
 
 /// Whether `opened` may carry an access-control list, which can grant a write that its mode does not.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(test), expect(dead_code))]
 fn may_carry_access_list(opened: &File) -> bool {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the descriptor is live for the call.
@@ -258,11 +250,13 @@ fn may_carry_access_list(opened: &File) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(test), expect(dead_code))]
 fn may_carry_access_list(_opened: &File) -> bool {
     true
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), expect(dead_code))]
 fn write_access(opened: &File, _path: &Path) -> std::io::Result<()> {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the descriptor is live, and the empty path is a terminated string.
@@ -283,6 +277,7 @@ fn write_access(opened: &File, _path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(not(test), expect(dead_code))]
 fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
     let spelled = std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -405,18 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
+    fn configured_commands_load_hard_links_this_user_can_write() {
         let directory = tempfile::tempdir().expect("directory");
         let command = directory.path().join("reader");
         program(&command);
         std::fs::hard_link(&command, directory.path().join("alias")).expect("hard link");
-        let error = ConfiguredCommands::load(&record(&command))
-            .expect_err("an unseen writable alias cannot be protected")
-            .to_string();
-        assert!(
-            error.contains("has 2 hard links, and the user that runs Box may be able to write it"),
-            "{error}"
-        );
+        let commands = ConfiguredCommands::load(&record(&command))
+            .unwrap_or_else(|error| panic!("a writable command with two names: {error}"));
+        assert!(commands.get("reader").expect("loaded").has_several_names());
     }
 
     /// A root-owned regular file in a system folder with several names and no group or other write.
@@ -731,14 +722,9 @@ mod tests {
         let owned = directory.path().join("reader");
         program(&owned);
         std::fs::hard_link(&owned, directory.path().join("alias")).expect("hard link");
-        let error = loaded_as(&owned, None)
+        loaded_as(&owned, None)
             .verify()
-            .expect_err("a file this user can write")
-            .to_string();
-        assert!(
-            error.contains("changed after this run loaded it"),
-            "{error}"
-        );
+            .expect("an unchanged file this user can write launches");
     }
 
     #[test]

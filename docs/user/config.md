@@ -555,13 +555,11 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 |---|---|---|
 | A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
-| A command has more than one hard link, which are filesystem names for the same file, and Box can't rule out that the user that runs Box can write it. | `has <n> hard links, and the user that runs Box may be able to write it` | Use a copy with one filesystem name, or install the command so that this user can't write it. |
 | The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
 
-Box accepts a command with more than one hard link when the user that runs Box can't write it
-through any name. The file belongs to another user, such as `root`, has no group or other write
-permission, and no access-control entry lets this user write it. Most system programs are like
-this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
+Box accepts a command with more than one hard link, which are filesystem names for the same file.
+Box can't find every name, so a write through a name outside the configured grants can change the
+program. Keep every name of a configured command outside every process's write grants.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. Reads still require the applicable policy permission.
