@@ -2,7 +2,7 @@
 
 Box runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
-`box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
+`box.toml` says what to run and what it can reach, and `policy.dw` decides requests it sends through Box.
 
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
 in a box on macOS. You'll give it one tool, a shell, so your policy decides every command it runs and every
