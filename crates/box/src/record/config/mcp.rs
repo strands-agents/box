@@ -132,6 +132,7 @@ pub(crate) fn contained_specs(
                         env: env.clone(),
                         filesystem: filesystem.clone(),
                         network: (!network.is_default()).then(|| network.clone()),
+                        grammar: None,
                     },
                 },
             )),

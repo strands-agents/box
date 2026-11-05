@@ -80,7 +80,7 @@ The file carries nine keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
 
 The example uses five of the nine: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
@@ -158,6 +158,9 @@ Signed macOS releases include the adapter, but leave it disabled until you selec
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
+`tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
+by default.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:
@@ -169,6 +172,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
+| `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
@@ -528,6 +532,34 @@ policy permits the operation. Reads still require the applicable policy permissi
 End every active run before installation updates. Update the installation from the surrounding OS.
 Start a new run to validate the updated files.
 
+## `[tool.<name>.grammar]`
+
+This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
+`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
+action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
+grammars is coming later.
+
+Each of these is refused at startup, before any box state exists:
+
+- A grammar while `tool-grammars` is off: ``invalid `[tool.git]` table: `grammar` is
+  experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
+- A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
+  grammar on `[mcp.<name>]` is an unknown field there.
+- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
+  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
+  `command` runs "gh"; ...``.
+- Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
+  `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
+- Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
+  both have `name = "git"`; give each grammar its own name``.
+- A grammar that breaks a rule of the grammar format. Each refusal names the key, as a path in
+  `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
+- A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
+  policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+
+An older build refuses a box that uses a grammar, so before you go back to one, turn
+`tool-grammars` off, remove every `grammar` table, and start the box once with this build.
+
 ## `[egress.<name>]`
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
@@ -705,7 +737,8 @@ A refusal of the file's shape happens at parse, before any box state exists: an 
 absent or invalid `name`, an absent or relative `box_dir`, an empty or relative `command` program, a
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
-overlapping or all-hosts egress destination, a secretless egress entry, and a literal egress secret.
+overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
+and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
