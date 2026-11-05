@@ -42,3 +42,5 @@ jobs:
         run: python run-tests.py
       - name: Test EKS Job receipts without a cluster
         run: python examples/cloud-deployments/eks/test_run.py
+      - name: Test deployment service and cooldown checks without a model
+        run: python examples/cloud-deployments/eks/claude/test_deployment.py
