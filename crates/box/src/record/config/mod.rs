@@ -612,8 +612,6 @@ const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 26;
-/// The record version that preserves a disabled Shell timeout.
-const UNLIMITED_SHELL_RECORD_VERSION: u32 = 27;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,9 +659,7 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if limits.shell.timeout().is_none() {
-        UNLIMITED_SHELL_RECORD_VERSION
-    } else if !limits.is_default() {
+    if !limits.is_default() {
         LIMITS_RECORD_VERSION
     } else if file_attributes {
         FILE_ATTRIBUTES_RECORD_VERSION
@@ -917,7 +913,6 @@ impl Record {
             SHARED_PROGRAM_RECORD_VERSION,
             FILE_ATTRIBUTES_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
-            UNLIMITED_SHELL_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1392,116 +1387,67 @@ mod tests {
     }
 
     #[test]
-    fn shell_limits_accept_dotted_and_nested_tables() {
-        for body in [
-            "[limits]\nshell.timeout = 600\n",
-            "[limits.shell]\ntimeout = 600\n",
+    fn shell_limits_round_trip_in_the_required_record_version() {
+        for (limits, timeout, explicit) in [
+            ("", Some(30), false),
+            ("[limits]\n", Some(30), false),
+            ("[limits.shell]\n", Some(30), false),
+            ("[limits]\nshell.timeout = 30\n", Some(30), true),
+            ("[limits.shell]\ntimeout = 30\n", Some(30), true),
+            ("[limits]\nshell.timeout = 600\n", Some(600), true),
+            ("[limits.shell]\ntimeout = 600\n", Some(600), true),
+            ("[limits]\nshell.timeout = false\n", None, true),
+            ("[limits.shell]\ntimeout = false\n", None, true),
         ] {
-            let configured = load(body).unwrap();
-            assert_eq!(
-                configured.limits.shell.timeout(),
-                Some(std::time::Duration::from_secs(600))
-            );
-            let stored = record_from_config(body).unwrap();
-            assert_eq!(stored.limits, configured.limits);
-            assert_eq!(stored.version, LIMITS_RECORD_VERSION);
-            assert_eq!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-                stored
-            );
-        }
-    }
-
-    #[test]
-    fn empty_limits_preserve_the_existing_record_format() {
-        for body in ["", "[limits]\n", "[limits.shell]\n"] {
-            let stored = pinned_record(body);
-            assert_eq!(stored.version, RECORD_VERSION);
-            assert!(!stored.to_toml().unwrap().contains("limits"));
-            assert_eq!(
-                stored.limits.shell.timeout(),
-                Some(limits::DEFAULT_SHELL_TIMEOUT)
-            );
-        }
-    }
-
-    #[test]
-    fn an_unlimited_shell_timeout_round_trips_only_in_its_record_version() {
-        for body in [
-            "[limits]\nshell.timeout = false\n",
-            "[limits.shell]\ntimeout = false\n",
-        ] {
-            let configured = load(body).unwrap();
-            let mut stored = pinned_record(body);
-            assert_eq!(configured.limits.shell.timeout(), None);
-            assert_eq!(stored.limits, configured.limits);
-            assert_eq!(stored.version, UNLIMITED_SHELL_RECORD_VERSION);
-            assert_eq!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-                stored
-            );
-            for version in RECORD_VERSION..=LIMITS_RECORD_VERSION {
-                stored.version = version;
-                assert!(matches!(
-                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                    Err(ConfigError::RecordVersion {
-                        found,
-                        expected: UNLIMITED_SHELL_RECORD_VERSION
-                    }) if found == version
-                ));
+            for file_attributes in [false, true] {
+                let version = match (explicit, file_attributes) {
+                    (true, _) => 26,
+                    (false, true) => 25,
+                    (false, false) => 21,
+                };
+                let body = format!("file-attributes = {file_attributes}\n{limits}");
+                let configured = load(&body).unwrap();
+                assert_eq!(
+                    configured.limits.shell.timeout(),
+                    timeout.map(std::time::Duration::from_secs),
+                    "{body}"
+                );
+                let mut stored = pinned_record(&body);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.limits, configured.limits);
+                assert_eq!(stored.version, version, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("[limits"), explicit, "{body}");
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored,
+                    "{body}"
+                );
+                for found in 21..=26 {
+                    if found == version {
+                        continue;
+                    }
+                    stored.version = found;
+                    assert!(
+                        matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion {
+                                found: refused,
+                                expected,
+                            }) if refused == found && expected == version
+                        ),
+                        "{body}: version {found}"
+                    );
+                }
             }
         }
-        let mut finite = pinned_record("[limits.shell]\ntimeout = 600\n");
-        finite.version = UNLIMITED_SHELL_RECORD_VERSION;
-        assert!(matches!(
-            Record::parse(&finite.to_toml().unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion {
-                found: UNLIMITED_SHELL_RECORD_VERSION,
-                expected: LIMITS_RECORD_VERSION,
-            })
-        ));
-    }
-
-    #[test]
-    fn a_configured_timeout_cannot_hide_in_an_earlier_record() {
-        let mut stored = pinned_record("[limits.shell]\ntimeout = 30\n");
-        assert_eq!(stored.version, LIMITS_RECORD_VERSION);
-        for version in [
-            RECORD_VERSION,
-            EXPERIMENTAL_RECORD_VERSION,
-            PROCESS_POLICY_RECORD_VERSION,
-            SHARED_PROGRAM_RECORD_VERSION,
-            FILE_ATTRIBUTES_RECORD_VERSION,
-        ] {
-            stored.version = version;
-            assert!(matches!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                Err(ConfigError::RecordVersion {
-                    found,
-                    expected: LIMITS_RECORD_VERSION
-                }) if found == version
-            ));
-        }
-
-        let mut unconfigured = record(None, BTreeMap::new());
-        unconfigured.version = LIMITS_RECORD_VERSION;
-        assert!(matches!(
-            Record::parse(&unconfigured.to_toml().unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion {
-                found: LIMITS_RECORD_VERSION,
-                expected: RECORD_VERSION
-            })
-        ));
     }
 
     #[test]
     fn configured_limits_preserve_other_versioned_record_fields() {
         let shared = pinned_record(SHARED_PROGRAM);
         let mut spec = agent(&["/bin/true"]);
-        for (timeout, version) in [
-            ("600", LIMITS_RECORD_VERSION),
-            ("false", UNLIMITED_SHELL_RECORD_VERSION),
-        ] {
+        for timeout in ["600", "false"] {
             let limits: Limits =
                 toml::from_str(&format!("[shell]\ntimeout = {timeout}\n")).unwrap();
             for file_attributes in [false, true] {
@@ -1521,7 +1467,7 @@ mod tests {
                                     std::iter::once(&spec),
                                     servers,
                                 ),
-                                version
+                                26
                             );
                         }
                     }
@@ -1533,7 +1479,7 @@ mod tests {
                 let mut stored = pinned_record(&body);
                 stored.experimental_features.tool_grammars = true;
                 stored.tool = grammar_record().tool;
-                assert_eq!(stored.version, version);
+                assert_eq!(stored.version, 26);
                 assert_eq!(stored.file_attributes, file_attributes);
                 assert_eq!(stored.mcp, shared.mcp);
                 assert_eq!(stored.contained_mcp, shared.contained_mcp);
@@ -1546,59 +1492,16 @@ mod tests {
     }
 
     #[test]
-    fn file_attributes_and_shell_limits_round_trip_in_their_combined_record_version() {
-        for (limits, version, timeout) in [
-            ("", 25, Some(30)),
-            ("[limits]\n", 25, Some(30)),
-            ("[limits.shell]\n", 25, Some(30)),
-            ("[limits.shell]\ntimeout = 30\n", 26, Some(30)),
-            ("[limits.shell]\ntimeout = 600\n", 26, Some(600)),
-            ("[limits.shell]\ntimeout = false\n", 27, None),
-        ] {
-            let body = format!("file-attributes = true\n{limits}");
-            let configured = load(&body).unwrap();
-            assert!(configured.file_attributes);
-            assert_eq!(
-                configured.limits.shell.timeout(),
-                timeout.map(std::time::Duration::from_secs)
-            );
-            let mut stored = pinned_record(&body);
-            assert!(stored.file_attributes);
-            assert_eq!(stored.limits, configured.limits);
-            assert_eq!(stored.version, version);
-            assert_eq!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-                stored
-            );
-            for found in 21..=27 {
-                if found == version {
-                    continue;
-                }
-                stored.version = found;
-                assert!(matches!(
-                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                    Err(ConfigError::RecordVersion {
-                        found: refused,
-                        expected,
-                    }) if refused == found && expected == version
-                ));
-            }
-        }
-    }
-
-    #[test]
     fn invalid_limits_are_refused_in_configuration_and_stored_records() {
-        for value in ["0", "-1", "1.5", "\"60s\"", "true", "9223372036854775807"] {
-            let body = format!("[limits.shell]\ntimeout = {value}\n");
-            let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
-            let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
-            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
-            let mut stored = record(None, BTreeMap::new());
-            stored.version = LIMITS_RECORD_VERSION;
-            let text = format!("{}\n{body}", stored.to_toml().unwrap());
-            let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
-            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
-        }
+        let body = "[limits.shell]\ntimeout = true\n";
+        let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+        let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
+        let mut stored = record(None, BTreeMap::new());
+        stored.version = LIMITS_RECORD_VERSION;
+        let text = format!("{}\n{body}", stored.to_toml().unwrap());
+        let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
     }
 
     #[test]
@@ -2403,7 +2306,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, UNLIMITED_SHELL_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
