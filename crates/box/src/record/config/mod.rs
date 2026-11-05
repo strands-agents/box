@@ -3018,15 +3018,14 @@ env = {}
             let config_path = directory.path().join("box.toml");
             std::fs::write(
                 &policy_path,
-                r#"permit(principal, action == Box::Action::"shell:exec", resource)
-               when { context.input.not_in_the_canonical_schema == "value" };"#,
+                r#"permit(principal, action == alpha::Action::"read", resource);"#,
             )
             .expect("write policy");
             std::fs::write(
                 &config_path,
                 format!(
                     "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\
-                 [mcp.alpha]\ntype = \"stdio\"\ncommand = [\"true\"]\n",
+                 [mcp.alpha]\ntype = \"http\"\ndestinations = [\"example.com\"]\n",
                     box_directory.display().to_string()
                 ),
             )
