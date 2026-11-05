@@ -4,7 +4,9 @@
 //! returns a canned outcome, so these tests prove the wiring — resolution, the governed
 //! file read, the refusals, and `--version` — without a real interpreter.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use strands_shell::Shell;
 
@@ -405,5 +407,167 @@ fn python_hook_error_reports_exit_one() {
             "the error must be surfaced with a python: prefix, got: {}",
             out.stderr
         );
+    }));
+}
+
+/// A synchronous interpreter turn keeps the current-thread runtime from polling its timers.
+fn blocking_hook(past_deadline: bool) -> (strands_shell::os::ScriptInterpreter, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let hook: strands_shell::os::ScriptInterpreter = Arc::new(move |_| {
+        let observed = Arc::clone(&observed);
+        Box::pin(async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            if past_deadline {
+                block_past_deadline();
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(strands_shell::os::ScriptOutcome {
+                status: 0,
+                stdout: "FINISHED".to_string(),
+                stderr: String::new(),
+            })
+        })
+    });
+    (hook, calls)
+}
+
+fn block_past_deadline() {
+    let deadline = strands_shell::io::with_process(|proc| proc.deadline)
+        .expect("the overrun probe has a deadline");
+    std::thread::sleep(
+        deadline.saturating_duration_since(tokio::time::Instant::now()) + Duration::from_millis(20),
+    );
+}
+
+#[test]
+fn a_synchronous_interpreter_cannot_return_success_after_the_shell_deadline() {
+    for command in [
+        "python -c work",
+        "! python -c work",
+        "python -c work || true",
+    ] {
+        let (hook, calls) = blocking_hook(true);
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .script_interpreter(hook)
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the hook must run: {command}"
+            );
+            assert_eq!(out.status, 1, "{command}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{command}: {}",
+                out.stderr
+            );
+            let next = shell.run("printf READY").await;
+            assert_eq!(next.status, 0, "{}", next.stderr);
+            assert_eq!(next.stdout, "READY");
+        }));
+    }
+}
+
+#[test]
+fn an_expired_interpreter_cannot_start_following_commands_or_redirects() {
+    for command in [
+        "python -c work; printf LATE > /home/lash/after",
+        "printf '%s' \"$(python -c work)\" > /home/lash/after",
+        "printf '%s' \"$(python -c work; printf LATE > /home/lash/after)\"",
+    ] {
+        let (hook, calls) = blocking_hook(true);
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let mut shell = Shell::builder()
+                .script_interpreter(hook)
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            let out = shell.run(command).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the hook must run: {command}"
+            );
+            assert_eq!(out.status, 1, "{command}: {}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{command}: {}",
+                out.stderr
+            );
+            let absent = shell.run("test ! -e /home/lash/after").await;
+            assert_eq!(absent.status, 0, "a late write ran: {command}");
+        }));
+    }
+}
+
+#[test]
+fn a_synchronous_interpreter_finishes_with_an_adequate_or_unlimited_deadline() {
+    for unlimited in [false, true] {
+        let (hook, calls) = blocking_hook(false);
+        let (rt, local) = rt();
+        rt.block_on(local.run_until(async {
+            let builder = Shell::builder().script_interpreter(hook);
+            let mut shell = if unlimited {
+                builder.disable_timeout()
+            } else {
+                builder.timeout(Duration::from_secs(5))
+            }
+            .build()
+            .unwrap();
+            let out = shell.run("python -c work").await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(out.status, 0, "{}", out.stderr);
+            assert_eq!(out.stdout, "FINISHED");
+        }));
+    }
+}
+
+#[test]
+fn a_late_interpreter_does_not_wait_for_an_open_output_channel() {
+    let retained = Arc::new(Mutex::new(None));
+    let writer = Arc::clone(&retained);
+    let hook: strands_shell::os::ScriptInterpreter = Arc::new(move |_| {
+        let writer = Arc::clone(&writer);
+        Box::pin(async move {
+            *writer.lock().unwrap() = strands_shell::io::with_process(|proc| {
+                proc.channel_writer(strands_shell::os::STDOUT)
+            });
+            block_past_deadline();
+            Ok(strands_shell::os::ScriptOutcome {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        })
+    });
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .script_interpreter(hook)
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let out = tokio::time::timeout(Duration::from_secs(5), shell.run("python -c work"))
+            .await
+            .expect("the expired pipeline must stop its output drain");
+        assert!(
+            retained.lock().unwrap().is_some(),
+            "the output channel stays open"
+        );
+        assert_eq!(out.status, 1, "{}", out.stderr);
+        assert!(
+            out.stderr.contains("execution timeout exceeded"),
+            "{}",
+            out.stderr
+        );
+        retained.lock().unwrap().take();
     }));
 }

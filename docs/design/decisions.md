@@ -1348,7 +1348,8 @@ and 7, so `touch` fails until the writer of `box.toml` selects it, and a box tha
 `utimensat` already works there and Linux keeps refusing set-ID bits and ACLs, so one `box.toml`
 stays portable and the ignored key widens nothing. It is an ordinary key, not an experimental
 feature, because it is opt-in and changes only what the workload already reaches. A record that
-selects it is stored at version 25, so a build that predates the key refuses the box
+selects it is stored at version 25, or at a newer version when a Shell timeout is explicit,
+so a build that predates the key refuses the box
 (`the_file_attributes_key_cannot_hide_in_a_legacy_record`).
 
 A grant operation for each folder would confine the residual to named folders, but it adds an
@@ -1710,10 +1711,12 @@ returns it once, under a size cap. It refuses the interactive frames, so a scrip
 `input()` cannot read. Status 0 means completed, 1 means the script raised, and 125 means a broker
 or interpreter fault. The interpreter stops a script after 2 minutes of execution time, from inside
 its own run loop, so `while True: pass` stops even when the script makes no OS call. Time suspended
-on the host does not count against that budget, so Box bounds the rest: 5 minutes of wall-clock time
-for each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
-MiB for each `os.urandom` call. Each of these bounds is less than the wall clock. A sleep is never
-shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
+on the host does not count against that budget, so Box adds a fixed outer wall-clock bound to direct
+Python calls, plus 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
+MiB for each `os.urandom` call. Python invoked through Shell shares the enclosing call's configured
+deadline and broker grace instead of a separate five-minute allowance. Monty's limits also apply;
+a shorter Shell deadline can expire first, although synchronous execution can delay its check.
+A sleep is never shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
 `a_sleep_longer_than_the_total_raises_at_once` pins. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which

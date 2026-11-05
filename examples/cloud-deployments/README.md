@@ -5,7 +5,7 @@ Each example includes source, setup commands, policy checks, and cleanup instruc
 
 | Example | What you run | What Box demonstrates |
 | --- | --- | --- |
-| [EKS](eks/) | A fixed coding exercise or a Claude Code deployment agent. | File and network restrictions, plus a deployment cooldown after repeated failures while diagnostics remain available. |
+| [EKS](eks/) | A fixed coding example or Claude Code with a mock deployment service. | File and network restrictions. Box blocks deployment retries after repeated failures while status checks remain available. |
 | [Google Cloud](gcp/) | A Strands agent with Gemini on a Compute Engine VM. | Deployment retries pause after repeated failures while status checks remain available. |
 | [AgentCore Runtime](agentcore-runtime/) | A shipment agent using Strands or LangChain, with scripted controls. | A dispatch depends on an earlier eligibility response. A completed shipment or refund closes competing requests for five minutes. |
 

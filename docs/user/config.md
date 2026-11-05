@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries ten keys. `name` and `box_dir` are required.
+The file carries eleven keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -82,8 +82,9 @@ The file carries ten keys. `name` and `box_dir` are required.
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
+| `[limits]` | table | Execution limits for Strands Shell. |
 
-The example uses five of the ten: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -158,8 +159,9 @@ file-attributes = true
 
 The default is `false`, and the switch applies to the agent, every tool, and every local MCP server
 in the box. It has no effect on Linux, which accepts the key. With the switch off, the box renders
-no rule for it. A box that sets it stores its record at version 25, so an older build refuses to
-resume it.
+no rule for it. A box that sets it stores its record at version 25 or newer, depending on its
+[other configured features](native-filesystem-policy.md#stored-configuration-and-rollback).
+An older build refuses a version it does not support.
 
 With the switch on, a process in a write folder can set the times of a file there. It can also set
 the file's set-user-ID and set-group-ID bits, change its group, store an access control list on it,
@@ -174,6 +176,25 @@ still fails to restore the owner and the flags. Extract it with `tar -x --no-mac
 The box prints one line for each process the switch applies to, in the startup disclosure:
 `strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
 group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+
+## `[limits]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
+
+To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
+`[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
+Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
+Connection and write operations retain their transport timeouts.
+Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
+are load errors.
+
+This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
+inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
+with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
+See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
+[stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
 
 ## `[experimental-features]`
 
@@ -771,6 +792,7 @@ relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
 and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
+An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
