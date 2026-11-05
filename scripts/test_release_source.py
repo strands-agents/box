@@ -299,7 +299,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 )
                 self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
                 body = (root / "body.md").read_text()
-                self.assertEqual("EXPERIMENTAL_LINUX_SUPPORT=TRUE" in body, publish_linux)
+                self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
                 self.assertEqual(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz" in body, publish_linux)
                 self.assertEqual("sha256sum --check box-linux.sha256" in body, publish_linux)
                 self.assertEqual("Package availability does not establish security acceptance" in body, publish_linux)

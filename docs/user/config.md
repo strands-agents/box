@@ -107,6 +107,43 @@ and remove the directory after `run` has exited to delete one. Do not remove the
 its `run` is alive: on macOS, the kernel kills a shell or Python call of that box whose program file
 loses a name during its security assessment.
 
+<a id="protect-other-boxes"></a>
+### Keep other boxes' configuration and state outside write access
+
+Keep each box's configuration, policy, and generated state in locations controlled by the operator.
+Do not grant a workload write access to another box's `box_dir`, configuration file (`box.toml`), or policy file (`policy.dw`).
+Keep each policy file outside every other box's filesystem grants.
+Review the filesystem lists for the agent, tools, and local MCP servers before starting a workload.
+
+A directory grant can include another box's files beneath that directory.
+For example, write access to `/work/projects` can include a second box's configuration under `/work/projects/other-box`.
+Box protects the configuration and policy that the current run loaded.
+It does not automatically discover and protect every other box's files.
+A directory name such as `.strands-box` alone provides no protection for another box.
+If a workload changes another box's configuration or policy, that box reads the changes on its next run.
+
+Write access that includes another running box's `box_dir` can also expose its broker socket, `run/box.sock`.
+Requests through that socket use the receiving box's policy.
+
+If a filesystem grant must enclose another box, add native exclusions through `filesystem.deny`.
+Exclude that box's `box_dir` and the directories that hold its configuration and policy.
+Apply these exclusions to the agent, each tool, and each local MCP server with the grant.
+These exclusions also block connections through the other box's `run/box.sock` path.
+On Linux, these directories must exist before startup.
+
+The startup output lists each filesystem grant, including a broad grant that encloses another box's directory.
+Inspect these paths for access to other boxes' files.
+The output reports the granted access and does not remove another box's files from it.
+The workload starts without waiting for you to approve that output.
+
+Restrict file operations through Strands Shell and Monty separately with [policy `forbid` rules](policy.md#common-rules).
+Protect each other box's `box_dir` and the directories that hold its configuration and policy.
+Cover each directory and its descendants for [`fs:read`, `fs:write`, `fs:delete`, and `fs:move`](policy/actions.md#filesystem).
+Also forbid `fs:move` on enclosing directories that could relocate these protected paths.
+
+A `forbid` overrides matching permits. Adding a narrower permit leaves any broader permit active.
+A native `filesystem.deny` entry does not restrict these requests through the box's trusted process.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:
@@ -269,6 +306,16 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
+Run Box as a non-root account to grant sandbox directory writes.
+Root launches support explicitly granted existing-file writes and read-only directory access.
+Private `/tmp` storage remains writable and separate from the surrounding OS.
+The same restriction applies when a container maps a non-root account to user ID zero.
+
+These filesystem lists govern sandbox access.
+Shell and Python requests through Box use separate policy and reach checks in the trusted process.
+This restriction does not change their file ownership or permission to create files.
+
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
 owner or group, or requesting either special bit during creation, remains forbidden. These requests fail with `EPERM` (operation not permitted).
@@ -288,15 +335,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Supported |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
+| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.

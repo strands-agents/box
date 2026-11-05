@@ -236,6 +236,17 @@
         "group": "Reference",
         "order": 5
       }
+    },
+    {
+      "id": "cloud-deployments",
+      "source": "docs/user/cloud-deployments.md",
+      "slug": "reference/cloud-deployments",
+      "title": "Cloud deployment profiles",
+      "description": "Check Linux environment requirements and service configuration for AgentCore Runtime and Lambda MicroVM deployments.",
+      "nav": {
+        "group": "Reference",
+        "order": 6
+      }
     }
   ]
 }
