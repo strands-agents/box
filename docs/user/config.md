@@ -248,10 +248,13 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   `https_proxy`, `NO_PROXY`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
   `NODE_USE_ENV_PROXY`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
   `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
-- **Names that make a runtime load code, refused:** `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `RUBYOPT`,
-  `PERL5LIB`, `PERL5OPT`, `GEM_PATH`, `CLASSPATH`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, and every
-  name that starts with `LD_`, `DYLD_`, or `PYTHON`. The prefixes are refused as a family, so a
-  name that loads no code, such as `PYTHONUNBUFFERED`, is refused too.
+- **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
+  own aliases run in the box, so their loader would read the value too. A runtime's own option
+  variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,
+  are the operator's to set, and they reach only the process whose table names them. The `zsh`,
+  `bash`, `sh`, `python3`, and `python` aliases run in Box and do not read them, so a shell or
+  Python option variable reaches a real interpreter that the table runs or spawns, and not an
+  alias call.
 - **`HOME`:** an absolute path. It stays the operator's own home unless `[agent] env.HOME` names
   another directory; the example names `strands-home`, so the CLI reads its settings and writes its
   sessions there. A home inside `box_dir` is refused with ``` `env.HOME` is <path>, which lies in
@@ -263,8 +266,10 @@ the project, and the `list` entry below is what lets the CLI see the names in it
   directory rather than above it, or omit `env.HOME` for the operator's own home```.
 - **`TMPDIR`:** an absolute path.
 
-A name from the first two kinds is refused with ``` `env` name "<name>" is set by the box itself,
-so a table cannot claim it```.
+A name Box sets is refused with ``` `env` name "<name>" is set by the box itself, so a table
+cannot claim it```. A dynamic-loader name is refused with ``` `env` name "<name>" is read by the
+dynamic loader of every program in the box, Box's own aliases included, so a table cannot set
+it```.
 
 `TERM` and `COLORTERM` reach the process only when `env` names them, so a program that picks colors
 from them renders plain otherwise. The example names `TERM`; an operator who wants a program's

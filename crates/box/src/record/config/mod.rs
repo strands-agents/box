@@ -2516,15 +2516,14 @@ env = {}
     }
 
     #[test]
-    fn a_loader_hook_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
+    fn a_dynamic_loader_name_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
         use super::env::refused_name;
         use crate::EnvRefusal;
-        for prefix in LOADER_HOOK_PREFIXES {
-            let name = format!("{prefix}ANY");
-            assert_eq!(refused_name(&name), Some(EnvRefusal::LoadsCode), "{name}");
+        for name in ["LD_ANY", "DYLD_ANY"] {
+            assert_eq!(refused_name(name), Some(EnvRefusal::LoadsCode), "{name}");
         }
-        for hook in LOADER_HOOKS {
-            assert_eq!(refused_name(hook), Some(EnvRefusal::LoadsCode), "{hook}");
+        for name in ["PYTHONANY", "NODE_OPTIONS", "BASH_ENV"] {
+            assert_eq!(refused_name(name), None, "{name}");
         }
         for name in ["HTTPS_PROXY", "OTEL_EXPORTER_OTLP_ENDPOINT", "PWD", "USER"] {
             assert_eq!(refused_name(name), Some(EnvRefusal::SetByBox), "{name}");
