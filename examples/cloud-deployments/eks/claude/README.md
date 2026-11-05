@@ -62,6 +62,17 @@ python3.12 check_deployment.py --box-binary /absolute/path/to/box \
 Quick mode uses a three-second failure window and nine-second cooldown.
 Its receipt identifies these shorter windows. Use the full check to verify the documented five-minute and ten-minute policy.
 
+The regression below checks repeated cooldowns against a service that always returns deployment failures.
+It uses a thirty-second failure window and a three-second cooldown.
+A fourth failure must start another cooldown while diagnostics remain available.
+
+```sh
+python3.12 test_deployment_policy.py --box-binary /absolute/path/to/box \
+  --evidence-dir /absolute/path/to/new-policy-regression-evidence
+```
+
+Continuous integration runs this regression against a Box build from the pull request.
+
 ## Run the boundary exercise
 
 Pass `--exercise boundaries` to the EKS runner for the coding and file-permission task.

@@ -54,7 +54,7 @@ when temporal {{
                         )
                     )
                 )) == failures
-                && failures == 3
+                && failures >= 3
             )
         )
     )
