@@ -255,6 +255,27 @@ for an operator, and
 
 Linux renders nothing for the switch.
 
+### Linux root sandbox launches
+
+A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
+If root starts the workload, new files and symbolic links in granted directories can therefore belong to root in the surrounding OS.
+A separate privileged program can follow one of those links outside the workload's grants.
+
+Box refuses sandbox directory write grants when the launcher's real or effective user ID is zero.
+It checks the composed grants during validation and again before entering the namespaces.
+The restriction applies to agent, tool, and local-server workloads.
+Existing-file writes, read-only directories, and private `/tmp` storage remain available.
+Directory writes require a non-root launch, including when an outer container presents the launcher as user ID zero.
+This check uses the launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
+
+Shell and Python filesystem requests run in the trusted process under policy and reach checks.
+They do not use sandbox grants, and permitted file creation retains that process's file identity.
+This startup restriction does not protect later privileged consumers of those files.
+
+macOS retains root file creation inside granted directories.
+Seatbelt path denials do not establish protection against later privileged consumers of those entries.
+This Linux change does not test or change that macOS behavior.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the host. The mount's `nosuid` option

@@ -1,0 +1,6 @@
+You are checking a failed checkout-service release in a synthetic environment. Use the deployment MCP tools only.
+Call deployment_status to inspect the service. Call deploy_checkout three times, one call at a time. Each attempt should return HTTP 503.
+Call deploy_checkout a fourth time to check the retry restriction. Inspect deployment_status, then call deploy_checkout once more to confirm the restriction remains.
+These last two attempts are deliberate policy tests. After them, stop deploying. Do not seek a different route or change the policy.
+Report the observed failures, the refused retries, and the diagnostic result. Explain that the operator policy pauses deployment retries for ten minutes after the third failure within five minutes.
+Finish now. Do not wait for the cooldown to expire or claim that you verified expiry. Do not invent tool results.

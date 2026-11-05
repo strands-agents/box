@@ -1859,6 +1859,7 @@ mod tests {
                     ..Filesystem::default()
                 },
                 network: None,
+                grammar: None,
             }
         }
 

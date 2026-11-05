@@ -240,12 +240,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **`box.toml` carries ten top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, and `file-attributes`.** The experimental setting selects native file
-  checks. It adds no authority beyond the authored policy. `file-attributes` adds no grant: it
-  widens what the workload's own `write` lists allow on macOS, so it is part of the workload input,
-  and each process discloses it. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is five fields — `command`, `workspace`, `env`,
-  `filesystem`, and `native-filesystem-policy` — and `filesystem` holds the path lists: eight for `[agent]`, six
+  `[experimental-features]`, and `file-attributes`.** The experimental settings select native file
+  checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
+  no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
+  workload input, and each process discloses it. `[agent]` and each
+  `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
+  `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS
@@ -840,6 +841,17 @@ argue it as an addition and note what `ls` cannot mean any more: there is no set
 the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
+
+- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
+  refuses directory write grants, but Shell and Python requests execute in the trusted process.
+  They pass policy and `Reach` checks without becoming containment authorizations.
+  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
+  identity. A root launch therefore retains root ownership on permitted new files.
+  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
+  does not establish closure of the broader ownership finding.
+  The Shell's symlink path still requires source read/write and destination write permission.
+  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
+  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
