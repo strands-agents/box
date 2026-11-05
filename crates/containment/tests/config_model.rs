@@ -235,6 +235,98 @@ fn an_identity_requirement_refuses_a_hard_link_added_before_apply() {
 
 #[cfg(unix)]
 #[test]
+fn a_file_identity_requirement_refuses_an_object_with_another_hard_link() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let authority = dir.path().join("authority");
+    std::fs::write(&authority, "authority").expect("authority fixture");
+    let opened = std::fs::File::open(&authority).expect("open authority");
+    std::fs::hard_link(&authority, dir.path().join("alias")).expect("hard-link alias");
+
+    let error = ContainmentConfig::new()
+        .require_file_identity(&authority, &opened)
+        .expect_err("an authority keeps exactly one name")
+        .to_string();
+    assert!(error.contains("hard links"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_command_identity_requirement_keeps_its_link_count_through_apply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("command");
+    std::fs::write(&command, "command").expect("command fixture");
+    let opened = std::fs::File::open(&command).expect("open command");
+    std::fs::hard_link(&command, dir.path().join("alias")).expect("hard-link alias");
+    let json = ContainmentConfig::new()
+        .require_command_identity(&command, &opened)
+        .expect("a command with several names keeps its identity")
+        .to_json()
+        .expect("serialize");
+    ContainmentConfig::from_json(&json).expect("an unchanged link count loads");
+
+    std::fs::hard_link(&command, dir.path().join("later")).expect("later hard-link alias");
+
+    let error = ContainmentConfig::from_json(&json)
+        .expect_err("apply-time loading must refuse a changed link count")
+        .to_string();
+    assert!(error.contains("identity changed before apply"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_one_name_entry_states_no_link_count_on_the_wire() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let authority = dir.path().join("authority");
+    std::fs::write(&authority, "authority").expect("authority fixture");
+    let opened = std::fs::File::open(&authority).expect("open authority");
+    let json = ContainmentConfig::new()
+        .require_file_identity(&authority, &opened)
+        .expect("require authority identity")
+        .protect_write(&authority, &opened)
+        .expect("protect authority")
+        .require_command_identity(&authority, &opened)
+        .expect("require command identity")
+        .to_json()
+        .expect("serialize");
+
+    assert!(!json.contains("links"), "{json}");
+    ContainmentConfig::from_json(&json).expect("a one-name entry loads without a link count");
+}
+
+#[cfg(unix)]
+#[test]
+fn loading_refuses_a_stated_link_count_that_the_builder_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let authority = dir.path().join("authority");
+    std::fs::write(&authority, "authority").expect("authority fixture");
+    let opened = std::fs::File::open(&authority).expect("open authority");
+    let identity = ContainmentConfig::new()
+        .require_file_identity(&authority, &opened)
+        .expect("require authority identity")
+        .to_json()
+        .expect("serialize");
+    let protection = ContainmentConfig::new()
+        .protect_write(&authority, &opened)
+        .expect("protect authority")
+        .to_json()
+        .expect("serialize");
+    std::fs::hard_link(&authority, dir.path().join("alias")).expect("hard-link alias");
+
+    for (list, json) in [
+        ("identity_requirements", identity),
+        ("write_protections", protection),
+    ] {
+        let mut crafted: serde_json::Value = serde_json::from_str(&json).expect("config JSON");
+        crafted[list][0]["links"] = serde_json::json!(2);
+        let error = ContainmentConfig::from_json(&crafted.to_string())
+            .expect_err("a crafted link count cannot widen a one-name entry")
+            .to_string();
+        assert!(error.contains("hard links"), "{list}: {error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_write_protection_refuses_a_new_symlink_spelling_for_the_same_object() {
     use std::os::unix::fs::symlink;
 

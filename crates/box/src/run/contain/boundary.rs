@@ -662,7 +662,7 @@ impl Boundary {
                 }
                 .into());
             }
-            containment = containment.require_file_identity(command.path(), command.opened())?;
+            containment = containment.require_command_identity(command.path(), command.opened())?;
         }
 
         containment = protect_authorities(

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ContainmentError;
 use crate::model::{
-    BackendOverride, IpcMode, Network, Operation, PathGrant, PreparedFilesystemPath,
-    ProcessInfoMode, Scope, SignalMode, WriteProtection,
+    BackendOverride, CommandIdentity, IpcMode, Network, Operation, PathGrant,
+    PreparedFilesystemPath, ProcessInfoMode, Scope, SignalMode, WriteProtection,
 };
 
 type Result<T> = std::result::Result<T, ContainmentError>;
@@ -25,6 +25,9 @@ pub struct ContainmentConfig {
     paths: Vec<PathGrant>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
+    /// Program files that keep the link count they had when opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_identities: Vec<CommandIdentity>,
     #[serde(deserialize_with = "deserialize_validated_network")]
     network: Network,
     process: Process,
@@ -83,6 +86,7 @@ impl ContainmentConfig {
             paths: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
+            command_identities: Vec::new(),
             network: Network::Blocked,
             process: Process::default(),
             backend_override: BackendOverride::None,
@@ -284,6 +288,29 @@ impl ContainmentConfig {
         Ok(self)
     }
 
+    /// Require one opened program file to keep its path, identity, and current link count; a backend can allow metadata and existence checks.
+    pub fn require_command_identity(
+        mut self,
+        path: impl AsRef<Path>,
+        opened: &std::fs::File,
+    ) -> Result<Self> {
+        let requirement = CommandIdentity::new(path, opened)?;
+        if self
+            .command_identities
+            .iter()
+            .any(|existing| existing.file().path() == requirement.file().path())
+        {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!(
+                    "{} has two command identity requirements",
+                    requirement.file().path().display()
+                ),
+            });
+        }
+        self.command_identities.push(requirement);
+        Ok(self)
+    }
+
     /// Set the network mode after validating every concrete port.
     pub fn set_network(mut self, network: Network) -> Result<Self> {
         validate_network(&network)?;
@@ -428,6 +455,10 @@ impl ContainmentConfig {
         &self.identity_requirements
     }
 
+    pub(crate) fn command_identities(&self) -> impl Iterator<Item = &WriteProtection> {
+        self.command_identities.iter().map(CommandIdentity::file)
+    }
+
     /// The home this caller stated it resolved its `~/`-relative grants against.
     pub(crate) fn operator_home(&self) -> Option<&Path> {
         self.operator_home.as_deref()
@@ -496,6 +527,9 @@ impl ContainmentConfig {
 
     pub(crate) fn require_live_file_identities(&self) -> Result<()> {
         for required in &self.identity_requirements {
+            required.validate_live_identity()?;
+        }
+        for required in self.command_identities() {
             required.validate_live_identity()?;
         }
         for protected in &self.write_protections {

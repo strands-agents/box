@@ -1306,7 +1306,10 @@ A caller can load authority before the sandbox applies, for example a certificat
 opened regular file and its canonical path to one of two configuration methods. Both record the device
 and inode, require the file to have one filesystem name, and revalidate path and identity at each
 backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant. A backend
+writable grant; the other grants no access at all, for a file outside every writable grant. A third
+method pins a configured tool's program: it records the link count the file has, and revalidation
+requires that count, because Box accepts a program with several names only when the user that runs
+Box cannot write it through any name. A backend
 that cannot keep both the write subtraction and write-xor-execute may make the file non-executable, so
 a caller must not use write protection to preserve an execute grant.
 

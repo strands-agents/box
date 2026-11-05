@@ -794,6 +794,7 @@ pub(crate) fn render_profile_with_streams(
         .identity_requirements()
         .iter()
         .chain(config.write_protections())
+        .chain(config.command_identities())
         .flat_map(|required| required.path().ancestors())
         .collect();
     for path in identity_paths {
