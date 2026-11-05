@@ -10,8 +10,8 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 when {
     context.input.host == "127.0.0.1" && context.input.port == 0 &&
     context.input.method == "GET" &&
-    ["/orders/42", "/orders/42/eligibility", "/orders/42/eligibility-failed",
-     "/orders/43/eligibility"].contains(context.input.path)
+    ["/orders/42", "/orders/42/replacement", "/orders/42/replacement-failed",
+     "/orders/43/replacement"].contains(context.input.path)
 };
 
 @id("shipment_fixture_mutations")
@@ -19,7 +19,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 when {
     context.input.host == "127.0.0.1" && context.input.port == 0 &&
     context.input.method == "POST" &&
-    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+    ["/orders/42/replacement", "/orders/42/refund"].contains(context.input.path)
 };
 
 @id("dispatch_requires_eligibility")
@@ -27,13 +27,15 @@ when {
 forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
 when {
     context.input.host == "127.0.0.1" && context.input.port == 0 &&
-    context.input.method == "POST" && context.input.path == "/orders/42/dispatch"
+    context.input.method == "POST" && context.input.path like "/orders/*/replacement"
 }
 unless temporal {
     formerly within 300s (
         Box::Action::"http:request"::response{
             input.host: "127.0.0.1", input.port: 0,
-            input.method: "GET", input.path: "/orders/42/eligibility",
+            input.method: "GET",
+            // Match this order: GET and POST use the same replacement path.
+            input.path: context.input.path,
             output.status: 200
         }
     )
@@ -45,13 +47,13 @@ forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 when {
     context.input.host == "127.0.0.1" && context.input.port == 0 &&
     context.input.method == "POST" &&
-    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+    ["/orders/42/replacement", "/orders/42/refund"].contains(context.input.path)
 }
 when temporal {
     formerly within 300s (
         Box::Action::"http:request"::response{
             input.host: "127.0.0.1", input.port: 0,
-            input.method: "POST", input.path: "/orders/42/dispatch",
+            input.method: "POST", input.path: "/orders/42/replacement",
             output.status: 201
         }
     )
@@ -63,7 +65,7 @@ forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 when {
     context.input.host == "127.0.0.1" && context.input.port == 0 &&
     context.input.method == "POST" &&
-    ["/orders/42/dispatch", "/orders/42/refund"].contains(context.input.path)
+    ["/orders/42/replacement", "/orders/42/refund"].contains(context.input.path)
 }
 when temporal {
     formerly within 300s (

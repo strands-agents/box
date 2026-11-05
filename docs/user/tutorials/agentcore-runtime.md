@@ -5,6 +5,12 @@ The agent reads a synthetic order, checks eligibility, and requests one replacem
 Box refuses dispatch before eligibility and further shipment or refund requests after either resolution.
 Use Strands for the first run. The same sample also includes a LangChain variant.
 
+Eligibility checks and dispatch requests share `/orders/{order_id}/replacement`.
+`GET` checks eligibility, and `POST` requests a replacement.
+The policy matches the earlier GET response to the current POST through `input.path: context.input.path`.
+The order ID is part of that path, so another order's check does not satisfy the rule.
+The eligibility endpoint returns HTTP 200 only for an eligible order.
+
 ## Before you start
 
 Prepare the package on Linux ARM64 with Python 3.12, pip, Git, and Rust through rustup.

@@ -222,14 +222,14 @@ class FixtureServer:
                 order["resolution"] = copy.deepcopy(self._cached_reply)
                 return 200, order, False, None
             if path in (
-                "/orders/42/eligibility",
-                "/orders/42/eligibility-failed",
-                "/orders/43/eligibility",
+                "/orders/42/replacement",
+                "/orders/42/replacement-failed",
+                "/orders/43/replacement",
             ):
-                status = 200 if path == "/orders/43/eligibility" else self.eligibility_status
-                if path == "/orders/42/eligibility-failed":
+                status = 200 if path == "/orders/43/replacement" else self.eligibility_status
+                if path == "/orders/42/replacement-failed":
                     status = 409
-                order_id = 43 if path == "/orders/43/eligibility" else 42
+                order_id = 43 if path == "/orders/43/replacement" else 42
                 return status, {
                     "synthetic": True,
                     "order_id": order_id,
@@ -240,7 +240,7 @@ class FixtureServer:
                     ),
                 }, False, None
             return error(404, "unknown_endpoint")
-        if path not in ("/orders/42/dispatch", "/orders/42/refund"):
+        if path not in ("/orders/42/replacement", "/orders/42/refund"):
             return error(404, "unknown_endpoint")
         try:
             payload = json.loads(body) if body else {}
@@ -250,7 +250,7 @@ class FixtureServer:
             return error(400, "body_must_be_empty_object")
         if not key or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", key):
             return error(400, "valid_idempotency_key_required")
-        kind = path.rsplit("/", 1)[1]
+        kind = "dispatch" if path == "/orders/42/replacement" else "refund"
         if self._resolution is not None:
             if self._resolution["kind"] == kind and self._resolution["idempotency_key"] == key:
                 return 201, self._cached_reply, True, None
