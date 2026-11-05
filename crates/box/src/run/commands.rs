@@ -153,6 +153,10 @@ impl ConfiguredCommand {
         &self.invoked
     }
 
+    pub(crate) const fn has_several_names(&self) -> bool {
+        self.loaded.links > 1
+    }
+
     pub(crate) fn opened(&self) -> &File {
         &self.opened
     }
@@ -221,16 +225,11 @@ fn may_change(
         || match access() {
             Ok(()) => true,
             Err(error) => match error.raw_os_error() {
-                Some(code) if refuses_every_name(code) => false,
-                Some(libc::EROFS) if cfg!(target_os = "macos") => access_list(),
+                Some(libc::EACCES) => false,
+                Some(libc::EPERM | libc::EROFS) if cfg!(target_os = "macos") => access_list(),
                 _ => true,
             },
         }
-}
-
-/// Whether an error from the kernel's write check refuses the write through every name.
-const fn refuses_every_name(code: i32) -> bool {
-    code == libc::EACCES || (cfg!(target_os = "macos") && code == libc::EPERM)
 }
 
 // macOS access-control-list calls, which the `libc` crate does not declare.
@@ -589,10 +588,12 @@ mod tests {
             !cfg!(target_os = "macos"),
             "macOS answers EROFS before it checks permissions, so the owner, mode, and list decide"
         );
-        assert!(
-            may_change(foreign, users, refused(libc::EROFS), || true),
-            "an access-control list can grant a write that the mode does not"
-        );
+        for code in [libc::EPERM, libc::EROFS] {
+            assert!(
+                may_change(foreign, users, refused(code), || true),
+                "errno {code}: an access-control list can grant a write that the mode does not"
+            );
+        }
         for (state, users, why) in [
             (
                 FileState {
