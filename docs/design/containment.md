@@ -311,10 +311,15 @@ same two rules:
 
 A process still can't read the information of its parent, a sibling, or any other process on the
 machine. That includes the `strands-box run` process that started the box.
+
+Signals follow the same line. A process can signal a child it started, so a harness can stop a
+program it no longer needs. It can't signal any other process, including the `strands-box run`
+process. A child runs under the same sandbox as its parent, so a signal gives no new reach.
 The rules are in
 [`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
-`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
-control outside the box shows the refusal comes from the sandbox.
+`CN-I-03` checks that a box can read and signal an own child, is refused its parent's information
+and a signal to another process, and a control outside the box shows the refusal comes from the
+sandbox.
 
 ### How you check a box's reach
 

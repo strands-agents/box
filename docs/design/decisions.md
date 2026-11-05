@@ -1907,18 +1907,26 @@ changes the policy facade to buy something the box already owns.
 ## Credentials
 
 <a id="the-workload-holds-a-phantom-and-the-gateway-holds-the-secret"></a>
-### The workload holds a phantom token, and the gateway swaps in the real secret at the bound destination
+### The workload holds one phantom token for each credential, and the gateway swaps in the real secret at that credential's destinations
 
 For an `env://` binding the box mints a random phantom token and places that value, and never the real
 secret, in the workload's environment. The gateway holds the real secret and swaps the phantom for it
-only on a request to the destination the binding names. The phantom is a 256-bit random value, unique
-across the vault. At the bound destination the gateway clears the harness's own credential location
-before it writes the real secret, so the phantom does not ride out beside it. A phantom sent anywhere
-else is not rewritten, and needs no rewrite, because it is random and authenticates nothing: an
-upstream that receives one receives a useless value. The box opens one vault for each route, so an
-ambiguous match inside a vault is refused, and an overlap between two routes is caught at the gateway
-instead: a mutation collision is denied, and a strict phantom check refuses a mismatch. The workload
-can read the phantom and learn that a credential exists.
+only on a request to a destination that one of the credential's routes names. The phantom is a 256-bit
+random value, unique to one credential across the vault. At a bound destination the gateway clears the
+harness's own credential location before it writes the real secret, so the phantom does not ride out
+beside it. A phantom sent anywhere else is not rewritten, and needs no rewrite, because it is random and
+authenticates nothing: an upstream that receives one receives a useless value. The box opens one vault
+for each provisioned variable, and every route that names the variable shares that vault's one phantom,
+because the workload's variable can hold only one value
+(`one_variable_for_two_hosts_provisions_one_phantom_accepted_at_both`). One phantom for each
+destination lost, because the variable kept only the last one and a strict check then refused every
+other host. A caller-chosen phantom lost too, because the vault must mint every phantom itself. The
+cost: a phantom works at every destination of its credential, so it separates credentials, not hosts.
+Routes that name one variable must also share one `phantom_prefix`, and a load refuses a mismatch
+(`one_variable_with_two_phantom_prefixes_is_refused`). An ambiguous match inside a vault is refused,
+and an overlap between two vaults is caught at the gateway instead: a mutation collision is denied, and
+a strict phantom check refuses a mismatch. The workload can read the phantom and learn that a
+credential exists.
 
 <a id="the-box-is-the-credential-boundary"></a>
 ### The box is the credential boundary, so every process in a box gets every route

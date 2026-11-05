@@ -23,6 +23,13 @@ behaviour, and [`docs/design/decisions.md`](design/decisions.md) owns why.
 
 ---
 
+## Opt-in configuration
+
+Opt-in behavior can use an ordinary `box.toml` setting scoped to the component it affects.
+For example, `argument_wildcards` belongs on the stdio MCP entry whose arguments it changes.
+Use `experimental-features` when a capability needs an experimental rollout. Requiring explicit
+enablement alone is not a reason to place a setting there.
+
 ## MUST — universal (every existing crate does this, with the product-name exception below)
 
 Verify per crate under its `<crate-path>/` (for example,

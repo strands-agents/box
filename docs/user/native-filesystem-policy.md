@@ -88,21 +88,26 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-When `limits.shell.timeout` is omitted and `file-attributes` is `false`, configurations without
-process overrides retain version 21 when disabled and version 22 when enabled.
+When `limits.shell.timeout` is omitted, `file-attributes` is `false`, and MCP argument wildcards
+are disabled, configurations without process overrides retain version 21 when disabled and
+version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
-An explicit `limits.shell.timeout` requires record version 26, including `30` and `false`.
+Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requires version 26.
+An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides and `limits.shell.timeout`, give each stdio MCP server its own
 program, and set `file-attributes` to `false` before returning to a binary that supports only
-version 21. Run once with the current build before switching binaries. This writes a version 21
-record while retaining durable policy history.
-Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, or 26 record.
+version 21.
+If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
+`argument_wildcards` on each server too.
+Run once with the current build before switching binaries.
+This writes a version 21 record while retaining durable policy history.
+Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, 26, or 27 record.
 
 ## FAQ
 
@@ -166,7 +171,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, or 26 record that the older binary does not support.
+No, if the box has a version 22, 23, 24, 25, 26, or 27 record that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 

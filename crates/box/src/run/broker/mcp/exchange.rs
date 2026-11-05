@@ -1132,6 +1132,7 @@ mod tests {
         );
         let registry = DiscoveryRegistry::testing_with_policy(
             &[McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec!["issues-mcp".to_string()],
             }],
@@ -1185,6 +1186,7 @@ done"#
         tokio::sync::mpsc::Receiver<super::super::super::host::OutboundFrame>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -1878,6 +1880,7 @@ done"#
 
     fn registry() -> Arc<DiscoveryRegistry> {
         DiscoveryRegistry::testing(&[McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command: vec!["issues-mcp".to_string()],
         }])
@@ -1906,6 +1909,7 @@ done"#
         Arc<DecisionRecorder>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -2058,6 +2062,7 @@ done"#
                 ("malformed-json", "{not-json", "invalid MCP server frame"),
             ] {
                 let admitted = McpServer {
+                    argument_wildcards: false,
                     name: name.to_string(),
                     command: vec![
                         "/bin/sh".to_string(),
@@ -2115,6 +2120,7 @@ done"#
             registry.list_failed("issues-mcp", "earlier", DiscoveryFailure::CatalogCapture);
 
             let admitted = McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -2229,6 +2235,7 @@ when { context.input has value && context.input.value == "secret" };"#;
         Arc<DecisionRecorder>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -2515,6 +2522,7 @@ when { context.input has value && context.input.value == "secret" };"#;
             let reaped = running.observe_stop_and_wait_completion();
             let (frames, _output) = tokio::sync::mpsc::channel(1);
             let registry = DiscoveryRegistry::testing(&[McpServer {
+                argument_wildcards: false,
                 name: "non-reading-server".to_string(),
                 command: vec!["unused".to_string()],
             }]);
@@ -2601,6 +2609,7 @@ when { context.input has value && context.input.value == "secret" };"#;
 
     async fn non_reading_server() -> (RunningMcpServer, tokio::process::ChildStdout) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "non-reading-server".to_string(),
             command: vec![
                 "/bin/sh".to_string(),

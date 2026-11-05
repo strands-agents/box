@@ -88,8 +88,9 @@ names the route.
    the same destination are refused too, so one request never has two candidate secrets.
 2. **Box checks each `env://` variable.** The variable must be set and hold more than whitespace,
    and its name must not be one Box sets itself, such as `HTTPS_PROXY`.
-3. **The vaults open.** Box opens one vault for each route. An `env://` vault reads the variable
-   and mints a placeholder. A signed vault reads nothing yet.
+3. **The vaults open.** Box opens one vault for each `env://` variable and one for each signed
+   route. An `env://` vault reads the variable and mints one placeholder, shared by every
+   destination that names the variable. A signed vault reads nothing yet.
 4. **Every process gets the placeholders.** The agent, each tool, and each stdio MCP server get
    every placeholder in their environments.
 

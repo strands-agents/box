@@ -160,7 +160,7 @@ file-attributes = true
 The default is `false`, and the switch applies to the agent, every tool, and every local MCP server
 in the box. It has no effect on Linux, which accepts the key. With the switch off, the box renders
 no rule for it. A box that sets it stores its record at version 25 or newer, depending on its
-[Shell timeout setting](native-filesystem-policy.md#stored-configuration-and-rollback).
+[other configured features](native-filesystem-policy.md#stored-configuration-and-rollback).
 An older build refuses a version it does not support.
 
 With the switch on, a process in a write folder can set the times of a file there. It can also set
@@ -680,6 +680,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
+| `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
