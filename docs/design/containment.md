@@ -470,9 +470,11 @@ sandbox, which ends when the program does
 
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
-execution. Box refuses command files with multiple hard links because another name could expose
-the same contents to writes. This conservative rule also refuses legitimate system executables
-with multiple hard links, regardless of their owner or file permissions.
+execution. Box refuses a command file with more than one hard link when the user that runs Box can
+write it, because a name that Box can't find could expose the same contents to writes. A file that
+this user can't write through any name, such as a root-owned system program, keeps its other
+names: the kernel refuses a write through each of them. Before each launch, Box then requires the
+same link count, owner, group, and mode, and checks again that this user can't write the file.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity.
 Direct writable-grant refusals and the broker's mutation checks protect the program's contents.
