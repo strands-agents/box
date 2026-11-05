@@ -283,15 +283,18 @@ part of what you have to trust.
 4. **It installs the policy.** A policy that does not parse or does not validate refuses the box. A
    rule the load can prove will never fire is also refused, and a rule that might fire warns ([a rule
    that cannot fire is refused at
-   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)).
+   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). A
+   rule on an experimental tool grammar action is the exception for now: it loads but can't take
+   effect yet, and `run` prints a warning for each grammar.
 5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
    each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
    grant refuses the box here.
 6. **It builds each sandbox's grants and discloses them**, each tool first and then the agent.
    Every direct filesystem grant is printed to stderr, because no `fs:*` decision will cover one
    ([direct filesystem reach is declared and
-   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). A tool that cannot be
-   translated refuses the box before the agent exists.
+   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). On macOS, the
+   `file-attributes` switch adds one line per sandbox that names what its write grants may set. A
+   tool that cannot be translated refuses the box before the agent exists.
 
    On Linux, preserved interpreter spellings appear under `interpreter aliases for configured access`,
    before the runtime-minimum section. Each line maps a spelling to the file the process's original grants already authorize.

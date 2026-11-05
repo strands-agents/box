@@ -182,6 +182,21 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
+The downloader selects macOS Apple silicon or Linux ARM64 archives. For Linux, select a release
+that includes `box-<version>-linux-arm64.tar.gz` and its `SHA256SUMS.txt` entry.
+Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
+the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
+
+The script verifies the checksum and extracts into temporary storage before changing destination files.
+Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
+The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
+For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
+Temporary download storage can prohibit execution (`noexec`).
+A failed version check reports the loader error and leaves existing destination files unchanged.
+The final extraction can partially update the destination if it fails. Use a fresh `BOX_DOWNLOAD_DIR`
+to retain a previous installation.
+
 Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
@@ -249,6 +264,14 @@ In pull-request CI, changes to `docs/site-manifest.json`,
 site-manifest contract test instead of the full Rust test matrix. The test compares the base
 contract to keep the product ID stable and require an append-only retirement before a page or route
 is removed.
+
+### Test the release downloader
+
+Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
+Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
+and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
+It creates a `noexec` temporary mount only inside the test process's private namespace.
 
 ## Documentation
 

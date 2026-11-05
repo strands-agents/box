@@ -77,12 +77,14 @@ impl std::error::Error for ReloadRefused {}
 
 /// Check the policy that a Box configuration selects, as a box checks it when it opens.
 pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
-    let (source, complete) = record::config::read_checked_policy(&config).map_err(CheckFailed)?;
+    let (source, complete, grammars) =
+        record::config::read_checked_policy(&config).map_err(CheckFailed)?;
     let operator = record::config::policy_operator().map_err(CheckFailed)?;
-    Ok(policy::PolicyEngine::check(
+    Ok(policy::PolicyEngine::check_with_grammars(
         &operator,
         source.as_slice(),
         complete,
+        &grammars,
     ))
 }
 
@@ -208,8 +210,8 @@ pub enum EnvRefusal {
     InvalidName,
     /// The box sets the name itself: proxy routing, CA trust, the OTLP exporter, `PWD`, or `USER`.
     SetByBox,
-    /// The name is in a family that can make a runtime load code before the workload's first line,
-    /// such as `LD_*` or `PYTHON*`. A member of the family need not load code (`PYTHONUNBUFFERED`).
+    /// The dynamic loader reads the name: `LD_*` or `DYLD_*`. A member of the family need not load
+    /// code (`LD_BIND_NOW`).
     LoadsCode,
     /// The name is `HOME` or `TMPDIR`, and the value is not an absolute path.
     NotAbsolute,

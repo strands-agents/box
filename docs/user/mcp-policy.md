@@ -56,10 +56,16 @@ when { ["fetch", "github"].contains(context.input.server) };
 | `shell:spawn` | `context.input.program` | Element 0 of the server's `command`. |
 | | `context.input.program_path` | The program's file, with every link resolved. `~` is the operator's home. |
 | | `context.input.arg1`, `arg2`, `arg_count` | The server's arguments. |
-| | `context.input.command` | The server's full `command` as written in `box.toml`: the program and its arguments, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
+| | `context.input.command` | By default, the server's full `command` as written in `box.toml`: the program and its arguments, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
 | `mcp:call` | `context.input.server` | The `[mcp.<name>]` table's name. |
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
+
+For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the effective
+launch command, with received values in the `*` positions and fixed arguments expanded.
+`arg1`, `arg2`, and `arg_count` describe those same launch arguments.
+A permit that checks only `program`, as above, matches every value supplied in the `*` positions.
+To restrict those values, add conditions on the effective arguments.
 
 ## Step 2. Connect the harness
 
@@ -67,7 +73,8 @@ Add each server to the harness's own MCP configuration.
 
 - **A `stdio` server:** set its command to the server's full `command` from `box.toml`: the
   program, then every argument, in the same order. The harness runs the alias with those arguments,
-  and the box starts the server whose `command` matches.
+  and the box starts the server whose `command` matches. With `argument_wildcards = true` on that server, supply
+  the runtime value for each `*` position.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.
 
@@ -175,7 +182,9 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | Error message (excerpt) or symptom | What to do |
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
-| `no MCP server declares "<command>"` | The harness command or arguments do not match a declared server. Copy its `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). |
+| `no MCP server declares "<command>"` | The harness command or arguments do not match a declared server. Copy its `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |
+| `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |

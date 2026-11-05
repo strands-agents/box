@@ -170,6 +170,41 @@ fn opens_env_routes_and_attaches_the_real_secret() {
     clear_var("E2E_STRIPE_KEY");
 }
 
+/// One `env://` key that serves two hosts mints one phantom, and a strict check accepts it at both.
+#[test]
+fn one_credential_serves_two_hosts_under_one_phantom() {
+    set_var("E2E_SHARED_KEY", "ksk_real_shared");
+    let route = |host: &str| {
+        RouteSpec::opaque(
+            DestinationPattern::parse(host).unwrap(),
+            Locator::parse_uri("env://E2E_SHARED_KEY").unwrap(),
+            header("Bearer {}"),
+        )
+    };
+    let opened = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant-a")
+            .route(route("management.example.dev"))
+            .route(route("runtime.example.dev")),
+    )
+    .expect("both routes resolve");
+
+    let phantom = opened.phantoms()[0].token().to_string();
+    assert_eq!(opened.phantoms()[1].token(), phantom);
+    let store = opened.into_vault();
+
+    let headers = bearer_headers(&phantom);
+    for host in ["management.example.dev", "runtime.example.dev"] {
+        let url = format!("https://{host}/");
+        assert_eq!(
+            attached_authorization(&store, bearer_request(dest(host, 443, "/"), &headers, &url)),
+            "Bearer ksk_real_shared",
+            "the one placeholder must be accepted at {host}"
+        );
+    }
+
+    clear_var("E2E_SHARED_KEY");
+}
+
 /// A custom prefix mints an `sk-ant-` phantom, and the vault swaps it on a full-string match — the
 /// prefix changes the minted literal, not the match.
 #[test]

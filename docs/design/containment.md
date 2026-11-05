@@ -136,8 +136,8 @@ the same four plus `network`. One translator turns each of them into a set of sa
   [`env`](../user/config.md) refuses four kinds of entry. A library caller asks about one entry
   through `check_workload_env(name, value)`. It runs the checks that `box.toml` runs on one entry
   when it loads (a `HOME` in or above `box_dir` needs `box_dir`, so the check does not see it), and its error's `kind()` is an `EnvRefusal`: `InvalidName`, `SetByBox` (a name Box sets
-  itself), `LoadsCode` (a name in a family that can make a runtime load code, such as `PYTHON*`; Box refuses
-  the whole family, so a member such as `PYTHONUNBUFFERED` is `LoadsCode` and need not load code), or `NotAbsolute` (a relative `HOME`
+  itself), `LoadsCode` (a name the dynamic loader reads, `LD_*` or `DYLD_*`; Box refuses the whole
+  family, so a member such as `LD_BIND_NOW` is `LoadsCode` and need not load code), or `NotAbsolute` (a relative `HOME`
   or `TMPDIR`). The caller gets the kind, so it can drop a name Box sets and refuse a name that loads
   code without its own copy of the lists. The check does not cover a credential's `env://` name,
   which Box also refuses for `HOME` and `PATH`.
@@ -231,6 +231,30 @@ naming it is `Other`, and so are `/`, `/Users`, and the operator home. A read gr
 reports `Forbidden` with `WholeFilesystem` or `CredentialStore`. The caller can treat a
 `SystemTree` refusal differently from every other refusal without its own copy of the rows.
 
+### File attributes in a macOS write folder
+
+A macOS write folder names six write operations: contents, create, unlink, extended attributes,
+mode, and times. `utimes` and `futimes` use the times operation. `utimensat`, which `touch` calls,
+and `setattrlist` check the whole write family instead, so a write folder refuses them. Nothing
+ordinary needs the flags, the owner, or the access control list, so the folder withholds them.
+
+The `file-attributes` switch grants the whole family over the folder and then denies again the four
+members the folder withholds: the flags, the owner, the access control list, and the Finder
+information. The set-ID operation and mounts lie outside the family, so the grant does not reach
+them, and `chmod` of a set-ID bit stays refused. The switch keeps the folder's own unlink and create
+denies and its no-execute-mapping rule, and every protection and refusal still wins, because it
+renders after the grant.
+`setattrlist` sets the times, the mode, the group, the owner, and the access control list through
+that one family check, and no rule tells them apart. So `touch` works, and a set-user-ID bit, a
+group, an owner (as far as the ownership check lets the caller), and an access control list can
+change through `setattrlist` too. The four leaf operations themselves (`chflags`, `chown`,
+`acl_set_file`, and Finder information) stay refused.
+[File attributes on macOS](../user/security.md#file-attributes-on-macos) states the residual risk
+for an operator, and
+[decisions.md](decisions.md#a-write-root-sets-file-attributes-only-when-selected) states why.
+
+Linux renders nothing for the switch.
+
 ### Linux root sandbox launches
 
 A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
@@ -287,10 +311,15 @@ same two rules:
 
 A process still can't read the information of its parent, a sibling, or any other process on the
 machine. That includes the `strands-box run` process that started the box.
+
+Signals follow the same line. A process can signal a child it started, so a harness can stop a
+program it no longer needs. It can't signal any other process, including the `strands-box run`
+process. A child runs under the same sandbox as its parent, so a signal gives no new reach.
 The rules are in
 [`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
-`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
-control outside the box shows the refusal comes from the sandbox.
+`CN-I-03` checks that a box can read and signal an own child, is refused its parent's information
+and a signal to another process, and a control outside the box shows the refusal comes from the
+sandbox.
 
 ### How you check a box's reach
 
@@ -441,9 +470,11 @@ sandbox, which ends when the program does
 
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
-execution. Box refuses command files with multiple hard links because another name could expose
-the same contents to writes. This conservative rule also refuses legitimate system executables
-with multiple hard links, regardless of their owner or file permissions.
+execution. Box refuses a command file with more than one hard link when the user that runs Box can
+write it, because a name that Box can't find could expose the same contents to writes. A file that
+this user can't write through any name, such as a root-owned system program, keeps its other
+names: the kernel refuses a write through each of them. Before each launch, Box then requires the
+same link count, owner, group, and mode, and checks again that this user can't write the file.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity.
 Direct writable-grant refusals and the broker's mutation checks protect the program's contents.

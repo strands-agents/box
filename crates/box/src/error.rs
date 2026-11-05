@@ -67,6 +67,9 @@ pub(crate) enum Internal {
     #[error("policy staging failed: {0}")]
     PolicyStaging(#[from] policy::PolicyStagingError),
 
+    #[error("tool grammar binding refused: {0}")]
+    GrammarBinding(#[from] policy::BindingRefusal),
+
     /// The committed record and the durable history disagree about whether this box has run.
     #[error(
         "policy staging failed: the box record is {}, but the history {history} {found}. \
@@ -238,6 +241,9 @@ pub(crate) enum ConfigError {
 
     #[error("invalid `{table}` table: {reason}")]
     Process { table: String, reason: String },
+
+    #[error("tool grammar refused: {source}")]
+    ToolGrammar { source: policy::ToolGrammarError },
 
     /// The hosted Shell was asked to start a program no `[tool.<name>]` names.
     #[error("no tool runs {program}: {reason}")]

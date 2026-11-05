@@ -40,6 +40,8 @@ def manifest(args):
         pod['imagePullSecrets'] = [{'name': args.image_pull_secret}]
     if args.mode == 'claude':
         pod['serviceAccountName'] = args.service_account
+        container['command'] = ['/usr/bin/python3.12']
+        container['args'] = ['/demo/main.py', '--exercise', args.exercise]
         container['env'] = [{'name': 'AWS_REGION', 'value': args.region},
                             {'name': 'AWS_DEFAULT_REGION', 'value': args.region},
                             {'name': 'BEDROCK_MODEL_ID', 'value': args.model},
@@ -54,6 +56,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
     parser.add_argument('--mode', choices=['scripted', 'claude'], default='scripted')
+    parser.add_argument('--exercise', choices=['deployment-cooldown', 'boundaries'],
+                        default='deployment-cooldown', help='Exercise for --mode claude.')
     parser.add_argument('--namespace', default='box-demo')
     parser.add_argument('--context', help='Kubernetes context; otherwise use your current context.')
     parser.add_argument('--image-pull-secret')
@@ -111,6 +115,8 @@ def main():
     receipt = {'job': name, 'image': args.image, 'mode': args.mode,
                'passed': False, 'checks': {}, 'error': polling_error,
                'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if args.mode == 'claude':
+        receipt['exercise'] = args.exercise
     if polling_error is not None:
         receipt['incomplete'] = True
         (dest / 'receipt.json').write_text(json.dumps(receipt, indent=2))

@@ -7,27 +7,34 @@ det_case! {
     name: cn_i_03,
     id:   "CN-I-03",
     platforms: [Macos, Linux],
-    desc: "Process signals: macOS refuses signals to an owned child; Linux permits self-signaling and cannot signal a live host marker",
+    desc: "Process signals: macOS permits signals only to itself and an owned child; Linux permits self-signaling and cannot signal a live host marker",
     run: |b| {
         b.reset_policy();
         if Platform::current() == Platform::Linux {
             linux_signals(b);
             return;
         }
-        // Uncontained control: an unsandboxed process of the same user reads the pidinfo of a
-        // same-user process that is not its child. So a refusal of the box's parent below can only
-        // come from the profile, and not from the kernel's same-user check.
+        // Uncontained control: an unsandboxed process of the same user reads the pidinfo of, and
+        // signals, a same-user process that is not its child. So a refusal of the box's parent
+        // below can only come from the profile, and not from the kernel's same-user check.
         let control = Command::new(&native_python().executable)
             .args(["-c", "import ctypes, ctypes.util, os\n\
                  libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n\
                  buffer = ctypes.create_string_buffer(512)\n\
                  rc = libc.proc_pidinfo(os.getppid(), 3, ctypes.c_uint64(0), buffer, 512)\n\
-                 print('HOST_PIDINFO', rc > 0)"])
+                 print('HOST_PIDINFO', rc > 0)\n\
+                 os.kill(os.getppid(), 0)\n\
+                 print('HOST_SIGNAL True')"])
             .output()
-            .expect("DET_ERROR: run the host pidinfo control");
+            .expect("DET_ERROR: run the host pidinfo and signal control");
+        let control = support::text(control);
         assert!(
-            support::text(control).contains("HOST_PIDINFO True"),
+            control.contains("HOST_PIDINFO True"),
             "DET_ERROR: the host control must read a same-user process, or the arm below proves nothing"
+        );
+        assert!(
+            control.contains("HOST_SIGNAL True"),
+            "DET_ERROR: the host control must signal a same-user process, or the arm below proves nothing"
         );
         let r = b.probe_py(
             r#"
@@ -41,6 +48,7 @@ if pid == 0:
 time.sleep(0.5)
 print("child_pid_nonzero", pid > 0)
 t("signal_own_child", lambda: os.kill(pid, 0))
+t("signal_parent", lambda: os.kill(os.getppid(), 0))
 t("priority_own_child", lambda: os.setpriority(os.PRIO_PROCESS, pid, 5))
 import ctypes
 def pidinfo(target):
@@ -49,10 +57,8 @@ def pidinfo(target):
     return "allowed" if rc > 0 else f"denied errno {errno}"
 t("pidinfo_own_child", lambda: pidinfo(pid))
 t("pidinfo_parent", lambda: pidinfo(os.getppid()))
-try:
-    os.kill(pid, signal.SIGKILL)
-except OSError as e:
-    print("cleanup_kill ERR", e.errno, e.strerror)
+t("kill_own_child", lambda: os.kill(pid, signal.SIGKILL))
+t("reap_own_child", lambda: os.waitpid(pid, 0)[1] & 0x7f)
 "#,
         );
         // Positive control: the workload inspects itself, so process-info is allowed for self.
@@ -61,14 +67,21 @@ except OSError as e:
         r.assert_errno("signal_pid1", 1);
         // The fork succeeded, so there is a real child to address.
         r.assert_contains("child_pid_nonzero True");
-        // Even a child the workload forked itself cannot be signalled.
-        r.assert_errno("signal_own_child", 1);
-        // Changing that child's priority is refused too.
+        // A child the workload forked itself can be signalled, so a harness can stop what it
+        // started.
+        r.assert_ok("signal_own_child", "None");
+        // The parent is the unsandboxed `strands-box run` process of the same user. The host
+        // control signals it, so the profile alone refuses this one.
+        r.assert_errno("signal_parent", 1);
+        // Changing that child's priority is still refused: it is not a signal.
         r.assert_errno("priority_own_child", 1);
         // Reading the child's process information is allowed. The parent is the unsandboxed
         // `strands-box run` process of the same user, and the profile alone hides it.
         r.assert_ok("pidinfo_own_child", "allowed");
         r.assert_ok("pidinfo_parent", "denied errno 1");
+        // A real signal reaches the child: it dies by SIGKILL (9), not by its own exit.
+        r.assert_ok("kill_own_child", "None");
+        r.assert_ok("reap_own_child", "9");
     }
 }
 

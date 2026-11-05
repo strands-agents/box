@@ -127,6 +127,10 @@ three kinds of event:
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
 
+For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled,
+the `shell:spawn` request records the effective launch command and arguments, including the
+received values in the `*` positions.
+
 A metadata read is an operation that happened once the workload has its answer, so a Shell
 `test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
 an existing folder is a `::response`, not a `::error`. A check of a path that can't be resolved,
@@ -226,8 +230,11 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
-tool programs with multiple hard links or overlap with direct writable grants.
+tool programs that have more than one hard link and that its user can write, or that overlap with
+direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
+When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also
+refuses wildcard commands that can select different servers for the same request.
 Box also refuses installed trusted programs with unaccounted hard-link names or overlap with any
 process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
 describes these refusals.

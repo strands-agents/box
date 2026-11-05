@@ -244,18 +244,30 @@ flowchart TD
 command through the alias in the box's `bin/`, not when `box run` starts. The alias is named for
 the program, so servers that share a program, such as `npx`, share one alias. The alias sends its
 name and its arguments to the broker, and the broker picks the one server whose `command` in
-`box.toml` is those words, in that order, with each argument as written in `box.toml` or as the
-leaf starts it, each `${OTEL_EXPORTER_OTLP_*}` token expanded (`McpLeafLauncher::launched_arguments`).
+`box.toml` is those words, in that order, with the arguments all as written in `box.toml` or all
+as the server receives them, with `${OTEL_EXPORTER_OTLP_*}` tokens expanded.
 A harness with a fixed configuration relies on the written form, because an endpoint token expands to
 a port that is new on each run. When
 no `command` matches, the broker refuses the launch and starts no server, so a launch never reaches
 a server it didn't name. The refusal names the servers on that program and never their commands,
 because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
 denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
-records. The arguments only select
-among the servers the operator declared: the agent could already start any of them.
+records. By default, the arguments only select among the servers the operator declared.
 
-The broker then decides `shell:spawn` on the program and arguments from `box.toml`, before the
+With `argument_wildcards = true` on a stdio MCP entry, a configured argument equal
+to `*` skips that position's comparison. The executable, argument count, and other arguments
+still match. Each entry defaults to literal argument matching. Exact commands, including literal
+stars on entries without the opt-in, take priority. Otherwise, exactly one wildcard command
+must match. Box refuses overlapping wildcard entries before the workload starts, checking both
+the authored and expanded forms. The launcher expands the configured arguments,
+then replaces only the star positions with received values. Received text is not expanded again.
+Policy sees the effective command and arguments before the existing contained launch starts.
+Any workload process can call the MCP alias. Each operator-declared `*` therefore gives that
+caller control of one argument to a server with its own configured permissions. A permit that
+checks only the program does not restrict that value. If the argument selects a package or a
+destination, the caller selects the code or destination used under the server's permissions.
+
+The broker then decides `shell:spawn` on the configured program and effective arguments, before the
 process exists. If it's allowed, the server starts in its own sandbox.
 
 **An http server is already running.** The gateway decides `net:connect` before DNS, again for

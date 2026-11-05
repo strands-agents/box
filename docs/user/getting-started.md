@@ -69,9 +69,13 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/refs/heads/main/
 ./box-core/box --version
 ```
 
-The script selects the package for your operating system, verifies its checksum, and unpacks it into `./box-core`.
+The script downloads the latest release for your operating system, verifies its checksum, and checks the extracted files in temporary storage.
+It then unpacks the archive into `./box-core`.
 Run `box` by its path, and keep the entire directory together.
 The version command prints `strands-box` followed by the release version.
+
+Set `BOX_VERSION` to select a release tag and `BOX_DOWNLOAD_DIR` to select a destination.
+Use a fresh destination to keep a previous installation if the final extraction fails.
 
 ### macOS
 

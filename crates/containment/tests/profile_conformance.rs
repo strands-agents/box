@@ -244,6 +244,17 @@ fn renderer_only_replaces_the_checked_in_placeholders() {
     assert!(profile.contains("(allow process-info* (target self))"));
     assert!(profile.contains("(allow process-info-pidinfo (target children))"));
     assert!(!profile.contains("(allow process-info* (target same-sandbox))"));
+    assert!(profile.contains("(allow signal (target children))"));
+    let signal_rules: Vec<_> = rules(&profile)
+        .lines()
+        .filter(|line| line.starts_with("(allow signal"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        signal_rules,
+        ["(allow signal (target children))"],
+        "the only signal grant reaches the workload's own children"
+    );
     assert!(profile.contains(&format!(
         "(allow process-exec (literal \"{}\"))",
         executable.display()
@@ -1721,13 +1732,14 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
     granted.sort();
 
     // One line per authority, with why it exists. `process-fork` is what lets a harness invoke a
-    // child at all; the rest are the placeholders' own rules.
+    // child at all, and `signal` is what lets it stop that child; the rest are the placeholders'
+    // own rules.
     //
-    // **Five operations left this list and none joined it.** `/`, `/etc`, `/private/tmp` and
-    // `/dev/null` were static text, so every box carried them whether or not its start program
-    // needed one — a Python box carried Bun's `/private/tmp` entry. Each is a grant the box's
-    // floor states now, so it renders through the same cells every other grant uses. The profile's
-    // own authority is strictly smaller than it was.
+    // **Five operations left this list.** `/`, `/etc`, `/private/tmp` and `/dev/null` were static
+    // text, so every box carried them whether or not its start program needed one — a Python box
+    // carried Bun's `/private/tmp` entry. Each is a grant the box's floor states now, so it renders
+    // through the same cells every other grant uses. Two joined it on purpose, each scoped to the
+    // workload's own children: `process-info-pidinfo` and `signal`.
     let mut expected = vec![
         "mach-lookup",
         "process-info*", // self-inspection only; paired with (deny process-info*)
@@ -1735,6 +1747,7 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
         "process-exec",  // the one execute grant
         "file-read-metadata", // that literal, so a PATH search can stat it
         "process-fork",  // unscoped; SBPL has no argv/child-count filter
+        "signal",        // the workload's own children only
         "file-ioctl",    // inherited PTY slave
         "file-read*",    // the trust bundle
         "file-read-metadata", // path-ancestors of the home
@@ -3569,6 +3582,55 @@ fn a_leaf_shape_renders_byte_for_byte_what_it_rendered_before() {
         "leaf-writable-workspace.sb",
         &fixture.root,
         &fixture.leaf_with_a_writable_workspace(),
+    );
+}
+
+/// **The file-attributes switch adds the wildcard allow and its withheld-leaf denies to each write root, and
+/// nothing else.** Removing exactly those lines from the switched profile gives the recorded one.
+#[test]
+fn the_file_attributes_switch_adds_only_the_wildcard_and_its_denies_to_a_leaf_shape() {
+    let fixture = ShapeFixture::new();
+    let off = generate_seatbelt_profile(&fixture.leaf_with_a_writable_workspace())
+        .expect("the recorded shape renders");
+    let on = generate_seatbelt_profile(
+        &fixture
+            .leaf_with_a_writable_workspace()
+            .allow_file_attributes(),
+    )
+    .expect("the switched shape renders");
+    let write_roots: Vec<String> = [fixture.project.clone(), fixture.box_root.join("home")]
+        .iter()
+        .map(|root| {
+            root.canonicalize()
+                .expect("the write root resolves")
+                .display()
+                .to_string()
+        })
+        .collect();
+    let added: Vec<String> = write_roots
+        .iter()
+        .flat_map(|root| {
+            [
+                format!("(allow file-write* (subpath \"{root}\"))"),
+                format!("(deny file-write-flags (subpath \"{root}\"))"),
+                format!("(deny file-write-owner (subpath \"{root}\"))"),
+                format!("(deny file-write-acl (subpath \"{root}\"))"),
+                format!("(deny file-write-finderinfo (subpath \"{root}\"))"),
+            ]
+        })
+        .collect();
+    let remaining: Vec<&str> = on
+        .lines()
+        .filter(|line| !added.iter().any(|rule| rule == line))
+        .collect();
+    assert_eq!(
+        on.lines().count() - remaining.len(),
+        added.len(),
+        "each added rule appears exactly once"
+    );
+    assert_eq!(
+        remaining.join("\n"),
+        off.lines().collect::<Vec<_>>().join("\n")
     );
 }
 
