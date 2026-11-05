@@ -80,7 +80,7 @@ The file carries ten keys. `name` and `box_dir` are required.
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[experimental-features]` | table | Optional native filesystem policy checks. Disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 
 The example uses five of the ten: `name`, `box_dir`, `policy`, `[agent]`, and one
@@ -107,6 +107,43 @@ its own private tree from inside. It stays until you delete it: end the `run` pr
 and remove the directory after `run` has exited to delete one. Do not remove the directory while
 its `run` is alive: on macOS, the kernel kills a shell or Python call of that box whose program file
 loses a name during its security assessment.
+
+<a id="protect-other-boxes"></a>
+### Keep other boxes' configuration and state outside write access
+
+Keep each box's configuration, policy, and generated state in locations controlled by the operator.
+Do not grant a workload write access to another box's `box_dir`, configuration file (`box.toml`), or policy file (`policy.dw`).
+Keep each policy file outside every other box's filesystem grants.
+Review the filesystem lists for the agent, tools, and local MCP servers before starting a workload.
+
+A directory grant can include another box's files beneath that directory.
+For example, write access to `/work/projects` can include a second box's configuration under `/work/projects/other-box`.
+Box protects the configuration and policy that the current run loaded.
+It does not automatically discover and protect every other box's files.
+A directory name such as `.strands-box` alone provides no protection for another box.
+If a workload changes another box's configuration or policy, that box reads the changes on its next run.
+
+Write access that includes another running box's `box_dir` can also expose its broker socket, `run/box.sock`.
+Requests through that socket use the receiving box's policy.
+
+If a filesystem grant must enclose another box, add native exclusions through `filesystem.deny`.
+Exclude that box's `box_dir` and the directories that hold its configuration and policy.
+Apply these exclusions to the agent, each tool, and each local MCP server with the grant.
+These exclusions also block connections through the other box's `run/box.sock` path.
+On Linux, these directories must exist before startup.
+
+The startup output lists each filesystem grant, including a broad grant that encloses another box's directory.
+Inspect these paths for access to other boxes' files.
+The output reports the granted access and does not remove another box's files from it.
+The workload starts without waiting for you to approve that output.
+
+Restrict file operations through Strands Shell and Monty separately with [policy `forbid` rules](policy.md#common-rules).
+Protect each other box's `box_dir` and the directories that hold its configuration and policy.
+Cover each directory and its descendants for [`fs:read`, `fs:write`, `fs:delete`, and `fs:move`](policy/actions.md#filesystem).
+Also forbid `fs:move` on enclosing directories that could relocate these protected paths.
+
+A `forbid` overrides matching permits. Adding a narrower permit leaves any broader permit active.
+A native `filesystem.deny` entry does not restrict these requests through the box's trusted process.
 
 ## `[limits]`
 
@@ -141,6 +178,9 @@ Signed macOS releases include the adapter, but leave it disabled until you selec
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
+`tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
+by default.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:
@@ -152,6 +192,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
+| `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
@@ -285,6 +326,16 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
+Run Box as a non-root account to grant sandbox directory writes.
+Root launches support explicitly granted existing-file writes and read-only directory access.
+Private `/tmp` storage remains writable and separate from the surrounding OS.
+The same restriction applies when a container maps a non-root account to user ID zero.
+
+These filesystem lists govern sandbox access.
+Shell and Python requests through Box use separate policy and reach checks in the trusted process.
+This restriction does not change their file ownership or permission to create files.
+
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
 owner or group, or requesting either special bit during creation, remains forbidden. These requests fail with `EPERM` (operation not permitted).
@@ -304,15 +355,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Supported |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
+| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
@@ -501,6 +552,34 @@ policy permits the operation. Reads still require the applicable policy permissi
 End every active run before installation updates. Update the installation from the surrounding OS.
 Start a new run to validate the updated files.
 
+## `[tool.<name>.grammar]`
+
+This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
+`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
+action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
+grammars is coming later.
+
+Each of these is refused at startup, before any box state exists:
+
+- A grammar while `tool-grammars` is off: ``invalid `[tool.git]` table: `grammar` is
+  experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
+- A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
+  grammar on `[mcp.<name>]` is an unknown field there.
+- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
+  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
+  `command` runs "gh"; ...``.
+- Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
+  `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
+- Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
+  both have `name = "git"`; give each grammar its own name``.
+- A grammar that breaks a rule of the grammar format. Each refusal names the key, as a path in
+  `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
+- A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
+  policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+
+An older build refuses a box that uses a grammar, so before you go back to one, turn
+`tool-grammars` off, remove every `grammar` table, and start the box once with this build.
+
 ## `[egress.<name>]`
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
@@ -678,7 +757,8 @@ A refusal of the file's shape happens at parse, before any box state exists: an 
 absent or invalid `name`, an absent or relative `box_dir`, an empty or relative `command` program, a
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
-overlapping or all-hosts egress destination, a secretless egress entry, and a literal egress secret.
+overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
+and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
 An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal

@@ -201,6 +201,7 @@ mod tests {
                     env: Default::default(),
                     filesystem: Default::default(),
                     network: None,
+                    grammar: None,
                 },
             )]),
             egress: Default::default(),

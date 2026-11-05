@@ -157,6 +157,7 @@ check. The direct `python` and `python3` aliases use their [own limits](monty.md
 | `env` | table | empty | Variables the program receives. |
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
+| `grammar` | table | none | Experimental. The tool grammar for the program. See [`[tool.<name>.grammar]`](config.md#toolnamegrammar). |
 
 A table matches a `shell:spawn` when `program_path` names the command file that Box resolved at startup,
 and its fixed arguments match the leading arguments of the command. When several tables match,
