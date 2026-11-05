@@ -19,7 +19,7 @@ These are examples, not reserved versions. Do not include the leading `v` in the
 The workflow adds it to the tag and archive names.
 The version must make one major, minor, or patch increment from the latest stable tag.
 The tag must not already exist. Preview tags do not change the stable version baseline.
-There is no separate macOS preview channel; a Linux preview includes the macOS archive too.
+A Linux preview also includes the macOS archive. There is no separate macOS preview channel.
 
 ## Rehearse
 
@@ -43,7 +43,7 @@ Run the same version, source, and `publish_linux` selection from upstream `main`
 Real releases require macOS signing and signed-package verification, including releases that introduce Linux support.
 Approve the protected signing environment when requested, then approve `release-gate` after the checks pass.
 The workflow creates the tag and publishes the verified bundle from that run.
-A new run rebuilds the package; retain the hashes from the publication run.
+A new run rebuilds the package. Keep the hashes from the publication run.
 
 With `publish_linux=true`, both channels publish these files, with the selected tag in place of `<tag>`:
 
@@ -61,7 +61,7 @@ It does not download and execute the published Linux package.
 ## Verify the Linux download
 
 Run the downloader on the qualified Amazon Linux 2023 ARM64 host.
-Set `release_tag` to the published tag you are verifying; `v0.1.1` below is an example.
+Set `release_tag` to the published tag you are verifying. The command below uses `v0.1.1` as an example.
 
 ```sh
 release_tag=v0.1.1
@@ -70,9 +70,9 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ```
 
 The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
-The package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+The package requires glibc 2.34 or newer and the GCC runtime library, `libgcc_s.so.1`.
 Before replacing files, it runs the candidate's `box --version` inside an existing destination, or beside a new destination.
-This staging location must be writable and allow execution; temporary download storage can be `noexec`.
+This staging location must be writable and permit execution. Temporary download storage can be `noexec`.
 A failed candidate check preserves existing destination files and shows the loader error.
 If execution fails after final extraction, the downloader reports failure and warns that destination files changed.
 If the release omits Linux, select a tag that includes its archive and checksum entry.

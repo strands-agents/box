@@ -21,7 +21,7 @@ Copy the following files to the target:
 - `test-integ/tools/target_validation.py`.
 
 Keep the three Box executables together. Record the package source revision and deployment image identity.
-The runner hashes each executable. The supplied revision is an operator assertion, not a verified link to source.
+The runner hashes each executable. The operator supplies the revision. The runner does not verify its link to the source.
 Use the deployment's normal Box environment and library dependencies.
 
 ## Run the checks
@@ -42,7 +42,7 @@ The command exits nonzero if any check fails or cannot execute.
 Seven checks cover startup, file access, normal exit, termination, forced termination, a harness deadline, and a later isolated run.
 File checks require successful permitted access and unchanged protected contents.
 Lifecycle checks observe a live workload and an advancing heartbeat before triggering shutdown.
-They inspect survivors and further writes before test-owned cleanup.
+They check for surviving processes and further writes before the test cleans up its processes.
 The runner signals only processes identified inside its fixture tree and checks their process identities.
 
 The deadline check sends a termination signal when a harness timer expires.
@@ -80,7 +80,7 @@ python3 target_validation.py restore-check \
 ```
 
 The check requires the same live Box process, unchanged binaries, an advancing heartbeat, and preserved file contents.
-It then verifies cleanup, stopped writes, and a successful subsequent Box run.
+It then verifies that cleanup stops writes and that a subsequent Box run succeeds.
 Running these commands without a platform suspension tests the fixture only.
 The report cannot prove that a platform restoration occurred.
 
@@ -93,4 +93,4 @@ python3 -m unittest discover -s test-integ/tools -p test_target_validation.py -v
 These tests use test-owned processes and a substitute Box executable.
 They reject missing workload entry, unrestricted access, missing heartbeat evidence, and unrelated native errors.
 They also verify that cleanup leaves a similarly named process outside the fixture tree alive.
-Run the installed-package checks as well; substitutes do not establish Box containment.
+Also run the installed-package checks. A substitute executable cannot verify Box containment.

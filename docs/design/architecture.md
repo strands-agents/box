@@ -1,15 +1,13 @@
 # Box architecture
 
-A box has three parts: the agent's sandbox, a sandbox for each tool or local MCP server, and the
-box's trusted process, which runs outside every sandbox. Box enforces two things across them.
-**Operating system enforcement** bounds what each sandboxed process reaches with its own system
-calls, and the operating system applies it. **Policy** decides each request the agent sends to the
-box's trusted process. [How Box contains a process](containment.md) covers the first in depth, and
-[policy](policy.md) the second.
+A box consists of the agent's sandbox, a sandbox for each tool or local MCP server, and the
+box's trusted process, which runs outside every sandbox. Operating system enforcement limits what
+sandboxed processes can access through their own system calls. Policy decides each request the
+agent sends to the trusted process. [How Box contains a process](containment.md) explains the
+sandbox restrictions, and [policy](policy.md) explains how Box decides requests.
 
-This page names the parts of a box, says where each one runs and what it decides, follows one shell
-command from the agent to the file it touches, and gives the order a run brings the parts up and
-takes them down. For which risks belong to Box and which to the operator, read
+This page explains where each part runs and what it does. It follows a shell command from the agent
+to a file, then describes startup and shutdown. For the risks Box and the operator each own, read
 [security model and shared responsibility](security.md).
 
 ## The parts
@@ -17,173 +15,168 @@ takes them down. For which risks belong to Box and which to the operator, read
 ### The box's trusted process
 
 The box's trusted process is `strands-box run` or an application that calls the Box library.
-The operator starts it, it starts everything else, and it never runs inside a sandbox.
-It holds the policy engine and the four enforcement points
-that ask it: Strands Shell, Monty, the egress gateway, and the MCP broker. Beside them, the broker
-routes each request from the agent to the right enforcement point, and the collector records each
-decision. Two more parts sit at the boundary: the trampoline, which applies a sandbox and then
-becomes the contained program, and the alias, the one Box program inside the agent's sandbox.
+The operator starts it, and it starts the other parts outside or inside their sandboxes.
+It holds the policy engine and four enforcement points that ask the engine for decisions:
+Strands Shell, Monty, the egress gateway, and the MCP broker. The broker routes the agent's requests
+to an enforcement point. The collector records the decisions.
 
-One `run` is one box. It holds that box's policy engine, its interpreters, its gateway, its
-certificate authority, and only that box's secrets. A shared process would hold every box's
-plaintext secrets and signing keys in one address space, where one memory-safety failure reaches them
-all ([each box has one trusted process](decisions.md#one-trusted-process-per-box)). It holds an
-exclusive lock on a file inside the box directory for its whole life, so a second `run` against the
-same box directory refuses rather than opening a second engine ([one `run` owns one box
-directory](decisions.md#one-run-owns-one-box-directory)). Box needs no verb to stop or delete a box:
-the caller ends the process, and removes the directory.
+Two helper programs connect the trusted process to the sandboxes. The trampoline applies a sandbox
+to itself, then becomes the program that will run there. The alias runs inside the agent's sandbox
+and sends requests to the broker.
+
+[Each box has one trusted process](decisions.md#one-trusted-process-per-box), which holds that
+box's policy engine, interpreters, gateway, certificate authority, and secrets. A shared process
+would expose every box's plaintext secrets and signing keys to one memory-safety failure.
+The trusted process holds an exclusive lock inside the box directory for the whole run.
+A second `run` using that directory fails before it can open another engine, so
+[one `run` owns one box directory](decisions.md#one-run-owns-one-box-directory).
+The caller stops a box by ending the process and deletes it by removing the directory.
 
 ### The policy engine
 
-The policy engine decides every request the workload makes through the trusted process, and it is the
-only authorizer. No other part holds a verdict of its own ([the authored policy is the only decision
-authority](decisions.md#the-authored-policy-is-the-only-decision-authority)). A box whose policy
-grants nothing starts, and then refuses every effect.
+The policy engine authorizes requests the workload makes through the trusted process.
+[Policy is the only decision authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
+Other checks can refuse an operation, but they cannot grant one that policy denies.
+A box can start with a policy that grants nothing. It then refuses operations that need a policy
+permit.
 
-There is exactly one engine per box, and every enforcement point shares it ([a box has exactly one
-policy engine](decisions.md#one-policy-engine-per-box)). That one shared history is what lets a rule
-connect a file read through the Shell with a later request through the gateway. The history belongs
-to the box rather than to the run, so it carries across runs ([history is durable per
-box](decisions.md#history-is-durable-per-box-and-has-no-rewind)). [Policy](policy.md) covers how a
-request is decided and what a history rule can see.
+[Every enforcement point shares one policy engine](decisions.md#one-policy-engine-per-box).
+Its shared history lets a rule connect a file read through Strands Shell with a later request through
+the gateway. [History persists across runs of the same
+box](decisions.md#history-is-durable-per-box-and-has-no-rewind). [Policy](policy.md) explains how
+the engine decides a request and what a history rule can see.
 
 ### The broker
 
-The broker accepts the alias's connections on `run/box.sock`, in the box directory, and it
-authorizes nothing itself. It has three legs, one for each kind of request: Strands Shell takes a
-shell command, Monty takes a Python script, and the MCP broker takes a request to a local MCP server.
-The broker checks the protocol version, reads which leg the request named, and hands the request
-over.
+The broker accepts connections from the alias on `run/box.sock` in the box directory. It checks
+the protocol version and routes each request by type. Strands Shell handles shell commands, Monty
+handles Python scripts, and the MCP broker handles requests to local MCP servers. The broker does
+not authorize requests itself.
 
-The alias is part of the workload, so the broker treats every alias as hostile ([an interpreter runs
-beside the workload](decisions.md#interpreters-are-brokered-aliases)).
+The alias is part of the untrusted workload. The broker therefore treats its input as hostile, as
+described in [why interpreters run outside the workload](decisions.md#interpreters-are-brokered-aliases).
 
 ### Strands Shell
 
-[Strands Shell](shell.md) runs every shell command the agent issues, and it is where a command
-becomes a decision. It raises `shell:exec` on the resolved command, then an `fs:*` action for each
-file that command touches. A program the Shell does not implement raises `shell:spawn` and runs in
-its own sandbox, separate from the agent's ([the sandboxes](#the-sandboxes)).
+[Strands Shell](shell.md) runs shell commands the agent sends through an alias.
+For a command it implements, it asks policy to decide `shell:exec` on the resolved command and an
+`fs:*` action for each file operation. For an external program, it asks policy to decide
+`shell:spawn`. A permitted program runs in [its own sandbox](#the-sandboxes), separate from the agent's.
 
 ### Monty
 
-[Monty](monty.md) runs Python, and it performs no I/O of its own. Each file operation a script makes
-pauses the interpreter, Box decides it, and Box performs only what policy permits. A script reaches
-the network through one function.
+[Monty](monty.md) runs Python and performs no input or output of its own. It pauses at each file
+operation so Box can ask policy for a decision. Box performs the permitted operation.
+A script accesses the network through `fetch()`.
 
-Neither interpreter keeps state across a call, so a variable exported in one command is unset in the
-next ([no interpreter state crosses a call
-boundary](decisions.md#no-state-crosses-a-call-boundary)). Both run in the trusted process, beside
-the policy engine, the certificate authority key, and the resolved secrets. That placement is stated
-residual risk: what makes it acceptable is mediation rather than memory safety, so a memory defect in
-either interpreter is code execution in the trusted process ([both interpreters run in the trusted
-process](decisions.md#the-interpreters-run-in-the-trusted-process)).
+[Neither interpreter keeps state between calls](decisions.md#no-state-crosses-a-call-boundary).
+A variable exported in one shell command is unset in the next.
+Both interpreters run in the trusted process, which also holds the policy engine, certificate
+authority key, and resolved secrets. This placement lets Box check their operations against policy,
+but a memory-safety defect in either interpreter can give an attacker code execution in the trusted
+process. The [decision to run the interpreters there](decisions.md#the-interpreters-run-in-the-trusted-process)
+accepts that risk.
 
 ### The egress gateway
 
-The gateway is the box's only route out. Box points every sandboxed process at it with the standard
-proxy environment variables (`HTTPS_PROXY` and its siblings), and the sandbox holds each process to
-it, so a client that ignores those variables reaches nothing. A tool or a stdio MCP server for which
-the operator declares a network exception is the one way past it, and that exception is stated
-residual risk ([a declared network
-exception](decisions.md#native-egress-is-an-operator-declared-leaf-escape)). The gateway terminates
-each connection, which is why no tunnel is opaque to the boundary ([the gateway terminates every
-connection](decisions.md#no-connection-is-opaque-to-the-boundary)). It raises `net:connect` for each
-destination and `http:request` for each request, and it holds no allow list of its own.
+The gateway handles outbound traffic. Box configures sandboxed processes to use it through
+standard proxy environment variables, including `HTTPS_PROXY`. The sandbox blocks direct network
+access, so a client that ignores the proxy settings cannot connect to an external destination.
+An operator can [declare a network exception](decisions.md#native-egress-is-an-operator-declared-leaf-escape)
+for a tool or stdio MCP server. That program can then bypass the gateway and its policy checks.
 
-The gateway is also where a credential is added, because the workload never holds one. The workload
-gets a placeholder, and the gateway swaps in the real secret on a permitted request to the destination
-the operator bound it to ([the workload holds a phantom
-token](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret),
-[how Box keeps credentials out of the box](credentials.md)). A binding reaches nothing by itself:
-policy still decides the connection and the request, so each destination needs its own permit ([a
-credential binding is
-configuration](decisions.md#a-credential-binding-is-configuration-not-a-policy-action)).
-[How Box controls outbound traffic](egress.md) covers the route and the decisions.
+[The gateway terminates every connection](decisions.md#no-connection-is-opaque-to-the-boundary)
+so it can inspect the requests inside it. It asks policy to decide `net:connect` for each destination
+and `http:request` for each request. It has no allowlist of its own.
+
+The gateway also adds credentials to requests. For a bound secret, the
+[workload gets a placeholder token](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret).
+The gateway replaces it with the real secret on a permitted request to the bound destination.
+[A credential binding does not authorize access](decisions.md#a-credential-binding-is-configuration-not-a-policy-action).
+Policy must still permit the connection and the request. [Credentials](credentials.md) explains
+how Box handles secrets, and [outbound traffic](egress.md) explains the network route and its checks.
 
 ### The MCP broker
 
-The MCP broker is the broker's third leg. The other two legs are interpreters. The MCP broker is the
-broker's own code, and it is the enforcement point for a request to a local MCP server. Each stdio
-server runs in its own sandbox, separate from the agent's, and it starts only when the agent runs
-the server's full command through its alias and a `shell:spawn` permit admits it ([every MCP server is one configuration
-table](decisions.md#an-mcp-server-is-one-configuration-table)). After that, the MCP broker raises
-`mcp:call` on each request the agent sends to the server. A permit on `mcp:call` covers every tool
-on that server, and a rule on a tool's own action can narrow it ([an MCP tool call passes two
-gates](decisions.md#mcp-authorization-is-two-gates)). A remote MCP server takes the gateway's route
-instead, and the gateway raises the same `mcp:call`. [How Box runs MCP servers](mcp.md) covers both
-routes.
+The MCP broker handles requests to local MCP servers within the broker. Each stdio server runs in
+its own sandbox. It starts when the agent invokes the server's full command through an alias and
+policy permits `shell:spawn`. The command comes from
+[the server's configuration table](decisions.md#an-mcp-server-is-one-configuration-table).
+
+The MCP broker asks policy to decide `mcp:call` for requests to the server. A permit covers every
+tool on that server. A rule on a tool's own action can narrow that permit, as described in
+[the two checks on an MCP tool call](decisions.md#mcp-authorization-is-two-gates).
+Requests to a remote MCP server go through the gateway, which asks policy to decide the same
+`mcp:call` action. [How Box runs MCP servers](mcp.md) explains both routes.
 
 ### The collector
 
-Every box records each decision it takes, by default, to a file the workload cannot reach ([the
-default target](decisions.md#every-box-records-by-default)). The enforcement point submits the
-record, not the engine, so what the record names is the decision as it was enforced, including a
-reachable paths check that overrode a permit ([the canonical
-record](decisions.md#the-effective-decision-is-the-canonical-record)).
+By default, the collector writes each decision to [a file the workload cannot
+access](decisions.md#every-box-records-by-default). The enforcement point submits the record after
+all checks finish. The record therefore includes any refusal by the reachable paths check, even
+when policy permitted the operation. This is why
+[the record describes the effective decision](decisions.md#the-effective-decision-is-the-canonical-record).
 
-The collector also receives the agent's own spans, which makes it the one part of the trusted process
-the workload can post to. [Telemetry](telemetry.md) covers what that costs and why the workload can
-neither forge a record nor suppress one.
+The collector also accepts telemetry spans from the agent. Its receiver runs in the trusted process
+and accepts input from the workload. [Telemetry](telemetry.md) explains how Box separates that input
+from its own records and protects those records from forgery and suppression.
 
 ### The trampoline
 
-Sandboxing on macOS is one-way: the call that applies a sandbox locks down the process that makes
-it, permanently. So the trusted process never makes that call for itself. It starts
-`strands-box-contain-trampoline`, which applies the sandbox to itself and then becomes the target
-program, already contained and unable to undo it ([one trampoline spawns every contained
-process](decisions.md#one-trampoline-spawns-every-contained-process)). The trampoline decides
-nothing: which rules a process gets is written in the configuration it is handed.
-[The box binaries](binaries.md) covers how Box verifies the trampoline before it runs one.
+On macOS, a process that applies a sandbox to itself cannot remove it. The trusted process therefore
+starts `strands-box-contain-trampoline` to apply the sandbox in a separate process. The trampoline
+then becomes the target program, which inherits the restrictions.
+[Box uses this trampoline for every contained process](decisions.md#one-trampoline-spawns-every-contained-process).
+The trampoline applies the configuration it receives and makes no authorization decisions.
+[The box binaries](binaries.md) explains how Box verifies the trampoline before starting it.
 
 ### The sandboxes
 
-A box has two kinds of sandbox, and the trampoline applies both.
+A box has two kinds of sandbox. The trampoline applies both.
 
-**The agent's sandbox** starts with the run, and no policy decision admits it. It's the narrowest:
-the agent can run its own `command` and each program its `exec` list names, and nothing else. It's
-also the only sandbox with a route back to the box's trusted process, through the aliases and
-`run/box.sock`.
+The agent's sandbox starts with the run, without a policy decision. The agent can execute only its
+configured `command`, programs its `exec` list names, and the aliases that connect it to
+`run/box.sock`. Only the agent's sandbox has those aliases and access to the broker socket.
 
-**A tool's sandbox, or a local MCP server's sandbox,** starts only when a `shell:spawn` permit admits
-the program. It takes its filesystem grants from its own `[tool.<name>]` or `[mcp.<name>]` table,
-never from the agent's, and it's wider than the agent's sandbox. It gets no alias and no route to
-`run/box.sock`, so the program inside it can't ask Box to act for it. Its own file operations raise
-no `fs:*` decision, so its filesystem grants are what bound them, and one `shell:spawn` decision
-covers the whole process tree. Its network traffic still goes through the egress gateway, unless
-the operator declares a network exception for it ([a host
-binary runs in its own
-sandbox](decisions.md#a-host-binary-runs-in-a-leaf-box-and-the-policy-is-the-only-allowlist)).
+A tool's sandbox or a local MCP server's sandbox starts after policy permits `shell:spawn`.
+It uses filesystem grants from its own `[tool.<name>]` or `[mcp.<name>]` table.
+It has no alias or access to `run/box.sock`, so the program cannot ask the broker to act for it.
+Its file operations do not produce `fs:*` decisions. The operating system enforces its filesystem
+grants, and one `shell:spawn` decision admits the whole process tree.
+Network traffic still goes through the gateway unless the operator declares a network exception.
+The decision to [run a host binary in its own sandbox](decisions.md#a-host-binary-runs-in-a-leaf-box-and-the-policy-is-the-only-allowlist)
+explains this separation.
 [How Box contains a process](containment.md#the-agents-box-and-leaf-boxes) covers how the two
 differ.
 
 ### The alias
 
-A harness expects to run a shell and Python from its `PATH`, and Box's interpreters run outside the
-sandbox. The alias bridges that, and it holds no power of its own: it can't open the policy, and it
-can't serve a request. Box places it in the box directory's `bin/` as `zsh`, `bash`, `sh`,
-`python3`, and `python`, and as one name for each program a local MCP server starts from. Servers
-that share a program share its alias.
-Nothing a caller passes can point it at another socket ([the box binaries](binaries.md)). A tool's
-sandbox and a local MCP server's sandbox get no alias, so a `python3` there is the host OS's
-Python.
+A harness, the product that drives the agent, expects to find a shell and Python on its `PATH`.
+The alias receives those invocations and sends them to Box's interpreters outside the sandbox.
+It cannot open the policy or serve requests. Box installs it in the box directory's `bin/` as
+`zsh`, `bash`, `sh`, `python3`, and `python`, plus the program names used by local MCP servers.
+Servers that use the same program share an alias.
+
+The alias connects only to its own box's socket, as described in [the box binaries](binaries.md).
+The caller cannot select another socket. Tools and local MCP servers have no aliases, so
+`python3` in their sandboxes runs the host OS's Python.
 
 ## How the parts fit together
 
 | Part | Runs in | Lifetime | What it decides |
 |---|---|---|---|
-| The box's trusted process | Outside every sandbox | The whole run | Nothing itself. It holds everything that decides. |
-| Policy engine | The trusted process | The whole run, over history that outlives it | Every mediated request |
+| The box's trusted process | Outside every sandbox | The whole run | Runs the policy engine and enforcement points |
+| Policy engine | The trusted process | The whole run; history persists across runs | Authorizes mediated requests |
 | Broker | The trusted process, its own thread | The whole run | Nothing. It routes each request. |
-| Strands Shell | The trusted process | One command | Asks policy: `shell:exec` or `shell:spawn`, then `fs:*` per effect |
-| Monty | The trusted process | One script | Asks policy: `fs:*` per file operation |
-| Egress gateway | The trusted process | The whole run | Asks policy: `net:connect`, `http:request`, and `mcp:call` for a remote server |
-| MCP broker | The trusted process, within the broker | The whole run | Asks policy: `shell:spawn` to start a local MCP server, then `mcp:call` per request |
-| Collector | The trusted process | Opened before the box, drained after it | Nothing |
+| Strands Shell | The trusted process | One command | Asks policy for `shell:exec` or `shell:spawn`, and `fs:*` for interpreted file operations |
+| Monty | The trusted process | One script | Asks policy for `fs:*` for file operations |
+| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, and `mcp:call` for remote servers |
+| MCP broker | The trusted process, within the broker | The whole run | Asks policy for `shell:spawn` to start a local server, then `mcp:call` for requests |
+| Collector | The trusted process | Opens before the policy engine; drains after shutdown | Records decisions |
 | Trampoline | Outside the sandbox | Until it becomes the contained program | Nothing |
 | Alias | Inside the agent's sandbox | One command, or one MCP connection | Nothing |
 
-Every route the workload has ends at the same engine:
+Requests through the broker and gateway use the same policy engine:
 
 ```mermaid
 flowchart TD
@@ -211,8 +204,9 @@ flowchart TD
     gateway -->|"asks"| policy
 ```
 
-Each enforcement point acts only after a permit: Strands Shell and Monty perform the file
-operation, the MCP broker relays the request to the server, and the gateway forwards the request.
+After policy permits an operation and the remaining checks pass, the enforcement point performs it.
+Strands Shell and Monty perform file operations, the MCP broker relays requests to local servers,
+and the gateway forwards network requests.
 
 ## One command, from the agent to the file
 
@@ -240,90 +234,84 @@ sequenceDiagram
     Alias-->>Agent: output and exit status
 ```
 
-Four things in that path carry the design.
+The command needs more than one decision. Policy first decides `shell:exec` on `echo`, the command
+Strands Shell resolved. The `zsh` invocation selected the alias. The redirect needs a separate
+`fs:write` permit. If policy permits the command but denies the write, the command fails before
+`echo` runs.
 
-**One command raises more than one decision.** The decision is on `echo`, the command the Shell
-resolved, and not on the `zsh` the agent typed. Then each effect that command has raises its own
-decision. The redirect is a write, so a policy that permits the command and refuses the write fails
-the command before `echo` runs.
+Strands Shell resolves `notes.txt` against the working directory and follows symlinks before asking
+policy to decide the write. It then acts on the resolved object. A symlink swap between the decision
+and the write cannot redirect the operation because
+[the resolved token binds the object](decisions.md#a-resolved-token-binds-the-object-it-names).
 
-**The path is resolved before it is judged.** The Shell resolves `notes.txt` against the working
-directory, follows each symlink, and raises the decision on what it resolved. Then it performs the
-effect on the object it resolved rather than on the name, so swapping a symlink between the decision
-and the effect diverts nothing ([a resolved token binds the object it
-names](decisions.md#a-resolved-token-binds-the-object-it-names)).
+The reachable paths check runs after policy and can still refuse the operation. It rejects paths
+outside the operator's home, the agent's home, and the workspace. It also rejects paths inside the
+box directory and the configuration and policy files loaded for this run. A policy permit cannot
+override these restrictions.
 
-**A deny-only check runs after the permit.** On the interpreter path the reachable paths check runs
-after policy and can only subtract ([a deny-only check cannot be
-widened](decisions.md#the-authored-policy-is-the-only-decision-authority)). It refuses a path
-outside the operator's home, the agent's home, and the workspace, a path inside the box directory,
-and the configuration and policy this run loaded, whatever a permit says. It does not protect
-credentials: the Shell can name anything under the operator's home, so an `fs:read` permit with no
-path condition reads `~/.ssh` ([nothing beneath the interpreters protects
-credentials](decisions.md#no-credential-floor-sits-beneath-the-interpreters)). Scope every rule by
-path. [How Box runs shell commands](shell.md) covers what the check refuses.
+That check does not protect credentials elsewhere in the operator's home. An `fs:read` permit with
+no path condition can expose files under `~/.ssh`, because
+[no credential check sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+File access rules therefore need path conditions. [How Box runs shell commands](shell.md) explains
+the reachable paths check.
 
-**The trusted process performs the effect.** The workload holds a socket and nothing else. That is
-what puts the file operation on a path a decision can cover, and it is also why the interpreters are
-part of what you have to trust.
+For this command, the trusted process opens and writes the file. The alias sends the request over
+the socket and receives the result. This is how Box checks the file operation, and why the
+interpreters are part of the code the operator must trust.
 
 ## How a run comes up, and how it ends
 
-`strands-box run` brings the parts up in a fixed order, and each step can refuse the box:
+`strands-box run` starts the parts in a fixed order. A failure at any step stops startup.
 
-1. **It hardens itself first**, refusing a same-user process its address space. This is defence in
-   depth rather than a guarantee, and root bypasses it ([the trusted process refuses another process
-   its address space](decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
-2. **It reads `box.toml`, prepares the box directory, and takes the run lock.** It records the
-   canonical path and the filesystem identity of each file it opened, and every later step acts on
-   that identity rather than on the name, so replacing a file afterwards changes nothing ([a run
-   validates once, then acts on the identity it
-   approved](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved)).
-3. **It opens the collector**, so every step that follows has somewhere to record.
-4. **It installs the policy.** A policy that does not parse or does not validate refuses the box. A
-   rule the load can prove will never fire is also refused, and a rule that might fire warns ([a rule
-   that cannot fire is refused at
-   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). A
-   rule on an experimental tool grammar action is the exception for now: it loads but can't take
-   effect yet, and `run` prints a warning for each grammar.
-5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
-   each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
-   grant refuses the box here.
-6. **It builds each sandbox's grants and discloses them**, each tool first and then the agent.
-   Every direct filesystem grant is printed to stderr, because no `fs:*` decision will cover one
-   ([direct filesystem reach is declared and
-   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)). On macOS, the
-   `file-attributes` switch adds one line per sandbox that names what its write grants may set. A
-   tool that cannot be translated refuses the box before the agent exists.
+1. It [hardens the trusted process](decisions.md#the-trusted-processs-memory-is-a-defended-asset)
+   against memory access by other processes running as the same user. This adds protection but
+   does not guarantee it. Root can bypass it.
+2. It reads `box.toml`, prepares the box directory, and takes the run lock. It records the
+   canonical path and filesystem identity of each source file it opens.
+   [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
+   so replacing a source file cannot substitute a new configuration.
+3. It opens the collector to record the steps that follow.
+4. It installs the policy. Parsing or validation errors stop startup. Box also
+   [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
+   It warns when it finds a rule that may never match but cannot prove it.
+   Rules on experimental tool grammar actions load but cannot take effect yet.
+   `run` prints a warning for each grammar.
+5. It resolves bound secrets and starts the gateway with its own certificate authority.
+   It checks each process specification's filesystem grants, then binds the broker socket.
+   A grant it cannot check stops startup.
+6. It builds and discloses the sandbox grants for each tool, then for the agent.
+   Box [prints every direct filesystem grant to stderr](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)
+   because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
+   grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
+   sandbox that states which attributes its write grants can set.
 
-   On Linux, preserved interpreter spellings appear under `interpreter aliases for configured access`,
-   before the runtime-minimum section. Each line maps a spelling to the file the process's original grants already authorize.
-   These mappings preserve configured access without adding executable or library authority.
-   The [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the emitted form.
-7. **It starts the trampoline**, which becomes the agent, and then it waits.
+   On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
+   before the runtime-minimum section. Each line maps a spelling to a file the process's existing
+   grants authorize. These mappings add no executable or library access. The
+   [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
+7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
-Teardown runs in the reverse direction, and the order is the point. The workload is reaped first, so
-nothing contained is alive while the box's authority is still up. Then the broker unbinds, the gateway
-finishes, the record that names the running box is withdrawn, and the lock releases last among the
-box's own authority, so no second run takes the box while any of it is still serving. The collector
-drains after that, and the drain is what exports, so the export outlives the lock.
+During shutdown, Box stops and reaps the workload before closing the broker and gateway.
+It then removes the record that identifies the running box and releases the run lock.
+Holding the lock until this point prevents a second run from taking over while the first still
+serves requests. The collector drains and exports its queued records after the lock is released.
 
 ## Why this shape
 
 ### The boundary is the operating system's own sandboxing
 
-Box contains the workload with what the surrounding OS already has, and boots no guest operating
-system. A microVM is the stronger boundary, and Box still does not use one, because the workload has
-to do its job in the operator's own environment, at the paths that environment already uses. The cost
-is that a kernel escape defeats operating system enforcement ([the boundary is the surrounding OS's own
-sandboxing](decisions.md#the-boundary-is-the-surrounding-os-not-a-virtual-machine)).
+Box uses [the surrounding OS's sandboxing](decisions.md#the-boundary-is-the-surrounding-os-not-a-virtual-machine)
+so the workload can use the operator's existing environment and paths. It does not boot a guest
+operating system. A microVM would provide stronger isolation, but it would require a separate
+environment. With Box's approach, a kernel escape defeats operating system enforcement.
 
 ### Box decides outside the harness
 
-Many harnesses ship an allow list and an approval prompt of their own. Box neither relies on one nor
-reads one, because a check inside the agent's own process is a floor and never a wall, and because it
-judges the tool call rather than its effect ([Box decides outside the
-harness](decisions.md#box-decides-outside-the-harness)).
+A harness may have its own allowlist and approval prompt. Those checks run inside the untrusted
+agent process and judge tool calls. Box checks the resulting operations in the trusted process,
+where the agent cannot change the checks. This is why
+[Box decides outside the harness](decisions.md#box-decides-outside-the-harness)
+and does not read or rely on the harness's approval rules.
 
 ## See also
 

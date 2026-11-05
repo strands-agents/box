@@ -7,9 +7,9 @@ That feature adds Dogwood checks for selected operations when the operator expli
 
 ## See a sandbox restriction in action
 
-Consider a project with two existing files: `allowed.txt` and `blocked.txt`. The first contains `Hello from the allowed file.` The operator (the person configuring Box) grants read access only to `allowed.txt` through `[agent.filesystem].read_file` in `box.toml`. A filesystem grant names a path and its permitted access. No other grant covers either file.
+Consider a project with two existing files: `allowed.txt` and `blocked.txt`. The first contains `Hello from the allowed file.` The operator grants read access only to `allowed.txt` through `[agent.filesystem].read_file` in `box.toml`. A filesystem grant names a path and its permitted access. No other grant covers either file.
 
-A small program stands in for the agent and asks macOS to read both files. Its output is:
+A small program takes the place of the agent and asks macOS to read both files. Its output is:
 
 ```text
 allowed.txt: Hello from the allowed file.
@@ -28,7 +28,7 @@ A Seatbelt **profile** is a set of rules that Seatbelt applies to a process. A r
 
 Box generates a profile from the process's configuration and the system access it needs to run. The profile starts with a default refusal and adds rules for permitted operations. It also blocks changes to files Box protects, including its active policy files.
 
-The program continues to make **system calls** (requests handled by the operating system's kernel). Seatbelt restricts resource access in that path. Box does not need to replace every file operation with a policy-engine request.
+The program continues to make system calls, which the operating system's kernel handles. Seatbelt restricts resource access in that path. Box does not need to replace every file operation with a policy-engine request.
 
 The restrictions [last for the process's lifetime](decisions.md#containment-ends-with-the-contained-process). Programs it starts [inherit the restrictions](decisions.md#children-inherit-the-boundary), including when a child replaces itself with another program. Starting a new shell does not give that shell unrestricted access.
 
@@ -53,7 +53,7 @@ flowchart TD
 
 If applying the restrictions fails, [Box refuses to start the program](decisions.md#every-failed-or-unsupported-apply-refuses-the-workload).
 
-Strands Shell, Monty (Box's Python interpreter), and the egress gateway run in the box's trusted process, outside the agent's sandbox. The **egress gateway** checks and forwards outbound network requests. These components enforce policy on requests they handle. A policy permit for one of them does not expand the agent's own filesystem grants.
+Strands Shell, the Python interpreter Monty, and the egress gateway run in the box's trusted process, outside the agent's sandbox. The egress gateway checks and forwards outbound network requests. These components enforce policy on requests they handle. A policy permit for one of them does not expand the agent's own filesystem grants.
 
 ## What the sandbox permits
 
@@ -79,7 +79,8 @@ For a process that uses the gateway, Box permits connections to specified local 
 
 For gateway traffic, Seatbelt controls whether the process can connect to Box's local gateway port. Dogwood decides whether the gateway may connect to the destination and forward the request.
 
-Box's **broker** receives the agent's requests and routes them to Strands Shell, Monty, or a configured Model Context Protocol (MCP) server. Box permits the agent to contact the broker through a local socket (a connection between processes on the same machine).
+MCP means Model Context Protocol. Box's broker receives the agent's requests and routes them to
+Strands Shell, Monty, or a configured MCP server. Box permits the agent to contact the broker through a local socket, which connects processes on the same machine.
 
 A local MCP server can have `[mcp.<name>.network].contain_egress = false`. This selects [native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape), which bypasses the gateway and its network policy checks. A declared tool can have the same `[tool.<name>.network].contain_egress = false`. The agent's declaration refuses it.
 
@@ -104,18 +105,18 @@ the profile grants.
 
 ## Limits and necessary exceptions
 
-**The profile has to support the program.** A program may need libraries or local services that its sandbox does not permit. A new program or macOS version can change those needs.
+A program may need libraries or local services that its sandbox does not permit. A new program or macOS version can change those needs.
 
 ### File timestamps may not be preserved
 
 In tested macOS configurations, tools could write file contents but could not restore file timestamps. This affected timestamp-preserving copies, archive extraction, synchronization, and source-package installation.
 
-**An operation can report success with incorrect timestamps.** It can also fail after writing some output. Check both file contents and timestamps when preservation matters.
+An operation can report success with incorrect timestamps. It can also fail after writing some output. Check both file contents and timestamps when preservation matters.
 
-The opt-in top-level [`file-attributes`](../user/config.md#file-attributes) key restores timestamps in write folders, and
-[its residual risk](../user/security.md#file-attributes-on-macos) is that `setattrlist` can then set the set-user-ID bit, the group, the owner, and an access control list. Without it, these results hold.
+The opt-in top-level [`file-attributes`](../user/config.md#file-attributes) key restores timestamps in write folders.
+[Its residual risk](../user/security.md#file-attributes-on-macos) is that `setattrlist` can also set the set-user-ID bit, group, owner, and an access control list. Without this setting, the timestamp failures described above remain.
 
-These results were observed on macOS 27.0.1 with Box revision `08bc940b`, without the switch. The switch is the broader write rule that investigation measured, so it carries the change of group ownership that the investigation found, with the other residuals above. See the [timestamp compatibility investigation](https://github.com/strands-agents/box/issues/89) for follow-up.
+Tests on macOS 27.0.1 with Box revision `08bc940b` produced these results without the setting. The setting uses the broader write rule measured in that investigation. It permits the change of group ownership the investigation found and the other changes listed above. See the [timestamp compatibility investigation](https://github.com/strands-agents/box/issues/89) for follow-up.
 
 ### What the sandbox does not provide
 
@@ -141,7 +142,7 @@ Box reports agent and declared-tool grants at startup, including added system pa
 
 ## Reading a profile rule
 
-Seatbelt profiles use **Sandbox Profile Language (SBPL)**, a Scheme-like language. Operators configure Box through `box.toml`; Box generates the profile.
+Seatbelt profiles use Sandbox Profile Language, or SBPL, a language based on Scheme. Operators configure Box through `box.toml`, and Box generates the profile.
 
 This illustrative excerpt permits reads of one named file:
 
@@ -153,6 +154,6 @@ This illustrative excerpt permits reads of one named file:
 
 `literal` matches that exact path. `file-read*` covers file-read operations, including contents and metadata. A directory-tree rule uses `subpath` to match a path and its descendants.
 
-This is not a complete Box profile. A running program also needs execution rules, runtime access, and the other restrictions described above. The excerpt explains the rule's shape; it is not a configuration to install.
+This is not a complete Box profile. A running program also needs execution rules, runtime access, and the other restrictions described above. Use the excerpt to understand the rule, not as a configuration to install.
 
 For Box's request-level checks, read [Policy](policy.md). For installation and agent configuration, read [Getting started](../user/getting-started.md).
