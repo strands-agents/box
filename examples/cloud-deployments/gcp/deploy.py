@@ -45,15 +45,24 @@ def resource_commands(state):
     return {
         "network": ["compute", "networks", "describe", name],
         "subnet": ["compute", "networks", "subnets", "describe", name, "--region", region],
-        "service_account": ["iam", "service-accounts", "describe", state["service_account"]],
+        "service_account": ["iam", "service-accounts", "list", "--filter=email=" + state["service_account"]],
         "role": ["iam", "roles", "describe", state["role"]],
         "disk": ["compute", "disks", "describe", name + "-boot", "--zone", zone],
         "instance": ["compute", "instances", "describe", name, "--zone", zone],
     }
 
 
+def lookup_resource(state, kind):
+    value = gcloud(state["project"], *resource_commands(state)[kind], optional=kind != "service_account")
+    if kind == "service_account":
+        if not isinstance(value, list) or len(value) > 1 or any(not isinstance(item, dict) for item in value):
+            raise RuntimeError("The service account lookup returned an unexpected result.")
+        return value[0] if value else None
+    return value
+
+
 def owned_resource(state, kind):
-    value = gcloud(state["project"], *resource_commands(state)[kind], optional=True)
+    value = lookup_resource(state, kind)
     if value is not None and value.get("description") != state["marker"]:
         raise RuntimeError(f"Refusing to change {kind}: its ownership marker does not match the receipt.")
     return value
@@ -90,8 +99,8 @@ def deploy(args, receipt):
         "model": args.model, "probe_only": args.probe_only, "created": [],
     }
     gcloud(args.project, "services", "enable", "compute.googleapis.com", "iam.googleapis.com", "aiplatform.googleapis.com")
-    for kind, command in resource_commands(state).items():
-        if gcloud(args.project, *command, optional=True) is not None:
+    for kind in resource_commands(state):
+        if lookup_resource(state, kind) is not None:
             raise RuntimeError(f"The {kind} name already exists. Choose a different --name.")
     image = gcloud("debian-cloud", "compute", "images", "describe", args.image)
     state["image"] = image["name"]

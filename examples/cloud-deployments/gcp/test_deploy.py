@@ -61,6 +61,7 @@ class Cloud:
     def __init__(self):
         self.resources, self.bindings, self.calls, self.deleted = {}, [], [], []
         self.fail_create, self.accept_before_failure, self.serial = None, False, ""
+        self.deleted_account_lookup_denied = False
 
     def __call__(self, project, *args, optional=False, raw=False):
         self.calls.append((project, args))
@@ -89,7 +90,13 @@ class Cloud:
                 continue
             action, name = args[len(prefix):len(prefix) + 2]
             key = kind, name + "@" + project + ".iam.gserviceaccount.com" if kind == "service_account" and action == "create" else name
+            if action == "list" and kind == "service_account":
+                email = name.removeprefix("--filter=email=")
+                value = self.resources.get((kind, email))
+                return [copy.deepcopy(value)] if value is not None else []
             if action == "describe":
+                if kind == "service_account" and key not in self.resources and self.deleted_account_lookup_denied:
+                    raise RuntimeError("PERMISSION_DENIED: resource may not exist")
                 return copy.deepcopy(self.resources.get(key))
             if action == "create":
                 if kind != self.fail_create or self.accept_before_failure:
@@ -178,6 +185,28 @@ class LifecycleTests(unittest.TestCase):
         deploy.status(state, self.receipt)
         self.assertEqual(json.loads(saved.read_text()), trusted)
         self.assertEqual(len(list(self.receipt.parent.glob("serial-*.log"))), 2)
+
+    def test_cleanup_resumes_when_a_deleted_account_cannot_be_described(self):
+        state = self.create()
+        del self.cloud.resources[("service_account", state["service_account"])]
+        self.cloud.deleted_account_lookup_denied = True
+        deploy.cleanup(state, self.receipt)
+        self.assertEqual(self.cloud.resources, {})
+        self.assertEqual(self.cloud.bindings, [])
+        self.assertTrue(json.loads(self.receipt.read_text())["cleaned_up"])
+
+    def test_account_list_failure_does_not_imply_the_account_is_absent(self):
+        state = self.create()
+        for result in (RuntimeError("PERMISSION_DENIED"), {}, [None], ["invalid"],
+                       [{"description": state["marker"]}, {"description": state["marker"]}]):
+            with self.subTest(result=result), patch.object(deploy, "gcloud") as cloud:
+                if isinstance(result, Exception):
+                    cloud.side_effect = result
+                else:
+                    cloud.return_value = result
+                with self.assertRaises(RuntimeError):
+                    deploy.owned_resource(state, "service_account")
+        self.assertEqual(self.cloud.deleted, [])
 
     def test_cleanup_is_repeatable_and_keeps_vm_disks_until_ownership_check(self):
         state = self.create()

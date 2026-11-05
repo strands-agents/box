@@ -36,9 +36,10 @@ Use a Google Cloud project with billing and access to your selected Gemini model
 Your deployment account needs permission to:
 
 - Enable project APIs.
-- Create and delete Compute Engine VMs, disks, networks, and subnets.
-- Create and delete service accounts and custom Identity and Access Management (IAM) roles.
-- Add and remove project IAM role bindings.
+- Inspect, create, and delete Compute Engine VMs, disks, networks, and subnets.
+- List, inspect, create, and delete service accounts.
+- Inspect, create, and delete custom Identity and Access Management (IAM) roles.
+- Read project IAM policy, and add and remove role bindings.
 - Attach the new service account to the VM with `iam.serviceAccounts.actAs`.
 
 The VM service account receives only `aiplatform.endpoints.predict`.
