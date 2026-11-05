@@ -47,6 +47,26 @@ The actual Box process cleanup tests cover configured tools and their descendant
 Background jobs stop when their owning process is dropped or a pending `wait` is cancelled.
 An open shell retains background jobs across completed foreground calls.
 
+### A synchronous command finishing after its deadline reports a timeout
+
+A command that blocked the runtime past its deadline could return success: Tokio's timeout
+wrapper can receive a completed task before polling its timer. `run_pipeline` now checks the
+clock after each task join and reports the existing execution-timeout error when the deadline
+has passed. It also checks limits before expansion and after expansion, so a substitution that
+consumes the deadline stops that pipeline before command dispatch and redirection.
+`execute_item` checks again before returning, so `!` cannot turn the timeout into success. These
+checks do not interrupt synchronous work or undo its completed effects.
+
+This is an upstream deadline-accounting bug, exercised through the script-interpreter hook.
+`a_synchronous_interpreter_cannot_return_success_after_the_shell_deadline` covers late completion
+with `!` and `||`, and a successful subsequent call.
+`an_expired_interpreter_cannot_start_following_commands_or_redirects` covers subsequent commands
+and command substitution.
+`a_late_interpreter_does_not_wait_for_an_open_output_channel` covers cancellation of the output
+drain when a synchronous command finishes late with a writer still open.
+`a_synchronous_interpreter_finishes_with_an_adequate_or_unlimited_deadline` covers both ways to
+complete successfully with a sufficient or disabled limit.
+
 ### Local addition: an effect says which words the script stated (2026-09-25)
 
 At the pinned revision `expand_words` returns `Vec<String>` and discards which `Word` each string came

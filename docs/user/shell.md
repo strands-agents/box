@@ -134,19 +134,20 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 ### `limits.shell.timeout`
 
 Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
-`[limits]` to allow ten minutes, or `shell.timeout = false` for unlimited execution. See
+`[limits]` to allow ten minutes, or `shell.timeout = false` to disable this limit. See
 [`[limits]`](config.md#limits) for the accepted values.
 
 The allowance covers the full text sent in one call, including multiple commands, pipelines,
-and programs the Shell starts. Each new call receives a fresh allowance. Output leaves its
-deadline unchanged. The Shell alias waits for the broker's result.
+Python called inside the Shell, and programs the Shell starts. Each new call receives a fresh
+allowance. Output leaves its deadline unchanged. The Shell alias waits for the broker's result.
 
 With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
 Calls remain cancellable, and connection and write operations retain their transport timeouts.
 
-Python called inside the Shell retains Monty's 120-second active execution limit and
-180-second cumulative sleep limit. Synchronous Python execution can delay the Shell's timeout
-check. The direct `python` and `python3` aliases use their [own limits](monty.md#limits-and-exit-statuses).
+Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply to
+Python called inside the Shell, including with `shell.timeout = false`. Synchronous Python
+execution can delay timeout reporting. The direct `python` and `python3` aliases use their
+[own limits](monty.md#limits-and-exit-statuses).
 
 ### `[tool.<name>]`
 

@@ -153,14 +153,14 @@ A native `filesystem.deny` entry does not restrict these requests through the bo
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
-Set `shell.timeout = false` for unlimited execution, or omit the key for the 30-second default.
+Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
 Connection and write operations retain their transport timeouts.
 Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
 are load errors.
 
-This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`.
-Python retains its [own limits](monty.md#limits-and-exit-statuses), including when called inside the
-Shell. Synchronous Python execution can delay the Shell's timeout check.
+This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
+inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
+with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
 
