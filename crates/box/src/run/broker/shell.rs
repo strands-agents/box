@@ -13,6 +13,7 @@ use strands_shell::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation, Shell,
 };
 
+use crate::run::broker::held::HeldPath;
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
 use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
@@ -259,7 +260,43 @@ fn verify_direct_binds(shell: &Shell, declared: &[(&str, &str)]) -> io::Result<(
     Ok(())
 }
 
-/// The reachable set, as a deny-only floor over the Shell's own admission seam.
+/// Whether this effect can introduce a host filesystem entry.
+#[derive(Clone, Copy)]
+enum HostCreation {
+    Never,
+    IfMissing,
+    Always,
+}
+
+#[derive(Debug)]
+enum FloorRefusal {
+    Reach(Refused),
+    Ownership(io::Error),
+}
+
+impl FloorRefusal {
+    fn gate(&self) -> &'static str {
+        match self {
+            Self::Reach(_) => "reach-floor",
+            Self::Ownership(_) => "ownership-floor",
+        }
+    }
+
+    fn is_unresolved(&self) -> bool {
+        matches!(self, Self::Reach(refused) if refused.is_unresolved())
+    }
+}
+
+impl std::fmt::Display for FloorRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reach(refused) => refused.fmt(formatter),
+            Self::Ownership(refused) => refused.fmt(formatter),
+        }
+    }
+}
+
+/// The reachable set and ownership restrictions, beneath the Shell's policy admission.
 struct ReachFloor {
     reach: Arc<Reach>,
     inner: Arc<dyn EffectInterceptor>,
@@ -280,13 +317,18 @@ impl ReachFloor {
     }
 
     /// Approve every host-backed path this effect touches.
-    fn approve(&self, effect: &EffectAttempt<'_>) -> Result<(), Refused> {
+    fn approve(&self, effect: &EffectAttempt<'_>) -> Result<(), FloorRefusal> {
         match effect {
             // No path, so nothing for this floor to confine. What a command *does* arrives
             // here again as one filesystem attempt per effect.
             EffectAttempt::ShellRun { .. } | EffectAttempt::ShellSpawn { .. } => Ok(()),
             EffectAttempt::Filesystem { path, operation } => {
-                self.approve_one(path, mutates(*operation))
+                let creation = match operation {
+                    FsOperation::WriteContent { create: true, .. } => HostCreation::IfMissing,
+                    FsOperation::CreateDir => HostCreation::Always,
+                    _ => HostCreation::Never,
+                };
+                self.approve_one(path, mutates(*operation), creation)
             }
             EffectAttempt::FilesystemPair {
                 from,
@@ -294,14 +336,14 @@ impl ReachFloor {
                 operation,
             } => match operation {
                 strands_shell::FsPairOperation::Rename { .. } => self
-                    .approve_one(from, true)
-                    .and_then(|()| self.approve_one(to, true)),
+                    .approve_one(from, true, HostCreation::Never)
+                    .and_then(|()| self.approve_one(to, true, HostCreation::Always)),
                 strands_shell::FsPairOperation::Symlink => self
-                    .approve_one(from, false)
-                    .and_then(|()| self.approve_one(to, true)),
+                    .approve_one(from, false, HostCreation::Never)
+                    .and_then(|()| self.approve_one(to, true, HostCreation::Always)),
                 _ => self
-                    .approve_one(from, true)
-                    .and_then(|()| self.approve_one(to, true)),
+                    .approve_one(from, true, HostCreation::Never)
+                    .and_then(|()| self.approve_one(to, true, HostCreation::Never)),
             },
             // An attempt this box does not map never reaches here: the policy adapter
             // beneath refuses it with `PermissionDenied` before the floor is asked.
@@ -310,7 +352,12 @@ impl ReachFloor {
     }
 
     /// Approve one path, or pass a name the host does not back.
-    fn approve_one(&self, named: &str, mutates: bool) -> Result<(), Refused> {
+    fn approve_one(
+        &self,
+        named: &str,
+        mutates: bool,
+        creation: HostCreation,
+    ) -> Result<(), FloorRefusal> {
         let named = Path::new(named);
         if !self.reach.names_a_host_path(named) {
             return Ok(());
@@ -320,7 +367,23 @@ impl ReachFloor {
         } else {
             self.reach.approve(named, &named.to_string_lossy())
         };
-        approved.map(|_approved| ())
+        let approved = approved.map_err(FloorRefusal::Reach)?;
+        if super::ownership::is_root() {
+            let creates = match creation {
+                HostCreation::Never => false,
+                HostCreation::Always => true,
+                HostCreation::IfMissing => matches!(
+                    HeldPath::of(&approved).and_then(|held| held.stat()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound
+                ),
+            };
+            if creates {
+                super::ownership::require_nonroot_creation().map_err(FloorRefusal::Ownership)?;
+            }
+        }
+        // This probe classifies admission, not later I/O. CallKernel also removes O_CREAT,
+        // so an existing leaf that disappears afterward fails without creating a replacement.
+        Ok(())
     }
 }
 
@@ -497,7 +560,7 @@ impl EffectInterceptor for ReachFloor {
                             EffectiveDecision::enforcement_deny(
                                 subject.action,
                                 subject.resource,
-                                "reach-floor",
+                                refused.gate(),
                                 refused.to_string(),
                             )
                             .about(subject.reported),
@@ -526,6 +589,9 @@ impl EffectInterceptor for ReachFloor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    use crate::run::broker::ownership_tests::{run, under_identity};
 
     use policy::Policy;
 
@@ -779,6 +845,196 @@ mod tests {
         assert_eq!(verdict, EffectiveVerdict::Deny);
         assert_eq!(recorded[1].cause().as_str(), "no_match");
         assert!(recorded[1].attribution().is_empty());
+    }
+
+    /// Every prohibited host entry receives one final denial, after policy admission.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_refusals_have_one_effective_denial() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_refusals_have_one_effective_denial"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                run(async {
+                    let (root, reach) = fixture();
+                    let home = root
+                        .path()
+                        .canonicalize()
+                        .expect("fixture root")
+                        .join("home");
+                    let existing = home.join("existing");
+                    std::fs::write(&existing, "kept").expect("existing file");
+                    let existing = existing.display().to_string();
+                    let missing = home.join("missing").display().to_string();
+                    for effect in [
+                        EffectAttempt::Filesystem {
+                            path: &missing,
+                            operation: FsOperation::WriteContent {
+                                create: true,
+                                truncate: true,
+                            },
+                        },
+                        EffectAttempt::Filesystem {
+                            path: &missing,
+                            operation: FsOperation::CreateDir,
+                        },
+                        EffectAttempt::FilesystemPair {
+                            from: &existing,
+                            to: &missing,
+                            operation: strands_shell::FsPairOperation::Rename {
+                                destination_exists: false,
+                                destination_is_dir: false,
+                            },
+                        },
+                        EffectAttempt::FilesystemPair {
+                            from: &existing,
+                            to: &existing,
+                            operation: strands_shell::FsPairOperation::Rename {
+                                destination_exists: true,
+                                destination_is_dir: false,
+                            },
+                        },
+                        EffectAttempt::FilesystemPair {
+                            from: &existing,
+                            to: &missing,
+                            operation: strands_shell::FsPairOperation::Symlink,
+                        },
+                    ] {
+                        let (floor, recorder) = recording_floor(
+                            Arc::clone(&reach),
+                            "permit(principal, action, resource);",
+                        );
+                        let error = floor
+                            .intercept(&effect)
+                            .await
+                            .err()
+                            .expect("ownership refusal");
+                        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                        let recorded = recorder.recorded();
+                        let [decision] = recorded.as_slice() else {
+                            panic!("exactly one effective record: {recorded:?}");
+                        };
+                        let (_, _, rule, verdict, reason) = decision.parts();
+                        assert_eq!(rule, &EffectiveRule::Enforcement("ownership-floor"));
+                        assert_eq!(verdict, EffectiveVerdict::Deny);
+                        assert_eq!(decision.cause().as_str(), "enforcement");
+                        assert!(decision.attribution().is_empty());
+                        assert!(reason.is_some_and(|reason| reason.contains("root launch")));
+                    }
+                })
+            },
+        );
+    }
+
+    /// The ownership floor cannot replace a policy denial with its own explanation.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_admission_keeps_policy_first() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_admission_keeps_policy_first"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                run(async {
+                    let (root, reach) = fixture();
+                    let missing = root
+                        .path()
+                        .canonicalize()
+                        .expect("fixture root")
+                        .join("home/missing");
+                    let (floor, recorder) =
+                        recording_floor(reach, "forbid(principal, action, resource);");
+                    assert!(
+                        floor
+                            .intercept(&EffectAttempt::Filesystem {
+                                path: &missing.to_string_lossy(),
+                                operation: FsOperation::WriteContent {
+                                    create: true,
+                                    truncate: true
+                                },
+                            })
+                            .await
+                            .is_err()
+                    );
+                    let recorded = recorder.recorded();
+                    let [decision] = recorded.as_slice() else {
+                        panic!("one policy denial");
+                    };
+                    assert!(matches!(decision.parts().2, EffectiveRule::Policy(_)));
+                    assert_eq!(decision.parts().3, EffectiveVerdict::Deny);
+                    assert_eq!(decision.cause().as_str(), "forbidden");
+                })
+            },
+        );
+    }
+
+    /// A permitted existing-file operation can fail without becoming an ownership denial.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_admission_does_not_reclassify_io_failures() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_admission_does_not_reclassify_io_failures"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                run(async {
+                    let (root, reach) = fixture();
+                    let existing = root
+                        .path()
+                        .canonicalize()
+                        .expect("fixture root")
+                        .join("home/existing");
+                    // A directory is present, although opening it for a content write will fail.
+                    std::fs::create_dir(&existing).expect("an existing directory");
+                    let existing = existing.display().to_string();
+                    for error in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
+                        let (floor, recorder) = recording_floor(
+                            Arc::clone(&reach),
+                            "permit(principal, action, resource);",
+                        );
+                        let permit = floor
+                            .intercept(&EffectAttempt::Filesystem {
+                                path: &existing,
+                                operation: FsOperation::WriteContent {
+                                    create: true,
+                                    truncate: true,
+                                },
+                            })
+                            .await
+                            .expect("an existing-entry operation is admitted");
+                        permit
+                            .record_outcome(EffectOutcome::Kernel(EffectResult::Failed(error)))
+                            .await
+                            .expect("the ordinary failed outcome is recorded");
+                        let recorded = recorder.recorded();
+                        let [decision] = recorded.as_slice() else {
+                            panic!("one effective permit");
+                        };
+                        assert_eq!(decision.parts().3, EffectiveVerdict::Permit);
+                        assert!(matches!(decision.parts().2, EffectiveRule::Policy(_)));
+                    }
+                })
+            },
+        );
     }
 
     /// **The policy interception beneath the floor completes in one poll**, which is what makes the

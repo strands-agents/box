@@ -12,6 +12,7 @@ use policy::{FsResult, RenameDestination, ScriptPermit, ScriptPolicyInterceptor,
 
 use super::clock::{date_today, datetime_now, unix_seconds_now, urandom};
 use crate::run::broker::held::{HeldPath, Unreached};
+use crate::run::broker::ownership;
 use crate::run::broker::reach::Reach;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
@@ -187,6 +188,23 @@ pub(super) fn admit_and_perform(
         }
     };
 
+    if let Err(refused) = approve_ownership(&call, &approved) {
+        if let Some(subject) = subject {
+            interceptor
+                .recorder
+                .record(EffectiveDecision::enforcement_deny(
+                    subject.action,
+                    subject.resource,
+                    "ownership-floor",
+                    refused.to_string(),
+                ));
+        }
+        record(permit, FsResult::Failed);
+        return Err(MontyException::new(
+            ExcType::PermissionError,
+            Some(format!("{spelled}: {refused}")),
+        ));
+    }
     if let Some(subject) = subject {
         interceptor.recorder.record(EffectiveDecision::gate_permit(
             subject.action,
@@ -198,6 +216,35 @@ pub(super) fn admit_and_perform(
     let (result, resume_with) = perform(&call, &approved);
     record(permit, result);
     Ok(resume_with)
+}
+
+/// Classify ownership before recording a permit; the held open still omits O_CREAT as root.
+fn approve_ownership(call: &OsFunctionCall, approved: &Path) -> io::Result<()> {
+    if !ownership::is_root() {
+        return Ok(());
+    }
+    let create_if_missing = match call {
+        OsFunctionCall::Mkdir(_) | OsFunctionCall::Rename(_) => {
+            return ownership::require_nonroot_creation();
+        }
+        OsFunctionCall::WriteText(_)
+        | OsFunctionCall::WriteBytes(_)
+        | OsFunctionCall::AppendText(_)
+        | OsFunctionCall::AppendBytes(_) => true,
+        OsFunctionCall::Open(args) => args.mode.create(),
+        _ => false,
+    };
+    if create_if_missing
+        && matches!(
+            HeldPath::of(approved).and_then(|held| held.stat()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        )
+    {
+        ownership::require_nonroot_creation()?;
+    }
+    // Other errors describe an attempted existing-file operation. A leaf that disappears
+    // after this check likewise fails in HeldPath without creating a replacement.
+    Ok(())
 }
 
 fn mutates_authority(call: &OsFunctionCall) -> bool {
@@ -727,6 +774,24 @@ fn perform_rename(
         }
     };
 
+    if let Err(refused) = approve_ownership(call, &approved_dst) {
+        if let Some(subject) = subject {
+            interceptor
+                .recorder
+                .record(EffectiveDecision::enforcement_deny(
+                    subject.action,
+                    subject.resource,
+                    "ownership-floor",
+                    refused.to_string(),
+                ));
+        }
+        record(permit, FsResult::Failed);
+        return Err(MontyException::new(
+            ExcType::PermissionError,
+            Some(format!("{dst_spelled}: {refused}")),
+        ));
+    }
+
     let (result, resume_with) =
         match rename_approved(&approved_src, &approved_dst, judged_destination) {
             Ok(()) => (
@@ -782,6 +847,9 @@ fn rename_approved(source: &Path, destination: &Path, judged: RenameDestination)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    use crate::run::broker::ownership_tests::under_identity;
 
     use monty_types::unstable::{self, MontyNode};
 
@@ -1225,6 +1293,169 @@ mod tests {
             },
             recorder,
         )
+    }
+
+    /// Creation attempts are refused before any permit or successful outcome is recorded.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_refusals_have_one_effective_denial() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_refusals_have_one_effective_denial"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                let (root, reach) = fixture();
+                let policy = permissive();
+                for call in [
+                    OsFunctionCall::WriteText(PathStringDataArgs {
+                        path: MontyPath::new("missing".to_string()),
+                        data: "x".to_string(),
+                    }),
+                    OsFunctionCall::WriteBytes(PathBytesDataArgs {
+                        path: MontyPath::new("missing".to_string()),
+                        data: vec![1],
+                    }),
+                    OsFunctionCall::AppendText(PathStringDataArgs {
+                        path: MontyPath::new("missing".to_string()),
+                        data: "x".to_string(),
+                    }),
+                    OsFunctionCall::AppendBytes(PathBytesDataArgs {
+                        path: MontyPath::new("missing".to_string()),
+                        data: vec![1],
+                    }),
+                    OsFunctionCall::Mkdir(MkdirCallArgs {
+                        path: MontyPath::new("missing".to_string()),
+                        parents: false,
+                        exist_ok: false,
+                    }),
+                ] {
+                    let (interceptor, recorder) = recording_interceptor(&policy);
+                    let refused = admit_and_perform(&interceptor, call, &reach)
+                        .expect_err("ownership refusal");
+                    assert_eq!(refused.exc_type(), ExcType::PermissionError);
+                    assert!(
+                        refused
+                            .message()
+                            .unwrap_or_default()
+                            .contains("root launch")
+                    );
+                    let recorded = recorder.recorded();
+                    let [decision] = recorded.as_slice() else {
+                        panic!("one effective denial");
+                    };
+                    let (_, _, rule, verdict, reason) = decision.parts();
+                    assert_eq!(rule, &EffectiveRule::Enforcement("ownership-floor"));
+                    assert_eq!(verdict, EffectiveVerdict::Deny);
+                    assert_eq!(decision.cause().as_str(), "enforcement");
+                    assert!(decision.attribution().is_empty());
+                    assert!(reason.is_some_and(|reason| reason.contains("root launch")));
+                    assert!(!home(&root).join("missing").exists());
+                }
+            },
+        );
+    }
+
+    /// The move refusal is both one effective denial and a failed temporal attempt.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_rename_denial_records_failed_history() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_rename_denial_records_failed_history"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                let (root, reach) = fixture();
+                let home = home(&root);
+                std::fs::write(home.join("payload.txt"), "kept").expect("source file");
+                let policy = open_policy(vec![Policy {
+                    origin: PathBuf::from("ownership-history.dw"),
+                    text: rename_history_policy(&home, ""),
+                }]);
+                let (interceptor, recorder) = recording_interceptor(&policy);
+                let refused = admit_and_perform(
+                    &interceptor,
+                    OsFunctionCall::Rename(RenameCallArgs {
+                        src: MontyPath::new("payload.txt".to_string()),
+                        dst: MontyPath::new("protected.txt".to_string()),
+                    }),
+                    &reach,
+                )
+                .expect_err("ownership refusal");
+                assert_eq!(refused.exc_type(), ExcType::PermissionError);
+                assert_rename_history(&policy, &home, Some("error"), false);
+                let recorded = recorder.recorded();
+                let [decision] = recorded.as_slice() else {
+                    panic!("one effective move denial");
+                };
+                assert_eq!(
+                    decision.parts().2,
+                    &EffectiveRule::Enforcement("ownership-floor")
+                );
+                assert_eq!(decision.parts().3, EffectiveVerdict::Deny);
+                assert_eq!(
+                    std::fs::read_to_string(home.join("payload.txt")).unwrap(),
+                    "kept"
+                );
+                assert!(!home.join("protected.txt").exists());
+            },
+        );
+    }
+
+    /// Ordinary I/O failure does not change authorization or become an ownership refusal.
+    #[cfg(all(target_os = "linux", feature = "test-support"))]
+    #[test]
+    fn root_ownership_admission_does_not_reclassify_io_failures() {
+        under_identity(
+            concat!(
+                module_path!(),
+                "::",
+                "root_ownership_admission_does_not_reclassify_io_failures"
+            )
+            .split_once("::")
+            .expect("the crate prefix")
+            .1,
+            true,
+            || {
+                let (root, reach) = fixture();
+                std::fs::create_dir(home(&root).join("existing-dir")).expect("existing directory");
+                let policy = permissive();
+                let (interceptor, recorder) = recording_interceptor(&policy);
+                let result = admit_and_perform(
+                    &interceptor,
+                    OsFunctionCall::WriteText(PathStringDataArgs {
+                        path: MontyPath::new("existing-dir".to_string()),
+                        data: "x".to_string(),
+                    }),
+                    &reach,
+                )
+                .expect("the operation was admitted");
+                assert!(
+                    !matches!(result, ExtFunctionResult::Return(_)),
+                    "the write failed"
+                );
+                let recorded = recorder.recorded();
+                let [decision] = recorded.as_slice() else {
+                    panic!("one effective permit");
+                };
+                assert_eq!(decision.parts().3, EffectiveVerdict::Permit);
+                assert_ne!(
+                    decision.parts().2,
+                    &EffectiveRule::Enforcement("ownership-floor")
+                );
+            },
+        );
     }
 
     /// **A Monty record names the authored policy that decided the effect.** The gate's own label

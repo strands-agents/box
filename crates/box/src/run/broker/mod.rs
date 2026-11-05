@@ -31,6 +31,9 @@ pub(crate) mod host;
 mod kernel;
 pub(crate) mod mcp;
 pub(crate) mod mcp_remote;
+mod ownership;
+#[cfg(all(test, feature = "test-support", target_os = "linux"))]
+mod ownership_tests;
 pub(crate) mod program;
 pub(crate) mod protocol;
 pub(crate) mod python;

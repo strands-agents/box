@@ -10,8 +10,8 @@ Python scripts](../design/monty.md).
 
 ## Example
 
-The workspace is `~/src/project`, and it holds `notes.txt` and an empty `out` directory. The agent
-runs:
+The workspace is `~/src/project`, and it holds `notes.txt` and an empty `out` directory.
+On Linux, Box runs as a non-root account. The agent runs:
 
 ```sh
 python3 -c "from pathlib import Path
@@ -90,6 +90,11 @@ relative path is rooted at the workspace, and a path under the operator's home s
 Each read or write on a handle from `open()` is decided again. `os.stat()` returns the real size
 and file type, with `st_uid` and `st_gid` set to `0` and `st_nlink` set to `1`.
 
+On Linux, run Box as a non-root account for scripts that create files or directories, or rename entries.
+A launch with real or effective user ID zero supports policy-approved reads, writes, and appends to existing files within the reachable paths check.
+Writes and appends to a missing file fail, as do `Path.mkdir()` and `Path.rename()`, even when policy permits them.
+Non-root Linux launches and macOS retain their existing behavior.
+
 These raise an error whatever the policy says:
 
 | Python | Raises | Use instead |
@@ -102,6 +107,7 @@ These raise an error whatever the policy says:
 | The box directory, or the `box.toml` and `policy.dw` this run loaded | `PermissionError: <path>: resolves into trusted Box state, which no policy may open`, or `resolves to an authority source that this run loaded` | A path outside the box directory |
 | A write, deletion, or rename that changes a configured tool program or an enclosing path | `PermissionError` containing `is a configured tool command or its ancestor` | [Update the program between runs](config.md#configured-command-integrity) |
 | A write, deletion, or rename that changes an installed Box program or an enclosing path | `PermissionError` containing `cannot change a trusted Box executable or its path` | [Update the installation between runs](config.md#installation-integrity) |
+| Creation of a file or directory, or `Path.rename()`, on Linux with real or effective user ID zero | `PermissionError` containing `root launch cannot create or move host filesystem entries; run Box as a non-root account` | Run Box as a non-root account |
 
 A rename can also fail if another operation creates its destination while Box checks policy.
 Box raises `PermissionError: <destination>: filesystem identity changed during effect admission`

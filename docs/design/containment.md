@@ -244,9 +244,16 @@ Existing-file writes, read-only directories, and private `/tmp` storage remain a
 Directory writes require a non-root launch, including when an outer container presents the launcher as user ID zero.
 This check uses the launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
 
-Shell and Python filesystem requests run in the trusted process under policy and reach checks.
-They do not use sandbox grants, and permitted file creation retains that process's file identity.
-This startup restriction does not protect later privileged consumers of those files.
+Strands Shell and Monty filesystem requests run in the box's trusted process under policy and the reachable paths check.
+These requests do not use sandbox grants.
+On Linux, Box checks the trusted process's real and effective user IDs before creating or renaming entries in the surrounding OS.
+If either is zero, it refuses file creation, directory creation, symbolic-link creation, and renames, including replacement of an existing destination.
+
+Reads, writes, and appends to existing files remain subject to policy and the reachable paths check.
+A write to an absent file fails rather than creating it.
+The Shell's in-memory filesystem remains writable under policy.
+Non-root Linux launches retain file creation and renames under the existing checks.
+This restriction leaves permitted changes to existing file contents available to later consumers.
 
 macOS retains root file creation inside granted directories.
 Seatbelt path denials do not establish protection against later privileged consumers of those entries.

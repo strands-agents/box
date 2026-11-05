@@ -837,18 +837,23 @@ box_root_path, default_box_directory}`, `BoxRoot::{sited, open}`, `config::selec
 argue it as an addition and note what `ls` cannot mean any more: there is no set of boxes to list, so
 the verb would report on one directory the caller already named.
 
-## Open findings — divergences no decision covers
+## Linux root ownership in trusted interpreters
 
-- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
-  refuses directory write grants, but Shell and Python requests execute in the trusted process.
-  They pass policy and `Reach` checks without becoming containment authorizations.
-  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
-  identity. A root launch therefore retains root ownership on permitted new files.
-  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
-  does not establish closure of the broader ownership finding.
-  The Shell's symlink path still requires source read/write and destination write permission.
-  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
-  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+A Linux process with a root real or effective user ID cannot create or move host entries
+through Shell or Python. `broker::ownership` states this floor; `CallKernel` and `HeldPath`
+enforce it after policy authorization. Policy cannot widen it.
+
+For host writes, remove the creation flag before opening the file. An existence check alone
+leaves a race: the file can disappear before the open and return as a new root-owned file.
+Existing files remain readable, writable, and appendable under policy. Refuse directory and
+symlink creation, and refuse renames even when the destination exists. Moving a root-owned
+entry can introduce it into a shared directory without creating an inode.
+
+Shell's in-memory filesystem remains writable because it creates no host entries. Non-root
+Linux launches and macOS retain their existing behavior. This floor complements the Linux
+sandbox's root directory-write-grant refusal; neither changes the process identity.
+
+## Open findings — divergences no decision covers
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not

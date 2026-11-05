@@ -313,8 +313,11 @@ Private `/tmp` storage remains writable and separate from the surrounding OS.
 The same restriction applies when a container maps a non-root account to user ID zero.
 
 These filesystem lists govern sandbox access.
-Shell and Python requests through Box use separate policy and reach checks in the trusted process.
-This restriction does not change their file ownership or permission to create files.
+Strands Shell and Monty use separate policy and reachable paths checks in the box's trusted process.
+On Linux, either a real or effective user ID of zero also prevents those interpreters from creating or renaming entries in the surrounding OS.
+Reads, writes, and appends to existing files remain subject to policy and the reachable paths check.
+Writes to missing files fail. The Shell's in-memory filesystem remains writable under policy.
+Run Box as a non-root account for file creation and renames through [Strands Shell](shell.md#fs) or [Monty](monty.md#file-operations).
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's

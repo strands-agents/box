@@ -132,7 +132,16 @@ impl Kernel for CallKernel {
         self.backend.new_process()
     }
 
-    async fn open(&self, proc: &mut Process, path: Resolved, flags: OpenFlags) -> io::Result<Fd> {
+    async fn open(
+        &self,
+        proc: &mut Process,
+        path: Resolved,
+        mut flags: OpenFlags,
+    ) -> io::Result<Fd> {
+        let existing_only = flags.create && path.binding().is_some() && super::ownership::is_root();
+        if existing_only {
+            flags.create = false;
+        }
         self.backend.open(proc, path, flags).await
     }
 
@@ -193,14 +202,23 @@ impl Kernel for CallKernel {
     }
 
     async fn create_dir(&self, proc: &Process, path: Resolved) -> io::Result<()> {
+        if path.binding().is_some() {
+            super::ownership::require_nonroot_creation()?;
+        }
         self.backend.create_dir(proc, path).await
     }
 
     async fn rename(&self, proc: &Process, from: Resolved, to: Resolved) -> io::Result<()> {
+        if to.binding().is_some() {
+            super::ownership::require_nonroot_creation()?;
+        }
         self.backend.rename(proc, from, to).await
     }
 
     async fn symlink(&self, proc: &Process, target: &str, link: Resolved) -> io::Result<()> {
+        if link.binding().is_some() {
+            super::ownership::require_nonroot_creation()?;
+        }
         self.backend.symlink(proc, target, link).await
     }
 

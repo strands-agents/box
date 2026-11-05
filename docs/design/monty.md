@@ -195,7 +195,7 @@ error](decisions.md#an-unserviced-suspension-is-a-python-error)).
 
 The diagram above follows the read in this script. The workspace is `~/src/project`, and it holds
 `notes.txt` and an empty `out` directory. `policy.dw` permits `fs:read` under the workspace and
-`fs:write` under `out`.
+`fs:write` under `out`. On Linux, Box runs as a non-root account for this file-creation example.
 
 ```sh
 python3 -c "from pathlib import Path

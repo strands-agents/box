@@ -68,6 +68,12 @@ impl HeldPath {
 
     /// Open the leaf itself, never through a symbolic link.
     pub(super) fn open(&self, flags: libc::c_int) -> io::Result<File> {
+        let existing_only = flags & libc::O_CREAT != 0 && super::ownership::is_root();
+        let flags = if existing_only {
+            flags & !libc::O_CREAT
+        } else {
+            flags
+        };
         open_at(
             self.parent.as_raw_fd(),
             &self.leaf,
@@ -95,6 +101,7 @@ impl HeldPath {
     }
 
     pub(super) fn create_directory(&self) -> io::Result<()> {
+        super::ownership::require_nonroot_creation()?;
         // SAFETY: the parent and the leaf are owned, valid handles.
         checked(unsafe { libc::mkdirat(self.parent.as_raw_fd(), self.leaf.as_ptr(), 0o777) })
     }
@@ -116,6 +123,7 @@ impl HeldPath {
     }
 
     pub(super) fn rename_to(&self, destination: &Self) -> io::Result<()> {
+        super::ownership::require_nonroot_creation()?;
         // SAFETY: both parent and leaf pairs are owned, valid handles.
         checked(unsafe {
             libc::renameat(
@@ -129,6 +137,7 @@ impl HeldPath {
 
     /// Move the leaf only if the destination name is still unbound.
     pub(super) fn rename_to_new(&self, destination: &Self) -> io::Result<()> {
+        super::ownership::require_nonroot_creation()?;
         // SAFETY: both parent and leaf pairs are owned, valid handles.
         #[cfg(target_os = "linux")]
         let result = unsafe {

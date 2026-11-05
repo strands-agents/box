@@ -49,6 +49,7 @@ The Shell implements these, each in place of a program of the same name on the `
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
+This in-memory filesystem remains writable under policy when Box runs as root on Linux.
 
 ## `shell:exec`
 
@@ -94,6 +95,13 @@ A program's filesystem lists bound its own file operations.
 
 Decided once for each file operation that one of the Shell's commands makes, on the path with every
 link resolved.
+
+On Linux, Box refuses creation of files, directories, and symbolic links in the surrounding OS when its real or effective user ID is zero.
+It also refuses renames, including replacement of an existing destination.
+Reads, writes, and appends to existing files still require policy and the reachable paths check to permit them.
+Writes and appends to missing files fail.
+Run Box as a non-root account for creation and rename operations in the surrounding OS.
+Non-root Linux launches and macOS retain their existing behavior.
 
 | Action | `context.input.operation` |
 |---|---|
@@ -216,6 +224,7 @@ refuses makes `curl` exit non-zero.
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 | Any other | The operation would change a configured tool program or an enclosing path. Update the program between runs. | `<path>: is a configured tool command or its ancestor` |
 | Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
+| Any other | Linux root refused creation or rename in the surrounding OS. Run Box as a non-root account. | `root launch cannot create or move host filesystem entries; run Box as a non-root account` |
 
 ## See also
 
