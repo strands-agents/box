@@ -6,7 +6,7 @@ mod support;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use policy::{GovernedBox, Outcome, Policy, PolicyEngine, Principal, Request};
+use policy::{GovernedBox, Outcome, Policy, PolicyEngine, Principal, Request, RequestId};
 
 /// The host every leg of these tests names.
 const HOST: &str = "api.example.test";
@@ -86,14 +86,30 @@ fn probe(policy: &PolicyEngine, port: u16) -> bool {
                 port,
             },
         )
+        .0
         .is_allow()
 }
 
-fn record(policy: &PolicyEngine, address: IpAddr, connected: bool) {
+fn admit(policy: &PolicyEngine, address: IpAddr) -> RequestId {
+    let (decision, request_id) = policy.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &Request::Connect {
+            host: HOST,
+            ip: Some(address),
+            port: 443,
+        },
+    );
+    assert!(decision.is_allow(), "the permit grants the attempt");
+    request_id.expect("the request records")
+}
+
+fn record(policy: &PolicyEngine, request_id: &RequestId, address: IpAddr, connected: bool) {
     policy
         .record(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
+            request_id,
             &Outcome::Connect {
                 host: HOST,
                 port: 443,
@@ -116,7 +132,8 @@ fn a_plain_ipv4_outcome_records_the_ipv4_attribute_and_no_ipv6_form() {
 
     assert!(probe(&policy, port_of("response-ip4")));
     assert!(probe(&policy, port_of("mapped-response")));
-    record(&policy, address, true);
+    let request_id = admit(&policy, address);
+    record(&policy, &request_id, address, true);
     assert!(
         !probe(&policy, port_of("response-ip4")),
         "a rule keyed on `input.ip4` must see the address the response leg records"
@@ -135,7 +152,8 @@ fn a_connect_that_opened_records_both_address_attributes() {
 
     assert!(probe(&policy, port_of("response-ip4")));
     assert!(probe(&policy, port_of("response-ip6")));
-    record(&policy, wire(), true);
+    let request_id = admit(&policy, wire());
+    record(&policy, &request_id, wire(), true);
     assert!(
         !probe(&policy, port_of("response-ip4")),
         "a rule keyed on `input.ip4` must see the carried address the response leg records"
@@ -153,7 +171,8 @@ fn a_connect_that_did_not_open_records_both_address_attributes_on_its_error_leg(
 
     assert!(probe(&policy, port_of("error-ip4")));
     assert!(probe(&policy, port_of("error-ip6")));
-    record(&policy, wire(), false);
+    let request_id = admit(&policy, wire());
+    record(&policy, &request_id, wire(), false);
     assert!(
         !probe(&policy, port_of("error-ip4")),
         "a rule keyed on `input.ip4` must see the carried address the error leg records"
@@ -173,20 +192,7 @@ fn the_request_and_the_outcome_record_one_set_of_attributes() {
     for attribute in ["ip4", "ip6"] {
         assert!(probe(&policy, port_of(&format!("request-{attribute}"))));
     }
-    assert!(
-        policy
-            .decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::Connect {
-                    host: HOST,
-                    ip: Some(wire()),
-                    port: 443,
-                },
-            )
-            .is_allow(),
-        "the permit grants the attempt"
-    );
+    let request_id = admit(&policy, wire());
     for attribute in ["ip4", "ip6"] {
         assert!(
             !probe(&policy, port_of(&format!("request-{attribute}"))),
@@ -197,7 +203,7 @@ fn the_request_and_the_outcome_record_one_set_of_attributes() {
     for attribute in ["ip4", "ip6"] {
         assert!(probe(&policy, port_of(&format!("response-{attribute}"))));
     }
-    record(&policy, wire(), true);
+    record(&policy, &request_id, wire(), true);
     for attribute in ["ip4", "ip6"] {
         assert!(
             !probe(&policy, port_of(&format!("response-{attribute}"))),

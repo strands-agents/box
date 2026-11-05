@@ -810,7 +810,7 @@ mod tests {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(Vec::new(), &history.path().join("dogwood.redb"))
             .expect("policy opens");
-        let no_match = policy.decide(
+        let (no_match, _) = policy.decide(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
             &policy::Request::Connect {
@@ -1314,15 +1314,17 @@ mod tests {
         )
         .expect("policy opens");
         let connect = |host: &'static str| {
-            policy.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &policy::Request::Connect {
-                    host,
-                    ip: None,
-                    port: 443,
-                },
-            )
+            policy
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &policy::Request::Connect {
+                        host,
+                        ip: None,
+                        port: 443,
+                    },
+                )
+                .0
         };
         let allowed = connect("allowed.example");
         let denied = connect("denied.example");
@@ -1383,7 +1385,7 @@ mod tests {
         )
         .expect("policy opens");
         let identifier = |port: u16| {
-            let decision = policy.decide(
+            let (decision, _) = policy.decide(
                 &GovernedBox::assigned("test-box"),
                 &Principal::agent(),
                 &policy::Request::Connect {
