@@ -88,23 +88,24 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-When `limits.shell.timeout` is omitted, configurations without process overrides retain version 21
-when disabled and version 22 when enabled.
-Any explicit process override requires record version 23.
-A configuration where two stdio MCP servers share a program requires record version 24, whatever the setting and the overrides.
-An explicit numeric `limits.shell.timeout` requires record version 25, including a value of `30`.
-Setting `limits.shell.timeout = false` requires record version 26.
-Both versions retain the experimental setting, process overrides, and shared MCP programs.
-Older binaries refuse unsupported versions rather than silently losing the selection.
+When `limits.shell.timeout` is omitted and `file-attributes` is `false`, configurations without
+process overrides retain version 21 when disabled and version 22 when enabled.
+An explicit process override requires record version 23.
+Two stdio MCP servers that share a program require record version 24.
+Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
+An explicit numeric `limits.shell.timeout` requires record version 26, including a value of `30`.
+Setting `limits.shell.timeout = false` requires record version 27.
+When a configuration selects more than one of these features, it uses the highest required version
+and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
-Remove all process overrides and `limits.shell.timeout`, and give each stdio MCP server its own
-program, before returning to a binary that supports only version 21.
-Run once with the native-capable build before returning to an older binary.
-This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, 24, 25,
-or 26 record. To return from version 26 to a build that supports version 25, set a numeric Shell
-timeout and run once with the current build before switching binaries.
+Remove all process overrides and `limits.shell.timeout`, give each stdio MCP server its own
+program, and set `file-attributes` to `false` before returning to a binary that supports only
+version 21. Run once with the current build before switching binaries. This writes a version 21
+record while retaining durable policy history.
+Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, 26, or 27 record.
+To return from version 27 to a build that supports version 26, set a numeric Shell timeout and run
+once with the current build before switching binaries.
 
 ## FAQ
 
@@ -168,7 +169,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, or 26 record that the older binary does not support.
+No, if the box has a version 22, 23, 24, 25, 26, or 27 record that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 
