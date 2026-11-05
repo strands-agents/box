@@ -411,7 +411,7 @@ impl RunContract {
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
-            mcp_servers.is_empty(),
+            mcp_servers.is_empty() && http_mcp.is_empty(),
             &policy_operator()?,
             &self.grammars,
         )?;
@@ -1068,7 +1068,7 @@ pub(crate) fn read_checked_policy(
     let (source, text) = AuthoritySource::read(path, "configuration")?;
     let file = ConfigFile::parse(&text, source.path())?;
     let grammars = grammar::tool_grammars(&file.tool)?;
-    let (mcp_servers, _) = crate::record::config::mcp::partition(&file.mcp)?;
+    let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&file.mcp)?;
     let policy = match file.policy_path(source.path()) {
         Some(policy_path) => {
             let (identity, text) = AuthoritySource::read(&policy_path, "policy")?;
@@ -1079,7 +1079,11 @@ pub(crate) fn read_checked_policy(
         }
         None => None,
     };
-    Ok((policy, mcp_servers.is_empty(), grammars))
+    Ok((
+        policy,
+        mcp_servers.is_empty() && http_mcp.is_empty(),
+        grammars,
+    ))
 }
 
 /// The operator a policy loads for, anchored at the operator's own home.
@@ -2992,6 +2996,70 @@ env = {}
                     .into_request(&root)
                     .is_err(),
                 "configuration without MCP servers must keep strict schema validation"
+            );
+        });
+    }
+
+    #[test]
+    fn http_only_mcp_configuration_defers_complete_schema_validation() {
+        let directory = tempfile::tempdir().expect("configuration directory");
+        crate::test_support::with_operator_home(directory.path(), || {
+            let workspace = directory.path().join("workspace");
+            let box_directory = directory.path().join("box");
+            std::fs::create_dir(&workspace).expect("workspace");
+            std::fs::create_dir(&box_directory).expect("box directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&box_directory, std::fs::Permissions::from_mode(0o700))
+                    .expect("private box directory");
+            }
+            let policy_path = directory.path().join("policy.dw");
+            let config_path = directory.path().join("box.toml");
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == Box::Action::"shell:exec", resource)
+               when { context.input.not_in_the_canonical_schema == "value" };"#,
+            )
+            .expect("write policy");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\
+                 [mcp.alpha]\ntype = \"stdio\"\ncommand = [\"true\"]\n",
+                    box_directory.display().to_string()
+                ),
+            )
+            .expect("write MCP configuration");
+
+            let mut root = crate::record::layout::BoxRoot::open_directory(&box_directory)
+                .expect("box directory opens");
+            root.initialize().expect("box layout initializes");
+            let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
+                .expect("lock opens")
+                .expect("box is free");
+            root.settle_identity().expect("identity settles");
+            RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .expect("MCP configuration defers complete action-schema validation");
+
+            std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
             );
         });
     }
