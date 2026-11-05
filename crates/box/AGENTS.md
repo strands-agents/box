@@ -170,11 +170,15 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **`env` is a key on every `ProcessSpec`, not a fifth input.** It states the literal environment
   the box hands that process, and the box inherits nothing from the host. It grants no reach and
-  cannot claim a name the box owns: `ProcessSpec` refuses every name in
-  `reserved_workload_environment`, so proxy routing, CA trust, `PWD`, `USER`, and every loader hook
-  are out of its reach, and `compose` applies the table *before* every box-owned name as a second
-  line. `HOME` and `PATH` are not reserved, because a process must state where it lives and where it
-  looks for a bare name. `HOME` and `TMPDIR` must each be absolute.
+  cannot claim a name the box owns: `ProcessSpec` refuses every name in `box_owned_environment`, so
+  proxy routing, CA trust, `PWD`, `USER`, and the OTLP exporter are out of its reach, and `compose`
+  applies the table *before* every box-owned name as a second line. It also refuses every
+  `dynamic_loader_environment` name (`LD_*`, `DYLD_*`), because Box's own aliases run in the box. A
+  runtime's own option variable, such as `NODE_OPTIONS` or `PYTHONPATH`, is the operator's literal:
+  it reaches only the process whose table names it, which
+  `box_programs.rs::an_agent_runtime_option_reaches_the_agent_and_no_tool` pins, and `command` can
+  state the same flags. `HOME` and `PATH` are not reserved, because a process must state where it
+  lives and where it looks for a bare name. `HOME` and `TMPDIR` must each be absolute.
   `box_filesystem.rs::no_host_variable_is_inherited` pins the composition.
 
   **There is no declared bind, and the vocabulary is deleted.** `Reach`'s `Bind` and `Mount`
@@ -441,8 +445,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   and is deleted with it.
 - **The workload's environment is composed, never inherited, and box-owned values go last.** So a
   phantom cannot displace proxy routing, CA trust, or the fixed identity.
-  `reserved_workload_environment` is what a credential may not claim; when the box starts setting
-  a new variable, add it there in the same change. **Never forward the operator's `PATH`.**
+  `reserved_workload_environment` is what a credential may not claim: every loader hook and every
+  `box_owned_environment` name. When the box starts setting a new variable, add it to
+  `box_owned_environment` in the same change. **Never forward the operator's `PATH`.**
 - **One exec rule for the command, and one more for each `exec` entry.** The profile permits
   `process-exec` on exactly the resolved command, so a wrapper script resolved from a bare name needs
   an `exec` grant on the interpreter it runs. The spec's own `PATH`, or `/usr/bin:/bin` when it
