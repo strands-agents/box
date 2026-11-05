@@ -158,7 +158,10 @@ the project, and the `list` entry below is what lets the CLI see the names in it
 - **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
   own aliases run in the box, so their loader would read the value too. A runtime's own option
   variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,
-  are the operator's to set, and they reach only the process whose table names them.
+  are the operator's to set, and they reach only the process whose table names them. The `zsh`,
+  `bash`, `sh`, `python3`, and `python` aliases run in Box and do not read them, so a shell or
+  Python option variable reaches a real interpreter that the table runs or spawns, and not an
+  alias call.
 - **`HOME`:** an absolute path. It stays the operator's own home unless `[agent] env.HOME` names
   another directory; the example names `strands-home`, so the CLI reads its settings and writes its
   sessions there. A home inside `box_dir` is refused with ``` `env.HOME` is <path>, which lies in
