@@ -129,7 +129,8 @@ pub(in crate::sources) struct SdkChainProvider {
 
 impl SdkChainProvider {
     /// The process-wide provider, started on first use. One worker and one cache serve every bare
-    /// `aws://` request, so the metadata endpoint is reached at most once per credential lifetime.
+    /// `aws://` request, so an expiring credential (such as an instance-metadata role) is served
+    /// from cache while valid and the metadata endpoint is reached only near expiry.
     pub(in crate::sources) fn shared() -> &'static SdkChainProvider {
         static PROVIDER: OnceLock<SdkChainProvider> = OnceLock::new();
         PROVIDER.get_or_init(|| SdkChainProvider::spawn(Box::new(real_setup)))
@@ -248,7 +249,9 @@ fn worker(receiver: Receiver<Request>, setup: SetupFn) {
 /// first credential forever, even after a tool rewrites `~/.aws/credentials`. A fresh
 /// `ProviderConfig` re-reads the files. The [`RefreshCache`] still short-circuits a credential
 /// inside its expiry buffer, so the rebuild cost lands only on a resolve that is due, which for a
-/// file or environment credential is a cheap re-read. The HTTP/TLS stack is built once and shared.
+/// file or environment credential is a cheap re-read. The HTTP/TLS stack and the region are each
+/// resolved once and reused, so the per-resolve rebuild never runs the SDK region chain, which
+/// would reach instance metadata on every request on a host with no configured region.
 fn real_setup() -> Result<ResolveFn> {
     use aws_smithy_http_client::{Builder, tls};
 
@@ -266,14 +269,18 @@ fn real_setup() -> Result<ResolveFn> {
             tls::rustls_provider::CryptoMode::Ring,
         ))
         .build_https();
+    let region = configured_region();
     Ok(Box::new(move || {
-        // `without_region` carries the Tokio sleep implementation (rt-tokio); the region resolves
-        // from the chain's own region chain. A fresh config re-reads the profile files.
+        // `without_region` carries the Tokio sleep implementation (rt-tokio). A fresh config
+        // re-reads the profile files; `.region` pins the region so the rebuild does not re-run the
+        // region chain (which reaches instance metadata).
         let http_client = http_client.clone();
+        let region = region.clone();
         let chain = runtime.block_on(async {
             let config = aws_config::provider_config::ProviderConfig::without_region()
                 .with_http_client(http_client);
             aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                .region(region)
                 .configure(config)
                 .build()
                 .await
@@ -312,6 +319,31 @@ fn resolve_once(
         },
         expiry,
     ))
+}
+
+/// The region the chain resolves credentials under, read once from the environment.
+///
+/// The signing region comes from the route host, so this region only selects the STS endpoint for
+/// an assume-role or web-identity profile. Reading it here, rather than letting each rebuild run the
+/// SDK region chain, keeps the rebuild off instance metadata.
+fn configured_region() -> aws_config::Region {
+    region_from(
+        non_empty_env("AWS_REGION"),
+        non_empty_env("AWS_DEFAULT_REGION"),
+    )
+}
+
+/// `primary`, else `secondary`, else `us-east-1` (the global STS default).
+fn region_from(primary: Option<String>, secondary: Option<String>) -> aws_config::Region {
+    primary
+        .or(secondary)
+        .map(aws_config::Region::new)
+        .unwrap_or_else(|| aws_config::Region::new("us-east-1"))
+}
+
+/// A set, non-empty environment variable.
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// The full `: `-joined message chain of `error`, so a wrapped cause is not lost.
@@ -475,6 +507,21 @@ mod tests {
             !error.is_soft(),
             "an expired cache with a failed refresh is hard"
         );
+    }
+
+    /// The chain region prefers `AWS_REGION`, then `AWS_DEFAULT_REGION`, then falls back to the
+    /// global `us-east-1`, so the per-resolve rebuild never runs the SDK region chain.
+    #[test]
+    fn region_prefers_primary_then_secondary_then_falls_back() {
+        assert_eq!(
+            region_from(Some("eu-west-1".to_string()), Some("us-west-2".to_string())).as_ref(),
+            "eu-west-1"
+        );
+        assert_eq!(
+            region_from(None, Some("us-west-2".to_string())).as_ref(),
+            "us-west-2"
+        );
+        assert_eq!(region_from(None, None).as_ref(), "us-east-1");
     }
 
     // --- SdkChainProvider (worker + channel; fake resolver, no SDK) ----------
