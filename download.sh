@@ -85,7 +85,10 @@ trap 'exit 143' TERM
 
 log "Downloading SHA256SUMS.txt..."
 fetch "${base_url}/SHA256SUMS.txt" "${tmp}/SHA256SUMS.txt" \
-    || die "failed to download SHA256SUMS.txt"
+    || die "failed to download SHA256SUMS.txt.
+Check connectivity and whether this release is published:
+https://github.com/${REPO}/releases/tag/${VERSION}
+To select another release, set BOX_VERSION=vX.Y.Z."
 
 checksum_for() {
     awk -v a="$1" '{n=$2; sub(/^\*/, "", n); if (n==a) print $1}' "${tmp}/SHA256SUMS.txt"

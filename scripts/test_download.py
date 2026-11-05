@@ -249,6 +249,14 @@ exec "$1" "$2"
         self.assertTrue(all("/download/v9.9.9/" in url for url in self.urls()[1:]))
         self.assertIn(b"fixture v9.9.9", (self.destination / "box").read_bytes())
 
+    def test_missing_release_gives_release_and_version_guidance(self):
+        result = self.assert_refused("failed to download SHA256SUMS.txt")
+        self.assertIn("https://github.com/example/box/releases/tag/v1.2.3", result.stderr)
+        self.assertIn("BOX_VERSION=vX.Y.Z", result.stderr)
+        self.assertEqual(self.urls(), [
+            "https://github.com/example/box/releases/download/v1.2.3/SHA256SUMS.txt",
+        ])
+
     def test_missing_asset_gives_release_and_version_guidance(self):
         self.archive().unlink()
         result = self.assert_refused("could not download")
