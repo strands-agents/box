@@ -233,6 +233,128 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.cloud.resources, {})
         self.assertEqual(self.cloud.bindings, [])
 
+    def test_new_account_visibility_retries_binding_and_instance_creation(self):
+        for name in ("box-demo", "box-timeout", "box-permission", "box-unavailable", "box-forbidden"):
+            with self.subTest(name=name):
+                self.args.name = name
+                receipt = self.directory / name / "deployment.json"
+                attempts = {"binding": 0, "instance": 0}
+                account = f"{self.args.name}-vm@{self.args.project}.iam.gserviceaccount.com"
+
+                def delayed_account(project, *args, **kwargs):
+                    kind = ("binding" if args[:2] == ("projects", "add-iam-policy-binding") else
+                            "instance" if args[:3] == ("compute", "instances", "create") else None)
+                    if kind is not None:
+                        attempts[kind] += 1
+                        if attempts[kind] <= 2:
+                            message = (f"INVALID_ARGUMENT: Service account {account} does not exist." if kind == "binding" else
+                                       f"Could not fetch resource:\n - The service account '{account}' does not exist.")
+                            raise RuntimeError(message)
+                    return self.cloud(project, *args, **kwargs)
+
+                with patch.object(deploy, "gcloud", delayed_account), patch.object(deploy.time, "sleep") as sleep, \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    deploy.deploy(self.args, receipt)
+                state = json.loads(receipt.read_text())
+                self.assertEqual(attempts, {"binding": 3, "instance": 3})
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 1, 2])
+                self.assertEqual(len(state["created"]), 6)
+                self.assertEqual(set(state["created"]), set(Cloud.PREFIXES.values()))
+                self.assertEqual(len(self.cloud.resources), 6)
+                self.assertEqual(len(self.cloud.bindings), 1)
+                deploy.cleanup(state, receipt)
+                self.assertEqual(self.cloud.resources, {})
+                self.assertEqual(self.cloud.bindings, [])
+
+    def test_account_visibility_retry_exhaustion_preserves_cleanup(self):
+        account = f"{self.args.name}-vm@{self.args.project}.iam.gserviceaccount.com"
+        for kind, prefix in (("binding", ("projects", "add-iam-policy-binding")),
+                             ("instance", ("compute", "instances", "create"))):
+            with self.subTest(kind=kind):
+                receipt = self.directory / kind / "deployment.json"
+                attempts = []
+
+                def missing_account(project, *args, **kwargs):
+                    if args[:len(prefix)] == prefix:
+                        attempts.append(args)
+                        raise RuntimeError(f"INVALID_ARGUMENT: Service account {account} does not exist.")
+                    return self.cloud(project, *args, **kwargs)
+
+                with patch.object(deploy, "gcloud", missing_account), patch.object(deploy.time, "sleep") as sleep, \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, "does not exist"):
+                        deploy.deploy(self.args, receipt)
+                waits = [call.args[0] for call in sleep.call_args_list]
+                self.assertEqual(sum(waits), 120)
+                self.assertLessEqual(max(waits), 32)
+                self.assertEqual(len(attempts), len(waits) + 1)
+                state = json.loads(receipt.read_text())
+                self.assertEqual(len(state["created"]), len(set(state["created"])))
+                self.assertEqual(state["created"].count("instance"), int(kind == "instance"))
+                deploy.cleanup(state, receipt)
+                self.assertEqual(self.cloud.resources, {})
+                self.assertEqual(self.cloud.bindings, [])
+                self.assertTrue(json.loads(receipt.read_text())["cleaned_up"])
+
+    def test_account_retries_refuse_unrelated_and_ambiguous_errors(self):
+        account = f"{self.args.name}-vm@{self.args.project}.iam.gserviceaccount.com"
+        errors = [
+            f"PERMISSION_DENIED: Service account {account} does not exist.",
+            f"INVALID_ARGUMENT: Service account {account} does not exist or you lack permission.",
+            "INVALID_ARGUMENT: Service account another@demo-project.iam.gserviceaccount.com does not exist.",
+            "INVALID_ARGUMENT: Network box-demo does not exist.",
+            f"UNAVAILABLE: Service account {account} does not exist.",
+            "DEADLINE_EXCEEDED: The create request may have completed.",
+            "create response unavailable",
+        ]
+        for kind, prefix in (("binding", ("projects", "add-iam-policy-binding")),
+                             ("instance", ("compute", "instances", "create"))):
+            for index, message in enumerate(errors):
+                with self.subTest(kind=kind, message=message):
+                    receipt = self.directory / f"{kind}-{index}" / "deployment.json"
+                    attempts = []
+
+                    def rejected_request(project, *args, **kwargs):
+                        if args[:len(prefix)] == prefix:
+                            attempts.append(args)
+                            raise RuntimeError(message)
+                        return self.cloud(project, *args, **kwargs)
+
+                    with patch.object(deploy, "gcloud", rejected_request), patch.object(deploy.time, "sleep") as sleep:
+                        with self.assertRaises(RuntimeError) as raised:
+                            deploy.deploy(self.args, receipt)
+                    self.assertEqual(str(raised.exception), message)
+                    self.assertEqual(len(attempts), 1)
+                    sleep.assert_not_called()
+                    deploy.cleanup(json.loads(receipt.read_text()), receipt)
+                    self.assertEqual(self.cloud.resources, {})
+                    self.assertEqual(self.cloud.bindings, [])
+
+    def test_an_accepted_request_with_a_lost_response_is_not_retried(self):
+        for kind, prefix in (("binding", ("projects", "add-iam-policy-binding")),
+                             ("instance", ("compute", "instances", "create"))):
+            with self.subTest(kind=kind):
+                receipt = self.directory / f"lost-{kind}" / "deployment.json"
+                attempts = []
+
+                def lost_response(project, *args, **kwargs):
+                    result = self.cloud(project, *args, **kwargs)
+                    if args[:len(prefix)] == prefix:
+                        attempts.append(args)
+                        raise RuntimeError("create response unavailable")
+                    return result
+
+                with patch.object(deploy, "gcloud", lost_response), patch.object(deploy.time, "sleep") as sleep:
+                    with self.assertRaisesRegex(RuntimeError, "response unavailable"):
+                        deploy.deploy(self.args, receipt)
+                self.assertEqual(len(attempts), 1)
+                sleep.assert_not_called()
+                self.assertEqual(len(self.cloud.bindings), 1)
+                self.assertEqual(("instance", self.args.name) in self.cloud.resources, kind == "instance")
+                deploy.cleanup(json.loads(receipt.read_text()), receipt)
+                self.assertEqual(self.cloud.resources, {})
+                self.assertEqual(self.cloud.bindings, [])
+
     def test_cleanup_preserves_other_role_members(self):
         state = self.create()
         other = "serviceAccount:other@demo-project.iam.gserviceaccount.com"

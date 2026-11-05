@@ -33,6 +33,27 @@ def gcloud(project, *arguments, optional=False, raw=False):
     return result.stdout if raw else json.loads(result.stdout or "null")
 
 
+def gcloud_with_account_retry(project, service_account, *arguments):
+    """Retry explicit visibility failures for one newly created service account."""
+    delays = iter((1, 2, 4, 8, 16, 32, 32, 25))
+    missing_account = rf"\bservice account ['\"]?{re.escape(service_account)}['\"]? does not exist\.?\s*$"
+    while True:
+        try:
+            return gcloud(project, *arguments)
+        except RuntimeError as error:
+            message = str(error)
+            context = re.sub(re.escape(service_account), "", message, flags=re.IGNORECASE)
+            if not re.search(missing_account, message, re.IGNORECASE) or re.search(
+                    r"PERMISSION_DENIED|permission|forbidden|unauthorized|access denied|"
+                    r"UNAVAILABLE|DEADLINE_EXCEEDED|timed out|timeout|response unavailable", context, re.IGNORECASE):
+                raise
+            delay = next(delays, None)
+            if delay is None:
+                raise
+            print(f"Waiting {delay} seconds for the new service account to become visible...", file=sys.stderr)
+            time.sleep(delay)
+
+
 def save(path, value, *, exclusive=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".receipt-", dir=path.parent) as directory:
@@ -120,7 +141,10 @@ def deploy(args, receipt):
         state["created"].append(kind)
         save(receipt, state)
         print(f"Creating {kind} in project {args.project}...", flush=True)
-        gcloud(args.project, *command)
+        if kind == "instance":
+            gcloud_with_account_retry(args.project, state["service_account"], *command)
+        else:
+            gcloud(args.project, *command)
 
     create("network", "compute", "networks", "create", args.name,
            "--subnet-mode=custom", "--description", state["marker"])
@@ -132,7 +156,7 @@ def deploy(args, receipt):
     create("role", "iam", "roles", "create", state["role"], "--title=Strands Box example inference",
            "--description", state["marker"], "--stage=GA",
            "--permissions=aiplatform.endpoints.predict")
-    gcloud(args.project, "projects", "add-iam-policy-binding", args.project,
+    gcloud_with_account_retry(args.project, state["service_account"], "projects", "add-iam-policy-binding", args.project,
            "--member=serviceAccount:" + state["service_account"],
            "--role=projects/" + args.project + "/roles/" + state["role"], "--condition=None")
     create("disk", "compute", "disks", "create", args.name + "-boot", "--zone", args.zone,

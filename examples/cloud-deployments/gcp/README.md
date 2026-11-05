@@ -67,6 +67,11 @@ python3 examples/cloud-deployments/gcp/deploy.py deploy \
 ```
 
 The helper enables the Compute Engine, IAM, and Vertex AI APIs.
+
+Google notes that [new service accounts can take 60 seconds or more to become visible](https://cloud.google.com/iam/docs/service-accounts-create).
+The helper retries role binding and VM creation when Google explicitly reports that this account does not exist.
+It uses [increasing retry delays](https://cloud.google.com/iam/docs/retry-strategy), with at most 120 seconds of waiting per operation.
+
 The VM builds Box and runs two checks. Allow time for the source build and the ten-minute cooldown check.
 
 Read progress and save the results:
@@ -123,6 +128,9 @@ It continues if serial output is unavailable, so a stopped VM can still be remov
 It removes the VM, boot disk, network, subnet, service account, custom role, and role binding.
 It keeps local evidence and leaves shared project APIs enabled.
 Use cleanup after a failed deployment too. Keep the deployment receipt until cleanup succeeds.
+
+After cleanup succeeds, choose a new `--name` when you deploy again. Cleanup retains the old receipt and evidence.
+For example, add `--name box-gcp-demo-retry` to the deploy command. Use that name for its status and cleanup commands.
 
 ## Platform and limits
 
