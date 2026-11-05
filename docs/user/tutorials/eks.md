@@ -2,7 +2,7 @@
 
 Amazon Elastic Kubernetes Service (EKS) runs these Box workloads as Kubernetes Jobs.
 Start with the fixed script to check project changes and protected-file refusals.
-Then run Claude Code against a synthetic deployment service to observe Box pause retries after repeated failures.
+Then run Claude Code against a mock deployment service to see Box block retries after repeated failures.
 
 ## Before you start
 
@@ -17,8 +17,9 @@ Authenticate to a container registry that you can push to and your workers can p
 Configure `kubectl` for your cluster. The [EKS connection guide](https://docs.aws.amazon.com/eks/latest/userguide/create-kubeconfig.html) explains that step.
 Cluster and registry usage can incur charges.
 
-The [sample README](../../../examples/cloud-deployments/eks/README.md#tested-configuration) records the tested Box revision and platform versions for the fixed script and boundary exercise.
-Validate the deployment cooldown exercise on your cluster. Use those recorded versions as a tested configuration rather than minimum versions.
+The [sample README](../../../examples/cloud-deployments/eks/README.md#tested-configuration) lists the Box revision, platform versions, and results for each example.
+The coding examples were tested on EKS. The deployment example was tested in a Linux ARM64 container and still needs an EKS run.
+Test the deployment example on your cluster. The recorded versions are tested configurations, not minimum requirements.
 
 ## Build the image
 
@@ -82,9 +83,13 @@ A client error alone does not establish a policy refusal. The verifier also chec
 <a id="run-claude-code"></a>
 ## Run Claude Code
 
-The Claude variant uses live Bedrock model calls and Model Context Protocol (MCP) tools for a synthetic checkout deployment service.
-MCP is the protocol the agent uses to call these tools.
-After three failed deployment responses within five minutes, Box refuses deployment retries for ten minutes while diagnostic requests remain available.
+Claude Code uses an Amazon Bedrock model. Its tools send requests to a mock deployment service for a checkout application.
+The service simulates deployment failures. It does not deploy application code.
+After three failed responses within five minutes, Box blocks deployment retries for ten minutes. This pause is the cooldown.
+The agent can still check deployment status.
+
+The agent uses Model Context Protocol (MCP) to call `deploy_checkout` and `deployment_status`.
+Box checks their HTTP requests before forwarding permitted requests to the mock service.
 Use `us-west-2` and access to the selected `us.anthropic.claude-sonnet-4-6` inference profile.
 The template grants model invocation and `bedrock:CallWithBearerToken` through a dedicated workload role.
 
@@ -117,17 +122,19 @@ If your cluster lacks that addon, use `InstallAgent=true` and a compatible `Agen
 Follow the [Pod Identity setup requirements](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html), including the worker's permission to assume pod identities.
 The trusted controller needs network access to the AWS endpoints used for credentials and model calls.
 
-The runner selects `deployment-cooldown` by default for Claude and records the exercise in `receipt.json`.
-A successful receipt contains `passed: true`.
-The verifier checks three service failures, at least two policy refusals, and a successful diagnostic request after the failures.
-The service returns HTTP 503 for the first three deployment requests and HTTP 201 afterward. Box enforces the cooldown.
+The runner selects `deployment-cooldown` by default for Claude and records the selected example in `receipt.json`.
+A successful result contains `passed: true`.
+The test checks for three failed deployments, at least two blocked retries, and a successful status check after the failures.
+The mock service returns HTTP 503 (service unavailable) for its first three deployment requests and HTTP 201 (created) afterward.
+Box enforces the cooldown.
 
-The agent finishes after those checks. Use the [check without a model](../../../examples/cloud-deployments/eks/claude/README.md#check-cooldown-expiry-without-a-model) to verify expiry.
-That check waits through the full ten-minute cooldown and verifies that Box permits the next deployment.
+The agent finishes after those checks. It does not wait for the cooldown to end.
+Run the [test without a model](../../../examples/cloud-deployments/eks/claude/README.md#check-cooldown-expiry-without-a-model) to check that deployment becomes available again.
+That test waits through the full ten-minute cooldown and checks that Box permits the next deployment request.
 The supplied client makes sequential calls within one box. Requests already in flight and activity in other boxes remain outside this limit.
-Model responses can vary. Inspect the verifier's result separately from the agent's written report.
+Model responses can vary. Check `receipt.json` for the test result, even if the agent reports success.
 
-To run the earlier coding and file-permission exercise, select `boundaries`:
+To run the coding and file-permission example, select `boundaries`:
 
 ```sh
 python3 run.py --mode claude --exercise boundaries \

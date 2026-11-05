@@ -1,39 +1,46 @@
 # Add Claude Code to the EKS example
 
-The Claude image runs Claude Code 2.1.305 against a synthetic checkout deployment service.
-A failed deployment can lead an agent to retry while the service remains unhealthy.
-Box pauses deployment retries for ten minutes after three failed responses within five minutes. Diagnostic requests remain available.
+Run Claude Code against a mock deployment service to see Box stop repeated retries.
+The service simulates failed deployments of a checkout application. It does not deploy application code.
+
+After three failed responses within five minutes, Box blocks further deployment requests for ten minutes.
+This pause is the cooldown. The agent can still check deployment status.
+
+We tested this deployment example in a Linux container on 64-bit Arm (ARM64).
+It still needs testing on Amazon Elastic Kubernetes Service (EKS).
+The [tested configuration](../README.md#tested-configuration) lists the versions and results for each example.
 
 Use the [EKS build guide](../../../../docs/user/tutorials/eks.md#run-claude-code) to create the workload identity and submit the Job.
 Run the Docker and runner commands from the parent `eks/` directory.
 The controller obtains temporary credentials outside the agent's sandbox and gives Box a short-lived Bedrock token.
 Box inserts that token into permitted model requests. The agent receives a substitute value.
 
-## Run the deployment exercise
+<a id="run-the-deployment-exercise"></a>
+## Run the deployment example
 
 Use `--mode claude --exercise deployment-cooldown` with the EKS runner.
-The runner selects this exercise by default in Claude mode.
-The agent calls two Model Context Protocol (MCP) tools: `deploy_checkout` and `deployment_status`.
-MCP is the protocol the agent uses to call these tools.
-Their HTTP requests pass through Box's egress gateway to the synthetic service outside the box.
+The runner selects this example by default in Claude mode. The image pins Claude Code 2.1.305.
+The agent uses Model Context Protocol (MCP) to call two tools:
+`deploy_checkout` requests a deployment, and `deployment_status` checks its status.
+Box checks their HTTP requests before forwarding permitted requests to the mock service outside the box.
 
 | Operation | Expected result |
 | --- | --- |
 | First three `deploy_checkout` calls | Box permits each request. The service returns HTTP 503, a service-unavailable response. |
-| Two further deployment attempts during cooldown | Box refuses both requests before they reach the service. |
-| `deployment_status` during cooldown | Box permits the request. The service returns HTTP 200. |
-| Deployment after cooldown expiry, checked separately below | Box permits the request. The service returns HTTP 201. |
+| Two more deployment attempts during the cooldown | Box blocks both requests before they reach the service. |
+| `deployment_status` during the cooldown | Box permits the status check. The service returns HTTP 200 (success). |
+| Deployment after the cooldown, tested separately below | Box permits the request. The service returns HTTP 201 (created). |
 
-The [policy](deployment_policy.py) uses Dogwood, Box's policy language, to count deployment responses with HTTP status codes from 400 through 599.
-The service returns 503 for its first three deployment requests and 201 afterward. It enforces no cooldown itself.
-A diagnostic response or policy refusal does not extend the cooldown.
+The [policy](deployment_policy.py) uses Dogwood, Box's policy language, to count failed deployment responses (HTTP status codes 400 through 599).
+The mock service returns 503 for its first three deployment requests and 201 afterward. Box enforces the cooldown.
+Status checks and blocked retries do not extend the cooldown. Later failures can start another cooldown.
 
 The supplied client makes one call at a time. Each box has its own policy history.
 The rule does not coordinate limits across boxes or cancel requests already in flight when the third failure arrives.
 
-The live agent finishes after the failures, refused retries, and diagnostics. It does not wait ten minutes or verify expiry.
-Model responses can vary and can fail verification. Inspect `receipt.json` and the checks in `stdout.json` after each run.
-The [tested configuration](../README.md#tested-configuration) distinguishes the existing EKS boundary results from this exercise.
+The agent finishes after Box blocks its retries and permits a status check.
+It does not wait ten minutes or test whether deployment becomes available again.
+Model responses can vary. Read `receipt.json` for the result and `stdout.json` for the individual checks.
 
 ## Check cooldown expiry without a model
 
@@ -46,10 +53,10 @@ python3.12 check_deployment.py --box-binary /absolute/path/to/box \
 ```
 
 This check uses the same HTTP client and policy without model calls or AWS credentials.
-The full check uses a five-minute failure window and ten-minute cooldown.
-It verifies refusals through the cooldown and a successful request after expiry.
+The full check uses a five-minute failure window and a ten-minute cooldown.
+It checks that Box blocks retries during the cooldown and permits a deployment request after the cooldown ends.
 Allow about ten minutes for the full check.
-The command writes its configuration, service receipts, policy decisions, and checks to the evidence directory.
+The command saves its configuration, service request log, Box policy decisions, and test results in the evidence directory.
 A successful run reports `passed: true` and exits with status zero.
 
 For a faster check, use a separate evidence directory:
@@ -60,23 +67,24 @@ python3.12 check_deployment.py --box-binary /absolute/path/to/box \
 ```
 
 Quick mode uses a three-second failure window and nine-second cooldown.
-Its receipt identifies these shorter windows. Use the full check to verify the documented five-minute and ten-minute policy.
+The test report records these shorter durations. Use the full check to test the five-minute and ten-minute policy.
 
-The regression below checks repeated cooldowns against a service that always returns deployment failures.
-It uses a thirty-second failure window and a three-second cooldown.
-A fourth failure must start another cooldown while diagnostics remain available.
+To test whether later failures start another cooldown, run the command below.
+It uses a mock service that always returns deployment failures, a thirty-second failure window, and a three-second cooldown.
+It checks that the fourth and fifth failures each start another cooldown while status checks remain available.
 
 ```sh
 python3.12 test_deployment_policy.py --box-binary /absolute/path/to/box \
   --evidence-dir /absolute/path/to/new-policy-regression-evidence
 ```
 
-Continuous integration runs this regression against a Box build from the pull request.
+Continuous integration runs this test against a Box build from the pull request.
 
-## Run the boundary exercise
+<a id="run-the-boundary-exercise"></a>
+## Run the coding and file-permission example
 
 Pass `--exercise boundaries` to the EKS runner for the coding and file-permission task.
-Its verifier requires 23 checks to pass. That check count applies only to the boundary exercise.
+Its verifier requires 23 checks to pass. That count applies only to this coding example.
 The fixed task does not measure general autonomous coding quality.
 
 To check its file permissions without a model, run:
