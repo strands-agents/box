@@ -231,6 +231,7 @@ def stop(signum, frame):
 signal.signal(signal.SIGTERM, stop)
 pathlib.Path("workload.pid").write_text(str(workload.pid))
 pathlib.Path("workload.group").write_text(str(os.getpgid(workload.pid)))
+pathlib.Path("supervisor.ready").touch()
 if sys.argv[1] == "ready":
     pathlib.Path(".det-ready").touch()
 print("supervisor-output", flush=True)
@@ -293,17 +294,22 @@ fn when_readiness_times_out_then_shutdown_reaps_the_separate_workload() {
     let tmp = tempfile::tempdir().unwrap();
     let (b, _workload) = descendant_fixture(tmp.path(), false);
     let result = catch_unwind(AssertUnwindSafe(|| {
+        // Give the fixture its startup budget while exercising the helper's timeout cleanup.
         b.spawn_meanwhile_with_timeouts(
             "unused",
             &[],
             || panic!("callback must not run"),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
             Duration::from_secs(5),
         );
     }));
     assert!(
         super::super::panic_message(&result.unwrap_err())
             .contains("never touched the ready marker")
+    );
+    assert!(
+        tmp.path().join("supervisor.ready").exists() && tmp.path().join("workload.pid").exists(),
+        "the fixture supervisor did not initialize within its ten-second startup budget"
     );
     assert_shutdown_reaped_workload(tmp.path());
 }

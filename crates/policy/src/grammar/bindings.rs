@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::Grammar;
+use super::{Grammar, ToolGrammars};
 
 /// The most links Box records from one spelling.
 const MAXIMUM_LINKS: usize = 40;
@@ -90,11 +91,11 @@ fn links_from(path: &Path) -> Vec<PathBuf> {
     spellings
 }
 
-/// The installed tool grammars, the (program file, called name) pairs each one covers, and the file
-/// identity that each bound spelling led to when it was bound.
-#[derive(Debug, Default)]
-pub(crate) struct GrammarBindings {
-    grammars: Vec<Grammar>,
+/// The tool grammars an engine installs, the (program file, called name) pairs each one covers, and
+/// the file identity that each bound spelling led to when it was bound.
+#[derive(Debug)]
+pub struct GrammarBindings {
+    grammars: Vec<Arc<Grammar>>,
     bound: BTreeMap<(FileIdentity, String), usize>,
     spellings: BTreeMap<PathBuf, FileIdentity>,
     declared: BTreeSet<(FileIdentity, String)>,
@@ -128,35 +129,16 @@ pub(crate) enum CoverageRefusal {
     ReplacedFile { name: String, program_path: PathBuf },
 }
 
-/// Why Box refuses the installed grammars or one binding.
+/// Why Box refuses to declare a tool.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum BindingRefusal {
-    /// Two installed grammars have one name.
-    #[error("two installed tool grammars are named {grammar:?}")]
-    NamedTwice {
-        /// The name that two grammars have.
-        grammar: String,
-    },
-    /// A binding names a grammar that is not installed.
-    #[error("no installed tool grammar is named {grammar:?}")]
-    UnknownGrammar {
-        /// The name that no installed grammar has.
-        grammar: String,
-    },
-    /// A binding reuses a (program file, called name) pair that another grammar binds.
-    #[error(
-        "{} called as {name:?} is bound to tool grammar {bound:?}, so it cannot also bind {grammar:?}",
-        .program_path.display()
-    )]
-    BoundToAnotherGrammar {
-        /// The canonical path of the program file.
+pub enum BindingRefusal {
+    /// Box cannot read the identity of a declared program file.
+    #[error("cannot read the program file {}: {reason}", .program_path.display())]
+    UnreadableProgram {
+        /// The path the `[tool]` command resolved to.
         program_path: PathBuf,
-        /// The called name.
-        name: String,
-        /// The grammar that binds the pair.
-        bound: String,
-        /// The grammar that the refused binding names.
-        grammar: String,
+        /// What the host reported.
+        reason: String,
     },
 }
 
@@ -169,60 +151,61 @@ pub(crate) fn called_name(spelling: &str) -> &str {
 }
 
 impl GrammarBindings {
-    /// Hold the installed `grammars`, each with a distinct name, and no binding yet.
-    pub(crate) fn new(grammars: Vec<Grammar>) -> Result<Self, BindingRefusal> {
-        let mut seen = BTreeMap::<&str, usize>::new();
-        for grammar in &grammars {
-            *seen.entry(grammar.name.as_str()).or_default() += 1;
+    /// Hold the grammars an engine installs, and no binding yet.
+    pub(crate) fn installed(grammars: &ToolGrammars) -> Self {
+        Self {
+            grammars: grammars
+                .iter()
+                .map(|tool| Arc::clone(tool.grammar()))
+                .collect(),
+            bound: BTreeMap::new(),
+            spellings: BTreeMap::new(),
+            declared: BTreeSet::new(),
         }
-        if let Some((grammar, _)) = seen.into_iter().find(|&(_, count)| count > 1) {
-            return Err(BindingRefusal::NamedTwice {
-                grammar: grammar.to_string(),
-            });
-        }
-        Ok(Self {
-            grammars,
-            ..Self::default()
-        })
     }
 
-    /// Declare that a `[tool]` runs `program` under the name `name`.
-    pub(crate) fn declare(&mut self, program: &ProgramFile, name: impl Into<String>) {
-        self.declared.insert((program.identity, name.into()));
+    /// No installed grammar, so no spawn is covered.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn none() -> Self {
+        Self::installed(&ToolGrammars::default())
     }
 
-    /// Bind the grammar named `grammar` to `program` called by `name`.
-    pub(crate) fn bind(
+    /// Declare that a `[tool]` runs the program file at `program_path` under the name `called`, and
+    /// bind the grammar whose `program` is `called`, when one is installed
+    /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    pub fn declare_tool(
         &mut self,
-        program: &ProgramFile,
-        name: impl Into<String>,
-        grammar: &str,
+        program_path: &Path,
+        called: &str,
     ) -> Result<(), BindingRefusal> {
-        let index = self
+        let program = ProgramFile::read(program_path).map_err(|unreadable| {
+            BindingRefusal::UnreadableProgram {
+                program_path: unreadable.path,
+                reason: unreadable.reason.to_string(),
+            }
+        })?;
+        self.declare(&program, called);
+        Ok(())
+    }
+
+    /// Declare that a `[tool]` runs `program` under the name `called`, and bind the grammar whose
+    /// `program` is `called`, when one is installed.
+    pub(crate) fn declare(&mut self, program: &ProgramFile, called: &str) {
+        let pair = (program.identity, called.to_string());
+        self.declared.insert(pair.clone());
+        let Some(index) = self
             .grammars
             .iter()
-            .position(|installed| installed.name == grammar)
-            .ok_or_else(|| BindingRefusal::UnknownGrammar {
-                grammar: grammar.to_string(),
-            })?;
-        let pair = (program.identity, name.into());
-        if let Some(&bound) = self.bound.get(&pair)
-            && bound != index
-        {
-            return Err(BindingRefusal::BoundToAnotherGrammar {
-                program_path: program.path.clone(),
-                name: pair.1,
-                bound: self.grammars[bound].name.clone(),
-                grammar: grammar.to_string(),
-            });
-        }
+            .position(|grammar| grammar.program == called)
+        else {
+            return;
+        };
         for spelling in &program.spellings {
             self.spellings
                 .entry(spelling.clone())
                 .or_insert(program.identity);
         }
         self.bound.insert(pair, index);
-        Ok(())
     }
 
     /// Whether no grammar binds any file.
@@ -353,30 +336,13 @@ mod tests {
         /// Put a new file at `relative`, as an update does: a rename over the old name.
         fn replace(&self, relative: &str) -> ProgramFile {
             let staged = self.path(&format!("{relative}.new"));
+            // Keep the old inode allocated, as a running process does, so no later file reuses it.
+            std::fs::hard_link(self.path(relative), self.path(&format!("{relative}.old")))
+                .expect("the old build stays allocated");
             std::fs::write(&staged, "a new build").expect("a new program file");
             std::fs::rename(&staged, self.path(relative)).expect("the rename");
             self.program(relative)
         }
-    }
-
-    fn installed(names: &[&str]) -> Vec<Grammar> {
-        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/grammars/valid");
-        names
-            .iter()
-            .map(|name| {
-                Grammar::load(&corpus.join(format!("{name}.grammar.toml"))).expect("a grammar")
-            })
-            .collect()
-    }
-
-    fn version(grammar: &str, version: u32) -> Grammar {
-        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/grammars/valid");
-        let text = std::fs::read_to_string(corpus.join(format!("{grammar}.grammar.toml")))
-            .expect("a grammar");
-        let text = text.replacen("version = 1", &format!("version = {version}"), 1);
-        let grammar = Grammar::parse(&text).expect("a grammar");
-        assert_eq!(grammar.version, version, "{grammar:?} carries the version");
-        grammar
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -401,31 +367,61 @@ mod tests {
     const REFUSED: Option<Answer> = Some(Answer::Undeclared);
 
     #[test]
+    fn a_grammar_binds_every_declared_tool_that_runs_its_program() {
+        let host = Host::new();
+        let system = host.program(GIT);
+        let homebrew = host.program("opt/homebrew/bin/git");
+        let cli = host.program("usr/bin/gh");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]));
+
+        for (program, called) in [(&system, "git"), (&homebrew, "git"), (&cli, "gh")] {
+            bindings
+                .declare_tool(program.path(), called)
+                .expect("the tool declares");
+        }
+
+        assert_eq!(answer(bindings.coverage(Ok(system), "git")), parsed("git"));
+        assert_eq!(
+            answer(bindings.coverage(Ok(homebrew), "git")),
+            parsed("git")
+        );
+        assert_eq!(answer(bindings.coverage(Ok(cli), "gh")), None);
+    }
+
+    #[test]
+    fn an_unreadable_tool_program_is_refused_when_declared() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]));
+
+        let refusal = bindings
+            .declare_tool(&host.path("usr/bin/absent"), "git")
+            .expect_err("the program file is absent");
+
+        assert!(
+            matches!(refusal, BindingRefusal::UnreadableProgram { .. }),
+            "{refusal}"
+        );
+    }
+
+    #[test]
     fn each_spawn_resolves_by_its_program_file_and_its_called_name() {
         let host = Host::new();
-        let mut bindings =
-            GrammarBindings::new(installed(&["git", "cargo"])).expect("distinct grammars");
-        bindings
-            .bind(&host.program(GIT), "git", "git")
-            .expect("git binds");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git", "cargo"]));
+        bindings.declare(&host.program(GIT), "git");
         bindings.declare(&host.program(CARGO), "rustc");
-        bindings
-            .bind(&host.program(CARGO), "cargo", "cargo")
-            .expect("cargo binds");
+        bindings.declare(&host.program(CARGO), "cargo");
         bindings.declare(&host.program(MISE), "node");
         bindings.declare(&host.program(MISE), "npm");
-        bindings
-            .bind(&host.program(MISE), "git", "git")
-            .expect("the mise shim binary binds");
+        bindings.declare(&host.program(MISE), "git");
         for shim in [
             host.program(RENAMED_MISE),
             host.symlink(FIRST_MISE, LINKED_MISE),
         ] {
             bindings.declare(&shim, "node");
-            bindings
-                .bind(&shim, "cargo", "cargo")
-                .expect("cargo binds the shim binary");
+            bindings.declare(&shim, "cargo");
         }
+        let _original_shim = std::fs::File::open(host.path(RENAMED_MISE))
+            .expect("the replaced shim stays open so its file identity cannot be reused");
         host.replace(RENAMED_MISE);
         host.program(SECOND_MISE);
         std::fs::remove_file(host.path(LINKED_MISE)).expect("the old link is removed");
@@ -519,15 +515,10 @@ mod tests {
     #[test]
     fn two_grammars_bind_one_shim_binary_by_two_names() {
         let host = Host::new();
-        let mut bindings =
-            GrammarBindings::new(installed(&["cargo", "aws"])).expect("distinct grammars");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["cargo", "aws"]));
         let mise = host.program(MISE);
-        bindings
-            .bind(&mise, "cargo", "cargo")
-            .expect("cargo binds the shim binary");
-        bindings
-            .bind(&mise, "aws", "aws")
-            .expect("aws binds the same shim binary by another name");
+        bindings.declare(&mise, "cargo");
+        bindings.declare(&mise, "aws");
         bindings.declare(&mise, "node");
 
         for (case, name, expected) in [
@@ -547,7 +538,7 @@ mod tests {
     #[test]
     fn an_undeclared_name_on_a_file_that_no_grammar_binds_stays_a_spawn() {
         let host = Host::new();
-        let mut bindings = GrammarBindings::new(installed(&["git"])).expect("distinct grammars");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]));
         bindings.declare(&host.program(MISE), "node");
 
         for (case, name) in [
@@ -564,11 +555,8 @@ mod tests {
     #[test]
     fn a_link_to_a_bound_file_is_that_file() {
         let host = Host::new();
-        let mut bindings =
-            GrammarBindings::new(installed(&["git", "cargo"])).expect("distinct grammars");
-        bindings
-            .bind(&host.program(GIT), "git", "git")
-            .expect("git binds");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git", "cargo"]));
+        bindings.declare(&host.program(GIT), "git");
         bindings.declare(&host.program(GIT), "git-lfs");
 
         for (case, program) in [
@@ -591,25 +579,15 @@ mod tests {
                     "{case}: {at} called as {name}"
                 );
             }
-            assert_eq!(
-                bindings.bind(&program, "git", "cargo"),
-                Err(BindingRefusal::BoundToAnotherGrammar {
-                    program_path: program.path().to_path_buf(),
-                    name: "git".to_string(),
-                    bound: "git".to_string(),
-                    grammar: "cargo".to_string(),
-                }),
-                "{case}: a second grammar on the bound pair through {at}"
-            );
         }
     }
 
     #[test]
     fn a_replaced_file_at_a_bound_path_is_refused() {
         let host = Host::new();
-        let mut bindings = GrammarBindings::new(installed(&["git"])).expect("distinct grammars");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]));
         let original = host.program(GIT);
-        bindings.bind(&original, "git", "git").expect("git binds");
+        bindings.declare(&original, "git");
         bindings.declare(&original, "git-lfs");
 
         let replaced = host.replace(GIT);
@@ -640,11 +618,9 @@ mod tests {
     #[test]
     fn a_new_file_behind_a_bound_link_is_refused() {
         let host = Host::new();
-        let mut bindings = GrammarBindings::new(installed(&["git"])).expect("distinct grammars");
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]));
         let linked = host.symlink("opt/cellar/git/1/bin/git", "opt/bin/git");
-        bindings
-            .bind(&linked, "git", "git")
-            .expect("git binds through the link");
+        bindings.declare(&linked, "git");
 
         let upgraded = host.program("opt/cellar/git/2/bin/git");
         std::fs::remove_file(host.path("opt/bin/git")).expect("the old link is removed");
@@ -705,144 +681,5 @@ mod tests {
 
         assert_eq!(link.path(), original.path());
         assert_eq!(link.identity, original.identity);
-    }
-
-    #[test]
-    fn a_second_grammar_is_refused_only_on_a_bound_pair() {
-        let host = Host::new();
-        let mut bindings =
-            GrammarBindings::new(installed(&["git", "cargo"])).expect("distinct grammars");
-        bindings
-            .bind(&host.program(GIT), "git", "git")
-            .expect("git binds");
-        bindings
-            .bind(&host.program(CARGO), "cargo", "cargo")
-            .expect("cargo binds");
-        bindings
-            .bind(&host.program(MISE), "git", "git")
-            .expect("the mise shim binary binds");
-
-        let another_grammar = |program: &str, name: &str| {
-            Err(BindingRefusal::BoundToAnotherGrammar {
-                program_path: host.program(program).path().to_path_buf(),
-                name: name.to_string(),
-                bound: "git".to_string(),
-                grammar: "cargo".to_string(),
-            })
-        };
-        for (case, program, name, grammar, expected) in [
-            (
-                "an unknown grammar",
-                CARGO,
-                "rustc",
-                "kubectl",
-                Err(BindingRefusal::UnknownGrammar {
-                    grammar: "kubectl".to_string(),
-                }),
-            ),
-            (
-                "a bound pair, to another grammar",
-                GIT,
-                "git",
-                "cargo",
-                another_grammar(GIT, "git"),
-            ),
-            (
-                "a bound pair on the shim binary, to another grammar",
-                MISE,
-                "git",
-                "cargo",
-                another_grammar(MISE, "git"),
-            ),
-            (
-                "another name on the shim binary, to another grammar",
-                MISE,
-                "cargo",
-                "cargo",
-                Ok(()),
-            ),
-            (
-                "a bound pair, to the same grammar again",
-                GIT,
-                "git",
-                "git",
-                Ok(()),
-            ),
-            (
-                "another name, to the same grammar",
-                GIT,
-                "git-upload-pack",
-                "git",
-                Ok(()),
-            ),
-        ] {
-            assert_eq!(
-                bindings.bind(&host.program(program), name, grammar),
-                expected,
-                "{case}: {program} called as {name}, to {grammar}"
-            );
-        }
-
-        for (case, program, name, expected) in [
-            ("the refused unknown grammar", CARGO, "rustc", REFUSED),
-            ("the refused pair", GIT, "git", parsed("git")),
-            ("the refused pair on the shim", MISE, "git", parsed("git")),
-            (
-                "the accepted name on the shim",
-                MISE,
-                "cargo",
-                parsed("cargo"),
-            ),
-            ("the accepted name", GIT, "git-upload-pack", parsed("git")),
-        ] {
-            assert_eq!(
-                answer(bindings.coverage(Ok(host.program(program)), name)),
-                expected,
-                "{case}: {program} called as {name}"
-            );
-        }
-    }
-
-    #[test]
-    fn two_installed_grammars_with_one_name_are_refused_in_any_order() {
-        let (git, cargo) = (|v| version("git", v), |v| version("cargo", v));
-        for (case, grammars, named) in [
-            ("one version twice", vec![git(1), git(1)], "git"),
-            ("v1, then v2", vec![git(1), git(2)], "git"),
-            ("v2, then v1", vec![git(2), git(1)], "git"),
-            (
-                "around another grammar",
-                vec![git(2), cargo(1), git(1)],
-                "git",
-            ),
-            (
-                "before another grammar",
-                vec![git(1), git(2), cargo(1)],
-                "git",
-            ),
-            (
-                "after another grammar",
-                vec![cargo(1), git(1), git(2)],
-                "git",
-            ),
-            (
-                "two names, cargo first",
-                vec![cargo(1), git(1), git(2), cargo(2)],
-                "cargo",
-            ),
-            (
-                "two names, git first",
-                vec![git(1), git(2), cargo(1), cargo(2)],
-                "cargo",
-            ),
-        ] {
-            assert_eq!(
-                GrammarBindings::new(grammars).map(|_| ()),
-                Err(BindingRefusal::NamedTwice {
-                    grammar: named.to_string()
-                }),
-                "{case}"
-            );
-        }
     }
 }

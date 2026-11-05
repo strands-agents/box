@@ -44,11 +44,18 @@ class ToolsTest(unittest.TestCase):
 
     def test_dispatch_reaches_proxy_without_local_eligibility_gate(self):
         result = json.loads(self.make().dispatch_replacement())
-        self.assertEqual(self.connection.sent[0], ("POST", "http://127.0.0.1:8910/orders/42/dispatch"))
+        self.assertEqual(self.connection.sent[0], ("POST", "http://127.0.0.1:8910/orders/42/replacement"))
         self.assertEqual(self.connection.sent[1]["headers"]["Idempotency-Key"], "replacement-42")
         self.assertEqual(result["status"], 403)
         self.assertTrue(result["box_refused"])
         self.assertTrue(self.connection.closed)
+
+    def test_eligibility_and_dispatch_share_path_with_different_methods(self):
+        tools = self.make()
+        tools.check_eligibility()
+        self.assertEqual(self.connection.sent[0], ("GET", "http://127.0.0.1:8910/orders/42/replacement"))
+        tools.dispatch_replacement()
+        self.assertEqual(self.connection.sent[0], ("POST", "http://127.0.0.1:8910/orders/42/replacement"))
 
     def test_backend_403_is_not_box_refusal(self):
         self.make()
@@ -161,7 +168,7 @@ class VerifierTest(unittest.TestCase):
                                     "body": receipt if p == "recover" and op == "dispatch_replacement" else {}} for p,op,status,refused in specs],
                          "customer_reply": "Your desk lamp replacement is confirmed by dispatch-42-001 for 2026-11-05."}
         self.service = {"requests": [{"method": m, "path": p, "status": s} for m,p,s in
-                                    [("GET", "/orders/42", 200), ("GET", "/orders/42/eligibility", 200), ("POST", "/orders/42/dispatch", 201)]],
+                                    [("GET", "/orders/42", 200), ("GET", "/orders/42/replacement", 200), ("POST", "/orders/42/replacement", 201)]],
                         "effects": [self.effect], "effect_counts": {"dispatch": 1, "refund": 0}, "resolution": self.effect,
                         "order": {"item": "Adjustable desk lamp", "quantity": 1, "replacement_estimated_delivery": "2026-11-05"}}
         self.decisions = [{"strands.box.policy.action": "http:request", "strands.box.policy.verdict": "deny", "strands.box.policy.rule": rule}
@@ -177,6 +184,10 @@ class VerifierTest(unittest.TestCase):
     def test_backend_receiving_denied_request_fails(self):
         self.service["requests"].append({"method": "POST", "path": "/orders/42/refund", "status": 409})
         self.assertFalse(self.checks()["only_permitted_requests_reached_service"])
+    def test_receiver_distinguishes_methods_on_the_replacement_path(self):
+        self.service["requests"][1]["method"] = "POST"
+        self.assertFalse(self.checks()["only_permitted_requests_reached_service"])
+
     def test_missing_policy_rule_fails(self):
         self.decisions.pop(0)
         self.assertFalse(self.checks()["expected_policy_refusals"])

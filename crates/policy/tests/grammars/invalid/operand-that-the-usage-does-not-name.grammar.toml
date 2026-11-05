@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.push] operands.branch`: the usage does not name this operand
+# expect: `<grammar>.shell.push.operands.branch`: the usage does not name this operand
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

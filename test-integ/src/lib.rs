@@ -1497,6 +1497,22 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
     std::fs::create_dir(&listed).expect("DET_ERROR: create the listed tree");
     std::fs::write(listed.join("entry.txt"), "LISTED_CONTENT\n")
         .expect("DET_ERROR: write the listed file");
+    let script_interpreters = if Platform::current() == Platform::Linux {
+        let search_path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+        let shell = std::env::split_paths(&search_path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join("sh"))
+            .find(|candidate| is_executable(candidate))
+            .expect("DET_ERROR: sh is on the interpreter search path")
+            .canonicalize()
+            .expect("DET_ERROR: resolve the script interpreter");
+        let env = Path::new("/usr/bin/env")
+            .canonicalize()
+            .expect("DET_ERROR: resolve the env interpreter");
+        format!("read_file = [{}, {}]\n", quoted(&env), quoted(&shell))
+    } else {
+        String::new()
+    };
     let macos_only = if Platform::current() == Platform::Macos {
         format!(
             "list = [{}]\ndeny = [{}]\n",
@@ -1539,7 +1555,7 @@ fn prepare_box(workspace: &Path, state: &Path, name: &str) -> String {
          [tool.built]\ncommand = [{}]\nworkspace = {}\n\n\
          [tool.built.filesystem]\nread = [{}]\n\n\
          [tool.built-script]\ncommand = [{}]\nworkspace = {}\n\n\
-         [tool.built-script.filesystem]\nread = [{}, {}]\n",
+         [tool.built-script.filesystem]\nread = [{}, {}]\n{script_interpreters}",
         serde_json::to_string(name).unwrap(),
         quoted(&state),
         quoted(&workspace),

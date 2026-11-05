@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `name`: "in" is not an identifier (ASCII letters, digits, and `_`, not first a digit)
+# expect: `<grammar>.name`: "in" is not an identifier (ASCII letters, digits, and `_`, not first a digit)
 # A tool grammar for git: push, commit, and status.
 
 name    = "in"

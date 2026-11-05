@@ -1,4 +1,4 @@
-"""Check Job receipts without connecting to Kubernetes."""
+"""Check generated configuration and Job receipts without cloud connections."""
 import contextlib
 import importlib.util
 import io
@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -19,7 +20,7 @@ spec.loader.exec_module(runner)
 
 class JobReceiptTests(unittest.TestCase):
     def run_case(self, polling_failure=False, workload_passed=True, polling_timeout=False,
-                 diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False):
+                 diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=()):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
@@ -53,7 +54,7 @@ class JobReceiptTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, '{"items": []}', "")
 
         stderr = io.StringIO()
-        with mock.patch.object(sys, "argv", ["run.py", "--image", "example:scripted", "--context", "test-context"]), \
+        with mock.patch.object(sys, "argv", ["run.py", "--image", "example:scripted", "--context", "test-context", *extra_args]), \
                 mock.patch.object(runner.subprocess, "run", side_effect=kubectl), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
             status = runner.main()
@@ -66,6 +67,19 @@ class JobReceiptTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertTrue(receipt["passed"])
         self.assertEqual(receipt["checks"], {"fixture": True})
+        self.assertNotIn("exercise", receipt)
+
+    def test_claude_receipts_identify_the_exercise_even_when_polling_fails(self):
+        for exercise in ("deployment-cooldown", "boundaries"):
+            for polling_failure in (False, True):
+                with self.subTest(exercise=exercise, polling_failure=polling_failure):
+                    status, receipt, _, _ = self.run_case(
+                        polling_failure=polling_failure,
+                        extra_args=("--mode", "claude", "--exercise", exercise,
+                                    "--service-account", "box-example", "--region", "us-west-2"),
+                    )
+                    self.assertEqual(status, 1 if polling_failure else 0)
+                    self.assertEqual(receipt["exercise"], exercise)
 
     def test_failed_workload_is_not_a_successful_job_receipt(self):
         status, receipt, _, _ = self.run_case(workload_passed=False)
@@ -181,6 +195,70 @@ raise SystemExit(module.main())
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 self.assertEqual(sum("create" in call for call in calls), 1)
                 self.assertEqual(len(calls), 4)
+
+
+class JobManifestTests(unittest.TestCase):
+    def render(self, *arguments):
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "argv", ["run.py", "--image", "example:test", "--render", *arguments]), \
+                mock.patch.object(runner.subprocess, "run") as subprocess_run, \
+                contextlib.redirect_stdout(stdout):
+            self.assertEqual(runner.main(), 0)
+        subprocess_run.assert_not_called()
+        return json.loads(stdout.getvalue())["spec"]["template"]["spec"]["containers"][0]
+
+    def test_claude_defaults_to_the_deployment_cooldown_exercise(self):
+        container = self.render("--mode", "claude", "--service-account", "box-example", "--region", "us-west-2")
+        self.assertEqual(container["command"], ["/usr/bin/python3.12"])
+        self.assertEqual(container["args"], ["/demo/main.py", "--exercise", "deployment-cooldown"])
+
+    def test_claude_can_select_the_boundary_exercise(self):
+        container = self.render("--mode", "claude", "--exercise", "boundaries",
+                                "--service-account", "box-example", "--region", "us-west-2")
+        self.assertEqual(container["command"], ["/usr/bin/python3.12"])
+        self.assertEqual(container["args"], ["/demo/main.py", "--exercise", "boundaries"])
+
+    def test_scripted_mode_preserves_the_image_command(self):
+        container = self.render()
+        self.assertNotIn("command", container)
+        self.assertNotIn("args", container)
+        self.assertNotIn("env", container)
+
+    def test_unknown_exercise_fails_before_any_cluster_operation(self):
+        with mock.patch.object(sys, "argv", ["run.py", "--image", "example:test", "--exercise", "unknown"]), \
+                mock.patch.object(runner.subprocess, "run") as subprocess_run, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+            runner.main()
+        self.assertEqual(result.exception.code, 2)
+        subprocess_run.assert_not_called()
+
+
+class ClaudeConfigurationTests(unittest.TestCase):
+    def test_claude_server_grants_its_canonical_interpreter_only_to_the_server(self):
+        source = Path(__file__).with_name("claude") / "claude_runtime.py"
+        spec = importlib.util.spec_from_file_location("tested_claude_runtime", source)
+        runtime = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"AWS_REGION": "us-west-2"}):
+            spec.loader.exec_module(runtime)
+        interpreter = Path(sys.executable).resolve()
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / "python-alias" if linked else interpreter
+                if linked:
+                    executable.symlink_to(interpreter)
+                with mock.patch.object(runtime.sys, "executable", str(executable)):
+                    directory = runtime.ClaudeRuntime("unused-box").configure(
+                        Path("/usr/bin/true"), None, False, exercise=True,
+                        directory=root / "configuration",
+                    )
+                config = tomllib.loads((directory / "box.toml").read_text())
+                header = (directory / "runtime-demo-mcp").read_text().splitlines()[0]
+                self.assertEqual(header, "#!" + str(interpreter))
+                self.assertEqual(config["mcp"]["runtime_demo"]["filesystem"]["read_file"],
+                                 [str(interpreter)])
+                self.assertNotIn(str(interpreter), config["agent"]["filesystem"]["read_file"])
+                self.assertNotIn("exec", config["agent"]["filesystem"])
 
 
 if __name__ == "__main__":

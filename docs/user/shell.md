@@ -131,6 +131,24 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 2. An [`[agent.filesystem] exec`](#agentfilesystem-exec) entry.
 3. Neither: the program is refused with status `126`.
 
+### `limits.shell.timeout`
+
+Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
+`[limits]` to allow ten minutes, or `shell.timeout = false` to disable this limit. See
+[`[limits]`](config.md#limits) for the accepted values.
+
+The allowance covers the full text sent in one call, including multiple commands, pipelines,
+Python called inside the Shell, and programs the Shell starts. Each new call receives a fresh
+allowance. Output leaves its deadline unchanged. The Shell alias waits for the broker's result.
+
+With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
+Calls remain cancellable, and connection and write operations retain their transport timeouts.
+
+Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply to
+Python called inside the Shell, including with `shell.timeout = false`. Synchronous Python
+execution can delay timeout reporting. The direct `python` and `python3` aliases use their
+[own limits](monty.md#limits-and-exit-statuses).
+
 ### `[tool.<name>]`
 
 | Key | Type | Default | Meaning |
@@ -140,6 +158,7 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 | `env` | table | empty | Variables the program receives. |
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
+| `grammar` | table | none | Experimental. The tool grammar for the program. See [`[tool.<name>.grammar]`](config.md#toolnamegrammar). |
 
 A table matches a `shell:spawn` when `program_path` names the command file that Box resolved at startup,
 and its fixed arguments match the leading arguments of the command. When several tables match,
@@ -207,13 +226,17 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
+| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
+| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box: the call deadline exceeds this platform's clock range` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 | Any other | The operation would change a configured tool program or an enclosing path. Update the program between runs. | `<path>: is a configured tool command or its ancestor` |
+| Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
 
 ## See also
 

@@ -4,7 +4,7 @@ Box uses Linux [namespaces](#terms) to give each workload a restricted filesyste
 A system call filter limits the operations that the workload can request from the kernel.
 
 The [platform comparison](platform-differences.md) states configuration differences and startup results.
-The published [getting-started guide](../user/getting-started.md) retains its macOS release scope.
+For installation, see [getting started](../user/getting-started.md#step-1-download-box).
 This page covers ARM64, the 64-bit Arm architecture.
 
 ## Where enforcement runs
@@ -152,7 +152,11 @@ Hard-linked libraries can retain automatic execution access when ownership, perm
 See [writable library grants](../user/config.md#linux-writable-libraries) for the configuration requirements and limits.
 
 This discovery does not inspect script interpreter lines.
-Box handles the declared command's script interpreter chain separately.
+For a declared script command, Box checks each interpreter against that process's original filesystem grants.
+An agent needs `exec` coverage; a tool or local MCP server can reuse its readable grants.
+An earlier interpreter cannot authorize a later interpreter, and system paths have no exemption.
+See [script commands on Linux](../user/config.md#script-commands-on-linux) for the required grants.
+
 An additional script reached through an execution grant can need explicit interpreter and library access.
 A directory `exec` grant does not enumerate every program's dependencies.
 Libraries loaded later can need additional grants.

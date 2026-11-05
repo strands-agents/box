@@ -46,11 +46,19 @@ const SET_BY_BOX: [&str; 11] = [
     "USER",
 ];
 
-const LOADS_CODE: [&str; 16] = [
+const LOADS_CODE: [&str; 5] = [
     "LD_PRELOAD",
     "DYLD_INSERT_LIBRARIES",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "LD_BIND_NOW",
+];
+
+const RUNTIME_OPTIONS: [&str; 14] = [
     "PYTHONPATH",
     "PYTHONSTARTUP",
+    "PYTHONUNBUFFERED",
+    "PYTHONIOENCODING",
     "NODE_OPTIONS",
     "BASH_ENV",
     "ENV",
@@ -61,8 +69,6 @@ const LOADS_CODE: [&str; 16] = [
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
 ];
 
 const INVALID: [&str; 4] = ["", "1ABC", "A-B", "A B"];
@@ -85,16 +91,16 @@ fn a_name_the_box_sets_itself_is_refused_as_set_by_the_box() {
 }
 
 #[test]
-fn a_name_that_makes_a_runtime_load_code_is_refused_as_loading_code() {
+fn a_name_the_dynamic_loader_reads_is_refused_as_loading_code() {
     for name in LOADS_CODE {
         assert_eq!(kind(name, "x"), Some(EnvRefusal::LoadsCode), "{name}");
     }
 }
 
 #[test]
-fn a_member_of_a_loader_family_that_loads_no_code_is_refused_as_loading_code() {
-    for name in ["PYTHONUNBUFFERED", "PYTHONIOENCODING", "LD_BIND_NOW"] {
-        assert_eq!(kind(name, "1"), Some(EnvRefusal::LoadsCode), "{name}");
+fn a_runtime_option_variable_passes() {
+    for name in RUNTIME_OPTIONS {
+        assert_eq!(kind(name, "x"), None, "{name}");
     }
 }
 
@@ -156,6 +162,13 @@ fn the_check_and_a_box_load_refuse_the_same_entries_with_the_same_reason() {
                 load_refusal(table, name, value),
                 None,
                 "[{table}] {name}={value:?}"
+            );
+        }
+        for name in RUNTIME_OPTIONS {
+            assert_eq!(
+                load_refusal(table, name, "x"),
+                None,
+                "[{table}] {name} must load"
             );
         }
     }

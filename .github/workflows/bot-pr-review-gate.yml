@@ -21,7 +21,7 @@ permissions:
 jobs:
   check-bot-reviews:
     name: 2 Approvers for Bots
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 5
     steps:
       - name: Enforce maintainer reviews for bot/agent PRs

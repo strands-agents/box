@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status]`: field "effects" has a name that the schema gives every action
+# expect: `<grammar>.shell.status`: field "effects" has a name that the schema gives every action
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

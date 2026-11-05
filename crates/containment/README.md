@@ -132,7 +132,7 @@ shape:
 | `Metadata` + `Dir` | `file-read-metadata` on the literal and its ancestors, and no data rule at all |
 | `Metadata` + `Root` | ancestor metadata, and `file-read-metadata` over the subtree |
 | `Write` + `File` | `file-write*` on that literal |
-| `Write` + `Root` | `file-write*` over the subtree, and two denies pinning the root's own identity |
+| `Write` + `Root` | Six named write operations over the subtree (contents, create, unlink, extended attributes, mode, and times), and two denies pinning the root's own identity. With `allow_file_attributes`, also `file-write*` over the subtree, with the flags, owner, ACL, and Finder information operations denied again. Linux ignores the builder |
 | `Connect` + `File` | `network-outbound` on that socket path |
 
 **One block per cell, and every cell repeats.** The profile has a placeholder per
@@ -160,15 +160,16 @@ that file's metadata.
 ### The minimum process authority the profile grants
 
 An execute grant renders exactly two lines on one canonical literal, and the
-profile grants the unscoped fork once:
+profile grants the unscoped fork and the signal to its own children once:
 
 ```scheme
 (allow process-exec (literal "<granted executable>"))
 (allow file-read-metadata (literal "<granted executable>"))
 (allow process-fork)
+(allow signal (target children))
 ```
 
-Three properties of that block:
+Four properties of that block:
 
 - **The paired `file-read-metadata` is required, and it is not a widening.** A
   `PATH` search stats each candidate before it execs it. A program that can be
@@ -183,6 +184,12 @@ Three properties of that block:
   processes without limit, and process exhaustion is an unbounded residual.
   Closing it needs a separate resource boundary. Descendants inherit the profile,
   so the fork expands no filesystem, network, or exec authority.
+- **A contained process signals only the children it forked.** A harness stops
+  a child it started; without the grant `kill` refuses with `EPERM`, and a
+  harness that waits for the child to stop waits out its own timeout. A child
+  inherits the profile, so the signal reaches no authority the sender lacks.
+  Every other target stays refused, the box's own trusted process included.
+  `CN-I-03` proves both arms. On Linux the PID namespace already permits it.
 - **The crate recognizes an execute grant by its shape, not by the role the
   caller assigns it.** An alias is
   simply a second execute-only file, so the profile needs no `{{EXECUTABLE_PATH}}`

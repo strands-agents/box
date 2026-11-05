@@ -69,14 +69,21 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux publication and runtime consent stay separate
+### Linux startup does not require an environment opt-in
 
-Linux evaluation requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`, while help and version checks remain available without consent.
+The Linux command line and library validate configuration without an environment opt-in.
+`EXPERIMENTAL_LINUX_SUPPORT` has no effect, including when an existing script sets it to `TRUE`.
+Keeping an extra environment gate would require every caller and test to carry consent separately from configuration.
+The cost is that the variable no longer prevents accidental Linux use.
+Host requirements, process hardening, filesystem grants, and containment checks still apply.
+A missing or invalid configuration still fails before a workload starts.
+
 Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable release without a workflow revert.
 Keeping Linux in preview only would prevent an accepted Linux build from using the stable channel.
-The cost is an explicit platform choice: the release owner must establish Linux readiness before publishing its archive.
+The release owner must establish Linux readiness before publishing its archive.
 Linux previews always include ARM64 Linux and leave the latest stable release unchanged.
-Package availability and runtime consent establish neither filesystem authority nor security acceptance.
+Removing the startup flag does not authorize a release or establish security acceptance.
+The native filesystem policy experiment retains its separate configuration and Cargo feature controls.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -453,11 +460,22 @@ an interpreter is a policy decision, and no credential floor sits beneath it. Se
 The agent gets one exec rule for its own `command` and one more for each `exec` entry, a literal for a
 file and a subpath for a directory, each paired with a metadata read and never with a broad file
 read. The agent never renders the broad exec form, which `the_agent_profile_never_carries_broad_exec`
-pins. Box grants the interpreter chain of the one program it was told to run: it reads the program's
-first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter is itself a
-script, and grants exec at file scope on each hop. Box derives no wider exec closure, so a program
-that runs a helper needs that helper's directory in its own `exec` list. Two residual risks are
-stated. Write and exec on one path is a warning and not a refusal, so a workload that can write a
+pins. On macOS, Box grants the interpreter chain of the one program it was told to run: it reads
+the program's first bytes, follows a `#!` line to the real interpreter, repeats when an interpreter
+is itself a script, and grants exec at file scope on each hop.
+
+On Linux, every interpreter in a declared script's chain needs coverage from the process's original
+filesystem grants. An agent needs `exec` coverage. A declared tool or local server can use its own
+read or writable grants where those grants permit execution. System paths have no exemption.
+Discovery follows `env` and its selected command, and checks every nested script's interpreter.
+Script contents select the programs to check; they grant no authority to those programs.
+Box preserves required path spellings only for files already authorized, without adding a new source
+for library dependency discovery. A tool's readable interpreter can still need separate grants for non-system libraries.
+
+A workload-selected program without a declared tool table needs existing `exec` coverage for its
+interpreter chain on either platform. Box derives no wider exec closure, so a program that runs a
+helper needs that helper's directory in its own `exec` list. Two residual risks are stated.
+Write and exec on one path is a warning and not a refusal, so a workload that can write a
 path it can also run can run code it wrote there. And a granted shell can interpret workload-authored
 input inside its parent's boundary, because native descendants raise no new decision.
 
@@ -1071,22 +1089,29 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 ```
 
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
-### A tool grammar binds on the program file's identity and the name it was called by
+### A tool grammar binds by its program name, on the program file's identity and the name it was called by
 
-Box binds a tool grammar to a pair: the identity of the resolved program file, and the name the program
-was called by. The identity is the file's device and inode on the host, so a hard link or a symbolic
-link to a bound file is that same file, and a link can't route around the binding. A command is
-parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
-enough, because several programs can share one binary. mise runs every tool it manages through one shim
-binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can be links
-to one binary. The name alone isn't enough, because the caller picks the name, so any file called `git`
-would claim the git grammar. Binding on the file identity alone was rejected: it's one lookup, but it
-would read `npm install` through the mise shim binary as a cargo command.
+A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
+A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+`/opt/homebrew/bin/git`, because both run `git`. So one program name has at most one grammar, and Box
+refuses a second grammar with the same `program` and names both tables. Letting two grammars share a
+program was rejected, because both would claim the same tools, and the order of the tables would pick
+which one reads a command.
 
-Several grammars can bind one file, each under its own name. So a cargo grammar binds the mise shim
-binary as `cargo`, and an npm grammar binds the same file as `npm`. Box refuses a second grammar only on
-a pair that another grammar already binds. One grammar per file was rejected, because then only one
-tool that mise manages could have a grammar.
+For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
+name the program was called by. The identity is the file's device and inode on the host, so a hard
+link or a symbolic link to a bound file is that same file, and a link can't route around the binding.
+A command is parsed with a tool grammar only when both halves match one binding. The file identity
+alone isn't enough, because several programs can share one binary. mise runs every tool it manages
+through one shim binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and
+`rustc` can be links to one binary. The name alone isn't enough, because the caller picks the name,
+so any file called `git` would claim the git grammar. Binding on the file identity alone was rejected:
+it's one lookup, but it would read `npm install` through the mise shim binary as a cargo command.
+
+Several grammars can bind one file, each under its own program name. So a cargo grammar binds the
+mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. One grammar per file was
+rejected, because then only one tool that mise manages could have a grammar. A name that a `[tool]`
+declares, but that no grammar's `program` matches, binds no grammar and stays a `shell:spawn`.
 
 Box refuses a spawn of a bound file before any policy decides it, in two cases, and no rule can permit
 either one. The first is a name that no `[tool]` declares, such as `python` through the mise shim
@@ -1095,15 +1120,16 @@ link it bound through, leads to another file now, for example after an update wh
 a new name, a new link, or a new file can't fall back to a `shell:spawn` rule that permits more. Reading an undeclared
 name as the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
 grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator never
-named. A name that a `[tool]` declares with no grammar stays a `shell:spawn`, also after its file is
-replaced, because the operator named it and chose no grammar for it.
+named. A declared name with no grammar stays a `shell:spawn` also after its file is replaced, because
+the operator named it and chose no grammar for it.
 
-The cost has three parts. An operator must declare each name that runs a bound file, or Box refuses
-that name. An update that replaces a bound binary while the box runs refuses that program until the
-box restarts. And a grammar covers a file identity, not a program: a file that no grammar binds stays a
-`shell:spawn` under every name, even a name that no `[tool]` declares. So a copy of a bound binary at
-another path, or the same program reached through an unbound shim binary, is decided by the
-`shell:spawn` rules and not by its grammar.
+The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
+and `/opt/homebrew/bin/git` both read with the one git grammar. An operator must declare each name that
+runs a bound file, or Box refuses that name. An update that replaces a bound binary while the box runs
+refuses that program until the box restarts. And a grammar covers only the files that a `[tool]` runs:
+a file that no grammar binds stays a `shell:spawn` under every name, even a name that no `[tool]`
+declares. So a copy of a bound binary at another path, or the same program reached through an unbound
+shim binary, is decided by the `shell:spawn` rules and not by its grammar.
 
 ## Containment
 
@@ -1200,6 +1226,21 @@ descriptors, and then the command. It is process-agnostic, so nothing about a pa
 inside it. Its exit codes separate three failures: a setup error before the sandbox applies, a failed apply,
 and a contained process whose environment decode or exec failed.
 
+<a id="installed-box-programs-resist-workload-writes"></a>
+### Installed Box programs resist workload writes
+
+Box protects its installed programs from workload changes, even when policy or a filesystem grant permits the write.
+The protected programs are the main executable, containment trampoline, socket-alias image, and the macOS package launcher when present.
+They start containment or route workload operations through it, so they receive the same protection as configured tool programs.
+
+`TrustedInstallation` retains their identities and refuses grants and broker mutations that can
+replace the files or their paths. The cost is that writable development trees must exclude the
+running installation and its verified alternative names. The operator owns initial contents and
+updates between runs, and the public build marker identifies artifact kind rather than authenticating
+contents. `every_process_table_refuses_writes_to_installed_executables_and_their_ancestors` and
+`the_hosted_shell_cannot_rename_installed_executables_or_their_ancestors` pin the direct-grant and
+broker checks.
+
 <a id="the-configuration-crosses-exec-as-digest-bound-json"></a>
 ### The configuration crosses the exec boundary as an inherited descriptor, bound by a digest
 
@@ -1265,7 +1306,10 @@ A caller can load authority before the sandbox applies, for example a certificat
 opened regular file and its canonical path to one of two configuration methods. Both record the device
 and inode, require the file to have one filesystem name, and revalidate path and identity at each
 backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant. A backend
+writable grant; the other grants no access at all, for a file outside every writable grant. A third
+method pins a configured tool's program: it records the link count the file has, and revalidation
+requires that count, because Box accepts a program with several names only when the user that runs
+Box cannot write it through any name. A backend
 that cannot keep both the write subtraction and write-xor-execute may make the file non-executable, so
 a caller must not use write protection to preserve an execute grant.
 
@@ -1285,11 +1329,58 @@ code-level enforcement of no-escalation for an exec grant.
 <a id="write-plus-execute-warns-and-does-not-refuse"></a>
 ### Write plus execute on one path warns, and does not refuse
 
+This rule applies to workload programs outside the files Box protects from writes.
 An operator who names one directory in both a write list and an exec list gets a warning at startup,
 and the box still runs. A refusal was wrong for a real build, which loads and runs what it compiles.
 The warning names the executable and the write grant that reaches it. The cost is stated rather than
 hidden: an operator who reads the warning and continues leaves that program replaceable by the
 workload.
+
+<a id="a-write-root-sets-file-attributes-only-when-selected"></a>
+### A macOS write root sets file times through `utimensat` and `setattrlist` only when `file-attributes` selects it, and then `setattrlist` reaches more
+
+A macOS write root names six write operations. `utimes` works, but `utimensat` and `setattrlist`,
+which `touch` and `cp -p` use, check the bare `file-write*` family, and no rule grants the times
+alone. The top-level `file-attributes = true` adds `file-write*` over each write root of
+every process and denies the four leaf operations that the root withholds (`chflags`, `chown`,
+`acl_set_file`, and Finder information), and every protection and refusal renders after it and
+still wins. The key is part of the workload input: it widens only what the workload's own `write`
+lists allow, and each process discloses it. It is off by default because tenet 1 outranks tenets 3
+and 7, so `touch` fails until the writer of `box.toml` selects it, and a box that runs as root
+[accepts it too](#file-attributes-is-accepted-when-the-box-runs-as-root). Linux accepts the key and renders nothing:
+`utimensat` already works there and Linux keeps refusing set-ID bits and ACLs, so one `box.toml`
+stays portable and the ignored key widens nothing. It is an ordinary key, not an experimental
+feature, because it is opt-in and changes only what the workload already reaches. A record that
+selects it is stored at version 25, or at a newer version when a Shell timeout is explicit,
+so a build that predates the key refuses the box
+(`the_file_attributes_key_cannot_hide_in_a_legacy_record`).
+
+A grant operation for each folder would confine the residual to named folders, but it adds an
+operation to the frozen grant model, and the folders that need times (the workspace and its
+temporary folder) are where the residual matters most. A selection for each process, as
+`native-filesystem-policy` has, would still cover the agent, which sets times itself (`touch`, and
+Kiro CLI's lock refresh), and the agent's workspace is where the residual matters most. So an MCP
+server that needs times only in its own cache gets the switch for every process. The cost is the
+residual.
+`with_the_switch_setattrlist_reaches_the_setuid_bit_the_group_and_the_owner_as_known_residuals`
+pins that `setattrlist` stores a set-ID bit, moves the group, and reaches the owner in a write root,
+and it also stores an ACL, which is measured but not pinned. In a box that runs as root, a
+set-user-ID file that the workload leaves would run as root for whoever starts it, so
+[host-backed effects](#host-backed-effects-refuse-what-a-write-cannot-produce) no longer bound what
+lands on real disk while the switch is on.
+
+<a id="file-attributes-is-accepted-when-the-box-runs-as-root"></a>
+### A box that runs as root accepts `file-attributes`, and the writer of `box.toml` decides
+
+Box applies `file-attributes = true` whatever its effective user ID, and it
+does not refuse the switch at startup when `geteuid()` is 0. A refusal at euid 0 would leave the
+profile unchanged and block the one case where the residual becomes privilege escalation, but it
+takes the choice from the writer of `box.toml`, who knows whether a root box runs work that needs
+file times, and that writer can keep the switch off for a root box until its own user opts in. The
+cost: with the switch on, a box that runs as root can leave a
+set-user-ID file owned by root on real disk, and any local user who reaches that folder can run it
+outside the sandbox. The startup disclosure and
+[file attributes on macOS](../user/security.md#file-attributes-on-macos) are the only guards.
 
 <a id="one-forbidden-path-list-and-each-row-states-its-rule"></a>
 ### One forbidden-path list, and each row states its own match rule
@@ -1521,7 +1612,10 @@ the cage: a set-user-ID bit written there lands on real disk and a process outsi
 and a symlink stores its target as given, so a reader outside the box would follow it. Each refusal is
 a deny-only limit beneath policy. Two costs: a script that runs `chmod 4755`, or links to an absolute
 path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that the file already
-carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
+carried. This does not cover the workload's own syscalls inside the cage: the sandbox refuses a
+`chmod` of a set-ID bit, but `setattrlist` stores one on macOS when
+[`file-attributes`](#a-write-root-sets-file-attributes-only-when-selected) is on, and `symlinkat` is
+not covered.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
 ### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
@@ -1620,10 +1714,12 @@ returns it once, under a size cap. It refuses the interactive frames, so a scrip
 `input()` cannot read. Status 0 means completed, 1 means the script raised, and 125 means a broker
 or interpreter fault. The interpreter stops a script after 2 minutes of execution time, from inside
 its own run loop, so `while True: pass` stops even when the script makes no OS call. Time suspended
-on the host does not count against that budget, so Box bounds the rest: 5 minutes of wall-clock time
-for each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
-MiB for each `os.urandom` call. Each of these bounds is less than the wall clock. A sleep is never
-shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
+on the host does not count against that budget, so Box adds a fixed outer wall-clock bound to direct
+Python calls, plus 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
+MiB for each `os.urandom` call. Python invoked through Shell shares the enclosing call's configured
+deadline and broker grace instead of a separate five-minute allowance. Monty's limits also apply;
+a shorter Shell deadline can expire first, although synchronous execution can delay its check.
+A sleep is never shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
 `a_sleep_longer_than_the_total_raises_at_once` pins. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which
@@ -1814,18 +1910,26 @@ changes the policy facade to buy something the box already owns.
 ## Credentials
 
 <a id="the-workload-holds-a-phantom-and-the-gateway-holds-the-secret"></a>
-### The workload holds a phantom token, and the gateway swaps in the real secret at the bound destination
+### The workload holds one phantom token for each credential, and the gateway swaps in the real secret at that credential's destinations
 
 For an `env://` binding the box mints a random phantom token and places that value, and never the real
 secret, in the workload's environment. The gateway holds the real secret and swaps the phantom for it
-only on a request to the destination the binding names. The phantom is a 256-bit random value, unique
-across the vault. At the bound destination the gateway clears the harness's own credential location
-before it writes the real secret, so the phantom does not ride out beside it. A phantom sent anywhere
-else is not rewritten, and needs no rewrite, because it is random and authenticates nothing: an
-upstream that receives one receives a useless value. The box opens one vault for each route, so an
-ambiguous match inside a vault is refused, and an overlap between two routes is caught at the gateway
-instead: a mutation collision is denied, and a strict phantom check refuses a mismatch. The workload
-can read the phantom and learn that a credential exists.
+only on a request to a destination that one of the credential's routes names. The phantom is a 256-bit
+random value, unique to one credential across the vault. At a bound destination the gateway clears the
+harness's own credential location before it writes the real secret, so the phantom does not ride out
+beside it. A phantom sent anywhere else is not rewritten, and needs no rewrite, because it is random and
+authenticates nothing: an upstream that receives one receives a useless value. The box opens one vault
+for each provisioned variable, and every route that names the variable shares that vault's one phantom,
+because the workload's variable can hold only one value
+(`one_variable_for_two_hosts_provisions_one_phantom_accepted_at_both`). One phantom for each
+destination lost, because the variable kept only the last one and a strict check then refused every
+other host. A caller-chosen phantom lost too, because the vault must mint every phantom itself. The
+cost: a phantom works at every destination of its credential, so it separates credentials, not hosts.
+Routes that name one variable must also share one `phantom_prefix`, and a load refuses a mismatch
+(`one_variable_with_two_phantom_prefixes_is_refused`). An ambiguous match inside a vault is refused,
+and an overlap between two vaults is caught at the gateway instead: a mutation collision is denied, and
+a strict phantom check refuses a mismatch. The workload can read the phantom and learn that a
+credential exists.
 
 <a id="the-box-is-the-credential-boundary"></a>
 ### The box is the credential boundary, so every process in a box gets every route

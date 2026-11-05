@@ -180,9 +180,14 @@ pub(crate) struct Launch<'a> {
 }
 
 /// Build the command that runs the workload under containment.
-pub(crate) fn command(launch: Launch<'_>) -> Result<(Command, Trampoline), BoxError> {
-    let helper = locate()?;
-    let prepared = identity_bound_command(&helper, launch.image_name)?;
+pub(crate) fn command(
+    launch: Launch<'_>,
+    installation: &crate::run::installation::TrustedInstallation,
+) -> Result<(Command, Trampoline), BoxError> {
+    let _preparation = installation.prepare();
+    installation.verify()?;
+    let (helper, opened) = installation.launcher();
+    let prepared = identity_bound_command(helper, opened, launch.image_name)?;
     let mut command = prepared.command;
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
@@ -271,22 +276,13 @@ fn attach_descriptor(
 }
 
 /// Find `strands-box-contain-trampoline` beside the box's own executable, and nowhere else.
-fn locate() -> Result<PathBuf, BoxError> {
+pub(crate) fn locate() -> Result<PathBuf, BoxError> {
     let current =
         crate::run::installation::executable().map_err(|source| TrampolineError::Missing {
             path: PathBuf::from(HELPER_NAME),
             source,
         })?;
-    let directory = current.parent();
-    #[cfg(test)]
-    let directory = directory.map(|directory| {
-        if directory.file_name() == Some(std::ffi::OsStr::new("deps")) {
-            directory.parent().unwrap_or(directory)
-        } else {
-            directory
-        }
-    });
-    let helper = directory
+    let helper = crate::run::installation::directory(&current)
         .map(|directory| directory.join(HELPER_NAME))
         .ok_or_else(|| TrampolineError::NotExecutable {
             path: current.clone(),
@@ -333,13 +329,19 @@ struct PreparedCommand {
 #[cfg(target_os = "linux")]
 fn identity_bound_command(
     path: &Path,
+    executable: &File,
     _image_name: ImageName<'_>,
 ) -> Result<PreparedCommand, BoxError> {
-    let (executable, mut identity_reader) = open_without_following(path)?;
-    validate_opened(path, &executable, &mut identity_reader)?;
+    let mut identity_reader = executable
+        .try_clone()
+        .map_err(|error| TrampolineError::Open {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    validate_opened(path, executable, &mut identity_reader)?;
     // A fresh descriptor for the same open file, above stdio so `Command`'s own
     // stdio setup cannot claim it.
-    let for_exec = duplicate_above_stdio(path, &executable)?;
+    let for_exec = duplicate_above_stdio(path, executable)?;
     let descriptor = for_exec.as_raw_fd();
     let mut command = Command::new(format!("/proc/self/fd/{descriptor}"));
     // SAFETY: the closure only retains an already-open descriptor until exec.
@@ -378,10 +380,16 @@ fn duplicate_above_stdio(path: &Path, executable: &File) -> Result<File, BoxErro
 #[cfg(target_os = "macos")]
 fn identity_bound_command(
     path: &Path,
+    executable: &File,
     image_name: ImageName<'_>,
 ) -> Result<PreparedCommand, BoxError> {
-    let (executable, mut identity_reader) = open_without_following(path)?;
-    validate_opened(path, &executable, &mut identity_reader)?;
+    let mut identity_reader = executable
+        .try_clone()
+        .map_err(|error| TrampolineError::Open {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    validate_opened(path, executable, &mut identity_reader)?;
     let materialize = |reason: String| TrampolineError::Materialize {
         path: path.to_path_buf(),
         reason,
@@ -623,6 +631,7 @@ fn rename_at(
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn identity_bound_command(
     _path: &Path,
+    _executable: &File,
     _image_name: ImageName<'_>,
 ) -> Result<PreparedCommand, BoxError> {
     Err(TrampolineError::UnsupportedPlatform {
@@ -632,7 +641,7 @@ fn identity_bound_command(
 }
 
 /// Open `path` for reading without following a final symlink.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn open_without_following(path: &Path) -> Result<(File, File), TrampolineError> {
     let open = |reason: String| TrampolineError::Open {
         path: path.to_path_buf(),

@@ -212,7 +212,8 @@ when { context.input.server == "runtime_demo" && context.input.method == "tools/
         )
         if exercise:
             server = root / "runtime-demo-mcp"
-            server.write_text("#!" + str(Path(sys.executable).resolve()) + "\n"
+            interpreter = str(Path(sys.executable).resolve())
+            server.write_text("#!" + interpreter + "\n"
                               + (HERE / "mcp_fixture.py").read_text())
             server.chmod(0o755)
             data = root / "mcp-data"
@@ -225,6 +226,7 @@ when { context.input.server == "runtime_demo" && context.input.method == "tools/
                 f'command={json.dumps(["runtime-demo-mcp", str(data)])}\n'
                 f'workspace={json.dumps(str(data))}\n'
                 f'[mcp.runtime_demo.filesystem]\nread={json.dumps(reads)}\n'
+                f'read_file={json.dumps([interpreter])}\n'
                 f'write={json.dumps([str(data)])}\n'
             )
         (root / "box.toml").write_text(config)
@@ -247,7 +249,7 @@ when { context.input.server == "runtime_demo" && context.input.method == "tools/
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             environment = {
                 "HOME": str(Path.home()), "PATH": (str(root) + ":" if exercise else "") + "/usr/bin:/bin",
-                "LANG": "C.UTF-8",
+                "LANG": "C.UTF-8", "EXPERIMENTAL_LINUX_SUPPORT": "TRUE",
                 "AWS_BEARER_TOKEN_BEDROCK": token,
                 "TERM": "xterm-256color", "COLORTERM": "truecolor",
             }

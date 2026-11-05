@@ -73,7 +73,7 @@ jobs:
   # ── Resolve the commit, validate the version, refuse a bad bump ─────────
   scan:
     name: Resolve SHA and validate version
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -247,7 +247,7 @@ jobs:
       ref: ${{ needs.scan.outputs.release_sha }}
 
   build:
-    name: Build ${{ matrix.target.triple }}
+    name: Build ${{ matrix.target.label }}
     needs: scan
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 45
@@ -259,10 +259,13 @@ jobs:
         target:
           # x86_64 Linux remains a build artifact until its separate qualification.
           - triple: x86_64-unknown-linux-gnu
+            label: Linux x86_64
             runner: ubuntu-22.04
           - triple: aarch64-unknown-linux-gnu
+            label: Linux ARM64
             runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
+            label: macOS ARM64
             runner: xcode-27
     steps:
       - name: Checkout code
@@ -374,13 +377,17 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
         run: |
           set -euo pipefail
-          # Check the selected source's consent behavior before using its smoke script.
+          # Reject a selected source that still refuses startup without an opt-in.
           if output=$(env -u EXPERIMENTAL_LINUX_SUPPORT stage/box-core/box run \
-            --config "$RUNNER_TEMP/missing-linux-preview.toml" 2>&1); then
-            echo "::error::Linux startup did not require explicit consent."
+            --config "$RUNNER_TEMP/missing-linux-config.toml" 2>&1); then
+            echo "::error::Linux startup accepted a missing configuration."
             exit 1
           fi
-          grep -Fq 'EXPERIMENTAL_LINUX_SUPPORT=TRUE' <<< "$output"
+          if ! grep -Fq "$RUNNER_TEMP/missing-linux-config.toml" <<< "$output"; then
+            echo "::error::Linux startup did not reach configuration validation without an opt-in."
+            printf '%s\n' "$output"
+            exit 1
+          fi
           # This named profile permits user namespaces for the disposable test container.
           cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
           abi <abi/4.0>,
@@ -563,7 +570,7 @@ jobs:
       always() && needs.scan.result == 'success' && needs.build.result == 'success' &&
       ((inputs.dry_run == true && inputs.sign_macos != true) ||
        (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -603,7 +610,7 @@ jobs:
           fi
           cp "$darwin" release/
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            cp "$linux" release/
+            cp "$linux" "release/box-${NEW_TAG}-linux-arm64.tar.gz"
           fi
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
@@ -647,7 +654,7 @@ jobs:
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
           release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            release_assets+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+            release_assets+=("box-${NEW_TAG}-linux-arm64.tar.gz")
           fi
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
@@ -693,7 +700,7 @@ jobs:
         (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
       needs.build.result == 'success' &&
       needs.inspect.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 30
     environment:
       # Configure reviewers + main-only deployment branches in repo settings.
@@ -726,7 +733,7 @@ jobs:
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: write
@@ -782,17 +789,15 @@ jobs:
           cat >> body.md <<EOF
 
           Package availability does not establish security acceptance.
-          Linux startup requires explicit opt-in with \`EXPERIMENTAL_LINUX_SUPPORT=TRUE\`.
-
-          For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
+          For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-linux-arm64.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
           \`\`\`sh
-          awk '\$2 == "box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"' SHA256SUMS.txt > box-linux.sha256 &&
+          awk '\$2 == "box-${NEW_TAG}-linux-arm64.tar.gz"' SHA256SUMS.txt > box-linux.sha256 &&
             test -s box-linux.sha256 &&
             sha256sum --check box-linux.sha256 &&
             mkdir -p box-core &&
-            tar -C box-core -xzf box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz &&
-            EXPERIMENTAL_LINUX_SUPPORT=TRUE ./box-core/box run --config ./box.toml
+            tar -C box-core -xzf box-${NEW_TAG}-linux-arm64.tar.gz &&
+            ./box-core/box run --config ./box.toml
           \`\`\`
 
           The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
@@ -857,7 +862,7 @@ jobs:
       inputs.dry_run != true &&
       inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -875,7 +880,7 @@ jobs:
             "SHA256SUMS.txt"
           )
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            expected+=("box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz")
+            expected+=("box-${NEW_TAG}-linux-arm64.tar.gz")
           fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
