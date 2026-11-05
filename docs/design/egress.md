@@ -160,6 +160,7 @@ a request that does.
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
 
 ### The placeholder swap
 
@@ -209,6 +210,16 @@ the request with SigV4. It reads the service and the region from the host, for e
 and `us-west-2` from `bedrock-runtime.us-west-2.amazonaws.com`, and refuses a host it can't read
 them from. The process gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so
 an AWS SDK builds its request, and the gateway replaces the signature.
+
+`aws://PROFILE` resolves the named profile's static keys. A bare `aws://` instead resolves the AWS
+SDK default credential provider chain — the host's ambient identity — which the credentials crate
+owns: it links the SDK and drives the async chain on a worker thread. That chain reads
+`credential_process`, a program the trusted process executes, so a workload with write access to
+`~/.aws` can run its own program outside the sandbox. The box warns on every ambient sign; the
+shipped box has no setting to refuse the bare form, so the mitigation is a named profile or keeping
+`~/.aws` unwritable by the workload. See
+[Credentials](credentials.md#signed-routes-aws) and
+[Limits of Box's protection](limitations.md#how-access-choices-change-the-risk).
 
 ## Example: a GitHub API request
 

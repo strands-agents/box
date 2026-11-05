@@ -164,8 +164,10 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   `split_once("://")`. A bare `split_once` signs with the ambient identity, makes
   `AmbientFallbackPolicy::Deny` unreachable, and emits a lying `AwsAcquisition::Profile(..)`. The
   `Structured` arm carries the mirror check on `source`.
-- `EnvAwsProvider` errors hard on `Some(profile)`; it reads only `AWS_*`, and
-  `AwsAcquisition::warning()` returns `None` there, so a substitution would be invisible.
+- The no-profile branch resolves the SDK default chain (`SdkChainProvider`), not a named profile;
+  `provide(Some(_))` on that provider is a hard error. `AwsAcquisition::DefaultChain` carries the
+  ambient warning, and `Profile(_)` carries none, so the bare form is never silent. `EnvAwsProvider`
+  is gone — the SDK chain reads the environment first, so it subsumes the old ambient-env provider.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_policy`, never `AwsSource::new()`, or `require_scoped_aws_profile` is unreachable.
 - Derive the signing name with `derive_service_region`. `bedrock-runtime` and
@@ -188,7 +190,7 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 
 - `env://` refuses every `DENYLIST` name (`src/sources/env.rs`), case-insensitively and hard, so a
   manifest cannot exfiltrate ambient credentials or process-injection state. It is a floor, not a
-  catalogue. `EnvAwsProvider` reads those `AWS_*` names on purpose.
+  catalogue. A bare `aws://` default chain reads those `AWS_*` names on purpose, through the SDK.
 - Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/define/config.rs`), which
   governs what a credential may claim in the workload environment and refuses at `create`.
 - `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard.

@@ -276,7 +276,7 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.ref` | required | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
@@ -307,17 +307,26 @@ every phantom and every signing placeholder the box provisions. No table selects
 every process shares one gateway and the gateway cannot tell which process made a call. The box is
 the credential boundary: if a process must not get a credential, put it in another box.
 
-An `aws://` credential is a **signed route**. The box resolves the profile on the trusted side and
+An `aws://` credential is a **signed route**. The box resolves the identity on the trusted side and
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
+and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
+refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
+that instead.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
+**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
+ambient identity across the environment, the profile files (including `credential_process`), web
+identity, the container endpoint, and instance metadata. The credentials crate now links the SDK and
+an HTTP/TLS stack to drive it. The bare form signs with whatever identity the host carries, so the
+box warns on every signed request. Because the chain reads `credential_process` — a program the
+trusted `run` process executes outside containment — a bare `aws://` is a remote-code-execution path
+when a filesystem list grants the workload write access to `~/.aws`. The shipped box has no setting
+that refuses a bare `aws://`, so the only mitigation is to grant write to `~/.aws` to trusted writers
+only, or to write `aws://profile` instead (a named profile does not read `credential_process`). The
+credentials crate's `require_scoped_aws_profile` vault switch refuses the bare form, but no `box.toml`
+key exposes it yet.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.

@@ -785,9 +785,11 @@ as a bound name, and on a host bind a rename onto a symlink is refused beneath p
 There is no credential action in the schema. An operator declares a binding in `box.toml`, and that
 binding says only which secret is attached to a request the policy already permits. Reachability stays
 the policy's decision alone, so a binding never opens a destination, and the two must name the same
-host. There is no spelling for ambient credentials: an empty `aws://` body does not parse, because
-silent pickup of whatever credentials sit in the environment is exactly what a zero-trust box must not
-do. A secret rides TLS only; see [a secret rides only TLS](#a-secret-rides-only-tls).
+host. A bare `aws://` body parses and names the AWS default credential provider chain, so a binding
+can sign with the host's ambient identity; this is not silent, because the box warns on every such
+request and records a distinct default-chain acquisition. See
+[a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
+A secret rides TLS only; see [a secret rides only TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 ### A temporal rule rides the same closed context as an ordinary rule
@@ -1787,14 +1789,31 @@ refusal one phase later, so the operator learns about a broken config after the 
 delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
-### A credential provider refuses an identity it cannot honour, instead of substituting one
+### A named AWS profile resolves static keys, and a bare aws:// resolves the full chain
 
-The environment-backed AWS provider reads the ambient `AWS_*` variables, so it cannot resolve a named
-profile. It never falls back to the ambient identity, because a credential that is not the one the operator
-named is a silent authority change. A named profile resolves through the AWS profile chain, with one
-exception refused by name: `credential_process`. Honouring it would make the box's trusted process run
-a program that `~/.aws/config` names, and no floor defends that file, so it is the
-never-run-a-workload-named-program rule applied to credentials.
+`aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
+`credential_process`, SSO, or assume-role, because each needs an STS call the static-key path does
+not make, and a credential that is not the one the operator named is a silent authority change. A
+bare `aws://` instead resolves the AWS SDK default credential provider chain, which does honour
+`credential_process` and the host's ambient identity; see
+[a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
+The cost of that path is stated there.
+
+<a id="a-bare-aws-resolves-the-default-credential-chain"></a>
+### A bare aws:// resolves the AWS SDK default credential provider chain
+
+A bare `aws://` reference, with no profile, resolves the AWS SDK default credential provider chain:
+environment, profile files (including `credential_process`), web identity, the container endpoint,
+then instance metadata. The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a
+current-thread runtime on a dedicated worker thread), because the crate that already resolves
+`aws://PROFILE` owns every AWS credential path; the box crate injecting a resolver across a seam was
+rejected for splitting that ownership. The reserved tokens `aws://@instance-role` and
+`aws://@container-role`, and `aws://default`, were rejected, the last because `default` is a real
+profile and the overlap would be a silent identity substitution. The cost: the SDK, a runtime, and a
+TLS stack link into the one process that holds every resolved plaintext; and a workload with write
+access to `~/.aws` can name a `credential_process` program the trusted process runs outside the
+sandbox, which is remote code execution. The shipped box exposes no setting that refuses a bare
+`aws://`, so the mitigation is a named profile or keeping `~/.aws` unwritable.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

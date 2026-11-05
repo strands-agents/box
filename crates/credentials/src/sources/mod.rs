@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::{CredentialError, Locator, Result, Secret};
 
 mod aws;
+mod aws_chain;
 mod aws_profile;
 mod credsd;
 mod env;

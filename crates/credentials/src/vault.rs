@@ -285,6 +285,8 @@ impl Vault {
             "strands-box credentials [{tenant}]: {message}",
             tenant = self.tenant
         );
+        #[cfg(test)]
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
@@ -342,6 +344,20 @@ impl Vault {
             .find(|(pattern, _)| pattern.matches(dest))
             .map(|(_, value)| value)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Warnings `Vault::warn` emitted on this thread, so a test can observe a per-request warning
+    /// without capturing stderr. Drained by [`drain_captured_warnings`].
+    static CAPTURED_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take and clear the warnings captured on this thread (test-only).
+#[cfg(test)]
+pub(crate) fn drain_captured_warnings() -> Vec<String> {
+    CAPTURED_WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
 }
 
 #[cfg(test)]

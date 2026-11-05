@@ -97,10 +97,19 @@ names the route.
 hex characters. `box.toml` calls it a phantom. The workload can read it, and so learn that a
 credential exists, but the value authenticates nothing anywhere.
 
-**A named AWS profile is the only identity.** An `aws://` route never falls back to the ambient
-`AWS_*` variables, and it refuses a profile that uses `credential_process`, because that would make
-the box's trusted process run a program a configuration file names
-([a provider refuses an identity it can't honour](./decisions.md#a-provider-refuses-an-identity-it-cannot-honour)).
+**An `aws://` route has two forms.** `aws://PROFILE` reads the static keys of one named profile and
+nothing else: it never runs `credential_process`, SSO, or assume-role, because each needs an STS
+call. A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain — the
+environment, the profile files (including `credential_process`), web identity, the container
+endpoint, then instance metadata — the same chain the AWS CLI uses
+([a bare aws:// resolves the default credential chain](./decisions.md#a-bare-aws-resolves-the-default-credential-chain)).
+The credentials crate owns the SDK, the worker thread that drives the async chain, and a refresh
+cache; the chain's resolution lives beside the profile path in one crate. The bare form signs with the host's **ambient**
+identity, so the box warns on every request it signs that way. The default chain reading
+`credential_process` is a remote-code-execution path when `~/.aws` is writable by the workload; see
+[Limits of Box's protection](./limitations.md#how-access-choices-change-the-risk). The shipped box
+offers no setting that refuses a bare `aws://`; prefer `aws://PROFILE` to pin the identity, and keep
+`~/.aws` unwritable by the workload.
 
 ## On each request
 
@@ -212,8 +221,17 @@ from the host, which must end in `.amazonaws.com` or `.api.aws`, and refuses a h
 The process gets placeholder AWS keys so that an AWS SDK builds and signs its own request. The
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
-**`aws://` signs with static keys.** The vault resolves the profile's access key and secret key
-on each request.
+**`aws://PROFILE` signs with static keys.** The vault resolves the profile's access key and secret
+key on each request.
+
+**A bare `aws://` signs with the default chain.** The vault resolves the AWS SDK default credential
+provider chain on a dedicated worker thread, because the chain is async and the signing path is
+synchronous. The worker owns a current-thread runtime and a refresh cache: it serves cached
+credentials while valid, resolves again near expiry, and on a failed refresh serves still-valid
+cached credentials rather than dropping them. The resolved credentials are the host's ambient
+identity, so the box warns on each signed request. The crate's `require_scoped_aws_profile` vault
+switch refuses the bare form, but no `box.toml` key exposes it, so the shipped box always allows the
+bare form with a warning.
 
 <a id="credentials-in-a-leaf-box"></a>
 

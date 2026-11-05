@@ -1,7 +1,5 @@
 //! AWS SigV4 signing and the AWS credential source.
 
-use std::env;
-
 use zeroize::Zeroizing;
 
 use crate::{AwsSessionCredentials, CredentialError, Locator, Result};
@@ -417,20 +415,23 @@ pub(crate) enum AwsAcquisition {
     /// Credentials came from the named `credsd` environment. Never an ambient fallback, so it
     /// carries no warning.
     Credsd(String),
-    /// No scoped `profile` was declared; the ambient provider chain was used (allowed-with-warning).
-    AmbientFallback,
+    /// No scoped `profile` was declared; the AWS SDK default credential provider chain was resolved
+    /// (allowed-with-warning). The chain reads the host's ambient identity — environment, profile
+    /// files, web identity, the container endpoint, then instance metadata.
+    DefaultChain,
 }
 
 impl AwsAcquisition {
     /// The operator-facing warning for this acquisition, if any. Present only for
-    /// [`AmbientFallback`](Self::AmbientFallback) — a scoped profile or a `credsd` environment names
-    /// its identity, so neither needs a warning.
+    /// [`DefaultChain`](Self::DefaultChain) — a scoped profile or a `credsd` environment names its
+    /// identity, so neither needs a warning.
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
-            AwsAcquisition::AmbientFallback => Some(
-                "AWS ambient credential chain used (no scoped profile declared); \
-                 prefer a declared scoped identity to shrink blast radius",
+            AwsAcquisition::DefaultChain => Some(
+                "signing with the host's ambient AWS identity: a bare aws:// resolved the default \
+                 credential provider chain, not a declared scoped profile. Prefer aws://PROFILE to \
+                 pin the identity, and grant the workload no write access to ~/.aws",
             ),
         }
     }
@@ -457,65 +458,26 @@ impl std::fmt::Debug for AwsResolution {
 }
 
 /// Materializes AWS session credentials — the seam a real SDK-backed provider chain plugs into.
-trait AwsCredentialProvider: Send + Sync {
-    /// Resolve credentials for `profile` (or the ambient chain when `None`).
+pub(in crate::sources) trait AwsCredentialProvider: Send + Sync {
+    /// Resolve credentials for `profile` (or the default chain when `None`).
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials>;
 }
 
-/// The default provider: the ambient `AWS_*` environment, or the operator's named profile.
+/// The default provider: the AWS SDK default credential chain for a bare reference, or the
+/// operator's named profile.
 ///
-/// **It delegates rather than replacing, so ambient behaviour is unchanged.** With no profile it is
-/// `EnvAwsProvider` exactly. With one it resolves the operator's AWS configuration, which
-/// `EnvAwsProvider` refuses to do — correctly, since it cannot honour a named identity and must not
-/// substitute another. That refusal left `aws://<profile>` with no provider at all, so every such
-/// route failed at its first request.
+/// With no profile it resolves the SDK default chain
+/// ([`SdkChainProvider`](super::aws_chain::SdkChainProvider)) — environment, profile files
+/// (including `credential_process`), web identity, the container endpoint, then instance metadata.
+/// With one it resolves the operator's AWS configuration for static keys, which the chain is not
+/// asked for, so a named identity stays on the static-key path.
 struct DefaultAwsProvider;
 
 impl AwsCredentialProvider for DefaultAwsProvider {
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
         match profile {
-            None => EnvAwsProvider.provide(None),
+            None => super::aws_chain::SdkChainProvider::shared().provide(None),
             Some(profile) => crate::sources::aws_profile::resolve_profile(profile),
-        }
-    }
-}
-
-/// The v1 default provider: reads the ambient `AWS_*` environment credentials **synchronously**.
-struct EnvAwsProvider;
-
-impl AwsCredentialProvider for EnvAwsProvider {
-    fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
-        // Refuse rather than substitute. This provider reads the ambient `AWS_*` environment and has
-        // no way to honour a named profile, so accepting one would sign with whatever identity the
-        // host carries while `AwsAcquisition::Profile(..)` attests the opposite — and `warning()`
-        // returns `None` when a profile was declared, so that substitution reaches neither stderr nor
-        // the audit record. An operator who names an identity gets that identity or an error.
-        if let Some(profile) = profile {
-            return Err(CredentialError::Credential(format!(
-                "the ambient AWS provider cannot sign as the declared profile {profile:?}: it reads \
-                 AWS_* from the environment. Remove the profile to sign with the ambient identity, \
-                 or supply a provider that can resolve it"
-            )));
-        }
-
-        let non_empty = |name: &str| env::var(name).ok().filter(|v| !v.is_empty());
-        match (
-            non_empty("AWS_ACCESS_KEY_ID"),
-            non_empty("AWS_SECRET_ACCESS_KEY"),
-        ) {
-            (Some(access_key_id), Some(secret_access_key)) => Ok(AwsSessionCredentials {
-                access_key_id,
-                secret_access_key,
-                // `Some` only when AWS_SESSION_TOKEN is set and non-empty (STS/assumed-role); a
-                // long-lived IAM user key has none, so `None` — never an empty-string sentinel.
-                session_token: non_empty("AWS_SESSION_TOKEN"),
-                region: non_empty("AWS_REGION").or_else(|| non_empty("AWS_DEFAULT_REGION")),
-            }),
-            // No ambient credentials means the provider chain is unreachable → KeystoreAccess.
-            _ => Err(CredentialError::KeystoreAccess(
-                "AWS provider chain unreachable: no credentials found in the environment"
-                    .to_string(),
-            )),
         }
     }
 }
@@ -528,14 +490,14 @@ pub(crate) struct AwsSource {
 }
 
 impl AwsSource {
-    /// Construct the source backed by the v1 ambient environment provider, with the default
-    /// allowed-with-warning ambient-fallback policy.
+    /// Construct the source backed by the default provider, with the default allowed-with-warning
+    /// ambient-fallback policy.
     pub(crate) fn new() -> Self {
         Self::with_policy(AmbientFallbackPolicy::default())
     }
 
-    /// Construct the source backed by the v1 ambient environment provider, with an explicit
-    /// ambient-fallback `policy`.
+    /// Construct the source backed by the default provider, with an explicit ambient-fallback
+    /// `policy`.
     pub(crate) fn with_policy(policy: AmbientFallbackPolicy) -> Self {
         Self {
             provider: Box::new(DefaultAwsProvider),
@@ -569,7 +531,7 @@ impl AwsSource {
                             .to_string(),
                     ));
                 }
-                (AwsAcquisition::AmbientFallback, None)
+                (AwsAcquisition::DefaultChain, None)
             }
         };
 
@@ -1037,16 +999,17 @@ mod tests {
         }
     }
 
-    /// Bare `aws://` cannot be written: `parse_uri` rejects an empty body, so the URI form has no
-    /// spelling for "use whatever credentials are ambient". Ambient stays reachable only
-    /// through the structured form, and only when the policy permits it.
+    /// A bare `aws://` parses and resolves to no profile, which is what names the default chain.
+    /// Both surface forms — the bare URI and a structured block with no `profile` — reach the
+    /// provider with `None`.
     #[test]
-    fn the_uri_form_cannot_request_ambient_credentials() {
-        assert!(
-            Locator::parse_uri("aws://").is_err(),
-            "an empty profile body must not parse"
+    fn the_bare_uri_form_resolves_to_no_profile() {
+        assert_eq!(
+            AwsSource::parse_profile(&Locator::parse_uri("aws://").unwrap()).unwrap(),
+            None,
+            "a bare aws:// names no profile"
         );
-        // The structured form can omit the profile, which is what ambient fallback means.
+        // The structured form can omit the profile, which is the same request.
         assert_eq!(
             AwsSource::parse_profile(&structured(&[("source", "aws")])).unwrap(),
             None
@@ -1104,12 +1067,35 @@ mod tests {
         let resolution = src.resolve(&structured(&[("source", "aws")])).unwrap();
 
         assert!(!resolution.credentials.access_key_id.is_empty());
-        assert_eq!(resolution.acquisition, AwsAcquisition::AmbientFallback);
+        assert_eq!(resolution.acquisition, AwsAcquisition::DefaultChain);
         assert!(
             resolution.acquisition.warning().is_some(),
-            "ambient fallback must warn"
+            "the default chain must warn"
         );
         assert_eq!(recorder.0.lock().unwrap().as_slice(), [None]);
+    }
+
+    /// The no-profile acquisition names the default chain and carries the ambient-identity warning.
+    #[test]
+    fn default_chain_acquisition_warns() {
+        let warning = AwsAcquisition::DefaultChain
+            .warning()
+            .expect("the default chain warns");
+        assert!(
+            warning.contains("ambient") && warning.contains("aws://"),
+            "the warning names the ambient identity and the bare spelling: {warning}"
+        );
+    }
+
+    /// A scoped profile names its identity, so its acquisition carries no warning.
+    #[test]
+    fn scoped_profile_acquisition_does_not_warn() {
+        assert!(
+            AwsAcquisition::Profile("prod".to_string())
+                .warning()
+                .is_none(),
+            "a scoped profile does not warn"
+        );
     }
 
     /// A provider that panics if it is ever reached.
@@ -1128,6 +1114,36 @@ mod tests {
         let src = AwsSource::with_provider(Box::new(PanicProvider), AmbientFallbackPolicy::Deny);
         let err = src.resolve(&structured(&[("source", "aws")])).unwrap_err();
         assert!(!err.is_soft(), "denied ambient fallback must fail closed");
+    }
+
+    /// A bare `aws://` under `Deny` is a hard `CredentialError::Credential`, and the provider is
+    /// never reached.
+    #[test]
+    fn bare_aws_is_refused_under_deny() {
+        let src = AwsSource::with_provider(Box::new(PanicProvider), AmbientFallbackPolicy::Deny);
+        let err = src
+            .resolve(&Locator::parse_uri("aws://").unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(err, CredentialError::Credential(_)),
+            "a bare aws:// under Deny is a hard Credential refusal: {err:?}"
+        );
+    }
+
+    /// A scoped profile resolves normally under `Deny`: the switch refuses only the no-profile form.
+    #[test]
+    fn scoped_profile_resolves_under_deny() {
+        let src = AwsSource::with_provider(
+            Box::new(RecordingProvider(std::sync::Mutex::new(Vec::new()))),
+            AmbientFallbackPolicy::Deny,
+        );
+        let resolution = src
+            .resolve(&Locator::parse_uri("aws://prod").unwrap())
+            .expect("a scoped profile resolves under Deny");
+        assert_eq!(
+            resolution.acquisition,
+            AwsAcquisition::Profile("prod".to_string())
+        );
     }
 
     /// A non-`aws` URI scheme or source tag is a hard config error.
@@ -1160,16 +1176,54 @@ mod tests {
         assert!(!err.is_soft());
     }
 
-    /// The shipped provider refuses a profile it cannot honour.
+    /// A bare reference reaches the provider with `None`, returns session credentials, and records
+    /// the default-chain acquisition (driven through the injected fake, not the SDK).
     #[test]
-    fn the_ambient_provider_refuses_a_declared_profile() {
-        let err = EnvAwsProvider
-            .provide(Some("prod"))
-            .expect_err("the ambient provider cannot sign as a named profile");
-        assert!(!err.is_soft(), "an unhonourable profile fails closed");
-        assert!(
-            err.to_string().contains("prod"),
-            "the refusal names the profile: {err}"
+    fn bare_aws_resolves_through_the_sdk_chain() {
+        let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        struct Forward(std::sync::Arc<RecordingProvider>);
+        impl AwsCredentialProvider for Forward {
+            fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
+                self.0.provide(p)
+            }
+        }
+        let src = AwsSource::with_provider(
+            Box::new(Forward(recorder.clone())),
+            AmbientFallbackPolicy::AllowWithWarning,
+        );
+
+        let resolution = src.resolve(&Locator::parse_uri("aws://").unwrap()).unwrap();
+        assert!(resolution.credentials.session_token.is_some());
+        assert_eq!(resolution.acquisition, AwsAcquisition::DefaultChain);
+        assert_eq!(recorder.0.lock().unwrap().as_slice(), [None]);
+    }
+
+    /// A scoped `aws://PROFILE` reaches the profile path with the named profile, not the chain.
+    #[test]
+    fn scoped_profile_still_reads_the_profile_files() {
+        let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        struct Forward(std::sync::Arc<RecordingProvider>);
+        impl AwsCredentialProvider for Forward {
+            fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
+                self.0.provide(p)
+            }
+        }
+        let src = AwsSource::with_provider(
+            Box::new(Forward(recorder.clone())),
+            AmbientFallbackPolicy::AllowWithWarning,
+        );
+
+        let resolution = src
+            .resolve(&Locator::parse_uri("aws://prod").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolution.acquisition,
+            AwsAcquisition::Profile("prod".to_string())
+        );
+        assert_eq!(
+            recorder.0.lock().unwrap().as_slice(),
+            [Some("prod".to_string())],
+            "a named profile reaches the provider with its profile, not None"
         );
     }
 
@@ -1288,6 +1342,52 @@ mod tests {
                 "names the environment: {error}"
             );
         }
+    }
+
+    /// The same session credentials reached through the default-chain seam and through the profile
+    /// path sign to identical bytes at a fixed time — both feed the one unchanged signer, so the
+    /// resolution path cannot change the signature. The chain fills the region as `None` and a
+    /// profile may carry one; the signer derives the region from the host, so the two still match.
+    #[test]
+    fn chain_and_profile_sign_identically() {
+        let token = "FQoGZXIvYXdzEXAMPLETOKEN";
+        // What the SDK default chain would produce: a session token, no region hint.
+        let via_chain = AwsSessionCredentials {
+            access_key_id: "ASIACHAINEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: Some(token.to_string()),
+            region: None,
+        };
+        // What the profile path would produce for the same identity: a region hint the signer
+        // ignores.
+        let via_profile = AwsSessionCredentials {
+            region: Some("eu-west-1".to_string()),
+            ..via_chain.clone()
+        };
+
+        let time = SigningTime::from_unix_secs(1_440_938_160);
+        let headers = [(
+            "Host".to_string(),
+            "bedrock-runtime.us-west-2.amazonaws.com".to_string(),
+        )];
+        let sign = |creds: &AwsSessionCredentials| {
+            sign_request_at(
+                creds,
+                "bedrock",
+                "us-west-2",
+                "POST",
+                "https://bedrock-runtime.us-west-2.amazonaws.com/model/invoke",
+                &headers,
+                b"{}",
+                &time,
+            )
+            .expect("signing succeeds")
+        };
+        assert_eq!(
+            sign(&via_chain),
+            sign(&via_profile),
+            "the same credentials sign identically regardless of the resolution path"
+        );
     }
 
     /// A credsd-vended credential signs to the same bytes an aws:// route would, at a fixed
