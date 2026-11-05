@@ -160,6 +160,11 @@ more:
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
 
+When a tool grammar binds the program, the grammar action decides the spawn, and the spawn enters
+history as that action and not as `shell:spawn`. A spawn that the grammar binding refuses before
+any rule decides it enters history as a `shell:spawn` request.
+[`shell:spawn`](../shell.md#shellspawn) states when Box refuses one.
+
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
 the shell's own programs, and a `shell:spawn` permit covers a program of the surrounding OS. A
@@ -180,8 +185,8 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 | `uri?` | String | The resource URI, on `resources/read`. |
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
-`[mcp.<name>]` table names. A policy with no matching `shell:spawn` permit refuses the server at
-startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+`[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
+A policy with no matching permit refuses the server at startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 
@@ -198,8 +203,8 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ./box-core/box policy generate-schema --config my-box/box.toml --output-dir ./schema
 ```
 
-It writes `actions.cedarschema`, with every action and its fields, and `events.dwschema`, with what
-a `when temporal` clause observes. The namespace is the server name with every character other
+It writes `actions.cedarschema`, with every action and its fields, including the actions of each
+tool grammar, and `events.dwschema`, with what a `when temporal` clause observes. The namespace is the server name with every character other
 than a letter, a digit, or `_` changed to `_`. A leading digit gets a `_` prefix. Server `demo-mcp`
 and tool `lookup` give `demo_mcp::Action::"lookup"`.
 

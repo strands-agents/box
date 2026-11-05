@@ -13,6 +13,7 @@ use crate::record::config::{
     AuthoritySource, ConfigureRequest, Record, RunContract, trailing_arguments,
 };
 use crate::record::layout::BoxRoot;
+use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
 };
@@ -160,21 +161,18 @@ async fn hosted(
         .clone()
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
-    let _grammar_bindings = HostedBox::bind_tool_grammars(&policy, &locked.record)?;
-    for (label, spec) in &locked.record.tool {
-        if spec.grammar.is_some() {
-            eprintln!(
-                "strands-box: warning: [tool.{label}] grammar: the Shell still decides a spawn of \
-                 `{}` as `shell:spawn`, so a rule on an action of this grammar does not fire yet",
-                crate::record::config::grammar::called_name(spec)
-            );
-        }
-    }
+    let commands = Arc::new(ConfiguredCommands::load(&locked.record)?);
+    let policy = Arc::new(HostedBox::bind_tool_grammars(
+        policy,
+        &locked.record,
+        &commands,
+    )?);
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
         policy,
+        commands,
         collector,
         &locked.sources,
         locked.owned,

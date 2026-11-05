@@ -83,6 +83,13 @@ these shapes:
 - `because the request could not be evaluated.`: the engine hit an internal fault, and it denied
   the request.
 
+A denial of an experimental [tool grammar](config.md#toolnamegrammar) action names the action in
+place of `this operation`, and the tail has the same shapes:
+
+```text
+strands-shell: effect denied: policy denied Tool::git::Action::"push" on '/usr/bin/git' [policy: no_push]: Pushes are not allowed.
+```
+
 Each caller shows the text in its own form:
 
 - **A shell command** prints it on stderr. A command the policy refused exits `126`. When policy
@@ -95,12 +102,15 @@ Each caller shows the text in its own form:
 - **An MCP call** receives a JSON-RPC error with code `-32001` and the text, followed by the method
   in parentheses.
 
-Two refusals look like a denial, and no `permit` lifts them:
+Three refusals look like a denial, and no `permit` lifts them:
 
 - **A path inside the box directory, or the `box.toml` or `policy.dw` this run loaded, is refused
   whatever the policy says.** The decision log records the cause as `enforcement`, and
   [step 4 of the tutorial](tutorials/first-policy.md#step-4-read-the-decision-log) shows how to read
   it. [What Box always enforces](security.md#what-box-always-enforces) states the rule.
+- **A program file that a tool grammar binds, run by a name that no `[tool]` declares or after the
+  file was replaced, is refused whatever the policy says.** The tail is `[tool-grammar]`, then the
+  reason, then `No policy can permit it.` [`shell:spawn`](shell.md#shellspawn) states the cases.
 - **A file tool of the harness itself fails with "operation not permitted" on macOS, or "no such
   file or directory" on Linux, and the decision log holds no record.** The path is outside every
   `[agent.filesystem]` list. Add it to a list in `box.toml` if the agent is meant to reach it.

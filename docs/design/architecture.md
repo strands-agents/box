@@ -283,9 +283,9 @@ part of what you have to trust.
 4. **It installs the policy.** A policy that does not parse or does not validate refuses the box. A
    rule the load can prove will never fire is also refused, and a rule that might fire warns ([a rule
    that cannot fire is refused at
-   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). A
-   rule on an experimental tool grammar action is the exception for now: it loads but can't take
-   effect yet, and `run` prints a warning for each grammar.
+   load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns)). It
+   then binds each experimental tool grammar to the program file of each `[tool]` it covers, on
+   the file identity that the run opened.
 5. **It resolves each bound secret, starts the gateway with its own certificate authority, judges
    each process specification's filesystem reach once, and binds the broker socket.** An unjudgeable
    grant refuses the box here.

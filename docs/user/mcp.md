@@ -41,7 +41,9 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 | `network.contain_egress` | bool | `true` | How the server reaches the network. See [Network](#network). |
 
 The box starts the server when the agent's harness runs the server's full `command`, and only
-when policy permits `shell:spawn` for it. The box runs the `command` and arguments from `box.toml`.
+when policy permits `shell:spawn` for it. When an experimental tool grammar binds the server's
+program, the grammar's action decides the start in place of `shell:spawn`, as for a
+[spawn in the Shell](shell.md#shellspawn). The box runs the `command` and arguments from `box.toml`.
 
 The harness's command for the server must be the same words, in the same order, as `command`.
 The harness runs the alias with its arguments, and the box starts the server whose `command`

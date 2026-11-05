@@ -161,6 +161,11 @@ impl<'a> GrammarInvocation<'a> {
         serde_json::Value::Object(record)
     }
 
+    /// The grammar action this command line raises, as a rule spells it.
+    pub(crate) fn action_name(&self) -> String {
+        self.identity().observer_action().into_owned()
+    }
+
     /// The grammar action this command line raises, with its exact `context.input` record.
     pub(crate) fn request(&self) -> GrammarRequest {
         GrammarRequest {

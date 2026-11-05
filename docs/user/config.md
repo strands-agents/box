@@ -488,9 +488,9 @@ Start a new run to validate the updated files.
 ## `[tool.<name>.grammar]`
 
 This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
-`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
-action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
-grammars is coming later.
+`[experimental-features] tool-grammars = true`. The feature is experimental. A spawn of the
+program is decided as a grammar action in place of `shell:spawn`, as
+[`shell:spawn`](shell.md#shellspawn) states, and a user guide for tool grammars is coming later.
 
 Each of these is refused at startup, before any box state exists:
 
@@ -509,6 +509,9 @@ Each of these is refused at startup, before any box state exists:
   `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
 - A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
   policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+- An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
+  grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
+  while `tool-grammars` is on; give the server another name``.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.
