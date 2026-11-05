@@ -25,7 +25,7 @@ concurrency:
 jobs:
   offline:
     name: Offline cloud example tests
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

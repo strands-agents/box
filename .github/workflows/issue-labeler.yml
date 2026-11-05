@@ -15,7 +15,7 @@ permissions:
 jobs:
   label-area:
     name: "Label: Area"
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7
@@ -30,7 +30,7 @@ jobs:
 
   label-type:
     name: "Label: Type"
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7

@@ -73,7 +73,7 @@ jobs:
   # ── Resolve the commit, validate the version, refuse a bad bump ─────────
   scan:
     name: Resolve SHA and validate version
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -567,7 +567,7 @@ jobs:
       always() && needs.scan.result == 'success' && needs.build.result == 'success' &&
       ((inputs.dry_run == true && inputs.sign_macos != true) ||
        (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -697,7 +697,7 @@ jobs:
         (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
       needs.build.result == 'success' &&
       needs.inspect.result == 'success'
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 30
     environment:
       # Configure reviewers + main-only deployment branches in repo settings.
@@ -730,7 +730,7 @@ jobs:
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
       needs.approve-release.result == 'success'
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: write
@@ -859,7 +859,7 @@ jobs:
       inputs.dry_run != true &&
       inputs.premerge_signing_test != true &&
       needs.release.result == 'success'
-    runs-on: strands-agents_ubuntu-latest_4-core
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
