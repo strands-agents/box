@@ -46,11 +46,13 @@ impl ConfiguredCommands {
                 })?;
                 use std::os::unix::fs::MetadataExt as _;
                 if !metadata.is_file() || metadata.nlink() != 1 {
-                    return Err(refusal(
-                        &table,
-                        &path,
-                        "must be a regular file with exactly one hard link",
-                    ));
+                    let reason = if cfg!(target_os = "macos") && path == Path::new("/usr/bin/git") {
+                        "must be a regular file with exactly one hard link; \
+                         use the path from `/usr/bin/xcrun --find git` in the tool's command"
+                    } else {
+                        "must be a regular file with exactly one hard link"
+                    };
+                    return Err(refusal(&table, &path, reason));
                 }
                 let invoked = resolved.invoked().to_path_buf();
                 let mut routes = vec![invoked.clone()];
@@ -75,17 +77,20 @@ impl ConfiguredCommands {
             apple_git: None,
         };
         #[cfg(target_os = "macos")]
-        let commands = if commands.tools.is_empty() {
-            commands
-        } else {
-            commands.with_apple_git(developer_git())
-        };
+        let commands =
+            commands.with_apple_git(|| developer_git(std::process::Command::new("/usr/bin/xcrun")));
         Ok(commands)
     }
 
     #[cfg(any(target_os = "macos", test))]
-    fn with_apple_git(mut self, discovered: Option<PathBuf>) -> Self {
-        let Some(path) = discovered.filter(|path| path.is_absolute()) else {
+    fn with_apple_git(mut self, discover: impl FnOnce() -> Option<PathBuf>) -> Self {
+        if !self.tools.values().any(|command| {
+            command.path.file_name() == Some("git".as_ref())
+                || command.invoked.file_name() == Some("git".as_ref())
+        }) {
+            return self;
+        }
+        let Some(path) = discover().filter(|path| path.is_absolute()) else {
             return self;
         };
         let Ok(path) = path.canonicalize() else {
@@ -145,14 +150,16 @@ impl ConfiguredCommands {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn developer_git() -> Option<PathBuf> {
+#[cfg(any(target_os = "macos", test))]
+fn developer_git(mut command: std::process::Command) -> Option<PathBuf> {
     use std::io::Read as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    let mut child = Command::new("/usr/bin/xcrun")
+    let mut child = command
         .args(["--find", "git"])
+        .env_clear()
+        .envs(std::env::var_os("DEVELOPER_DIR").map(|directory| ("DEVELOPER_DIR", directory)))
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -306,7 +313,7 @@ mod tests {
     #[test]
     fn developer_git_must_match_a_valid_configured_identity_regardless_of_label() {
         let directory = tempfile::tempdir_in(".").unwrap();
-        let command = directory.path().join("reader");
+        let command = directory.path().join("git");
         program(&command);
         let real = command.canonicalize().unwrap();
         let relative = command
@@ -317,7 +324,7 @@ mod tests {
         let configured = record(&real);
         let commands = ConfiguredCommands::load(&configured)
             .unwrap()
-            .with_apple_git(Some(real.clone()));
+            .with_apple_git(|| Some(real.clone()));
         assert_eq!(commands.apple_git(), Some(real.as_path()));
         for discovered in [
             None,
@@ -329,7 +336,7 @@ mod tests {
             assert!(
                 ConfiguredCommands::load(&configured)
                     .unwrap()
-                    .with_apple_git(discovered)
+                    .with_apple_git(|| discovered)
                     .apple_git()
                     .is_none()
             );
@@ -339,13 +346,95 @@ mod tests {
         assert!(
             ConfiguredCommands::load(&configured)
                 .unwrap()
-                .with_apple_git(Some(other.canonicalize().unwrap()))
+                .with_apple_git(|| Some(other.canonicalize().unwrap()))
                 .apple_git()
                 .is_none()
         );
         let commands = ConfiguredCommands::load(&configured).unwrap();
         std::fs::hard_link(&command, directory.path().join("alias")).unwrap();
-        assert!(commands.with_apple_git(Some(real)).apple_git().is_none());
+        assert!(commands.with_apple_git(|| Some(real)).apple_git().is_none());
+    }
+
+    #[test]
+    fn developer_git_discovery_requires_a_git_executable_or_invocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let helper = directory.path().join("helper");
+        let git = directory.path().join("git");
+        program(&helper);
+        ConfiguredCommands::default().with_apple_git(|| panic!("no tools need Git"));
+        ConfiguredCommands::load(&record(&helper))
+            .unwrap()
+            .with_apple_git(|| panic!("an unrelated tool does not need Git"));
+
+        std::os::unix::fs::symlink(&helper, &git).unwrap();
+        let commands = ConfiguredCommands::load(&record(&git))
+            .unwrap()
+            .with_apple_git(|| Some(helper.clone()));
+        assert_eq!(
+            commands.apple_git(),
+            Some(helper.canonicalize().unwrap().as_path())
+        );
+
+        std::fs::remove_file(&git).unwrap();
+        program(&git);
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink(&git, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&alias))
+            .unwrap()
+            .with_apple_git(|| Some(git.clone()));
+        assert_eq!(
+            commands.apple_git(),
+            Some(git.canonicalize().unwrap().as_path())
+        );
+    }
+
+    #[test]
+    fn developer_git_probe_inherits_only_the_selected_developer_directory() {
+        use std::process::Command;
+
+        if std::env::var_os("BOX_TEST_GIT_PROBE").is_none() {
+            for directory in [None, Some("/Developer Tools/Selected")] {
+                let mut child = Command::new(std::env::current_exe().unwrap());
+                child
+                    .args(["--exact", "run::commands::tests::developer_git_probe_inherits_only_the_selected_developer_directory"])
+                    .env("BOX_TEST_GIT_PROBE", "1")
+                    .env("BOX_TEST_SECRET", "must-not-reach-the-probe")
+                    .env_remove("DEVELOPER_DIR");
+                if let Some(directory) = directory {
+                    child.env("DEVELOPER_DIR", directory);
+                }
+                assert!(child.status().unwrap().success());
+            }
+            return;
+        }
+
+        let mut probe = Command::new("/bin/sh");
+        probe.args([
+            "-c",
+            "test -z \"${BOX_TEST_SECRET+x}${BOX_TEST_GIT_PROBE+x}\" || exit 1; \
+             printf '%s\\n' \"${DEVELOPER_DIR-/unset}\"",
+        ]);
+        let expected = std::env::var_os("DEVELOPER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/unset"));
+        assert_eq!(developer_git(probe), Some(expected));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn apple_git_hard_link_refusal_names_the_discovery_command() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let launcher = Path::new("/usr/bin/git");
+        if std::fs::metadata(launcher).unwrap().nlink() == 1 {
+            eprintln!("skipping: Apple's Git launcher has only one hard link");
+            return;
+        }
+        let error = ConfiguredCommands::load(&record(launcher))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exactly one hard link"), "{error}");
+        assert!(error.contains("/usr/bin/xcrun --find git"), "{error}");
     }
 
     #[test]

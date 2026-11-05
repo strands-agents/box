@@ -166,6 +166,12 @@ directory. Either way, the Shell resolves every link, and `program_path` is the 
 and the program gets the agent's spelling as its `argv[0]` ([a program resolves on the operator's
 `PATH`](decisions.md#a-host-binary-resolves-on-the-operator-path)).
 
+On macOS, when a configured tool's executable or invocation is named `git`, Box looks up
+the developer Git with `/usr/bin/xcrun --find git`. That lookup receives only `DEVELOPER_DIR`,
+if the operator set it. When bare `git` resolves to `/usr/bin/git` and the lookup matches a
+validated configured tool, Box substitutes that tool's path before policy admission, including
+in `argv[0]`.
+
 **A rule reads where the program lives.** Use `context.input.program_path` to allow a program by
 its resolved file, which reads as `~/…` under the operator's home, as a path does. `program` and
 the argument fields work as they do for `shell:exec`, so a rule can refuse one subcommand.

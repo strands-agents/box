@@ -151,9 +151,13 @@ Configured tool programs remain protected from writes and replacement for the ru
 Box checks direct writable grants before startup and refuses changes through the Shell after policy permits them.
 [Configured command integrity](config.md#configured-command-integrity) lists the startup constraints and the procedure for operator updates.
 
+This macOS example uses the Command Line Tools installation. Run `/usr/bin/xcrun --find git`
+and use its output for `command`. If it names another installation, adjust the installation's
+`read` path too.
+
 ```toml
 [tool.git]
-command = ["git"]
+command = ["/Library/Developer/CommandLineTools/usr/bin/git"]
 
 [tool.git.filesystem]
 read  = ["~/src/project", "/Library/Developer/CommandLineTools"]

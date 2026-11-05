@@ -102,11 +102,14 @@ lists name, so put the path in that table's `deny` list too.
 ## Step 4. Allow a program on your `PATH`
 
 A program the Shell does not implement needs a `[tool.<name>]` table in `box.toml` and a
-`shell:spawn` permit. For `git`, add the table:
+`shell:spawn` permit. On macOS, run `/usr/bin/xcrun --find git` and use its output for
+`command`. This example uses the Command Line Tools installation; if the output names another
+installation, adjust the installation's `read` path too. On Linux, use the path from
+`command -v git` and omit the Command Line Tools `read` entry.
 
 ```toml
 [tool.git]
-command = ["git"]
+command = ["/Library/Developer/CommandLineTools/usr/bin/git"]
 
 [tool.git.filesystem]
 read  = ["~/src/project", "/Library/Developer/CommandLineTools"]
@@ -126,12 +129,12 @@ when {
 };
 ```
 
-The box's shell finds `git` on the `PATH` of the host OS's shell that runs `box run`. On macOS, `/usr/bin/git`
-hands off to the Command Line Tools' `git`, and that hand-off fails in the program's sandbox. Put
-the Command Line Tools first on the `PATH` when you start the box:
+The box's shell finds `git` on the `PATH` of the host OS's shell that runs `box run`.
+On macOS, when that path is `/usr/bin/git`, Box uses the configured developer Git executable.
+Start the box:
 
 ```sh
-PATH=/Library/Developer/CommandLineTools/usr/bin:$PATH ./box-core/box run --config my-box/box.toml
+./box-core/box run --config my-box/box.toml
 ```
 
 `git status` now runs, and `git push` is refused with status `126`, because `push` is not in the
@@ -201,7 +204,7 @@ permit  shell:spawn  /Library/Developer/CommandLineTools/usr/bin/git add todo.tx
 | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments``, status `126` | Policy permits the program, and no `[tool.<name>]` table or `exec` entry covers the file at `<path>`. | Add a `[tool.<name>]` table whose `command` resolves to `<path>`, or an `exec` entry that covers it. When a table names the program, make its fixed arguments match the command. |
 | `strands-shell: <program>: command not found`, status `127` | The program is not in the box's shell, and not on the `PATH` of the host OS's shell that runs `box run`. | Install it, or start `box run` with its directory on the `PATH`. |
 | `policy denied this operation on '<path>'`, and the command exits `1` | No `fs:*` permit matches the path, or a `forbid` names it. | Read the `@id` in the message. Widen the permit, as in step 2, or narrow the `forbid`. |
-| `xcode-select: error: unable to read data link at '/var/db/xcode_select_link'` | `git` resolved to `/usr/bin/git` on macOS. | Start `box run` with `/Library/Developer/CommandLineTools/usr/bin` first on the `PATH`, as in step 4. |
+| `configured command /usr/bin/git must be a regular file with exactly one hard link` at startup | The tool's `command` resolved to Apple's Git launcher. | Run `/usr/bin/xcrun --find git` and use its output for `command`, as in step 4. |
 | A file written to `/tmp` is missing in the next command | The Shell's `/tmp` lasts one command. | Write the file in the workspace. |
 | `curl` fails, and prints `http:request gate: policy denied this operation` | The gateway refused the request. | Permit `net:connect` and `http:request` for the host, as in [the `[egress.<name>]` table](./egress.md#example). |
 | A `shell:spawn` rule on `program_path` never matches | `program_path` is the file with every link resolved, under `~/` when it is in your home. | Read the path in the refusal, and write the rule on that spelling. |
