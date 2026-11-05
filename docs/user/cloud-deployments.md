@@ -1,8 +1,7 @@
 # Cloud deployment profiles
 
-A cloud deployment profile describes the environment around Box. It does not change Box policy or filesystem grants.
-This guide covers AgentCore Runtime managed code, Runtime customer containers, and Lambda MicroVM.
-Use it to prepare and check a deployment. It supplies configuration guidance, not deployment scripts or a cloud qualification claim.
+Use these profiles to prepare Box for AgentCore Runtime managed code, customer containers, or Lambda MicroVM.
+Each profile lists what the cloud environment must provide and what to check after deployment.
 
 ## Install and configure Box
 
@@ -41,11 +40,16 @@ On Amazon Linux, record `rpm -q glibc` and `rpm -q libgcc` as part of the depend
 Record `uname -r` separately from `/etc/os-release`: the cloud service supplies the kernel, even when you supply the image.
 These inventory commands do not establish a minimum package or kernel version.
 
+<details>
+<summary>How Box uses Linux capabilities during startup</summary>
+
 Box uses temporary Linux capabilities while it constructs namespaces and mounts.
 `CAP_SYS_ADMIN` applies inside the new user namespace. It does not imply administrative access to the surrounding operating system.
 Box uses `CAP_SETPCAP` to remove setup capabilities before workload execution.
 The localhost relay uses `CAP_NET_ADMIN` to enable its private loopback interface.
 These operations do not constitute a general container `cap-add` recipe.
+
+</details>
 
 <a id="runtime-managed-code"></a>
 ## AgentCore Runtime managed code

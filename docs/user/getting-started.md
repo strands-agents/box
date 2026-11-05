@@ -2,7 +2,7 @@
 
 Box runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
-`box.toml` says what to run and what it can reach, and `policy.dw` decides requests it sends through Box.
+`box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
 in a box on macOS. You'll give it one tool, a shell, so your policy decides every command it runs and every
@@ -44,7 +44,8 @@ Rules:
 ## Before you start
 
 Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm).
-[Step 1](#step-1-download-box) has download instructions for both platforms.
+On Linux, use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
+[Step 1](#step-1-download-box) installs Box on either platform.
 The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
@@ -80,16 +81,17 @@ The package is also notarized, so macOS runs a copy that you download in a brows
 
 ### Linux
 
-Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
-See [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
+After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+Steps 2–8 below follow the macOS Strands CLI example.
 
+Check [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
-For deployment examples, see [Amazon EKS](tutorials/eks.md) and [AgentCore Runtime](tutorials/agentcore-runtime.md).
 
-### Build from source
+<a id="build-from-source"></a>
+<details>
+<summary>Build from source (optional)</summary>
 
-To build Box yourself in place of the download, install [rustup](https://rustup.rs/), then build it
-and copy the binaries into `./box-core`:
+To build Box yourself, install [rustup](https://rustup.rs/). Build it and copy the binaries into `./box-core`:
 
 ```sh
 git clone https://github.com/strands-agents/box.git box-src
@@ -98,6 +100,8 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
+
+</details>
 
 ## Step 2. Install the Strands CLI
 
