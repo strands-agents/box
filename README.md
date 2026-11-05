@@ -46,7 +46,7 @@ Box's interpreters and gateways share an event history, so rules can use earlier
 actions and elapsed time to decide what is allowed next. For example, a file read
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
-**Preview:** Box currently supports local execution on macOS with Apple silicon.
+**Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -169,10 +169,10 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to run
-Strands CLI with Box. To follow this guide, you need a Mac with Apple silicon and
-macOS 15 or later, Node.js 22.21 or later from Homebrew, and access to Claude
-Opus 5 on Amazon Bedrock in `us-west-2`.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS or Linux ARM64.
+The Strands CLI walkthrough uses macOS.
+For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
+You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
 
 The download script checks the release checksum and unpacks the binaries into
 `./box-core`. It does not change your `PATH` or system directories:

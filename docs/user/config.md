@@ -13,7 +13,7 @@ Mac. Each section below annotates it. To write the policy the file points at, re
 
 ## Example
 
-This release runs on macOS. Getting started builds the example one file at a time, and the block is
+Getting started builds this macOS example one file at a time, and the block is
 the tutorial's `my-box/box.toml`, with its one longer comment shortened to a line.
 
 ```toml
@@ -60,9 +60,9 @@ destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
 secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"
 ```
 
-`<HOME>` stands for the operator's home directory. The paths in `box_dir`, `command`, `workspace`,
-and `env` must be absolute, and a filesystem list entry may start with `~`, so getting started
-replaces `<HOME>` with `sed -i '' "s|<HOME>|$HOME|g" my-box/box.toml`.
+`<HOME>` is a placeholder for your home directory. Getting started replaces it with
+`sed -i '' "s|<HOME>|$HOME|g" my-box/box.toml`.
+Use full paths for `box_dir`, `workspace`, and `env.HOME`. Filesystem list entries can start with `~`.
 
 An unknown key at any level is a load error.
 
@@ -229,8 +229,8 @@ Both tables hold one process, in one shape:
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
-The program is an absolute path, or a bare name. A bare name resolves on `env.PATH`,
-then on the operator's own `PATH`, then on `/usr/bin:/bin`. A relative path with more than one
+The program is a full path or a bare name. A bare name uses `env.PATH` when set.
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs
@@ -241,6 +241,14 @@ script are the CLI's own.
 started from. The directory must exist, and it may not be the operator's home. The box enters it.
 The process reads nothing in it until a list in `filesystem` names it: the example's `workspace` is
 the project, and the `list` entry below is what lets the CLI see the names in it.
+
+`env.PATH` contains full directory paths separated by `:`. Box uses these entries as written, so `~` stays literal.
+For example, use `/home/alex/.local/bin:/usr/bin:/bin` instead of `~/.local/bin:/usr/bin:/bin`.
+
+When the box declares an MCP server, it also protects directories on the `PATH` of the shell that starts Box.
+Keep those directories and their parents outside filesystem write grants.
+For example, a search directory `/work/tools/bin` prevents a write grant for `/work/tools`.
+Changing `env.PATH` in `box.toml` does not change this protection.
 
 `env` is literal. Four kinds of name have their own rule:
 
@@ -476,7 +484,7 @@ happen after the box directory is created and before the workload starts.
 | Two grants of one operation that name one path, or that nest | ``<path> lies inside <path>, granted by `read`. The union is the wider grant, so the narrower one enforces nothing it appears to`` |
 | A grant wholly inside a `deny` entry or the directory that holds `box.toml` and `policy.dw` | `<path> is at or inside <path>, which no grant reaches. The grant would render and reach nothing, so it is refused rather than left enforcing nothing` |
 | A writable grant that reaches the policy file without subtracting it | ``` `write` reaches this box's policy file, <path>. A grant may enclose it only when it is subtracted, and nothing subtracts it here``` |
-| A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against. That program starts outside containment at the operator's identity, so a writable directory there is a program the workload chooses` |
+| A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
