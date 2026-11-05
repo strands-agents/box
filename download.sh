@@ -1,7 +1,7 @@
 #!/bin/sh
 # Box release downloader.
 #
-# Downloads the prebuilt box tarball for macOS on Apple silicon from the
+# Downloads the prebuilt box tarball for macOS on Apple silicon or Linux on aarch64 from the
 # strands-agents/box GitHub Release, verifies it against SHA256SUMS.txt, and
 # unpacks its files into a local directory (./box-core by default).
 #
@@ -30,15 +30,21 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 host_os="$(uname -s)"
 host_arch="$(uname -m)"
 case "$host_os" in
-    Darwin) ;;
-    *) die "unsupported OS: $host_os. Box supports macOS on Apple silicon." ;;
+    Darwin)
+        case "$host_arch" in
+            arm64|aarch64) triple="aarch64-apple-darwin" ;;
+            *) die "unsupported architecture: $host_arch. Box supports macOS on Apple silicon." ;;
+        esac
+        ;;
+    Linux)
+        case "$host_arch" in
+            arm64|aarch64) triple="aarch64-unknown-linux-gnu" ;;
+            x86_64) die "Linux on x86_64 is not yet supported; see https://github.com/strands-agents/box/issues/45." ;;
+            *) die "unsupported architecture: $host_arch. Box supports Linux on aarch64." ;;
+        esac
+        ;;
+    *) die "unsupported OS: $host_os. Box supports macOS on Apple silicon and Linux on aarch64." ;;
 esac
-case "$host_arch" in
-    arm64|aarch64) ;;
-    *) die "unsupported architecture: $host_arch. Box supports macOS on Apple silicon." ;;
-esac
-triple="aarch64-apple-darwin"
-
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL "$1" -o "$2"; }
     latest_url() { curl -fsSIL -o /dev/null -w '%{url_effective}\n' "$1"; }
@@ -62,7 +68,7 @@ fi
 
 need tar
 need awk
-
+need mktemp
 if [ -z "$VERSION" ]; then
     log "Resolving latest release from ${REPO}..."
     resolved="$(latest_url "https://github.com/${REPO}/releases/latest")"
@@ -78,7 +84,10 @@ asset="box-${VERSION}-${triple}.tar.gz"
 base_url="https://github.com/${REPO}/releases/download/${VERSION}"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT INT HUP TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; exit 130' INT
+trap 'rm -rf "$tmp"; exit 129' HUP
+trap 'rm -rf "$tmp"; exit 143' TERM
 
 log "Downloading ${asset}..."
 fetch "${base_url}/${asset}" "${tmp}/${asset}" \
@@ -88,7 +97,7 @@ log "Downloading SHA256SUMS.txt..."
 fetch "${base_url}/SHA256SUMS.txt" "${tmp}/SHA256SUMS.txt" \
     || die "failed to download SHA256SUMS.txt"
 
-expected="$(awk -v a="$asset" '$2==a {print $1}' "${tmp}/SHA256SUMS.txt")"
+expected="$(awk -v a="$asset" '{n=$2; sub(/^\*/, "", n); if (n==a) print $1}' "${tmp}/SHA256SUMS.txt")"
 [ -n "$expected" ] || die "no SHA256SUMS.txt entry for ${asset}"
 actual="$(sha256_of "${tmp}/${asset}")"
 [ "$expected" = "$actual" ] || die "checksum mismatch for ${asset} (expected ${expected}, got ${actual})"
