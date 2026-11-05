@@ -1296,7 +1296,18 @@ async fn run_call(
     request_timeout: Option<Duration>,
     frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
 ) -> io::Result<i32> {
-    let deadline = request_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+    let deadline =
+        request_timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+    if request_timeout.is_some() && deadline.is_none() {
+        deny(
+            frames,
+            id,
+            DeniedKind::Internal,
+            "the call deadline exceeds this platform's clock range",
+        )
+        .await?;
+        return Ok(BOUNDARY_FAILURE_STATUS);
+    }
     let control = slot.control.clone();
     if control.is_cancelled() {
         return Ok(BOUNDARY_FAILURE_STATUS);
@@ -1312,6 +1323,9 @@ async fn run_call(
 
     // Drained inside the loop, so a chunk reaches the client while the Call is still running.
     let outcome = loop {
+        if control.is_cancelled() {
+            break None;
+        }
         tokio::select! {
             outcome = &mut call => {
                 // Synchronous interpreter work can return after both the call and timer are ready.
@@ -1329,14 +1343,8 @@ async fn run_call(
                 }
                 flush(frames, id, &mut pending).await?;
             }
-            // Poll for a signal rather than awaiting it, because the flag is not a future.
-            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {
-                // Dropping the Call future is the stop: `select!` abandons the losing branch, so
-                // leaving this loop releases it.
-                if control.is_cancelled() {
-                    break None;
-                }
-            }
+            // Wake quiet calls to observe cancellation.
+            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {}
             _ = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -2210,6 +2218,78 @@ done"#;
     }
 
     #[test]
+    fn a_deadline_that_no_longer_fits_the_clock_is_refused_before_execution() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control,
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let now = tokio::time::Instant::now();
+            let (mut fits, mut exceeds) = (0, u64::MAX);
+            while fits < exceeds {
+                let candidate = fits + (exceeds - fits) / 2 + 1;
+                if now.checked_add(Duration::from_secs(candidate)).is_some() {
+                    fits = candidate;
+                } else {
+                    exceeds = candidate - 1;
+                }
+            }
+            let timeout = Duration::from_secs(fits);
+            assert!(now.checked_add(timeout).is_some());
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(tokio::time::Instant::now().checked_add(timeout).is_none());
+
+            let status = run_call(
+                &mut slot,
+                "printf EXECUTED > \"$HOME/executed\"",
+                1,
+                Some(timeout),
+                &frames,
+            )
+            .await
+            .expect("the unrepresentable deadline is reported");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
+            assert!(!marker.path().join("executed").exists());
+            assert!(matches!(
+                received.try_recv().expect("the refusal").frame.body,
+                Body::Denied { kind: DeniedKind::Internal, reason }
+                    if reason == "the call deadline exceeds this platform's clock range"
+            ));
+            assert!(
+                received.try_recv().is_err(),
+                "the command produces no output"
+            );
+
+            let status = run_call(
+                &mut slot,
+                "printf STILL_SERVING",
+                1,
+                Some(Duration::from_secs(1)),
+                &frames,
+            )
+            .await
+            .expect("a valid subsequent call succeeds");
+            assert_eq!(status, 0);
+            assert!(matches!(
+                received.try_recv().expect("subsequent output").frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"STILL_SERVING"
+            ));
+        }));
+    }
+
+    #[test]
     fn an_unlimited_call_survives_elapsed_time_and_can_still_be_cancelled() {
         let marker = tempfile::tempdir().expect("marker directory");
         let spec = spec_with(marker.path(), None, None);
@@ -2228,10 +2308,10 @@ done"#;
                 control: control.clone(),
             };
             let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
-            let call = tokio::task::spawn_local(async move {
+            let mut call = tokio::task::spawn_local(async move {
                 run_call(
                     &mut slot,
-                    "printf RUNNING; sleep 7200; printf TOO_LATE",
+                    "printf RUNNING; read proceed; while true; do printf TICK; sleep 0.001; done",
                     1,
                     spec.request_timeout,
                     &frames,
@@ -2254,17 +2334,32 @@ done"#;
             );
             assert!(received.try_recv().is_err(), "no timeout or late output");
 
-            control.signal();
-            let status = tokio::time::timeout(Duration::from_secs(1), call)
+            control.feed_stdin(b"proceed\n").expect("resume output");
+            let tick = tokio::time::timeout(Duration::from_secs(1), received.recv())
                 .await
-                .expect("an unlimited call remains cancellable")
-                .expect("call task joins")
-                .expect("cancellation succeeds");
+                .expect("the call resumes promptly")
+                .expect("resumed output");
+            assert!(matches!(
+                tick.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+            ));
+            control.signal();
+            let status = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    tokio::select! {
+                        outcome = &mut call => break outcome,
+                        Some(frame) = received.recv() => assert!(matches!(
+                            frame.frame.body,
+                            Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+                        )),
+                    }
+                }
+            })
+            .await
+            .expect("output must not delay cancellation")
+            .expect("call task joins")
+            .expect("cancellation succeeds");
             assert_eq!(status, BOUNDARY_FAILURE_STATUS);
-            assert!(
-                received.try_recv().is_err(),
-                "cancelled work never completes"
-            );
         }));
     }
 

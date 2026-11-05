@@ -3,7 +3,7 @@
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 pub(crate) const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -61,48 +61,35 @@ impl Serialize for ShellTimeout {
 
 impl<'de> Deserialize<'de> for ShellTimeout {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct TimeoutVisitor;
-
-        impl de::Visitor<'_> for TimeoutVisitor {
-            type Value = ShellTimeout;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str(
-                    "a positive integer number of seconds or false to disable the timeout",
-                )
-            }
-
-            fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                if value {
-                    Err(E::invalid_value(de::Unexpected::Bool(value), &self))
-                } else {
-                    Ok(ShellTimeout::Disabled)
-                }
-            }
-
-            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                let value = u64::try_from(value)
-                    .map_err(|_| E::invalid_value(de::Unexpected::Signed(value), &self))?;
-                self.visit_u64(value)
-            }
-
-            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                let seconds = NonZeroU64::new(value)
-                    .ok_or_else(|| E::invalid_value(de::Unexpected::Unsigned(value), &self))?;
-                if Duration::from_secs(value)
-                    .checked_add(SHELL_TIMEOUT_GRACE)
-                    .and_then(|duration| Instant::now().checked_add(duration))
-                    .is_none()
-                {
-                    return Err(E::custom(
-                        "limits.shell.timeout is too large for this platform's clock",
-                    ));
-                }
-                Ok(ShellTimeout::Seconds(seconds))
-            }
+        #[derive(Deserialize)]
+        #[serde(
+            untagged,
+            expecting = "a positive integer number of seconds or false to disable the timeout"
+        )]
+        enum TimeoutValue {
+            Seconds(NonZeroU64),
+            Disabled(bool),
         }
 
-        deserializer.deserialize_any(TimeoutVisitor)
+        let seconds = match TimeoutValue::deserialize(deserializer)? {
+            TimeoutValue::Seconds(seconds) => seconds,
+            TimeoutValue::Disabled(false) => return Ok(Self::Disabled),
+            TimeoutValue::Disabled(true) => {
+                return Err(D::Error::custom(
+                    "limits.shell.timeout must be a positive integer number of seconds or false",
+                ));
+            }
+        };
+        if Duration::from_secs(seconds.get())
+            .checked_add(SHELL_TIMEOUT_GRACE)
+            .and_then(|duration| Instant::now().checked_add(duration))
+            .is_none()
+        {
+            return Err(D::Error::custom(
+                "limits.shell.timeout is too large for this platform's clock",
+            ));
+        }
+        Ok(Self::Seconds(seconds))
     }
 }
 

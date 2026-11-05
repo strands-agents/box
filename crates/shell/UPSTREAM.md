@@ -30,6 +30,14 @@ TOML, Python, and Node configuration surfaces do not change.
 repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
 checks cancellation and a successful subsequent call after restoring a finite deadline.
 
+### Execution deadlines refuse clock overflow
+
+The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout
+returns `InvalidInput` at build time; if it becomes unrepresentable later, the call expires
+before executing its commands. This fixes an upstream panic without treating overflow as
+unlimited execution. `builder_refuses_a_timeout_that_overflows_the_clock` and
+`an_unrepresentable_refreshed_deadline_stops_work` cover the builder, `run`, and `execute`.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.

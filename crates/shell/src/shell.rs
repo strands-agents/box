@@ -14,8 +14,12 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use std::time::Instant;
 
 use tokio::io::AsyncWriteExt;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time::Instant;
 
 use crate::effect::EffectInterceptor;
 use crate::exec;
@@ -319,18 +323,11 @@ impl Shell {
         ShellBuilder::default()
     }
 
-    /// Refresh `proc.deadline` to `now + timeout` so the per-command
-    /// budget starts fresh on each `run()` / `execute()`.
+    /// Refresh the call's deadline, expiring immediately if the clock cannot represent it.
     fn refresh_deadline(&mut self) {
-        if let Some(dur) = self.timeout {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.proc.deadline = Some(tokio::time::Instant::now() + dur);
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                self.proc.deadline = Some(std::time::Instant::now() + dur);
-            }
+        if let Some(timeout) = self.timeout {
+            self.proc.deadline =
+                Some(execution_deadline(timeout).unwrap_or_else(|_| Instant::now()));
         }
     }
 
@@ -946,7 +943,8 @@ impl ShellBuilder {
     /// than `duration` is terminated and its `Output` carries
     /// `status = 1` with `strands-shell: execution timeout exceeded` in stderr.
     ///
-    /// A zero `duration` is rejected by [`build`](Self::build).
+    /// A zero `duration` or one too large for the platform's clock is rejected by
+    /// [`build`](Self::build).
     /// Use [`disable_timeout`](Self::disable_timeout) for no execution deadline.
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
@@ -1174,6 +1172,7 @@ impl ShellBuilder {
     /// - A bind mount source path does not exist
     /// - The configured timeout is zero (use [`disable_timeout`](Self::disable_timeout)
     ///   for no execution deadline)
+    /// - The configured timeout is too large for the platform's clock
     pub fn build(self) -> io::Result<Shell> {
         if self.timeout == Some(Duration::ZERO) {
             return Err(io::Error::new(
@@ -1240,15 +1239,8 @@ impl ShellBuilder {
         proc.max_pipeline = self.max_pipeline;
         proc.max_input = self.max_input;
         proc.umask = self.config.umask;
-        if let Some(dur) = self.timeout {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                proc.deadline = Some(tokio::time::Instant::now() + dur);
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                proc.deadline = Some(std::time::Instant::now() + dur);
-            }
+        if let Some(timeout) = self.timeout {
+            proc.deadline = Some(execution_deadline(timeout)?);
         }
 
         for (k, v) in self.env {
@@ -1268,6 +1260,15 @@ impl ShellBuilder {
             mcp_config: self.mcp,
         })
     }
+}
+
+fn execution_deadline(timeout: Duration) -> io::Result<Instant> {
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "timeout is too large for this platform's clock",
+        )
+    })
 }
 
 // `EffectStartFailure` and `EffectPermitGuard` were deleted with the admission calls above.
@@ -1308,7 +1309,37 @@ async fn create_dir_recursive(kernel: &Mediated, proc: &Process, path: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::parent_dir;
+    use super::{Duration, Shell, io, parent_dir};
+
+    #[test]
+    fn builder_refuses_a_timeout_that_overflows_the_clock() {
+        let Err(error) = Shell::builder().timeout(Duration::MAX).build() else {
+            panic!("an unrepresentable timeout must be refused");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn an_unrepresentable_refreshed_deadline_stops_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            let mut shell = Shell::builder().build().unwrap();
+            shell.write_file("/tmp/guarded", b"original").await.unwrap();
+            shell.timeout = Some(Duration::MAX);
+
+            let output = shell.run("printf CHANGED > /tmp/guarded").await;
+            assert_eq!(output.status, 1);
+            assert!(output.stderr.contains("execution timeout exceeded"));
+            assert_eq!(shell.read_file("/tmp/guarded").await.unwrap(), b"original");
+
+            assert_eq!(shell.execute("printf CHANGED > /tmp/guarded").await, 1);
+            assert_eq!(shell.read_file("/tmp/guarded").await.unwrap(), b"original");
+        });
+    }
 
     #[test]
     fn parent_dir_of_root_is_none() {
