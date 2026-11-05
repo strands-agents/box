@@ -1333,6 +1333,51 @@ The warning names the executable and the write grant that reaches it. The cost i
 hidden: an operator who reads the warning and continues leaves that program replaceable by the
 workload.
 
+<a id="a-write-root-sets-file-attributes-only-when-selected"></a>
+### A macOS write root sets file times through `utimensat` and `setattrlist` only when `file-attributes` selects it, and then `setattrlist` reaches more
+
+A macOS write root names six write operations. `utimes` works, but `utimensat` and `setattrlist`,
+which `touch` and `cp -p` use, check the bare `file-write*` family, and no rule grants the times
+alone. The top-level `file-attributes = true` adds `file-write*` over each write root of
+every process and denies the four leaf operations that the root withholds (`chflags`, `chown`,
+`acl_set_file`, and Finder information), and every protection and refusal renders after it and
+still wins. The key is part of the workload input: it widens only what the workload's own `write`
+lists allow, and each process discloses it. It is off by default because tenet 1 outranks tenets 3
+and 7, so `touch` fails until the writer of `box.toml` selects it, and a box that runs as root
+[accepts it too](#file-attributes-is-accepted-when-the-box-runs-as-root). Linux accepts the key and renders nothing:
+`utimensat` already works there and Linux keeps refusing set-ID bits and ACLs, so one `box.toml`
+stays portable and the ignored key widens nothing. It is an ordinary key, not an experimental
+feature, because it is opt-in and changes only what the workload already reaches. A record that
+selects it requires record version 25 or later, so a build that predates the key refuses the box
+(`the_file_attributes_key_cannot_hide_in_a_legacy_record`).
+
+A grant operation for each folder would confine the residual to named folders, but it adds an
+operation to the frozen grant model, and the folders that need times (the workspace and its
+temporary folder) are where the residual matters most. A selection for each process, as
+`native-filesystem-policy` has, would still cover the agent, which sets times itself (`touch`, and
+Kiro CLI's lock refresh), and the agent's workspace is where the residual matters most. So an MCP
+server that needs times only in its own cache gets the switch for every process. The cost is the
+residual.
+`with_the_switch_setattrlist_reaches_the_setuid_bit_the_group_and_the_owner_as_known_residuals`
+pins that `setattrlist` stores a set-ID bit, moves the group, and reaches the owner in a write root,
+and it also stores an ACL, which is measured but not pinned. In a box that runs as root, a
+set-user-ID file that the workload leaves would run as root for whoever starts it, so
+[host-backed effects](#host-backed-effects-refuse-what-a-write-cannot-produce) no longer bound what
+lands on real disk while the switch is on.
+
+<a id="file-attributes-is-accepted-when-the-box-runs-as-root"></a>
+### A box that runs as root accepts `file-attributes`, and the writer of `box.toml` decides
+
+Box applies `file-attributes = true` whatever its effective user ID, and it
+does not refuse the switch at startup when `geteuid()` is 0. A refusal at euid 0 would leave the
+profile unchanged and block the one case where the residual becomes privilege escalation, but it
+takes the choice from the writer of `box.toml`, who knows whether a root box runs work that needs
+file times, and that writer can keep the switch off for a root box until its own user opts in. The
+cost: with the switch on, a box that runs as root can leave a
+set-user-ID file owned by root on real disk, and any local user who reaches that folder can run it
+outside the sandbox. The startup disclosure and
+[file attributes on macOS](../user/security.md#file-attributes-on-macos) are the only guards.
+
 <a id="one-forbidden-path-list-and-each-row-states-its-rule"></a>
 ### One forbidden-path list, and each row states its own match rule
 
@@ -1563,7 +1608,10 @@ the cage: a set-user-ID bit written there lands on real disk and a process outsi
 and a symlink stores its target as given, so a reader outside the box would follow it. Each refusal is
 a deny-only limit beneath policy. Two costs: a script that runs `chmod 4755`, or links to an absolute
 path, fails loudly, and an ordinary `chmod +x` drops a setgid or sticky bit that the file already
-carried. This does not cover the workload's own `fchmod` or `symlinkat` syscall inside the cage.
+carried. This does not cover the workload's own syscalls inside the cage: the sandbox refuses a
+`chmod` of a set-ID bit, but `setattrlist` stores one on macOS when
+[`file-attributes`](#a-write-root-sets-file-attributes-only-when-selected) is on, and `symlinkat` is
+not covered.
 
 <a id="shell-network-goes-through-the-egress-gateway"></a>
 ### Box's kernel wrapper sends the Shell's HTTP through the egress gateway

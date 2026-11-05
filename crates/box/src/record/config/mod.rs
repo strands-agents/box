@@ -457,6 +457,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    self.file.file_attributes,
                     &self.file.experimental_features,
                     &self.file.limits,
                     self.file
@@ -467,6 +468,7 @@ impl RunContract {
                     &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                file_attributes: self.file.file_attributes,
                 limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
@@ -525,6 +527,14 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// Whether each macOS write grant may also set file attributes.
+    #[serde(
+        default,
+        rename = "file-attributes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) file_attributes: bool,
 
     /// The operator-selected execution limits.
     #[serde(default, skip_serializing_if = "Limits::is_default")]
@@ -593,17 +603,20 @@ pub(crate) struct Record {
 /// key.
 pub(crate) const RECORD_VERSION: u32 = 21;
 
-/// Version 22 prevents older builds from resuming a box without its selected enforcement.
+/// Version 22 prevents older builds from resuming a box without each experimental feature it selects.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// The record version of a record that selects `file-attributes`, so an older build refuses the box
+/// rather than resuming it without the write grants it was configured with.
+const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 /// The record version that preserves configured execution limits.
-const LIMITS_RECORD_VERSION: u32 = 25;
+const LIMITS_RECORD_VERSION: u32 = 26;
 /// The record version that preserves a disabled Shell timeout.
-const UNLIMITED_SHELL_RECORD_VERSION: u32 = 26;
+const UNLIMITED_SHELL_RECORD_VERSION: u32 = 27;
 /// The record version that preserves a configured Python timeout.
-const PYTHON_LIMITS_RECORD_VERSION: u32 = 27;
+const PYTHON_LIMITS_RECORD_VERSION: u32 = 28;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +658,7 @@ impl ExperimentalFeatures {
 
 /// The record version for what a record holds.
 fn record_version<'a>(
+    file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
@@ -656,6 +670,8 @@ fn record_version<'a>(
         UNLIMITED_SHELL_RECORD_VERSION
     } else if !limits.is_default() {
         LIMITS_RECORD_VERSION
+    } else if file_attributes {
+        FILE_ATTRIBUTES_RECORD_VERSION
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
@@ -904,6 +920,7 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
             UNLIMITED_SHELL_RECORD_VERSION,
             PYTHON_LIMITS_RECORD_VERSION,
@@ -921,6 +938,7 @@ impl Record {
             source,
         })?;
         let expected = record_version(
+            record.file_attributes,
             &record.experimental_features,
             &record.limits,
             record
@@ -1162,6 +1180,10 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// Whether each macOS write grant may also set file times, set-ID bits, the group, the owner,
+    /// and ACLs. Linux accepts the key and renders nothing for it.
+    #[serde(default, rename = "file-attributes")]
+    file_attributes: bool,
     /// The execution limits for hosted interpreters.
     #[serde(default)]
     limits: Limits,
@@ -1359,6 +1381,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
@@ -1497,6 +1520,7 @@ mod tests {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
         ] {
             stored.version = version;
             assert!(matches!(
@@ -1533,35 +1557,45 @@ mod tests {
             ),
         ] {
             let limits: Limits = toml::from_str(settings).unwrap();
-            for native_filesystem_policy in [false, true] {
-                let features = ExperimentalFeatures {
-                    native_filesystem_policy,
-                    tool_grammars: true,
-                };
-                for override_value in [None, Some(false)] {
-                    spec.native_filesystem_policy = override_value;
-                    for servers in [&[][..], shared.mcp.as_slice()] {
-                        assert_eq!(
-                            record_version(&features, &limits, std::iter::once(&spec), servers),
-                            version
-                        );
-                    }
-                }
-            }
             let settings = settings
                 .replace("[shell]", "[limits.shell]")
                 .replace("[python]", "[limits.python]");
-            let body = format!("{SHARED_PROGRAM}\n{settings}");
-            let mut stored = pinned_record(&body);
-            stored.experimental_features.tool_grammars = true;
-            stored.tool = grammar_record().tool;
-            assert_eq!(stored.version, version);
-            assert_eq!(stored.mcp, shared.mcp);
-            assert_eq!(stored.contained_mcp, shared.contained_mcp);
-            assert_eq!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-                stored
-            );
+            for file_attributes in [false, true] {
+                for native_filesystem_policy in [false, true] {
+                    let features = ExperimentalFeatures {
+                        native_filesystem_policy,
+                        tool_grammars: true,
+                    };
+                    for override_value in [None, Some(false)] {
+                        spec.native_filesystem_policy = override_value;
+                        for servers in [&[][..], shared.mcp.as_slice()] {
+                            assert_eq!(
+                                record_version(
+                                    file_attributes,
+                                    &features,
+                                    &limits,
+                                    std::iter::once(&spec),
+                                    servers,
+                                ),
+                                version
+                            );
+                        }
+                    }
+                }
+                let body =
+                    format!("file-attributes = {file_attributes}\n{SHARED_PROGRAM}\n{settings}");
+                let mut stored = pinned_record(&body);
+                stored.experimental_features.tool_grammars = true;
+                stored.tool = grammar_record().tool;
+                assert_eq!(stored.version, version);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.mcp, shared.mcp);
+                assert_eq!(stored.contained_mcp, shared.contained_mcp);
+                assert_eq!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                    stored
+                );
+            }
         }
     }
 
@@ -1666,6 +1700,76 @@ native-filesystem-policy = false
                 Err(ConfigError::ExperimentalFeatureUnavailable { .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(!absent.file_attributes);
+        let enabled = ConfigFile::parse(
+            &format!("file-attributes = true\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(enabled.file_attributes);
+        assert!(enabled.experimental_features.is_disabled());
+        let disabled = ConfigFile::parse(
+            &format!("file-attributes = false\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(!disabled.file_attributes);
+    }
+
+    #[test]
+    fn file_attributes_is_refused_as_an_experimental_feature_and_when_misspelled() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("{required}[experimental-features]\nfile-attributes = true\n"),
+            format!("file-attribute = true\n{required}"),
+            format!("file_attributes = true\n{required}"),
+            format!("file-attributes = \"yes\"\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_attributes_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.file_attributes = true;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("file-attributes = true"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: FILE_ATTRIBUTES_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = FILE_ATTRIBUTES_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("file-attributes"), "{ordinary}");
     }
 
     #[test]

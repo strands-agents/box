@@ -88,25 +88,31 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-When both execution timeouts are omitted, configurations without process overrides retain version 21
-when disabled and version 22 when enabled.
-Any explicit process override requires record version 23.
-A configuration where two stdio MCP servers share a program requires record version 24, whatever the setting and the overrides.
-An explicit numeric `limits.shell.timeout` requires record version 25, including a value of `30`.
-Setting `limits.shell.timeout = false` requires record version 26.
-An explicit `limits.python.timeout` requires record version 27, including `120` and `false`.
-These versions retain the experimental setting, process overrides, and shared MCP programs.
+The stored version is the highest version required by the selected settings:
+
+| Setting | Required version |
+|---|---|
+| No experimental feature, process override, or setting below | 21 |
+| An enabled experimental feature | 22 |
+| An explicit process override | 23 |
+| Two stdio MCP servers sharing one program | 24 |
+| [`file-attributes = true`](config.md#file-attributes) | 25 |
+| A numeric `limits.shell.timeout`, including `30` | 26 |
+| `limits.shell.timeout = false` | 27 |
+| An explicit `limits.python.timeout`, including `120` and `false` | 28 |
+
+Each version retains the other selected settings.
 Older binaries refuse unsupported versions rather than silently losing the selection.
 
 To disable the experiment, change the global setting to `false`.
-Remove all process overrides and both execution timeouts, and give each stdio MCP server its own
-program, before returning to a binary that supports only version 21.
+Before returning to a binary that supports only version 21, remove all process overrides and both
+execution timeouts, give each stdio MCP server its own program, and set `file-attributes` to `false`.
 Run once with the native-capable build before returning to an older binary.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, 24, 25,
-26, or 27 record. To return from version 27, remove `limits.python.timeout` and run once with
+Changing TOML alone does not authorize an older binary to parse an existing record.
+To return from version 28, remove `limits.python.timeout` and run once with
 the current build before switching binaries.
-To return from version 26 to a build that supports version 25, set a numeric Shell
+To return from version 27 to a build that supports version 26, set a numeric Shell
 timeout and run once with the current build before switching binaries.
 
 ## FAQ
@@ -171,7 +177,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, or 26 record that the older binary does not support.
+No, if the box has a record version that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 
