@@ -69,14 +69,21 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux publication and runtime consent stay separate
+### Linux startup does not require an environment opt-in
 
-Linux evaluation requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`, while help and version checks remain available without consent.
+The Linux command line and library validate configuration without an environment opt-in.
+`EXPERIMENTAL_LINUX_SUPPORT` has no effect, including when an existing script sets it to `TRUE`.
+Keeping an extra environment gate would require every caller and test to carry consent separately from configuration.
+The cost is that the variable no longer prevents accidental Linux use.
+Host requirements, process hardening, filesystem grants, and containment checks still apply.
+A missing or invalid configuration still fails before a workload starts.
+
 Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable release without a workflow revert.
 Keeping Linux in preview only would prevent an accepted Linux build from using the stable channel.
-The cost is an explicit platform choice: the release owner must establish Linux readiness before publishing its archive.
+The release owner must establish Linux readiness before publishing its archive.
 Linux previews always include ARM64 Linux and leave the latest stable release unchanged.
-Package availability and runtime consent establish neither filesystem authority nor security acceptance.
+Removing the startup flag does not authorize a release or establish security acceptance.
+The native filesystem policy experiment retains its separate configuration and Cargo feature controls.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
