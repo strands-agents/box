@@ -15,7 +15,7 @@ concurrency:
 jobs:
   detect-changes:
     name: Detect Changes
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 5
     permissions:
       pull-requests: read
@@ -111,7 +111,7 @@ jobs:
     name: Site manifest
     needs: detect-changes
     if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.site_manifest == 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -177,7 +177,7 @@ jobs:
     name: CI Gate
     if: always()
     needs: [detect-changes, packaging, rust, site-manifest, containment, verdict]
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 5
     permissions: {}
     steps:
