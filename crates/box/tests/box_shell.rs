@@ -2359,8 +2359,7 @@ fn a_leaf_box_cannot_write_the_projects_own_authority() {
     std::fs::create_dir_all(&authority).expect("the project's own authority directory");
     let policy = authority.join("policy.dw");
     let policy_before = std::fs::read_to_string(&policy).expect("the loaded policy");
-    // A seed the host binary copies FROM, because a leaf host binary receives no piped stdin —
-    // measured: `echo x | dd` reports `0+0 records in` inside a leaf.
+    // A seed the host binary copies FROM via `if=`, independent of stdin plumbing.
     std::fs::write(box_.workspace().join("seed.txt"), "LEAF_WROTE_THIS\n").expect("a seed to copy");
 
     // The control: the same host binary writes an ordinary file in the project, which must land.
@@ -2380,6 +2379,29 @@ fn a_leaf_box_cannot_write_the_projects_own_authority() {
         "a leaf box must not write the policy that governs the next run of this box: \
          {attempt:?}\nthe policy now reads: {after}"
     );
+}
+
+/// **A host binary reads a Shell `< file` redirect**, so `dd of=out < seed` is not a silent empty
+/// write. Without feeding the redirect through `HostSpawn.stdin`, the leaf's stdin stayed
+/// `/dev/null` and the program exited 0 with an empty file — the #319 shape.
+#[test]
+fn a_host_binary_reads_a_shell_stdin_redirect() {
+    if !fixture::namespace_launcher_is_usable() {
+        println!("skipping: this platform has no usable containment backend");
+        return;
+    }
+    let box_ = Request::with_config("spawn-stdin-redirect", ONE_WRITER_POLICY, DD_TOOL).expect();
+    std::fs::write(box_.workspace().join("seed.txt"), "REDIRECTED_STDIN\n").expect("a seed");
+
+    let output =
+        box_.bash(r#"zsh -lc "dd of={workspace}/out.txt status=none < {workspace}/seed.txt""#);
+    let landed = std::fs::read_to_string(box_.workspace().join("out.txt")).unwrap_or_default();
+    assert!(
+        landed.contains("REDIRECTED_STDIN"),
+        "a host binary must read a Shell < file redirect, not /dev/null: \
+         landed={landed:?} full={output:?}"
+    );
+    assert!(output.status.success(), "{output:?}");
 }
 
 /// A permitted host binary runs, and its output reaches the caller.

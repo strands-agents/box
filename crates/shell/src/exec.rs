@@ -401,6 +401,11 @@ async fn spawn_host_program(
     // caller used.
     let program = admitted.filter(|program| program.bound)?;
 
+    // Take this stage's stdin after redirects: a `< file`, here-doc, or upstream pipe becomes
+    // bytes for the child. An empty or absent reader stays null so the child does not inherit the
+    // daemon's stdin or block the Call waiting for input that will never arrive.
+    let stdin = take_host_stdin().await;
+
     // Hand the resolved spawn to the kernel's host-spawn seam. The box installs a hook that runs
     // the binary inside a contained leaf box; with no hook the seam fails closed and the binary
     // is refused, not run uncontained. The environment is the Shell's composed one — cleared
@@ -415,6 +420,7 @@ async fn spawn_host_program(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
+        stdin,
     };
     let outcome = match os.spawn_host(spawn).await {
         Ok(outcome) => outcome,
@@ -436,6 +442,32 @@ async fn spawn_host_program(
         let _ = w.write_all(&outcome.stderr).await;
     }
     Some(outcome.status)
+}
+
+/// Collect this stage's stdin for a host spawn: `< file` / here-doc bytes, otherwise null.
+///
+/// Only drains when [`Process::stdin_from_shell`] is set. The broker Call channel stays in place
+/// otherwise — reading it to EOF would block the Call until `InputEof`.
+async fn take_host_stdin() -> crate::os::HostStdin {
+    use tokio::io::AsyncReadExt as _;
+
+    let Some(mut reader) = CURRENT_PROCESS.with(|p| {
+        let mut proc = p.borrow_mut();
+        if !proc.stdin_from_shell || !proc.has_fd(STDIN) {
+            return None;
+        }
+        let reader = proc.take_reader(STDIN).ok()?;
+        proc.stdin_from_shell = false;
+        Some(reader)
+    }) else {
+        return crate::os::HostStdin::Null;
+    };
+    let mut bytes = Vec::new();
+    match reader.read_to_end(&mut bytes).await {
+        Ok(_) if bytes.is_empty() => crate::os::HostStdin::Null,
+        Ok(_) => crate::os::HostStdin::Bytes(bytes),
+        Err(_) => crate::os::HostStdin::Null,
+    }
 }
 
 /// The program and its arguments as one line, for `context.input.command`.
@@ -2004,7 +2036,11 @@ async fn apply_redirects(
                 tokio::spawn(async move {
                     let _ = tx.send(data).await;
                 });
-                proc.set_channel_reader(*fd, rx);
+                if *fd == STDIN {
+                    proc.set_shell_stdin_reader(rx);
+                } else {
+                    proc.set_channel_reader(*fd, rx);
+                }
             }
         }
     }

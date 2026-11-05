@@ -350,9 +350,14 @@ fn tool_spawner(
                     "native-egress",
                 ));
             }
+            let stdin = match spawn.stdin {
+                strands_shell::os::HostStdin::Null => None,
+                strands_shell::os::HostStdin::Bytes(bytes) => Some(bytes),
+            };
             let captured = crate::run::contain::supervise::LeafBox::run(
                 boundary,
                 &layout,
+                stdin,
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 registration,
             )

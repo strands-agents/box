@@ -1778,3 +1778,21 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-05 — host spawn feeds a Shell stdin redirect to the child
+
+**Ours.** `HostSpawn` carried no stdin; `builtin_spawn_host` and the box's leaf run always used
+`/dev/null`. A parsed `< file` or here-doc therefore never reached a `shell:spawn` binary
+(`sqlite3 … < top.sql`, `dd of=out < seed`), which exited 0 with empty output and no denial —
+GitHub #319. Pipeline bytes into a host stage were the same gap.
+
+`HostSpawn` now carries [`HostStdin`]: `Null` when the stage has only the broker Call channel
+(so draining it cannot block on `InputEof`, and the child still does not inherit the daemon's
+stdin), and `Bytes` when `Process::stdin_from_shell` marks a `< file` or here-doc redirect.
+`spawn_host_program` takes those bytes after redirects; `builtin_spawn_host` and `LeafBox::run`
+pipe them into the child. An upstream pipeline into a host stage is unchanged (still null):
+draining it before spawn would block concurrent pipeline stages. `the_builtin_spawn_feeds_stdin_bytes_to_the_child`
+and `a_host_binary_reads_a_shell_stdin_redirect` pin the redirect path.
+
+Verified: `cargo test -p strands-shell --all-features` and `cargo test -p strands-box --all-features`
+for the named tests (full package gates run with the change).
