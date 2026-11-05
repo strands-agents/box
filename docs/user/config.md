@@ -302,6 +302,16 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
+Run Box as a non-root account to grant sandbox directory writes.
+Root launches support explicitly granted existing-file writes and read-only directory access.
+Private `/tmp` storage remains writable and separate from the surrounding OS.
+The same restriction applies when a container maps a non-root account to user ID zero.
+
+These filesystem lists govern sandbox access.
+Shell and Python requests through Box use separate policy and reach checks in the trusted process.
+This restriction does not change their file ownership or permission to create files.
+
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
 owner or group, or requesting either special bit during creation, remains forbidden. These requests fail with `EPERM` (operation not permitted).
@@ -321,15 +331,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Supported |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
+| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
