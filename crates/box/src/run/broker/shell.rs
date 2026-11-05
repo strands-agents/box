@@ -43,6 +43,7 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
+    pub(super) python_timeout: Option<Duration>,
     /// The Shell's own bound on one command.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
@@ -196,6 +197,7 @@ impl ShellSpec {
     }
 
     fn script_interpreter(&self) -> strands_shell::os::ScriptInterpreter {
+        let timeout = self.python_timeout;
         let reach = Arc::clone(&self.reach);
         let policy = Arc::clone(&self.policy);
         let governed = self.governed.clone();
@@ -207,17 +209,25 @@ impl ShellSpec {
             let governed = governed.clone();
             let egress = egress.clone();
             let recorder = Arc::clone(&recorder);
+            let deadline = strands_shell::io::CURRENT_PROCESS
+                .try_with(|process| process.borrow().deadline)
+                .ok()
+                .flatten();
             Box::pin(async move {
-                let outcome = crate::run::broker::python::drive_monty(
-                    source,
-                    crate::run::broker::python::PYTHON_ORIGIN.to_string(),
-                    &reach,
-                    &policy,
-                    &governed,
-                    egress.as_ref(),
-                    &recorder,
-                )
-                .await;
+                let outcome = crate::run::broker::python::CALL_DEADLINE
+                    .scope(
+                        deadline,
+                        crate::run::broker::python::run_python(
+                            source,
+                            &reach,
+                            &policy,
+                            &governed,
+                            egress.as_ref(),
+                            &recorder,
+                            timeout,
+                        ),
+                    )
+                    .await;
                 Ok::<_, std::io::Error>(strands_shell::os::ScriptOutcome {
                     status: outcome.status,
                     stdout: outcome.stdout,

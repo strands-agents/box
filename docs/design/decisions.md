@@ -1603,13 +1603,13 @@ an open residual rather than a closed case.
 <a id="python-in-the-shell-is-monty"></a>
 ### A workload reaches Monty two ways, and Box judges both on its one policy
 
-The workload runs the `python3` alias directly, and the broker serves that. Or it types `python` or
-`python3` in the hosted Shell, which forwards the source through a script seam to Monty. Both routes
-run one Monty VM per request, and Box judges both as the same principal under its one policy engine, so
-no route reaches an interpreter that policy does not see. Without the second route a `python` typed in
-the Shell exited 127, so an agent that reaches interpreters only through its shell never reached Monty.
-Two differences between the routes are deliberate: the direct route adds an outer request timeout, and
-a script file argument through the Shell reaches a bind, while the direct alias cannot.
+The workload reaches Monty through the `python` and `python3` aliases, or through either command in
+Strands Shell. Both routes create one VM per request and use the same principal, policy engine, and
+configured Python timeout. Serving only the direct aliases would leave agents that submit Shell
+commands without Python. Python inside Shell also shares that Shell call's remaining allowance;
+`nested_python_obeys_the_earlier_deadline_without_late_effects` pins this bound. The script file routes
+differ: Shell reads the file under policy, while the direct alias reads it under the agent's
+filesystem grants.
 
 <a id="a-bare-python-name-always-means-monty"></a>
 ### A bare `python` name always means Monty, so a host interpreter needs its absolute path
@@ -1660,14 +1660,20 @@ because the broker has no event loop, so two concurrent sleeps take the sum of t
 Monty builds one VM per call and keeps no state between calls. It buffers the script's output and
 returns it once, under a size cap. It refuses the interactive frames, so a script has no stdin and
 `input()` cannot read. Status 0 means completed, 1 means the script raised, and 125 means a broker
-or interpreter fault. The interpreter stops a script after 2 minutes of execution time, from inside
-its own run loop, so `while True: pass` stops even when the script makes no OS call. Time suspended
-on the host does not count against that budget, so Box bounds the rest: 5 minutes of wall-clock time
-for each request, 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1
-MiB for each `os.urandom` call. Each of these bounds is less than the wall clock. A sleep is never
-shortened: one that would pass the sleep total raises `TimeoutError` before it waits, which
-`a_sleep_longer_than_the_total_raises_at_once` pins. `a_script_stops_at_its_suspension_limit` and
-`urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
+or interpreter fault.
+
+One elapsed allowance covers computation, sleep, and operations Box performs for the script.
+The default is 120 seconds; `limits.python.timeout` selects positive seconds or `false` to disable
+the execution deadline. Separate computation and sleep budgets would give one call several
+independent limits, so Box charges time spent answering suspensions to the interpreter's budget.
+The interpreter checks that budget inside its run loop, and Box checks the same deadline while
+waiting for a suspension to complete. `sleep_and_resumed_computation_share_one_budget` and
+`the_default_budget_includes_sleep_and_each_call_starts_fresh` pin this contract. The remaining
+bounds are 60 seconds for each `fetch`, 10,000 suspensions, and 1 MiB for each `os.urandom` call.
+`a_script_stops_at_its_suspension_limit` and
+`urandom_above_its_cap_is_a_catchable_python_error` pin the latter two.
+
+Monty refuses one allocation
 above 128 MiB and stops the script with a `MemoryError`, which
 `an_oversized_allocation_stops_the_script_and_not_the_box` pins. A script has no limit on its total
 memory, because Monty enforces one only through a global allocator that counts the whole trusted
@@ -1675,6 +1681,9 @@ process and ends it on an overrun. A worker process for each script restores tha
 because it changes the process layout of the box. The costs: there is no interactive session, a long
 script shows nothing until it ends, and a script that grows its memory in small steps can use all
 the memory of its box's trusted process, which is residual risk.
+Uninterrupted computation cannot observe cancellation until Monty returns control or reaches its
+finite deadline. With Python and any enclosing Shell deadline disabled, a busy loop can prevent
+Box from shutting down.
 
 <a id="a-monty-script-reaches-the-network-through-one-fetch-function"></a>
 ### A Monty script reaches the network through one `fetch` function, and only that

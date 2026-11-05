@@ -179,16 +179,22 @@ it at the end, so a variable one script sets is undefined in the next ([no inter
 crosses a call boundary](decisions.md#no-state-crosses-a-call-boundary)). Two scripts can run at the
 same time.
 
-**Box bounds each script:** the number of calls Box answers for it, its total sleep, and the size
+**Box bounds each script:** its elapsed time, the number of calls Box answers for it, and the size
 of one allocation ([Monty handles one request per VM, and bounds each
 allocation](decisions.md#monty-is-per-request-and-buffers-its-output)). A script that passes a bound
 raises a Python exception, and the box keeps serving. The values are in [limits and exit
 statuses](../user/monty.md#limits-and-exit-statuses).
 
+The Python timeout covers computation, sleep, and operations Box performs for the script.
+Box charges time spent answering a suspended call to the interpreter's execution budget,
+so resuming computation keeps the same deadline. The same timeout applies through either route;
+Python inside Shell also uses the enclosing Shell call's remaining allowance. Each new call
+receives a fresh allowance. The alias waits for the result without a separate response deadline.
+
 **The exit status says who failed.** `0` means the script completed. `1` means it raised an
 exception it didn't catch: a policy denial, a bound, a `NameError` for a name Monty doesn't define,
-or a bug in the script. `125` means Box didn't run the script to its end: Box failed, or the script
-ran longer than the alias waits for it ([a suspension Box doesn't service is a Python
+or a bug in the script. `125` means Box failed to run the script to its end
+([a suspension Box doesn't service is a Python
 error](decisions.md#an-unserviced-suspension-is-a-python-error)).
 
 ## Example: the write, and two refusals
@@ -232,6 +238,9 @@ file that doesn't exist yet.
   effect still has to come back to Box as a paused call.
 - **A script's total memory has no bound.** Box refuses one allocation above 128 MiB, but a script
   that grows in small steps can use all the memory of the box's trusted process.
+- **Uninterrupted computation delays cancellation.** Monty checks its finite execution budget
+  inside the VM, but observes cancellation only after it returns control to Box. With the Python
+  timeout and any enclosing Shell timeout disabled, a busy loop can prevent Box from shutting down.
 - **A refusal can read as an answer.** A `fetch()` that the gateway refuses returns a `403`
   response, and a script that doesn't check the status reads a refusal as an answer.
 - **One broad rule reaches the operator's secrets.** Monty reaches the whole operator home, so an

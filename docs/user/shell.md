@@ -142,11 +142,12 @@ and programs the Shell starts. Each new call receives a fresh allowance. Output 
 deadline unchanged. The Shell alias waits for the broker's result.
 
 With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
-Calls remain cancellable, and connection and write operations retain their transport timeouts.
+Connection and write operations retain their transport timeouts.
 
-Python called inside the Shell retains Monty's 120-second active execution limit and
-180-second cumulative sleep limit. Synchronous Python execution can delay the Shell's timeout
-check. The direct `python` and `python3` aliases use their [own limits](monty.md#limits-and-exit-statuses).
+Python called inside Shell uses [`limits.python.timeout`](monty.md#limits-and-exit-statuses)
+and shares the enclosing Shell call's remaining allowance. The earlier deadline stops it.
+During uninterrupted Python computation, cancellation waits until the interpreter returns
+control or reaches that deadline. Disabling both deadlines can prevent Box from shutting down.
 
 ### `[tool.<name>]`
 

@@ -169,10 +169,22 @@ Example output:
 
 ## Limits and exit statuses
 
+Each Python call has a 120-second timeout by default. Set `python.timeout = 600` under
+`[limits]` to allow ten minutes, or `python.timeout = false` for unlimited execution.
+See [`[limits]`](config.md#limits) for the accepted values.
+
+One allowance covers computation, sleep, and operations Box performs for the script.
+Each new call receives a fresh allowance. Python called inside Strands Shell also shares
+the enclosing Shell call's remaining allowance. The Python alias waits for the broker's result.
+
+Use a finite timeout when a script may loop indefinitely. During uninterrupted computation,
+Python observes cancellation only when it returns control or reaches its finite deadline.
+With all applicable timeouts disabled, such a script can prevent Box from shutting down.
+
 | Limit | When a script passes it |
 |---|---|
+| `limits.python.timeout`, 120 seconds by default | `TimeoutError`, which the script cannot catch |
 | 10,000 calls that Box answers, such as file operations and `fetch()` | `RuntimeError`, which the script cannot catch |
-| 180 seconds of sleep in total | `TimeoutError`, at once, from the sleep that would pass it |
 | 128 MiB in one allocation | `MemoryError`, which the script cannot catch |
 | 1 MiB from one `os.urandom()` | `ValueError` |
 | 1 MiB in one `fetch()` response body | `OSError` |
@@ -182,7 +194,7 @@ Example output:
 | `0` | The script completed. |
 | `1` | The script raised an exception it did not catch, including a policy refusal and a limit. |
 | `2` | Strands Shell route only: a form the command refuses. |
-| `125` | Box did not run the script to its end: Box failed, or the script ran longer than the alias waits for it. |
+| `125` | Box failed to run the script to its end. |
 | `126` | Strands Shell route only: policy refused `shell:exec` for the command. |
 
 ## Policy

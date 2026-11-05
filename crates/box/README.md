@@ -84,11 +84,12 @@ every removed spelling is refused by its own name with its replacement.
 The four inputs are policy, credentials, name, and workload; a key becomes an input when it decides
 which requests are governed.
 
-`[limits]` accepts `shell.timeout`, a positive integer number of seconds or `false` to disable
-the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
-For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
-The nested table `[limits.shell]` accepts the same values under `timeout`.
-Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+`[limits]` accepts `shell.timeout` and `python.timeout`, each a positive integer number of seconds
+or `false` to disable its execution timeout. Shell defaults to 30 seconds; Python defaults to 120.
+For ten minutes, set either key to `600`; for unlimited execution, set it to `false`.
+The nested tables `[limits.shell]` and `[limits.python]` accept the same values under `timeout`.
+Each allowance covers one call. Python inside Shell also shares the Shell call's remaining allowance.
+Invalid or unrepresentable durations are load errors.
 See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the

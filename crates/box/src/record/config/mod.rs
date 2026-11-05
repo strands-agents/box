@@ -15,7 +15,7 @@
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
-//! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
+//! | [`limits`] | The execution timeouts of Shell and Python submissions |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -602,6 +602,8 @@ const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 const LIMITS_RECORD_VERSION: u32 = 25;
 /// The record version that preserves a disabled Shell timeout.
 const UNLIMITED_SHELL_RECORD_VERSION: u32 = 26;
+/// The record version that preserves a configured Python timeout.
+const PYTHON_LIMITS_RECORD_VERSION: u32 = 27;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,7 +650,9 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if limits.shell.timeout().is_none() {
+    if !limits.python.is_default() {
+        PYTHON_LIMITS_RECORD_VERSION
+    } else if limits.shell_timeout().is_none() {
         UNLIMITED_SHELL_RECORD_VERSION
     } else if !limits.is_default() {
         LIMITS_RECORD_VERSION
@@ -902,6 +906,7 @@ impl Record {
             SHARED_PROGRAM_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
             UNLIMITED_SHELL_RECORD_VERSION,
+            PYTHON_LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1377,7 +1382,7 @@ mod tests {
         ] {
             let configured = load(body).unwrap();
             assert_eq!(
-                configured.limits.shell.timeout(),
+                configured.limits.shell_timeout(),
                 Some(std::time::Duration::from_secs(600))
             );
             let stored = record_from_config(body).unwrap();
@@ -1391,13 +1396,56 @@ mod tests {
     }
 
     #[test]
+    fn python_limits_round_trip_only_in_their_record_version() {
+        for timeout in ["120", "600", "false"] {
+            for body in [
+                format!("[limits]\npython.timeout = {timeout}\n"),
+                format!("[limits.python]\ntimeout = {timeout}\n"),
+            ] {
+                let configured = load(&body).unwrap();
+                let mut stored = pinned_record(&body);
+                assert_eq!(stored.limits, configured.limits);
+                assert_eq!(stored.version, PYTHON_LIMITS_RECORD_VERSION);
+                assert_eq!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                    stored
+                );
+                for version in RECORD_VERSION..PYTHON_LIMITS_RECORD_VERSION {
+                    stored.version = version;
+                    assert!(matches!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                        Err(ConfigError::RecordVersion {
+                            found,
+                            expected: PYTHON_LIMITS_RECORD_VERSION,
+                        }) if found == version
+                    ));
+                }
+            }
+        }
+        for body in [
+            "",
+            "[limits.shell]\ntimeout = 600\n",
+            "[limits.shell]\ntimeout = false\n",
+        ] {
+            let mut stored = pinned_record(body);
+            let expected_version = stored.version;
+            stored.version = PYTHON_LIMITS_RECORD_VERSION;
+            assert!(matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion { found: PYTHON_LIMITS_RECORD_VERSION, expected })
+                    if expected == expected_version
+            ));
+        }
+    }
+
+    #[test]
     fn empty_limits_preserve_the_existing_record_format() {
-        for body in ["", "[limits]\n", "[limits.shell]\n"] {
+        for body in ["", "[limits]\n", "[limits.shell]\n", "[limits.python]\n"] {
             let stored = pinned_record(body);
             assert_eq!(stored.version, RECORD_VERSION);
             assert!(!stored.to_toml().unwrap().contains("limits"));
             assert_eq!(
-                stored.limits.shell.timeout(),
+                stored.limits.shell_timeout(),
                 Some(limits::DEFAULT_SHELL_TIMEOUT)
             );
         }
@@ -1411,7 +1459,7 @@ mod tests {
         ] {
             let configured = load(body).unwrap();
             let mut stored = pinned_record(body);
-            assert_eq!(configured.limits.shell.timeout(), None);
+            assert_eq!(configured.limits.shell_timeout(), None);
             assert_eq!(stored.limits, configured.limits);
             assert_eq!(stored.version, UNLIMITED_SHELL_RECORD_VERSION);
             assert_eq!(
@@ -1475,12 +1523,16 @@ mod tests {
     fn configured_limits_preserve_other_versioned_record_fields() {
         let shared = pinned_record(SHARED_PROGRAM);
         let mut spec = agent(&["/bin/true"]);
-        for (timeout, version) in [
-            ("600", LIMITS_RECORD_VERSION),
-            ("false", UNLIMITED_SHELL_RECORD_VERSION),
+        for (settings, version) in [
+            ("[shell]\ntimeout = 600\n", LIMITS_RECORD_VERSION),
+            ("[shell]\ntimeout = false\n", UNLIMITED_SHELL_RECORD_VERSION),
+            ("[python]\ntimeout = 600\n", PYTHON_LIMITS_RECORD_VERSION),
+            (
+                "[shell]\ntimeout = false\n[python]\ntimeout = false\n",
+                PYTHON_LIMITS_RECORD_VERSION,
+            ),
         ] {
-            let limits: Limits =
-                toml::from_str(&format!("[shell]\ntimeout = {timeout}\n")).unwrap();
+            let limits: Limits = toml::from_str(settings).unwrap();
             for native_filesystem_policy in [false, true] {
                 let features = ExperimentalFeatures {
                     native_filesystem_policy,
@@ -1496,7 +1548,10 @@ mod tests {
                     }
                 }
             }
-            let body = format!("{SHARED_PROGRAM}\n[limits.shell]\ntimeout = {timeout}\n");
+            let settings = settings
+                .replace("[shell]", "[limits.shell]")
+                .replace("[python]", "[limits.python]");
+            let body = format!("{SHARED_PROGRAM}\n{settings}");
             let mut stored = pinned_record(&body);
             stored.experimental_features.tool_grammars = true;
             stored.tool = grammar_record().tool;
@@ -1512,16 +1567,18 @@ mod tests {
 
     #[test]
     fn invalid_limits_are_refused_in_configuration_and_stored_records() {
-        for value in ["0", "-1", "1.5", "\"60s\"", "true", "9223372036854775807"] {
-            let body = format!("[limits.shell]\ntimeout = {value}\n");
-            let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
-            let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
-            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
-            let mut stored = record(None, BTreeMap::new());
-            stored.version = LIMITS_RECORD_VERSION;
-            let text = format!("{}\n{body}", stored.to_toml().unwrap());
-            let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
-            assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
+        for interpreter in ["shell", "python"] {
+            for value in ["0", "-1", "1.5", "\"60s\"", "true", "9223372036854775807"] {
+                let body = format!("[limits.{interpreter}]\ntimeout = {value}\n");
+                let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+                let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+                assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
+                let mut stored = record(None, BTreeMap::new());
+                stored.version = LIMITS_RECORD_VERSION;
+                let text = format!("{}\n{body}", stored.to_toml().unwrap());
+                let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+                assert!(matches!(error, ConfigError::Parse { .. }), "{value}");
+            }
         }
     }
 
@@ -2257,7 +2314,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, UNLIMITED_SHELL_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, PYTHON_LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

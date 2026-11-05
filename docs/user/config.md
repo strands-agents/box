@@ -150,19 +150,22 @@ A native `filesystem.deny` entry does not restrict these requests through the bo
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
+| `python.timeout` | positive integer or `false` | `120` | Seconds allowed for one Python call, including computation, sleep, and operations Box performs for it. `false` disables the Python execution deadline. |
 
-To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
-`[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
-Set `shell.timeout = false` for unlimited execution, or omit the key for the 30-second default.
-Connection and write operations retain their transport timeouts.
+To allow ten minutes, set `shell.timeout = 600` or `python.timeout = 600` under `[limits]`.
+The equivalent nested tables are `[limits.shell]` and `[limits.python]`, each with `timeout = 600`.
+Each call receives a fresh allowance; output and sleep leave its deadline unchanged.
+Set either key to `false` for unlimited execution, or omit it for that interpreter's default.
+The aliases wait for the broker's result. Connection and write operations retain their transport timeouts.
 Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
 are load errors.
 
-This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`.
-Python retains its [own limits](monty.md#limits-and-exit-statuses), including when called inside the
-Shell. Synchronous Python execution can delay the Shell's timeout check.
-See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
-[stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
+The Shell setting applies to calls forwarded by `zsh`, `bash`, and `sh`.
+The Python setting applies to the `python` and `python3` aliases and Python called inside Shell.
+Python inside Shell also shares the enclosing Shell call's remaining allowance.
+See [Shell timeouts](shell.md#limitsshelltimeout) and [Python limits](monty.md#limits-and-exit-statuses)
+for execution details. See [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback)
+for rollback.
 
 ## `[experimental-features]`
 
@@ -759,7 +762,7 @@ relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
 and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
-An invalid `limits.shell.timeout` is also a parse error.
+An invalid `limits.shell.timeout` or `limits.python.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

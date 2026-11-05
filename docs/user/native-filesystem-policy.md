@@ -88,22 +88,25 @@ Production use still requires further review and tests for those failures.
 
 ## Stored configuration and rollback
 
-When `limits.shell.timeout` is omitted, configurations without process overrides retain version 21
+When both execution timeouts are omitted, configurations without process overrides retain version 21
 when disabled and version 22 when enabled.
 Any explicit process override requires record version 23.
 A configuration where two stdio MCP servers share a program requires record version 24, whatever the setting and the overrides.
 An explicit numeric `limits.shell.timeout` requires record version 25, including a value of `30`.
 Setting `limits.shell.timeout = false` requires record version 26.
-Both versions retain the experimental setting, process overrides, and shared MCP programs.
+An explicit `limits.python.timeout` requires record version 27, including `120` and `false`.
+These versions retain the experimental setting, process overrides, and shared MCP programs.
 Older binaries refuse unsupported versions rather than silently losing the selection.
 
 To disable the experiment, change the global setting to `false`.
-Remove all process overrides and `limits.shell.timeout`, and give each stdio MCP server its own
+Remove all process overrides and both execution timeouts, and give each stdio MCP server its own
 program, before returning to a binary that supports only version 21.
 Run once with the native-capable build before returning to an older binary.
 This writes a version 21 record while retaining durable policy history.
 Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, 24, 25,
-or 26 record. To return from version 26 to a build that supports version 25, set a numeric Shell
+26, or 27 record. To return from version 27, remove `limits.python.timeout` and run once with
+the current build before switching binaries.
+To return from version 26 to a build that supports version 25, set a numeric Shell
 timeout and run once with the current build before switching binaries.
 
 ## FAQ

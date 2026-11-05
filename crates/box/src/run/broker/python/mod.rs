@@ -1,8 +1,4 @@
-//! Python, as one interpreter behind the box's one broker socket. Monty is the implementation.
-//!
-//! No listener and no protocol of its own: `run::broker::host` dispatches an
-//! `Interpreter::Python` Call here. The interpreter is stateless per Call, which is why this is a
-//! function rather than a host.
+//! One stateless Python interpreter per broker call, with policy-mediated host operations.
 
 mod clock;
 mod effects;
@@ -18,6 +14,7 @@ use monty_types::{
     SleepMode,
 };
 use policy::{GovernedBox, PolicyEngine, Principal, ScriptPolicyInterceptor};
+use tokio::time::Instant;
 
 use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES as MAX_SCRIPT_CAPTURE_BYTES;
 use crate::run::broker::reach::Reach;
@@ -26,28 +23,24 @@ use crate::run::telemetry::DecisionRecorder;
 use effects::{MontyPep, admit_and_perform};
 use fetch::{FETCH_NAME, fetch_through_gateway};
 
-/// Bound on one script's execution time, enforced **inside** the interpreter.
-const SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Bound on one allocation of a script, enforced inside the interpreter.
 const SCRIPT_MAX_ALLOCATION: usize = 128 * 1024 * 1024;
-
-/// Outer bound on serving one request, around the tracker.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
-
-/// Bound on all the sleeps of one script.
-const SLEEP_TOTAL_LIMIT: Duration = Duration::from_secs(180);
-
-/// Bound on the suspensions one script may make.
 const SUSPENSION_LIMIT: usize = 10_000;
+const BROKER_FAILURE_STATUS: i32 = 125;
+const SCRIPT_RAISED_STATUS: i32 = 1;
 
-const _: () = assert!(
-    REQUEST_TIMEOUT.as_nanos() > SCRIPT_TIMEOUT.as_nanos(),
-    "the outer bound must outlast the interpreter's, or a script stopped at its own deadline is \
-     reported as a broker failure"
-);
+pub(super) const PYTHON_ORIGIN: &str = "<box>";
 
-/// Compile and run one script, servicing every suspension through policy.
+tokio::task_local! {
+    pub(super) static CALL_DEADLINE: Option<Instant>;
+}
+
+pub(super) struct PythonOutcome {
+    pub(super) status: i32,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
+}
+
+/// Compile and run one script within its own and any enclosing Shell deadline.
 pub(super) async fn run_python(
     source: String,
     reach: &Reach,
@@ -55,58 +48,21 @@ pub(super) async fn run_python(
     governed: &GovernedBox,
     egress: Option<&EgressRouting>,
     recorder: &Arc<DecisionRecorder>,
+    timeout: Option<Duration>,
 ) -> PythonOutcome {
-    // The origin is a diagnostic label in a traceback, never a path this opens.
-    match tokio::time::timeout(
-        REQUEST_TIMEOUT,
-        drive_monty(
-            source,
-            PYTHON_ORIGIN.to_string(),
-            reach,
-            policy,
-            governed,
-            egress,
-            recorder,
-        ),
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(_) => PythonOutcome {
-            status: BROKER_FAILURE_STATUS,
-            stdout: String::new(),
-            stderr: "Python script exceeded its deadline\n".to_string(),
+    let mut captured = String::new();
+    let deadline = match timeout {
+        Some(timeout) => match Instant::now().checked_add(timeout) {
+            Some(deadline) => Some(deadline),
+            None => return raised(&deadline_exceeded(), &mut captured),
         },
-    }
-}
-
-/// The status reported when the broker itself failed, rather than the script.
-const BROKER_FAILURE_STATUS: i32 = 125;
-/// The status reported when a script raised an uncaught exception.
-const SCRIPT_RAISED_STATUS: i32 = 1;
-
-/// One Python Call's result: a status and whatever it wrote.
-pub(super) struct PythonOutcome {
-    pub(super) status: i32,
-    pub(super) stdout: String,
-    pub(super) stderr: String,
-}
-
-/// The origin a traceback names for source that arrived over the wire.
-pub(super) const PYTHON_ORIGIN: &str = "<box>";
-
-/// Drive Monty through policy; synchronous VM execution can delay the enclosing Shell deadline.
-pub(super) async fn drive_monty(
-    source: String,
-    origin: String,
-    reach: &Reach,
-    policy: &PolicyEngine,
-    governed: &GovernedBox,
-    egress: Option<&EgressRouting>,
-    recorder: &Arc<DecisionRecorder>,
-) -> PythonOutcome {
-    // **The same reporting as the Shell, or one `context.input.path` means two things.** Without
-    // this, a Python `fs:*` request carried the host path while the Shell reported `~/<relative>` —
+        None => None,
+    };
+    let inherited = CALL_DEADLINE.try_with(|deadline| *deadline).ok().flatten();
+    let deadline = match (deadline, inherited) {
+        (Some(own), Some(enclosing)) => Some(own.min(enclosing)),
+        (own, enclosing) => own.or(enclosing),
+    };
     let policy_interceptor =
         ScriptPolicyInterceptor::new(policy, Principal::agent(), governed.clone());
     let policy_interceptor = match reach.reported_home() {
@@ -117,11 +73,7 @@ pub(super) async fn drive_monty(
         policy: policy_interceptor,
         recorder: Arc::clone(recorder),
     };
-    // `CollectString` with a byte cap rather than a buffer this module grows: the workload
-    // chooses how much a script prints, so the writer enforces the cap. Exceeding it raises
-    let mut captured = String::new();
-
-    let run = match MontyRun::new(source, &origin, Vec::new(), CompileOptions::default()) {
+    let run = match MontyRun::new(source, PYTHON_ORIGIN, Vec::new(), CompileOptions::default()) {
         Ok(mut run) => {
             run.set_cwd(reach.working_directory());
             run.with_os_policy(OsPolicy {
@@ -129,170 +81,161 @@ pub(super) async fn drive_monty(
                 ..OsPolicy::default()
             })
         }
-        Err(exception) => return raised(&exception, String::new()),
+        Err(exception) => return raised(&exception, &mut captured),
     };
-    // The VM enforces the execution time, and the loop below enforces the suspension and sleep
-    // bounds (docs/design/decisions.md#monty-is-per-request-and-buffers-its-output).
-    let tracker = ResourceTracker::new(
-        ResourceLimits::default()
-            .max_feed_duration(SCRIPT_TIMEOUT)
-            .max_memory(SCRIPT_MAX_ALLOCATION)
-            .max_suspensions(SUSPENSION_LIMIT)
-            .max_total_sleep(SLEEP_TOTAL_LIMIT),
-    );
-    let mut progress = match run.start(
-        Vec::new(),
-        tracker,
-        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES)),
-    ) {
-        Ok(progress) => progress,
-        Err(exception) => return raised(&exception, String::new()),
-    };
-    let mut suspensions = 0_usize;
-    let mut slept = Duration::ZERO;
-
-    loop {
-        if !matches!(progress, RunProgress::Complete(_)) {
-            suspensions += 1;
-        }
-        progress = match progress {
-            RunProgress::Complete(_) => {
-                return PythonOutcome {
-                    status: 0,
-                    stdout: captured,
-                    stderr: String::new(),
-                };
-            }
-            RunProgress::OsCall(call) if suspensions > call.tracker().max_suspensions() => {
+    if expired(deadline) {
+        return raised(&deadline_exceeded(), &mut captured);
+    }
+    let mut limits = ResourceLimits::default()
+        .max_memory(SCRIPT_MAX_ALLOCATION)
+        .max_suspensions(SUSPENSION_LIMIT);
+    if let Some(deadline) = deadline {
+        limits = limits.max_feed_duration(deadline.saturating_duration_since(Instant::now()));
+    }
+    let execution = async {
+        let mut progress = match run.start(
+            Vec::new(),
+            ResourceTracker::new(limits),
+            PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES)),
+        ) {
+            Ok(progress) => progress,
+            Err(exception) => return raised(&exception, &mut captured),
+        };
+        let mut suspensions = 0_usize;
+        loop {
+            let exceeded = if expired(deadline) {
+                Some(deadline_exceeded())
+            } else if !matches!(progress, RunProgress::Complete(_)) {
+                suspensions += 1;
+                (suspensions > SUSPENSION_LIMIT).then(|| {
+                    MontyException::new(
+                        ExcType::RuntimeError,
+                        Some(format!(
+                            "script exceeded its limit of {SUSPENSION_LIMIT} host calls"
+                        )),
+                    )
+                })
+            } else {
+                None
+            };
+            if let Some(exception) = exceeded {
                 let writer =
                     PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let exceeded = suspension_limit_exceeded(call.tracker());
-                return raised(&abort_error(call.abort(exceeded, writer)), captured);
+                let exception = abort(progress, exception, writer);
+                return raised(&exception, &mut captured);
             }
-            RunProgress::FunctionCall(call) if suspensions > call.tracker().max_suspensions() => {
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let exceeded = suspension_limit_exceeded(call.tracker());
-                return raised(&abort_error(call.abort(exceeded, writer)), captured);
-            }
-            RunProgress::NameLookup(lookup) if suspensions > lookup.tracker().max_suspensions() => {
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let exceeded = suspension_limit_exceeded(lookup.tracker());
-                return raised(&abort_error(lookup.abort(exceeded, writer)), captured);
-            }
-            // A sleep is answered without a policy decision, and the box performs the wait.
-            RunProgress::OsCall(call) if sleep_delay(&call.function_call).is_some() => {
-                let requested =
-                    sleep_delay(&call.function_call).expect("the match guard proved a sleep");
-                let limit = call
-                    .tracker()
-                    .max_total_sleep()
-                    .unwrap_or(SLEEP_TOTAL_LIMIT);
-                let delay = match charge_sleep(&mut slept, requested, limit) {
-                    Ok(delay) => delay,
-                    Err(exceeded) => {
-                        let writer = PrintWriter::CollectString(
-                            &mut captured,
-                            Some(MAX_SCRIPT_CAPTURE_BYTES),
-                        );
-                        return raised(&abort_error(call.abort(exceeded, writer)), captured);
+            let stepped = match progress {
+                RunProgress::Complete(_) => {
+                    return PythonOutcome {
+                        status: 0,
+                        stdout: std::mem::take(&mut captured),
+                        stderr: String::new(),
+                    };
+                }
+                RunProgress::OsCall(call) if sleep_delay(&call.function_call).is_some() => {
+                    let delay = sleep_delay(&call.function_call).expect("the guard proved a sleep");
+                    call.tracker().on_execution_start();
+                    match Instant::now().checked_add(delay) {
+                        Some(wake) => tokio::time::sleep_until(wake).await,
+                        None => std::future::pending().await,
                     }
-                };
-                tokio::time::sleep(delay).await;
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let stepped = if call.allow_eager_await {
-                    call.resume_eager(Ok(MontyObject::none()), writer)
-                } else {
-                    call.resume(MontyObject::none(), writer)
-                };
-                match stepped {
-                    Ok(next) => next,
-                    Err(exception) => return raised(&exception, captured),
+                    call.tracker().on_execution_stop();
+                    let writer =
+                        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
+                    if expired(deadline) {
+                        call.abort(deadline_exceeded(), writer)
+                    } else if call.allow_eager_await {
+                        call.resume_eager(Ok(MontyObject::none()), writer)
+                    } else {
+                        call.resume(MontyObject::none(), writer)
+                    }
                 }
-            }
-            RunProgress::OsCall(call) => {
-                // `resume_with` rather than reading `function_call` and resuming separately:
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let stepped = call.resume_with(writer, |call| {
-                    // A denial converts to `ExtFunctionResult::Error`: an ordinary Python
-                    // error the script may catch.
-                    admit_and_perform(&interceptor, call, reach)
-                        .unwrap_or_else(ExtFunctionResult::from)
-                });
-                match stepped {
-                    Ok(next) => next,
-                    Err(exception) => return raised(&exception, captured),
+                RunProgress::OsCall(mut call) => {
+                    let function = std::mem::replace(
+                        &mut call.function_call,
+                        OsFunctionCall::Sleep(Duration::ZERO),
+                    );
+                    call.tracker().on_execution_start();
+                    let result = admit_and_perform(&interceptor, function, reach)
+                        .unwrap_or_else(ExtFunctionResult::from);
+                    call.tracker().on_execution_stop();
+                    let writer =
+                        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
+                    if expired(deadline) {
+                        call.abort(deadline_exceeded(), writer)
+                    } else {
+                        call.resume(result, writer)
+                    }
                 }
-            }
-            // The one curated network capability. A `fetch(url, method, headers, body)` call
-            // arrives here as a `FunctionCall` — a call in call context resolves
-            // directly, with no `NameLookup` — carrying its positional `args` and keyword `kwargs`.
-            // It is serviced only when the box carries egress. The gateway raises
-            // `net:connect`/`http:request`, so this adds no host-side decision.
-            RunProgress::FunctionCall(call)
-                if egress.is_some() && call.function_name == FETCH_NAME =>
-            {
-                let routing = egress.expect("the match guard proved egress is present");
-                let result = recorder
-                    .request_context()
-                    .scope(fetch_through_gateway(routing, &call.args))
-                    .await;
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                match call.resume(result, writer) {
-                    Ok(next) => next,
-                    Err(exception) => return raised(&exception, captured),
+                RunProgress::FunctionCall(call) if call.function_name == FETCH_NAME => {
+                    let Some(routing) = egress else {
+                        eprintln!(
+                            "strands-box: monty fetch refused (no egress): principal=agent function={}",
+                            call.function_name
+                        );
+                        return PythonOutcome {
+                            status: BROKER_FAILURE_STATUS,
+                            stdout: std::mem::take(&mut captured),
+                            stderr: "this box's Python (Monty) has no network without egress\n"
+                                .to_string(),
+                        };
+                    };
+                    call.tracker().on_execution_start();
+                    let result = recorder
+                        .request_context()
+                        .scope(fetch_through_gateway(routing, &call.args))
+                        .await;
+                    call.tracker().on_execution_stop();
+                    let writer =
+                        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
+                    if expired(deadline) {
+                        call.abort(deadline_exceeded(), writer)
+                    } else {
+                        call.resume(result, writer)
+                    }
                 }
-            }
-            // A `fetch` with no egress keeps the network off by absence: fail closed at `125`
-            // rather than report it as an undefined name.
-            RunProgress::FunctionCall(call) if call.function_name == FETCH_NAME => {
-                eprintln!(
-                    "strands-box: monty fetch refused (no egress): principal=agent function={}",
-                    call.function_name
-                );
-                return PythonOutcome {
-                    status: BROKER_FAILURE_STATUS,
-                    stdout: captured,
-                    stderr: "this box's Python (Monty) has no network without egress\n".to_string(),
-                };
-            }
-            // Any other unresolved callable is a language error, not a broker failure: resume with
-            // `NotFound` so the VM raises a catchable `NameError` and the script exits `1`.
-            RunProgress::FunctionCall(call) => {
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                let not_found = ExtFunctionResult::NotFound(call.function_name.clone());
-                match call.resume(not_found, writer) {
-                    Ok(next) => next,
-                    Err(exception) => return raised(&exception, captured),
+                RunProgress::FunctionCall(call) => {
+                    let writer =
+                        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
+                    let not_found = ExtFunctionResult::NotFound(call.function_name.clone());
+                    call.resume(not_found, writer)
                 }
-            }
-            // An undefined bare name: resume `Undefined` so the VM raises a catchable `NameError`.
-            RunProgress::NameLookup(lookup) => {
-                let writer =
-                    PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
-                match lookup.resume(NameLookupResult::Undefined, writer) {
-                    Ok(next) => next,
-                    Err(exception) => return raised(&exception, captured),
+                RunProgress::NameLookup(lookup) => {
+                    let writer =
+                        PrintWriter::CollectString(&mut captured, Some(MAX_SCRIPT_CAPTURE_BYTES));
+                    lookup.resume(NameLookupResult::Undefined, writer)
                 }
-            }
-            // Async is unsupported: report it honestly at status `1`, not as a broker failure.
-            RunProgress::ResolveFutures(_) => {
-                let exception = MontyException::new(
+                RunProgress::ResolveFutures(_) => Err(MontyException::new(
                     ExcType::RuntimeError,
                     Some("async is not supported by this box's Python (Monty)".to_string()),
-                );
-                return raised(&exception, captured);
-            }
-        };
+                )),
+            };
+            progress = match stepped {
+                Ok(progress) => progress,
+                Err(exception) => return raised(&exception, &mut captured),
+            };
+        }
+    };
+    match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, execution).await {
+            Ok(outcome) => outcome,
+            Err(_) => raised(&deadline_exceeded(), &mut captured),
+        },
+        None => execution.await,
     }
 }
 
-/// The wait a sleep call names, or `None` for any other call.
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn deadline_exceeded() -> MontyException {
+    MontyException::new(
+        ExcType::TimeoutError,
+        Some("Python script exceeded its deadline".to_string()),
+    )
+}
+
 fn sleep_delay(call: &OsFunctionCall) -> Option<Duration> {
     match call {
         OsFunctionCall::Sleep(delay)
@@ -303,51 +246,30 @@ fn sleep_delay(call: &OsFunctionCall) -> Option<Duration> {
     }
 }
 
-/// Charge one sleep against the script's total, and return the wait to perform.
-fn charge_sleep(
-    slept: &mut Duration,
-    delay: Duration,
-    limit: Duration,
-) -> Result<Duration, MontyException> {
-    if slept.saturating_add(delay) > limit {
-        return Err(MontyException::new(
-            ExcType::TimeoutError,
-            Some(format!(
-                "script exceeded its total sleep of {} seconds",
-                limit.as_secs()
-            )),
-        ));
-    }
-    *slept += delay;
-    Ok(delay)
-}
-
-fn suspension_limit_exceeded(tracker: &ResourceTracker) -> MontyException {
-    MontyException::new(
-        ExcType::RuntimeError,
-        Some(format!(
-            "script exceeded its limit of {} host calls",
-            tracker.max_suspensions()
-        )),
-    )
-}
-
-/// The exception an `abort` ends the run with.
-fn abort_error(aborted: Result<RunProgress, MontyException>) -> MontyException {
-    match aborted {
-        Err(exception) => exception,
-        Ok(_) => MontyException::new(
+fn abort(
+    progress: RunProgress,
+    exception: MontyException,
+    writer: PrintWriter<'_>,
+) -> MontyException {
+    let result = match progress {
+        RunProgress::OsCall(call) => call.abort(exception, writer),
+        RunProgress::FunctionCall(call) => call.abort(exception, writer),
+        RunProgress::NameLookup(lookup) => lookup.abort(exception, writer),
+        RunProgress::ResolveFutures(futures) => futures.abort(exception, writer),
+        RunProgress::Complete(_) => return exception,
+    };
+    result.err().unwrap_or_else(|| {
+        MontyException::new(
             ExcType::RuntimeError,
             Some("an aborted script continued".to_string()),
-        ),
-    }
+        )
+    })
 }
 
-/// A script that raised, reported the way CPython reports one.
-fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
+fn raised(exception: &MontyException, captured: &mut String) -> PythonOutcome {
     PythonOutcome {
         status: SCRIPT_RAISED_STATUS,
-        stdout: captured,
+        stdout: std::mem::take(captured),
         stderr: format!(
             "{}: {}\n(this box's Python is Monty, a subset — see the box's docs)\n",
             exception.exc_type(),
@@ -359,6 +281,8 @@ fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::record::config::limits::DEFAULT_PYTHON_TIMEOUT;
 
     use std::path::{Path, PathBuf};
 
@@ -392,14 +316,14 @@ mod tests {
         let (_root, reach) = fixture();
         let policy = permissive();
 
-        let outcome = drive_monty(
+        let outcome = run_python(
             "undefined_name".to_string(),
-            PYTHON_ORIGIN.to_string(),
             &reach,
             &policy,
             &GovernedBox::assigned("codex"),
             None,
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await;
 
@@ -422,14 +346,14 @@ mod tests {
         let (_root, reach) = fixture();
         let policy = permissive();
 
-        let outcome = drive_monty(
+        let outcome = run_python(
             "try:\n    undefined_name\nexcept NameError:\n    print(\"caught\")\n".to_string(),
-            PYTHON_ORIGIN.to_string(),
             &reach,
             &policy,
             &GovernedBox::assigned("codex"),
             None,
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await;
 
@@ -447,19 +371,53 @@ mod tests {
 
     /// Run one script with no egress under `policy`.
     pub(super) async fn run_script(source: &str, policy: &PolicyEngine) -> PythonOutcome {
+        run_script_with_timeout(source, policy, Some(DEFAULT_PYTHON_TIMEOUT)).await
+    }
+
+    async fn run_script_with_timeout(
+        source: &str,
+        policy: &PolicyEngine,
+        timeout: Option<Duration>,
+    ) -> PythonOutcome {
         let (_root, reach) = fixture();
-        run_script_in(source, policy, &reach).await
+        run_python(
+            source.to_string(),
+            &reach,
+            policy,
+            &GovernedBox::assigned("bounds"),
+            None,
+            &DecisionRecorder::discarding(),
+            timeout,
+        )
+        .await
+    }
+
+    fn run_script_with_watchdog(source: &'static str, timeout: Duration) -> PythonOutcome {
+        let (finished, result) = std::sync::mpsc::channel();
+        let _worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("the script runtime starts");
+            let outcome = runtime.block_on(async {
+                run_script_with_timeout(source, &permissive(), Some(timeout)).await
+            });
+            let _ = finished.send(outcome);
+        });
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Python must finish within the independent five-second test watchdog")
     }
 
     async fn run_script_in(source: &str, policy: &PolicyEngine, reach: &Reach) -> PythonOutcome {
-        drive_monty(
+        run_python(
             source.to_string(),
-            PYTHON_ORIGIN.to_string(),
             reach,
             policy,
             &GovernedBox::assigned("bounds"),
             None,
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await
     }
@@ -555,45 +513,121 @@ mod tests {
         assert_eq!(after.stdout.trim(), "still serving");
     }
 
-    #[tokio::test]
-    async fn a_sleep_longer_than_the_total_raises_at_once() {
-        let started = std::time::Instant::now();
-        let outcome = run_script(
-            "import time\ntime.sleep(600)\nprint('woke')",
-            &open_policy(Vec::new()),
-        )
-        .await;
-        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS, "{}", outcome.stdout);
+    #[test]
+    fn a_computing_script_cannot_catch_its_timeout_and_keeps_prior_output() {
+        let outcome = run_script_with_watchdog(
+            "print('started')\ntry:\n    while True:\n        pass\nexcept Exception:\n    print('caught')",
+            Duration::from_millis(100),
+        );
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS);
         assert!(
             outcome.stderr.contains("TimeoutError"),
             "{}",
             outcome.stderr
         );
-        assert!(!outcome.stdout.contains("woke"));
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(outcome.stdout, "started\n");
     }
 
     #[test]
-    fn a_sleep_is_never_shortened_and_the_total_is_bounded() {
-        let mut slept = Duration::ZERO;
-        assert_eq!(
-            charge_sleep(&mut slept, SLEEP_TOTAL_LIMIT, SLEEP_TOTAL_LIMIT).ok(),
-            Some(SLEEP_TOTAL_LIMIT),
-            "one sleep may use the whole total"
+    fn sleep_and_resumed_computation_share_one_budget() {
+        let started = std::time::Instant::now();
+        let outcome = run_script_with_watchdog(
+            "import time\nprint('started')\ntime.sleep(1.5)\nwhile True:\n    pass",
+            Duration::from_secs(2),
         );
-        slept = Duration::ZERO;
-        let refused = charge_sleep(&mut slept, Duration::from_secs(600), SLEEP_TOTAL_LIMIT)
-            .expect_err("a sleep longer than the total is refused, not shortened");
-        assert_eq!(refused.exc_type(), ExcType::TimeoutError);
-        assert_eq!(slept, Duration::ZERO, "a refused sleep is not charged");
-        slept = SLEEP_TOTAL_LIMIT - Duration::from_secs(1);
-        assert_eq!(
-            charge_sleep(&mut slept, Duration::from_secs(1), SLEEP_TOTAL_LIMIT).ok(),
-            Some(Duration::from_secs(1))
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS);
+        assert!(
+            outcome.stderr.contains("TimeoutError"),
+            "{}",
+            outcome.stderr
         );
-        let refused = charge_sleep(&mut slept, Duration::from_millis(1), SLEEP_TOTAL_LIMIT)
-            .expect_err("the total is spent");
-        assert_eq!(refused.exc_type(), ExcType::TimeoutError);
-        assert_eq!(slept, SLEEP_TOTAL_LIMIT);
+        assert_eq!(outcome.stdout, "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the VM must not receive a fresh budget after sleeping"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn output_and_suspensions_do_not_renew_the_deadline() {
+        let started = Instant::now();
+        let outcome = run_script_with_timeout(
+            "import time\nprint('started')\ntime.sleep(1)\nprint('resumed')\ntry:\n    time.sleep(2)\nexcept Exception:\n    print('caught')\nprint('late')",
+            &permissive(),
+            Some(Duration::from_secs(2)),
+        )
+        .await;
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS);
+        assert!(
+            outcome.stderr.contains("TimeoutError"),
+            "{}",
+            outcome.stderr
+        );
+        assert_eq!(outcome.stdout, "started\nresumed\n");
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_and_disabled_timeouts_replace_the_old_sleep_caps() {
+        for timeout in [Some(Duration::from_secs(600)), None] {
+            let started = Instant::now();
+            let outcome = run_script_with_timeout(
+                "import time\ntime.sleep(181)\nprint('finished')",
+                &permissive(),
+                timeout,
+            )
+            .await;
+            assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+            assert_eq!(outcome.stdout, "finished\n");
+            assert_eq!(started.elapsed(), Duration::from_secs(181));
+        }
+        let outcome = run_script_with_timeout(
+            "import time\ntime.sleep(3601)\nprint('finished')",
+            &permissive(),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+        assert_eq!(outcome.stdout, "finished\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_default_budget_includes_sleep_and_each_call_starts_fresh() {
+        let policy = permissive();
+        let outcome = run_script("import time\ntime.sleep(121)\nprint('late')", &policy).await;
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS);
+        assert!(
+            outcome.stderr.contains("TimeoutError"),
+            "{}",
+            outcome.stderr
+        );
+        assert!(outcome.stdout.is_empty());
+        let next = run_script("import time\ntime.sleep(119)\nprint('finished')", &policy).await;
+        assert_eq!(next.status, 0, "{}", next.stderr);
+        assert_eq!(next.stdout, "finished\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unlimited_python_still_observes_the_remaining_enclosing_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let outcome = CALL_DEADLINE
+            .scope(
+                Some(deadline),
+                run_script_with_timeout(
+                    "import time\ntime.sleep(2)\nprint('late')",
+                    &permissive(),
+                    None,
+                ),
+            )
+            .await;
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS);
+        assert!(
+            outcome.stderr.contains("TimeoutError"),
+            "{}",
+            outcome.stderr
+        );
+        assert!(outcome.stdout.is_empty());
+        assert_eq!(Instant::now(), deadline);
     }
 }

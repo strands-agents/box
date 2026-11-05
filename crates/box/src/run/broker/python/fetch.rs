@@ -18,11 +18,6 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Bound on one Python fetch through the gateway.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
 
-const _: () = assert!(
-    NETWORK_TIMEOUT.as_nanos() < super::REQUEST_TIMEOUT.as_nanos(),
-    "a fetch's own timeout must fire before the direct Python request timeout"
-);
-
 /// The parsed shape of one `fetch` call, at parity with the gateway's `InterceptedRequest`:
 /// a method, a url, request headers, and an optional body. The gateway governs the method through
 /// `http:request`, so the client passes any method the guest names.
@@ -278,10 +273,9 @@ mod tests {
 
     use policy::GovernedBox;
 
+    use crate::record::config::limits::DEFAULT_PYTHON_TIMEOUT;
     use crate::run::broker::python::tests::{fixture, permissive};
-    use crate::run::broker::python::{
-        BROKER_FAILURE_STATUS, PYTHON_ORIGIN, SCRIPT_RAISED_STATUS, drive_monty,
-    };
+    use crate::run::broker::python::{BROKER_FAILURE_STATUS, SCRIPT_RAISED_STATUS, run_python};
     use crate::run::telemetry::DecisionRecorder;
 
     /// `fetch` with positional and keyword arguments, built as Monty passes them.
@@ -483,14 +477,14 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
             let (_ca, routing) = routing_with_proxy(proxy_url);
             let recorder = DecisionRecorder::discarding()
                 .for_request(telemetry::Correlation::from_headers(parent, state));
-            let outcome = drive_monty(
+            let outcome = run_python(
                 format!("print(fetch(\"http://origin.example/data\"{headers})[\"body\"])"),
-                PYTHON_ORIGIN.to_string(),
                 &reach,
                 &policy,
                 &GovernedBox::assigned("fetch-tracing"),
                 Some(&routing),
                 &recorder,
+                Some(DEFAULT_PYTHON_TIMEOUT),
             )
             .await;
             assert_eq!(outcome.status, 0, "{}", outcome.stderr);
@@ -584,14 +578,14 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         let (_root, reach) = fixture();
         let policy = permissive();
 
-        let outcome = drive_monty(
+        let outcome = run_python(
             "fetch(\"http://origin.example/x\")".to_string(),
-            PYTHON_ORIGIN.to_string(),
             &reach,
             &policy,
             &GovernedBox::assigned("codex"),
             None,
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await;
 
@@ -610,14 +604,14 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         let (proxy_url, _rx) = proxy_returning(200, "OK", "HELLO");
         let (_dir, routing) = routing_with_proxy(proxy_url);
 
-        let outcome = drive_monty(
+        let outcome = run_python(
             "nope(1)".to_string(),
-            PYTHON_ORIGIN.to_string(),
             &reach,
             &policy,
             &GovernedBox::assigned("codex"),
             Some(&routing),
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await;
 
@@ -793,14 +787,14 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         let (_root, reach) = fixture();
         let policy = permissive();
 
-        let outcome = drive_monty(
+        let outcome = run_python(
             "nope(1)".to_string(),
-            PYTHON_ORIGIN.to_string(),
             &reach,
             &policy,
             &GovernedBox::assigned("codex"),
             None,
             &DecisionRecorder::discarding(),
+            Some(DEFAULT_PYTHON_TIMEOUT),
         )
         .await;
 

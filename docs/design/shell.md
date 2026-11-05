@@ -248,17 +248,18 @@ refused file operation fails the command the way the operation's own error would
 `false` for unlimited execution. A finite limit gives the broker a backup deadline five seconds
 later, so the Shell can finish and report its result. Output resets neither deadline.
 With `false`, neither execution deadline is installed; cancellation, client disconnect, and
-broker shutdown can still end the call.
+broker shutdown can still end the call when the interpreter returns control.
 
 While a Shell call runs, the connection's idle timer is suspended, and the Shell alias waits for
 the broker's result without a separate response deadline. Connection and write operations retain
 their own transport timeouts.
 
-**Deadline checks depend on the interpreter returning control.** Monty runs synchronous Python
-code on the same thread that checks the Shell and broker deadlines, so a VM turn can delay those
-checks. Its own 120-second active execution limit and 180-second cumulative sleep limit remain in
-effect. The direct Python aliases retain their separate limits. A broker that stops making
-progress can leave a Shell alias waiting; the alias's wait is not proof that the call has stopped.
+**Nested Python shares the remaining Shell allowance.** Monty uses the earlier of the Shell
+deadline and its own [Python deadline](../user/monty.md#limits-and-exit-statuses), including time spent
+asleep or waiting for Box to answer a call. It checks this budget during computation.
+Cancellation still depends on the interpreter returning control. With both timeouts disabled,
+a Python busy loop can prevent shutdown. A broker that stops making progress can leave an alias
+waiting; the alias's wait is not proof that the call has stopped.
 
 ## Example: find the to-dos and stage them
 

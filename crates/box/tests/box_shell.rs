@@ -26,6 +26,8 @@
 
 use std::process::Output;
 
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
 #[path = "support/fixture.rs"]
 mod fixture;
 
@@ -59,6 +61,12 @@ const DENIED_STATUS: i32 = 126;
 /// box stored rather than about arguments to the command being measured.
 fn box_under(policy_text: &str, name: &str) -> Configured {
     Request::with_policy(name, policy_text).expect()
+}
+
+fn bounded_bash(box_: &Configured, script: &str) -> Output {
+    let mut command = box_.command_for("/bin/bash");
+    command.args(["-c", script]);
+    bounded_output::bounded_output(command)
 }
 
 #[test]
@@ -1872,50 +1880,141 @@ unless temporal {{
     );
 }
 
-/// An unbounded Python loop is stopped by the interpreter, not left running.
-///
-/// The regression guard for a defect this module shipped and an altitude review caught:
-/// `SCRIPT_TIMEOUT` was applied as a `tokio::time::timeout` around Monty's run loop, which
-/// has **no await points** — so the timer could never fire and `while True: pass` pinned
-/// the broker thread indefinitely. The bound now lives inside the VM (`ResourceTracker`),
-/// which checks it from its own loop.
-///
-/// Asserted by wall clock rather than by message, because what matters is that it *stops*.
-/// The script's own deadline is 120s and the request bound is 300s, so anything under 130s
-/// means the interpreter stopped itself; a hang would sit here until the test harness gave
-/// up. Also asserts the box is still administrable afterwards — a bound that stopped the
-/// script but left the thread wedged would pass a timing check alone.
 #[test]
 fn an_unbounded_python_loop_is_stopped() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = box_under(PYTHON_POLICY, "monty-bounded");
+    let box_ = Request::with_config(
+        "monty-bounded",
+        PYTHON_POLICY,
+        "[limits]\npython.timeout = 1\n",
+    )
+    .expect();
 
     let started = std::time::Instant::now();
-    let output = box_.bash(
+    let output = bounded_bash(
+        &box_,
         r#"python3 -c "
 while True:
     pass
-"; echo "status=$?""#,
-    );
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < std::time::Duration::from_secs(130),
-        "an unbounded script must be stopped by the interpreter; it ran for {elapsed:?}"
-    );
-    assert!(
-        stdout(&output).contains("status="),
-        "the alias must report a status rather than hanging: {output:?}"
+"
+printf 'status=%s\n' "$?"
+python3 -c "print('STILL_SERVING')"
+"#,
     );
 
-    // And the broker still serves, so the bound cost that script and not the box.
-    let after = box_.bash(r#"python3 -c "print('STILL_SERVING')""#);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "status=1\nSTILL_SERVING\n");
+    assert!(stderr(&output).contains("TimeoutError"), "{output:?}");
     assert!(
-        stdout(&after).contains("STILL_SERVING"),
-        "the broker must survive a stopped script: {after:?}"
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the configured deadline must stop the interpreter: {output:?}"
     );
+}
+
+#[test]
+fn configured_python_timeouts_allow_quiet_calls_beyond_thirty_five_seconds() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for timeout in ["45", "false"] {
+        let box_ = Request::with_config(
+            &format!("monty-long-{timeout}"),
+            PYTHON_POLICY,
+            &format!("[limits]\npython.timeout = {timeout}\n"),
+        )
+        .expect();
+        let output = bounded_bash(
+            &box_,
+            r#"
+python3 -c "import time; time.sleep(36); print('FINISHED_LONG_CALL')"
+printf 'status=%s\n' "$?"
+python3 -c "print('STILL_SERVING')"
+"#,
+        );
+
+        assert!(output.status.success(), "{timeout}: {output:?}");
+        assert_eq!(
+            stdout(&output),
+            "FINISHED_LONG_CALL\nstatus=0\nSTILL_SERVING\n",
+            "{timeout}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_python_obeys_the_earlier_deadline_without_late_effects() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for (name, shell_timeout, python_timeout, delay, pipeline) in [
+        ("shell", "3", "false", 2, ""),
+        ("pipeline", "3", "false", 2, " | cat"),
+        ("python", "false", "1", 0, ""),
+    ] {
+        let box_ = Request::with_config(
+            &format!("monty-nested-{name}"),
+            PYTHON_POLICY,
+            &format!(
+                "[limits]\nshell.timeout = {shell_timeout}\npython.timeout = {python_timeout}\n"
+            ),
+        )
+        .expect();
+        let entered = box_.box_home().join("entered");
+        let late = box_.box_home().join("late");
+        let source = format!(
+            r#"
+import time
+from pathlib import Path
+Path({entered:?}).write_text("entered")
+time.sleep(0.25)
+finish = time.monotonic() + 2
+while time.monotonic() < finish:
+    for _ in range(100000):
+        pass
+Path({late:?}).write_text("late")
+"#,
+        );
+        let command = format!(
+            "sleep {delay}; python3 -c '{}'{pipeline}",
+            source.replace('\'', "'\\''"),
+        );
+        let output = bounded_bash(
+            &box_,
+            &format!(
+                r#"
+zsh -c '{}'
+printf 'status=%s\n' "$?"
+zsh -c 'sleep 2.5' || exit "$?"
+python3 -c "print('STILL_SERVING')"
+"#,
+                command.replace('\'', "'\\''")
+            ),
+        );
+
+        assert!(output.status.success(), "{name}: {output:?}");
+        let status = if pipeline.is_empty() { 1 } else { 0 };
+        assert_eq!(
+            stdout(&output),
+            format!("status={status}\nSTILL_SERVING\n"),
+            "{name}: {output:?}"
+        );
+        assert!(
+            stderr(&output).contains("TimeoutError")
+                || stderr(&output).contains("execution timeout exceeded"),
+            "{name}: {output:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&entered).unwrap(),
+            "entered",
+            "{name}: the nested script must start"
+        );
+        assert!(
+            !late.exists(),
+            "{name}: the nested script wrote after its deadline: {output:?}"
+        );
+    }
 }
 
 /// A file handle does not become an unmediated channel.

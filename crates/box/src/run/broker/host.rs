@@ -25,8 +25,8 @@ use tokio::task::{JoinError, JoinSet};
 
 use crate::error::{BoxError, ShellError};
 #[cfg(test)]
-use crate::record::config::limits::DEFAULT_SHELL_TIMEOUT;
-use crate::record::config::limits::SHELL_TIMEOUT_GRACE;
+use crate::record::config::limits::{DEFAULT_PYTHON_TIMEOUT, DEFAULT_SHELL_TIMEOUT};
+use crate::record::config::limits::{Limits, SHELL_TIMEOUT_GRACE};
 use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
@@ -177,7 +177,7 @@ impl BrokerHost {
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
-        let command_timeout = record.limits.shell.timeout();
+        let limits = record.limits.clone();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -209,7 +209,7 @@ impl BrokerHost {
                     egress,
                     recorder,
                     host_spawner,
-                    command_timeout,
+                    limits,
                     &ready_sender,
                     shutdown_receiver,
                 );
@@ -451,7 +451,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<strands_shell::os::HostSpawner>,
-    command_timeout: Option<Duration>,
+    limits: Limits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -470,7 +470,9 @@ fn host(
 
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
+        let command_timeout = limits.shell_timeout();
         let spec = ShellSpec {
+            python_timeout: limits.python_timeout(),
             command_timeout,
             request_timeout: command_timeout.map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
             reach,
@@ -676,6 +678,8 @@ async fn serve_transport(
     // Open Python Programs. A set rather than a map, because a stateless interpreter has nothing
     // per-Program to hold — what the id buys is that `Open`, `Close`, and the cap count it.
     let mut python: std::collections::HashSet<ProgramId> = std::collections::HashSet::new();
+    let mut python_calls = HashMap::<ProgramId, RunningPython>::new();
+    let mut python_tasks = JoinSet::new();
     // One entry per open MCP server. Separate from `programs` because an MCP server is a child
     // process rather than a Shell, and separate from `python` because it is stateful: the child
     let mut mcp: std::collections::HashMap<
@@ -700,6 +704,29 @@ async fn serve_transport(
                 None => loop {
                     tokio::select! {
                         biased;
+                        Some(done) = python_tasks.join_next() => {
+                            let (id, sequence, outcome): (_, _, super::python::PythonOutcome) = match done {
+                                Ok(done) => done,
+                                Err(error) if error.is_cancelled() => continue,
+                                Err(error) => return Err(io::Error::other(error)),
+                            };
+                            if !python_calls.get(&id).is_some_and(|call| call.sequence == sequence) {
+                                continue;
+                            }
+                            python_calls.remove(&id);
+                            for (stream, text) in [
+                                (Stream::Stdout, outcome.stdout),
+                                (Stream::Stderr, outcome.stderr),
+                            ] {
+                                if !text.is_empty() {
+                                    send(&frames, id, Body::Output {
+                                        stream,
+                                        data: encode_payload(text.as_bytes()),
+                                    }).await?;
+                                }
+                            }
+                            send(&frames, id, Body::Exit { status: outcome.status }).await?;
+                        }
                         // `recv` is cancel-safe, and a completion is never lost: the sender is held by
                         // a task that has already finished writing its output.
                         Some(done) = completions.recv() => {
@@ -740,7 +767,7 @@ async fn serve_transport(
                             }
                         }
                         _ = tokio::time::sleep(idle_timeout(!mcp.is_empty())),
-                            if running.is_empty() => {
+                            if running.is_empty() && python_calls.is_empty() => {
                             return Err(timed_out("read a transport frame"));
                         }
                     }
@@ -894,47 +921,7 @@ async fn serve_transport(
                     .await?;
                         continue;
                     }
-                    if python.contains(&id) {
-                        let recorder = spec.recorder.for_request(correlation);
-                        // Stateless, so it runs inline: there is no Program state a concurrent reader
-                        // must reach, and no `Input`/`Signal` the interpreter can observe.
-                        let outcome = crate::run::broker::python::run_python(
-                            source,
-                            &spec.reach,
-                            &spec.policy,
-                            &spec.governed,
-                            spec.egress.as_ref(),
-                            &recorder,
-                        )
-                        .await;
-                        for (stream, text) in [
-                            (Stream::Stdout, outcome.stdout),
-                            (Stream::Stderr, outcome.stderr),
-                        ] {
-                            if !text.is_empty() {
-                                send(
-                                    &frames,
-                                    id,
-                                    Body::Output {
-                                        stream,
-                                        data: encode_payload(text.as_bytes()),
-                                    },
-                                )
-                                .await?;
-                            }
-                        }
-                        send(
-                            &frames,
-                            id,
-                            Body::Exit {
-                                status: outcome.status,
-                            },
-                        )
-                        .await?;
-                        continue;
-                    }
-                    if running.contains_key(&id) {
-                        // One Call per Program at a time, like a shell's one foreground command.
+                    if running.contains_key(&id) || python_calls.contains_key(&id) {
                         deny(
                             &frames,
                             id,
@@ -942,6 +929,28 @@ async fn serve_transport(
                             "the program is already running a call",
                         )
                         .await?;
+                        continue;
+                    }
+                    if python.contains(&id) {
+                        let recorder = spec.recorder.for_request(correlation);
+                        let spec = Arc::clone(&spec);
+                        let sequence = calls_accepted;
+                        calls_accepted += 1;
+                        let task = python_tasks.spawn_local(async move {
+                            let outcome = recorder.request_context().scope(
+                                super::python::run_python(
+                                    source,
+                                    &spec.reach,
+                                    &spec.policy,
+                                    &spec.governed,
+                                    spec.egress.as_ref(),
+                                    &recorder,
+                                    spec.python_timeout,
+                                )
+                            ).await;
+                            (id, sequence, outcome)
+                        });
+                        python_calls.insert(id, RunningPython { sequence, task });
                         continue;
                     }
                     let Some(mut slot) = programs.remove(&id) else {
@@ -1078,6 +1087,9 @@ async fn serve_transport(
                     // background jobs — the Program level's whole lifetime.
                     programs.remove(&id);
                     python.remove(&id);
+                    if let Some(call) = python_calls.remove(&id) {
+                        call.task.abort();
+                    }
                     // A Program mid-Call cannot be dropped here: its slot lives in the Call task. Ask
                     // that Call to end and close its stdin, so the task finishes and drops the Shell
                     if let Some(current) = running.remove(&id) {
@@ -1095,6 +1107,8 @@ async fn serve_transport(
     }
     .await;
 
+    python_tasks.abort_all();
+    while python_tasks.join_next().await.is_some() {}
     for current in running.values() {
         current.control.signal();
         current.control.close_stdin();
@@ -1189,6 +1203,11 @@ struct RunningCall {
     /// Which Call this is on this connection, counted from zero and never reused.
     sequence: u64,
     control: ProgramControl,
+}
+
+struct RunningPython {
+    sequence: u64,
+    task: tokio::task::AbortHandle,
 }
 
 struct OpenMcpProgram<T> {
@@ -1796,6 +1815,7 @@ done"#;
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
+            python_timeout: Some(DEFAULT_PYTHON_TIMEOUT),
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
@@ -1882,6 +1902,7 @@ done"#;
         request_timeout: impl Into<Option<Duration>>,
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
+            python_timeout: Some(DEFAULT_PYTHON_TIMEOUT),
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
             reach: Arc::new(
@@ -2025,7 +2046,7 @@ done"#;
         while !path.exists() {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "Shell command did not create {}",
+                "the call did not create {}",
                 path.display()
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3272,6 +3293,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
+                python_timeout: Some(DEFAULT_PYTHON_TIMEOUT),
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -3578,6 +3600,7 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
+                python_timeout: Some(DEFAULT_PYTHON_TIMEOUT),
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -3734,6 +3757,7 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
+                python_timeout: Some(DEFAULT_PYTHON_TIMEOUT),
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -4565,6 +4589,155 @@ done"#;
                 .expect("serving task joins")
                 .expect("shutdown succeeds");
         }));
+    }
+
+    #[test]
+    fn closing_or_disconnecting_python_cancels_work_without_late_effects() {
+        for stop in ["close", "disconnect", "shutdown"] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                tokio::time::pause();
+                let marker = tempfile::tempdir().expect("marker directory");
+                let mut spec = connection_spec(marker.path());
+                Arc::get_mut(&mut spec).unwrap().python_timeout = None;
+                let (client, server) = UnixStream::pair().expect("transport pair");
+                let (stop_connection, shutdown) = tokio::sync::watch::channel(false);
+                let serving =
+                    tokio::task::spawn_local(handle_connection(server, spec, None, shutdown));
+                let (mut reader, mut writer) = client.into_split();
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Python,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: "import time\nfrom pathlib import Path\n\
+                                 Path('started').write_text('started')\n\
+                                 time.sleep(3600)\nPath('late').write_text('late')"
+                            .to_string(),
+                    },
+                )
+                .await;
+                wait_for_marker(&marker.path().join("started")).await;
+
+                match stop {
+                    "close" => {
+                        put(&mut writer, 1, Body::Close).await;
+                        put(
+                            &mut writer,
+                            1,
+                            Body::Open {
+                                mode: Interpreter::Python,
+                            },
+                        )
+                        .await;
+                        put(
+                            &mut writer,
+                            1,
+                            Body::Call {
+                                correlation: Default::default(),
+                                source: "import time\nfrom pathlib import Path\n\
+                                         Path('reopened').write_text('reopened')\n\
+                                         time.sleep(2)\nprint('REOPENED')"
+                                    .to_string(),
+                            },
+                        )
+                        .await;
+                        wait_for_marker(&marker.path().join("reopened")).await;
+                        tokio::time::advance(Duration::from_secs(3601)).await;
+                        let outcome =
+                            tokio::time::timeout(Duration::from_secs(1), collect(&mut reader, 1))
+                                .await
+                                .expect("the reopened program completes");
+                        assert_eq!(outcome, ("REOPENED\n".to_string(), 0));
+                        stop_connection.send_replace(true);
+                    }
+                    "disconnect" => {
+                        drop(reader);
+                        drop(writer);
+                    }
+                    "shutdown" => {
+                        stop_connection.send_replace(true);
+                    }
+                    _ => unreachable!(),
+                }
+
+                tokio::time::timeout(Duration::from_secs(1), serving)
+                    .await
+                    .expect("cancellation must not wait for the Python sleep")
+                    .expect("the connection task joins")
+                    .expect("connection cleanup succeeds");
+                tokio::time::advance(Duration::from_secs(3601)).await;
+                tokio::task::yield_now().await;
+                assert!(!marker.path().join("late").exists(), "{stop}");
+            }));
+        }
+    }
+
+    #[test]
+    fn active_python_calls_outlast_transport_timers_and_get_fresh_deadlines() {
+        for timeout in [Some(Duration::from_secs(400)), None] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                tokio::time::pause();
+                let marker = tempfile::tempdir().expect("marker directory");
+                let mut spec = connection_spec(marker.path());
+                Arc::get_mut(&mut spec).unwrap().python_timeout = timeout;
+                let (client, server) = UnixStream::pair().expect("transport pair");
+                let (stop_connection, shutdown) = tokio::sync::watch::channel(false);
+                let serving =
+                    tokio::task::spawn_local(handle_connection(server, spec, None, shutdown));
+                let (mut reader, mut writer) = client.into_split();
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Python,
+                    },
+                )
+                .await;
+                for call in 0..2 {
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Call {
+                            correlation: Default::default(),
+                            source: format!(
+                                "import time\nfrom pathlib import Path\n\
+                                 Path('started-{call}').write_text('started')\n\
+                                 time.sleep(360)\nprint('FINISHED')"
+                            ),
+                        },
+                    )
+                    .await;
+                    wait_for_marker(&marker.path().join(format!("started-{call}"))).await;
+                    tokio::time::advance(Duration::from_secs(301)).await;
+                    tokio::task::yield_now().await;
+                    assert!(
+                        !serving.is_finished(),
+                        "an active Python call must suspend the idle timer: {timeout:?}"
+                    );
+                    tokio::time::advance(Duration::from_secs(60)).await;
+                    let outcome =
+                        tokio::time::timeout(Duration::from_secs(1), collect(&mut reader, 1))
+                            .await
+                            .expect("the long Python call completes");
+                    assert_eq!(outcome, ("FINISHED\n".to_string(), 0), "{timeout:?}");
+                }
+                stop_connection.send_replace(true);
+                serving
+                    .await
+                    .expect("the connection task joins")
+                    .expect("connection cleanup succeeds");
+            }));
+        }
     }
 
     /// Dropping the connection reaps every Program on it.
