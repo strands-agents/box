@@ -25,6 +25,10 @@
 (allow file-read-metadata (literal "{ROOT}/operator/.strands-box/b/box-0123/bin/python"))
 (allow process-fork)
 
+; A process may signal the children it forked, which inherit this profile. Every other target stays
+; refused, so a signal never leaves the processes this one started.
+(allow signal (target children))
+
 ; An interactive Agent needs ioctl on an inherited macOS PTY slave, and cannot create a new PTY.
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+$"))
 
