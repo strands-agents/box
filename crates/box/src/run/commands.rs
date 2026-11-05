@@ -199,25 +199,68 @@ impl ConfiguredCommand {
 fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
     // SAFETY: these calls read the process credentials without changing them.
     let users = unsafe { [libc::getuid(), libc::geteuid()] };
-    may_change(state, users, || write_access(opened, path))
+    may_change(
+        state,
+        users,
+        || write_access(opened, path),
+        || may_carry_access_list(opened),
+    )
 }
 
-/// Whether a file in `state` may change through some name, for the real and effective `users` and
-/// the kernel's answer to a write check.
+/// Whether a file in `state` may change through some name, for the real and effective `users`, the
+/// kernel's answer to a write check, and whether the file may carry an access-control list.
 fn may_change(
     state: FileState,
     users: [u32; 2],
     access: impl FnOnce() -> std::io::Result<()>,
+    access_list: impl FnOnce() -> bool,
 ) -> bool {
     users.contains(&0)
         || users.contains(&state.owner)
         || state.mode & 0o022 != 0
-        || !matches!(access(), Err(error) if error.raw_os_error().is_some_and(refuses_every_name))
+        || match access() {
+            Ok(()) => true,
+            Err(error) => match error.raw_os_error() {
+                Some(code) if refuses_every_name(code) => false,
+                Some(libc::EROFS) if cfg!(target_os = "macos") => access_list(),
+                _ => true,
+            },
+        }
 }
 
 /// Whether an error from the kernel's write check refuses the write through every name.
 const fn refuses_every_name(code: i32) -> bool {
     code == libc::EACCES || (cfg!(target_os = "macos") && code == libc::EPERM)
+}
+
+// macOS access-control-list calls, which the `libc` crate does not declare.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+}
+
+/// `ACL_TYPE_EXTENDED`, the one list type macOS stores.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+/// Whether `opened` may carry an access-control list, which can grant a write that its mode does not.
+#[cfg(target_os = "macos")]
+fn may_carry_access_list(opened: &File) -> bool {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor is live for the call.
+    let list = unsafe { acl_get_fd_np(opened.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if list.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+    }
+    // SAFETY: `list` came from `acl_get_fd_np`, and this frees it once.
+    unsafe { acl_free(list) };
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn may_carry_access_list(_opened: &File) -> bool {
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -400,13 +443,74 @@ mod tests {
             })
     }
 
+    /// Report a test that found no [`system_command_with_several_names`]. macOS always has one.
+    fn skipping_without_a_system_command() {
+        assert!(
+            !cfg!(target_os = "macos"),
+            "macOS always has a root-owned program with several names, such as /usr/bin/git, so a \
+             skip there hides a regression"
+        );
+        eprintln!(
+            "skipping: no root-owned program with several names in /usr/bin or /bin, or the test \
+             runs as root"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apples_git_loads_as_a_configured_command() {
+        use std::os::unix::fs::MetadataExt as _;
+        let git = Path::new("/usr/bin/git");
+        let metadata = std::fs::symlink_metadata(git).expect("macOS ships /usr/bin/git");
+        assert!(
+            metadata.is_file()
+                && metadata.nlink() > 1
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0,
+            "/usr/bin/git is not a root-owned file with several names, so this test checks \
+             nothing: {metadata:?}"
+        );
+        let opened = open_without_following(git).expect("opened");
+        assert!(
+            !may_carry_access_list(&opened),
+            "/usr/bin/git carries an access-control list"
+        );
+        let commands = ConfiguredCommands::load(&record(git))
+            .unwrap_or_else(|error| panic!("/usr/bin/git: {error}"));
+        commands
+            .get("reader")
+            .unwrap()
+            .verify()
+            .unwrap_or_else(|error| panic!("/usr/bin/git: {error}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_with_an_access_control_list_may_be_written() {
+        let directory = tempfile::tempdir().expect("directory");
+        let listed = directory.path().join("listed");
+        program(&listed);
+        let opened = open_without_following(&listed).expect("opened");
+        assert!(
+            !may_carry_access_list(&opened),
+            "a new file carries no list"
+        );
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny write"])
+            .arg(&listed)
+            .status()
+            .expect("chmod");
+        assert!(status.success(), "chmod +a: {status}");
+        assert!(
+            may_carry_access_list(&opened),
+            "a file with an entry carries a list"
+        );
+    }
+
     #[test]
     fn a_root_owned_command_with_several_names_loads_and_launches() {
         let Some(command) = system_command_with_several_names() else {
-            eprintln!(
-                "skipping: no root-owned program with several names in /usr/bin or /bin, or the \
-                 test runs as root"
-            );
+            skipping_without_a_system_command();
             return;
         };
         let commands = ConfiguredCommands::load(&record(&command))
@@ -431,7 +535,7 @@ mod tests {
             "an owner can change its own mode"
         );
         let Some(system) = system_command_with_several_names() else {
-            eprintln!("skipping: no root-owned program with several names in /usr/bin or /bin");
+            skipping_without_a_system_command();
             return;
         };
         let opened = open_without_following(&system).expect("opened system command");
@@ -453,21 +557,40 @@ mod tests {
         };
         let users = [501, 501];
         let refused = |code: i32| move || Err(std::io::Error::from_raw_os_error(code));
-        assert!(!may_change(foreign, users, refused(libc::EACCES)));
-        assert!(may_change(foreign, users, || Ok(())), "an allowed write");
-        for code in [libc::EROFS, libc::ENOENT, libc::ENOSYS, libc::EINVAL] {
-            assert!(may_change(foreign, users, refused(code)), "errno {code}");
+        let no_list = || false;
+        assert!(!may_change(foreign, users, refused(libc::EACCES), no_list));
+        assert!(
+            may_change(foreign, users, || Ok(()), no_list),
+            "an allowed write"
+        );
+        for code in [libc::ENOENT, libc::ENOSYS, libc::EINVAL] {
+            assert!(
+                may_change(foreign, users, refused(code), no_list),
+                "errno {code}"
+            );
         }
         assert!(
-            may_change(foreign, users, || Err(
-                std::io::ErrorKind::InvalidInput.into()
-            )),
+            may_change(
+                foreign,
+                users,
+                || Err(std::io::ErrorKind::InvalidInput.into()),
+                no_list
+            ),
             "an answer with no errno"
         );
         assert_eq!(
-            may_change(foreign, users, refused(libc::EPERM)),
+            may_change(foreign, users, refused(libc::EPERM), no_list),
             !cfg!(target_os = "macos"),
             "EPERM is a refusal only where System Integrity Protection answers it"
+        );
+        assert_eq!(
+            may_change(foreign, users, refused(libc::EROFS), no_list),
+            !cfg!(target_os = "macos"),
+            "macOS answers EROFS before it checks permissions, so the owner, mode, and list decide"
+        );
+        assert!(
+            may_change(foreign, users, refused(libc::EROFS), || true),
+            "an access-control list can grant a write that the mode does not"
         );
         for (state, users, why) in [
             (
@@ -498,7 +621,14 @@ mod tests {
                 "other write",
             ),
         ] {
-            assert!(may_change(state, users, refused(libc::EACCES)), "{why}");
+            assert!(
+                may_change(state, users, refused(libc::EACCES), no_list),
+                "{why}"
+            );
+            assert!(
+                may_change(state, users, refused(libc::EROFS), no_list),
+                "{why} on a read-only mount"
+            );
         }
     }
 
@@ -525,10 +655,7 @@ mod tests {
     #[test]
     fn a_command_with_several_names_refuses_launch_when_its_names_owner_or_mode_change() {
         let Some(system) = system_command_with_several_names() else {
-            eprintln!(
-                "skipping: no root-owned program with several names in /usr/bin or /bin, or the \
-                 test runs as root"
-            );
+            skipping_without_a_system_command();
             return;
         };
         use std::os::unix::fs::MetadataExt as _;

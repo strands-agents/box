@@ -862,8 +862,12 @@ the verb would report on one directory the caller already named.
   `may_change` is true when root runs Box, when the real or the effective user owns the file, when
   a group or other write bit is set, or when the kernel's write check (`faccessat2` on the opened
   descriptor on Linux, `faccessat` on the path elsewhere) does not refuse. Only `EACCES` is a
-  refusal, and `EPERM` on macOS, which System Integrity Protection answers. `EROFS` and every other
-  answer count as writable, as in `inode_may_be_writable` in the Linux containment backend.
+  refusal, and `EPERM` on macOS, which System Integrity Protection answers. On macOS, `EROFS` is a
+  refusal when `may_carry_access_list` is false. XNU answers a read-only mount before it checks
+  permissions, so with System Integrity Protection off (as on GitHub's macOS runners) `faccessat`
+  on `/usr/bin` answers `EROFS`. Then the root, owner, and mode checks and the absence of an
+  access-control list decide. Every other answer counts as writable, and on Linux `EROFS` does too,
+  as in `inode_may_be_writable` in the Linux containment backend.
   `ConfiguredCommand::verify` requires the startup link count, owner, group, and mode before each
   launch, and asks the kernel again. At launch, `ContainmentConfig::require_command_identity`
   records the link count in its own `command_identities` wire list. `identity_requirements` and

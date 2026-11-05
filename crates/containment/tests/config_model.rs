@@ -272,6 +272,28 @@ fn a_command_identity_requirement_keeps_its_link_count_through_apply() {
     assert!(error.contains("identity changed before apply"), "{error}");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_command_identity_requirement_accepts_apples_git() {
+    use std::os::unix::fs::MetadataExt as _;
+    let git = std::path::Path::new("/usr/bin/git");
+    let opened = std::fs::File::open(git).expect("macOS ships /usr/bin/git");
+    let links = opened.metadata().expect("metadata").nlink();
+    assert!(
+        links > 1,
+        "/usr/bin/git has {links} name, so this test checks nothing"
+    );
+    let json = ContainmentConfig::new()
+        .require_command_identity(git, &opened)
+        .expect("Apple's git keeps its identity with several names")
+        .to_json()
+        .expect("serialize");
+
+    let wire: serde_json::Value = serde_json::from_str(&json).expect("config JSON");
+    assert_eq!(wire["command_identities"][0]["links"], links, "{json}");
+    ContainmentConfig::from_json(&json).expect("an unchanged link count loads");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_one_name_entry_states_no_link_count_on_the_wire() {

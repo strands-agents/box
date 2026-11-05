@@ -3446,6 +3446,11 @@ fn a_root_owned_configured_command_with_several_names_runs() {
         return;
     }
     let Some((name, argument)) = system_program_with_several_names() else {
+        assert!(
+            !cfg!(target_os = "macos"),
+            "macOS ships a root-owned id, unzip, or bzip2 with several names, so a skip there hides \
+             a regression"
+        );
         println!("skipping: no root-owned id, unzip, or bzip2 with several names in /usr/bin");
         return;
     };
