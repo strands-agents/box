@@ -29,6 +29,7 @@ use crate::os::{
 pub struct Mediated {
     kernel: Arc<dyn Kernel>,
     interceptor: Option<Arc<dyn EffectInterceptor>>,
+    pub(crate) host_launcher: Option<crate::exec::HostLauncher>,
 }
 
 impl Mediated {
@@ -43,6 +44,7 @@ impl Mediated {
         Self {
             kernel,
             interceptor,
+            host_launcher: None,
         }
     }
 

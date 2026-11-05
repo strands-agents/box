@@ -198,6 +198,10 @@ exec = ["~/src/project/target/debug"]
 A bare program name in a command resolves on the `PATH` of the host OS's shell that runs `box run`, else on
 `/usr/bin:/bin`.
 
+On macOS, when bare `git` resolves to `/usr/bin/git`, Box uses the executable reported by
+`/usr/bin/xcrun --find git` if a tool table declares that executable. Put that absolute path in
+the tool's `command` and its `shell:spawn` permit. The permit names the developer Git executable.
+
 ## `curl`
 
 `curl` sends each request through the egress gateway, which decides `net:connect` and

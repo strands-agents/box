@@ -6,7 +6,7 @@
 
 use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +23,7 @@ use strands_shell::{Follow, Resolved};
 fn render(effect: &EffectAttempt<'_>) -> String {
     match effect {
         EffectAttempt::ShellRun { command, .. } => format!("shell:run {command}"),
+        EffectAttempt::ShellSpawn { program_path, .. } => format!("shell:spawn {program_path}"),
         EffectAttempt::Filesystem { path, operation } => {
             let verb = match operation {
                 FsOperation::ReadContent => "read".to_string(),
@@ -177,6 +178,74 @@ fn shell_with(interceptor: Arc<dyn EffectInterceptor>) -> Shell {
         .effect_interceptor(interceptor)
         .build()
         .expect("shell builds")
+}
+
+#[test]
+#[cfg(unix)]
+fn a_host_launcher_is_resolved_before_policy_with_a_custom_kernel() {
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let launcher = std::env::split_paths(&path)
+        .map(|directory| directory.join("git"))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .and_then(|candidate| candidate.canonicalize().ok())
+        .expect("Git on the test host");
+    let target = std::path::Path::new("/usr/bin/true")
+        .canonicalize()
+        .unwrap();
+    for denied in [false, true] {
+        let (recorder, _) =
+            Recorder::denying(move |event| denied && event.starts_with("shell:spawn"));
+        let spawned = Arc::new(Mutex::new(Vec::new()));
+        let captured = spawned.clone();
+        let mut kernel = VfsKernel::new(Default::default());
+        kernel.host_spawner = Some(Arc::new(move |request| {
+            captured
+                .lock()
+                .unwrap()
+                .push((request.program, request.invoked));
+            Box::pin(async {
+                Ok(strands_shell::os::HostSpawnOutcome {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            })
+        }));
+        let mut shell = Shell::builder()
+            .kernel(Arc::new(kernel))
+            .host_launcher("git", &launcher, &target)
+            .effect_interceptor(recorder.clone())
+            .build()
+            .unwrap();
+        let output = run(shell.run("git --version"));
+        assert_eq!(
+            output.status,
+            if denied { 126 } else { 0 },
+            "{}",
+            output.stderr
+        );
+        assert!(
+            recorder
+                .attempted
+                .lock()
+                .unwrap()
+                .contains(&format!("shell:spawn {}", target.display()))
+        );
+        let expected = if denied {
+            Vec::new()
+        } else {
+            vec![(target.clone(), target.clone())]
+        };
+        assert_eq!(*spawned.lock().unwrap(), expected);
+        let output = run(shell.run("git() { printf function; }; git"));
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "function");
+        assert_eq!(*spawned.lock().unwrap(), expected);
+    }
 }
 
 /// The headline property: one admission per **resolved command**, many individually-admitted

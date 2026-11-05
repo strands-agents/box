@@ -17,6 +17,18 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Local addition: resolve a host launcher before admission
+
+`ShellBuilder::host_launcher` replaces one bare-name host launcher with its canonical executable.
+It applies after PATH lookup and before policy admission, including with a caller-supplied kernel.
+The executable supplies both the admitted identity and `argv[0]`. Explicit paths keep their meaning.
+An unavailable target remains unbound and cannot run.
+
+This is an integration addition for Box, not an upstream defect.
+Box uses it only for Apple's Git launcher after matching developer Git to a validated configured command.
+The tests `a_host_launcher_changes_identity_and_spelling_only_for_its_bare_name` and
+`a_host_launcher_is_resolved_before_policy_with_a_custom_kernel` pin resolution and policy ordering.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.

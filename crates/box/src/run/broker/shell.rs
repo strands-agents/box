@@ -160,6 +160,9 @@ impl ShellSpec {
         // write rather than the mount deciding first**.
         let binds = self.reach.shell_binds();
         let mut builder = Shell::builder();
+        if let Some(git) = self.reach.apple_git() {
+            builder = builder.host_launcher("git", Path::new("/usr/bin/git"), git);
+        }
         for (source, destination) in &binds {
             builder = builder.bind_direct(*source, *destination);
         }

@@ -214,6 +214,10 @@ impl Reach {
         self
     }
 
+    pub(super) fn apple_git(&self) -> Option<&Path> {
+        self.commands.apple_git()
+    }
+
     pub(super) fn with_installation(
         mut self,
         installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,

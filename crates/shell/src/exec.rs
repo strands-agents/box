@@ -225,8 +225,39 @@ async fn host_program(os: &Arc<Mediated>, proc: &Process, program: &str) -> Opti
     // keeps the walk from widening the floor generally is that its only consumer is the
     // `shell:spawn` decision — the path it finds is not returned to the workload, is not openable
     // through the VFS, and reaches nothing unless a rule permits that exact program.
-    let _ = os;
-    host_program_path(program, &proc.cwd)
+    let found = host_program_path(program, &proc.cwd)?;
+    Some(match &os.host_launcher {
+        Some(launcher) => launcher.resolve(program, found),
+        None => found,
+    })
+}
+
+pub(crate) struct HostLauncher {
+    pub(crate) name: String,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) target: std::path::PathBuf,
+}
+
+impl HostLauncher {
+    fn resolve(&self, name: &str, found: HostProgram) -> HostProgram {
+        if name != self.name
+            || name.contains('/')
+            || !found.bound
+            || self.path != std::path::Path::new(&found.path)
+        {
+            return found;
+        }
+        if is_host_executable(&self.target)
+            && self
+                .target
+                .canonicalize()
+                .is_ok_and(|path| path == self.target)
+        {
+            HostProgram::bound(&self.target, &self.target)
+        } else {
+            HostProgram::unbound(&self.target)
+        }
+    }
 }
 
 /// A host program a `shell:spawn` decision names.
@@ -4035,7 +4066,7 @@ async fn read_receivers_limited(receivers: Vec<mpsc::Receiver<Bytes>>, limit: us
 
 #[cfg(test)]
 mod host_program_path_tests {
-    use super::{HostProgram, host_program_on, host_program_path, lexical_absolute};
+    use super::{HostLauncher, HostProgram, host_program_on, host_program_path, lexical_absolute};
     use std::path::{Path, PathBuf};
 
     fn root(name: &str) -> PathBuf {
@@ -4079,6 +4110,34 @@ mod host_program_path_tests {
             spelling: path.to_string_lossy().into_owned(),
             bound: false,
         })
+    }
+
+    #[test]
+    fn a_host_launcher_changes_identity_and_spelling_only_for_its_bare_name() {
+        let root = root("launcher");
+        let target = root.join("out/built");
+        let source = PathBuf::from("/usr/bin/git");
+        let launcher = HostLauncher {
+            name: "git".into(),
+            path: source.clone(),
+            target: target.clone(),
+        };
+        let found = HostProgram::bound(&source, &source);
+        assert_eq!(
+            launcher.resolve("git", found.clone()),
+            HostProgram::bound(&target, &target)
+        );
+        for name in ["cc", "/usr/bin/git", "./git"] {
+            assert_eq!(launcher.resolve(name, found.clone()), found);
+        }
+        let custom_path = root.join("custom/git");
+        let custom = HostProgram::bound(&custom_path, &custom_path);
+        assert_eq!(launcher.resolve("git", custom.clone()), custom);
+        let missing = HostProgram::unbound(&source);
+        assert_eq!(launcher.resolve("git", missing.clone()), missing);
+        std::fs::remove_file(&target).unwrap();
+        assert!(!launcher.resolve("git", found).bound);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// **A path spelling names its file as the canonical path**, absolute or relative to the cwd.

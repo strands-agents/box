@@ -1749,7 +1749,7 @@ must read that disclosure. No tool grant can name the box directory, which
 `a_tool_grant_cannot_expose_the_box_directory` pins.
 
 <a id="a-host-binary-resolves-on-the-operator-path"></a>
-### A host binary resolves against the operator's real `PATH`, and the longest command prefix selects the tool
+### Host lookup uses the operator's PATH, resolves Apple's Git launcher, and selects the longest command prefix
 
 The Shell resolves a host binary against the operator's real host `PATH`, with `/usr/bin:/bin` as the
 fallback, so Box finds a tool under Homebrew, nvm, or mise. Each process's search path is the table's
@@ -1762,13 +1762,23 @@ identity for the `shell:spawn` decision, for selection, and for credentials, and
 identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one
 control on whether a program runs; a larger `PATH` changes only where Box finds a permitted program.
 
+On macOS, bare `git` found as `/usr/bin/git` names the developer Git reported by `xcrun --find git`,
+but only when that executable matches a validated configured command.
+The replacement precedes policy admission, so the decision names the executable that runs.
+Changing the whole process `PATH` would also change unrelated tools.
+The fixed probe runs once during command loading; a failed probe installs no replacement.
+`developer_git_must_match_a_valid_configured_identity_regardless_of_label` pins the configured match.
+
 <a id="the-caller-spelling-becomes-argument-zero"></a>
-### The identity selects the program, and the caller's spelling becomes `argv[0]`
+### The identity selects the program, and its bound spelling becomes `argv[0]`
 
 Box runs the canonical identity, but it passes the caller's own spelling as `argv[0]`, because an
 interpreter reads `argv[0]`. A workload that ran a virtual environment's `.venv/bin/python` once ran
 the canonical system interpreter under the system name, so the virtual environment was discarded with no
-error. The spelling names the same file and nothing else: Box records a spelling only when its own
+error. When bare Git resolves through Apple's launcher, the developer executable supplies both the
+identity and `argv[0]`, because the launcher names a different file.
+`a_host_launcher_changes_identity_and_spelling_only_for_its_bare_name` pins this exception.
+The spelling names the same file and nothing else: Box records a spelling only when its own
 canonicalization produced the identity, and it is never resolved again. The residual risk is stated: a
 workload that can write a directory, put a link to a declared interpreter in it, and place a
 `pyvenv.cfg` beside that link can make the interpreter load modules from that directory. That is not

@@ -15,6 +15,7 @@ use crate::record::layout::{disk_identity, lies_within, open_without_following};
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
+    apple_git: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -69,7 +70,38 @@ impl ConfiguredCommands {
                 Ok((label.clone(), Arc::new(command)))
             })
             .collect::<Result<_, BoxError>>()?;
-        Ok(Self { tools })
+        let commands = Self {
+            tools,
+            apple_git: None,
+        };
+        #[cfg(target_os = "macos")]
+        let commands = if commands.tools.is_empty() {
+            commands
+        } else {
+            commands.with_apple_git(developer_git())
+        };
+        Ok(commands)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn with_apple_git(mut self, discovered: Option<PathBuf>) -> Self {
+        let Some(path) = discovered.filter(|path| path.is_absolute()) else {
+            return self;
+        };
+        let Ok(path) = path.canonicalize() else {
+            return self;
+        };
+        if path != Path::new("/usr/bin/git")
+            && let Some(command) = self.tools.values().find(|command| command.path == path)
+            && command.verify().is_ok()
+        {
+            self.apple_git = Some(path);
+        }
+        self
+    }
+
+    pub(crate) fn apple_git(&self) -> Option<&Path> {
+        self.apple_git.as_deref()
     }
 
     pub(crate) fn get(&self, label: &str) -> Option<&Arc<ConfiguredCommand>> {
@@ -111,6 +143,48 @@ impl ConfiguredCommands {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn developer_git() -> Option<PathBuf> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new("/usr/bin/xcrun")
+        .args(["--find", "git"])
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout.take(4097).read_to_end(&mut output).map(|_| output);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let output = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    }?;
+    let output = output.ok()?.ok()?;
+    if !status.success() || output.len() > 4096 {
+        return None;
+    }
+    let text = String::from_utf8(output).ok()?;
+    Some(PathBuf::from(text.strip_suffix('\n').unwrap_or(&text)))
 }
 
 impl ConfiguredCommand {
@@ -227,6 +301,51 @@ mod tests {
             },
         )
         .expect("read-write reach")
+    }
+
+    #[test]
+    fn developer_git_must_match_a_valid_configured_identity_regardless_of_label() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let command = directory.path().join("reader");
+        program(&command);
+        let real = command.canonicalize().unwrap();
+        let relative = command
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+        assert!(!relative.is_absolute());
+        let configured = record(&real);
+        let commands = ConfiguredCommands::load(&configured)
+            .unwrap()
+            .with_apple_git(Some(real.clone()));
+        assert_eq!(commands.apple_git(), Some(real.as_path()));
+        for discovered in [
+            None,
+            Some("reader".into()),
+            Some(relative),
+            Some("/usr/bin/git".into()),
+            Some(directory.path().join("absent")),
+        ] {
+            assert!(
+                ConfiguredCommands::load(&configured)
+                    .unwrap()
+                    .with_apple_git(discovered)
+                    .apple_git()
+                    .is_none()
+            );
+        }
+        let other = directory.path().join("other");
+        program(&other);
+        assert!(
+            ConfiguredCommands::load(&configured)
+                .unwrap()
+                .with_apple_git(Some(other.canonicalize().unwrap()))
+                .apple_git()
+                .is_none()
+        );
+        let commands = ConfiguredCommands::load(&configured).unwrap();
+        std::fs::hard_link(&command, directory.path().join("alias")).unwrap();
+        assert!(commands.with_apple_git(Some(real)).apple_git().is_none());
     }
 
     #[test]

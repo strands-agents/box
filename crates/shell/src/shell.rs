@@ -697,6 +697,7 @@ pub struct ShellBuilder {
     egress_proxy: Option<EgressProxy>,
     script_interpreter: Option<crate::os::ScriptInterpreter>,
     host_spawner: Option<crate::os::HostSpawner>,
+    host_launcher: Option<crate::exec::HostLauncher>,
     egress_refusal_header: Option<String>,
     effect_interceptor: Option<Arc<dyn EffectInterceptor>>,
     kernel: Option<Arc<dyn Kernel>>,
@@ -722,6 +723,7 @@ impl Default for ShellBuilder {
             egress_proxy: None,
             script_interpreter: None,
             host_spawner: None,
+            host_launcher: None,
             egress_refusal_header: None,
             effect_interceptor: None,
             kernel: None,
@@ -1072,6 +1074,21 @@ impl ShellBuilder {
         self
     }
 
+    /// Replace one bare-name host launcher with its canonical executable before admission.
+    pub fn host_launcher(
+        mut self,
+        name: &str,
+        launcher: &std::path::Path,
+        executable: &std::path::Path,
+    ) -> Self {
+        self.host_launcher = Some(crate::exec::HostLauncher {
+            name: name.to_string(),
+            path: launcher.to_path_buf(),
+            target: executable.to_path_buf(),
+        });
+        self
+    }
+
     /// Name the response header the egress proxy sets on a refusal it originates itself.
     ///
     /// State it before [`egress_proxy`](Self::egress_proxy), which reads it. Without it a refusal the
@@ -1225,7 +1242,9 @@ impl ShellBuilder {
         // Wrapped once, here. `Mediated` is the only route to the kernel, so a
         // supplied kernel is admitted exactly as the bundled one is — mediation does
         // not depend on which backend the embedder chose.
-        let kernel = Arc::new(Mediated::new(kernel, self.effect_interceptor.clone()));
+        let mut mediated = Mediated::new(kernel, self.effect_interceptor.clone());
+        mediated.host_launcher = self.host_launcher;
+        let kernel = Arc::new(mediated);
         let mut proc = kernel.new_process();
 
         proc.max_depth = self.max_depth;
