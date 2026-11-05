@@ -61,33 +61,27 @@ cd ~/box-tutorial
 
 ## Step 1. Download Box
 
-Follow the instructions for your operating system.
+Download Box on macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+./box-core/box --version
+```
+
+The script selects the package for your operating system, verifies its checksum, and unpacks it into `./box-core`.
+Run `box` by its path, and keep the entire directory together.
+The version command prints `strands-box` followed by the release version.
 
 ### macOS
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
-./box-core/box --version
-```
-
-The script downloads the latest release, checks it, and unpacks it into `./box-core`. You run
-`box` by its path. Keep the entire directory together. The signed macOS package contains
-`Box.app`, with a `box` launcher and helper links into that bundle. Moving only an executable
-out of the bundle loses its provisioning profile. The package is also notarized, so macOS runs
-a copy that you download in a browser.
+The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
+Moving only an executable out of the bundle loses its provisioning profile.
+The package is also notarized, so macOS runs a copy that you download in a browser.
 
 ### Linux
 
-Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
-./box-core/box --version
-```
-
-The script verifies the checksum and unpacks Box and its helpers into `./box-core`. Keep that directory together.
-The version command prints `strands-box` followed by the release version.
-
+Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
+On Linux, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal before you start a workload.
 See [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
 
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
@@ -105,8 +99,6 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
-
-On Linux, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal before you start a workload.
 
 ## Step 2. Install the Strands CLI
 
