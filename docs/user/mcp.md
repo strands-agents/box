@@ -89,7 +89,7 @@ earlier build refuses that box directory.
 
 ### Argument wildcards
 
-To let the harness supply an argument at runtime, enable this feature and put `*` in that
+To let the caller supply an argument at runtime, enable this feature and put `*` in that
 argument's position:
 
 ```toml
@@ -104,6 +104,13 @@ command = ["example-server", "--token", "*"]
 If the harness runs `example-server --token runtime-value`, Box matches the entry and starts
 `example-server --token runtime-value` after policy permits it. The same server filesystem and
 network settings still apply.
+
+Any process in the workload can invoke the MCP alias and supply values for the `*` positions.
+The operator chooses those positions in `box.toml`; the workload cannot add wildcards.
+A `shell:spawn` permit that checks only the program matches every value in those positions.
+The server runs with its own configured permissions, which can exceed the workload's.
+For example, `["npx", "-y", "*"]` lets the caller choose the package that runs with those
+permissions. Put `*` only in positions whose values you intend the caller to choose.
 
 Only an argument equal to `*` is a wildcard. It accepts one argument, including an empty string.
 The executable, argument count, order, and every other argument must match. `--token=*` is

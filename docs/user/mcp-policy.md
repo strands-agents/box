@@ -64,6 +64,8 @@ when { ["fetch", "github"].contains(context.input.server) };
 For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the effective
 launch command, with received values in the `*` positions and fixed arguments expanded.
 `arg1`, `arg2`, and `arg_count` describe those same launch arguments.
+A permit that checks only `program`, as above, matches every value supplied in the `*` positions.
+To restrict those values, add conditions on the effective arguments.
 
 ## Step 2. Connect the harness
 

@@ -259,6 +259,10 @@ to `*` skips that position's comparison. The executable, argument count, and oth
 still match. Multiple matches cause refusal. The launcher expands the configured arguments,
 then replaces only the star positions with received values. Received text is not expanded again.
 Policy sees the effective command and arguments before the existing contained launch starts.
+Any workload process can call the MCP alias. Each operator-declared `*` therefore gives that
+caller control of one argument to a server with its own configured permissions. A permit that
+checks only the program does not restrict that value. If the argument selects a package or a
+destination, the caller selects the code or destination used under the server's permissions.
 
 The broker then decides `shell:spawn` on the configured program and effective arguments, before the
 process exists. If it's allowed, the server starts in its own sandbox.
