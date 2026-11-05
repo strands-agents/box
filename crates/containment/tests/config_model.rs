@@ -447,6 +447,32 @@ fn a_leaf_config_round_trips_every_leaf_field() {
     assert_eq!(agent["runtime_services"], serde_json::json!(false));
 }
 
+/// The file-attributes switch survives the wire, because the trampoline renders from the JSON.
+#[test]
+fn the_file_attributes_switch_round_trips_and_defaults_off() {
+    let off = ContainmentConfig::new().to_json().expect("serialize");
+    let off_wire: serde_json::Value = serde_json::from_str(&off).expect("parse");
+    assert_eq!(off_wire["file_attributes"], serde_json::json!(false));
+
+    let on = ContainmentConfig::new()
+        .allow_file_attributes()
+        .to_json()
+        .expect("serialize");
+    let on_wire: serde_json::Value = serde_json::from_str(&on).expect("parse");
+    assert_eq!(on_wire["file_attributes"], serde_json::json!(true));
+    let restored = ContainmentConfig::from_json(&on).expect("round trip");
+    assert_eq!(restored.to_json().expect("re-serialize"), on);
+
+    let mut without_the_key = off_wire.clone();
+    without_the_key
+        .as_object_mut()
+        .expect("an object")
+        .remove("file_attributes");
+    let restored = ContainmentConfig::from_json(&without_the_key.to_string())
+        .expect("a config written before the switch still loads");
+    assert_eq!(restored.to_json().expect("re-serialize"), off);
+}
+
 /// A crafted payload meets every refusal a builder call does, because loading rebuilds.
 ///
 /// Four crafted shapes, one per refusal: a path that does not exist, a relative path, a

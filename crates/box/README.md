@@ -112,6 +112,14 @@ on stderr when it starts. A grant that would expose the box's own directory is r
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
 
+The top-level `file-attributes` key, off by default, lets a macOS write folder set file times, and
+with them the set-ID bits, the group, the owner (as far as the ownership check allows), and access
+control lists through `setattrlist`. It applies to the agent, every tool, and every local MCP server,
+and Linux ignores it.
+`record::config::tests::the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system`
+pins the key, and `run::contain::boundary::tests::the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos`
+pins its reach.
+
 **A `filesystem` list governs one process, and nothing else.** The agent's lists do not govern a
 tool, and a tool's lists do not govern the agent. A path absent from a process's own lists is a path
 that process cannot reach; it does not mean nothing in the box reaches it, because the Shell reaches

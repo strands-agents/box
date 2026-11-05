@@ -132,7 +132,7 @@ shape:
 | `Metadata` + `Dir` | `file-read-metadata` on the literal and its ancestors, and no data rule at all |
 | `Metadata` + `Root` | ancestor metadata, and `file-read-metadata` over the subtree |
 | `Write` + `File` | `file-write*` on that literal |
-| `Write` + `Root` | `file-write*` over the subtree, and two denies pinning the root's own identity |
+| `Write` + `Root` | Six named write operations over the subtree (contents, create, unlink, extended attributes, mode, and times), and two denies pinning the root's own identity. With `allow_file_attributes`, also `file-write*` over the subtree, with the flags, owner, ACL, and Finder information operations denied again. Linux ignores the builder |
 | `Connect` + `File` | `network-outbound` on that socket path |
 
 **One block per cell, and every cell repeats.** The profile has a placeholder per

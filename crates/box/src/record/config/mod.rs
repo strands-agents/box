@@ -454,6 +454,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    self.file.file_attributes,
                     &self.file.experimental_features,
                     self.file
                         .agent
@@ -463,6 +464,7 @@ impl RunContract {
                     &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                file_attributes: self.file.file_attributes,
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -520,6 +522,14 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// Whether each macOS write grant may also set file attributes.
+    #[serde(
+        default,
+        rename = "file-attributes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) file_attributes: bool,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -584,11 +594,14 @@ pub(crate) struct Record {
 /// key.
 pub(crate) const RECORD_VERSION: u32 = 21;
 
-/// Version 22 prevents older builds from resuming a box without its selected enforcement.
+/// Version 22 prevents older builds from resuming a box without each experimental feature it selects.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// The record version of a record that selects `file-attributes`, so an older build refuses the box
+/// rather than resuming it without the write grants it was configured with.
+const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,11 +643,14 @@ impl ExperimentalFeatures {
 
 /// The record version for what a record holds.
 fn record_version<'a>(
+    file_attributes: bool,
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if crate::record::config::mcp::shares_a_program(mcp) {
+    if file_attributes {
+        FILE_ATTRIBUTES_RECORD_VERSION
+    } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
         process_record_version(features, specs)
@@ -882,6 +898,7 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -896,6 +913,7 @@ impl Record {
             source,
         })?;
         let expected = record_version(
+            record.file_attributes,
             &record.experimental_features,
             record
                 .agent
@@ -1136,6 +1154,10 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// Whether each macOS write grant may also set file times, set-ID bits, the group, the owner,
+    /// and ACLs. Linux accepts the key and renders nothing for it.
+    #[serde(default, rename = "file-attributes")]
+    file_attributes: bool,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1330,6 +1352,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1428,6 +1451,76 @@ native-filesystem-policy = false
                 Err(ConfigError::ExperimentalFeatureUnavailable { .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(!absent.file_attributes);
+        let enabled = ConfigFile::parse(
+            &format!("file-attributes = true\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(enabled.file_attributes);
+        assert!(enabled.experimental_features.is_disabled());
+        let disabled = ConfigFile::parse(
+            &format!("file-attributes = false\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(!disabled.file_attributes);
+    }
+
+    #[test]
+    fn file_attributes_is_refused_as_an_experimental_feature_and_when_misspelled() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("{required}[experimental-features]\nfile-attributes = true\n"),
+            format!("file-attribute = true\n{required}"),
+            format!("file_attributes = true\n{required}"),
+            format!("file-attributes = \"yes\"\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_attributes_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.file_attributes = true;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("file-attributes = true"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: FILE_ATTRIBUTES_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = FILE_ATTRIBUTES_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("file-attributes"), "{ordinary}");
     }
 
     #[test]
@@ -2076,7 +2169,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, FILE_ATTRIBUTES_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
