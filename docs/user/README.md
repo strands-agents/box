@@ -36,6 +36,7 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 - [`tutorials/eks.md`](./tutorials/eks.md): build and run a Box coding workload on Amazon EKS, then inspect its permitted operations and refusals.
 - [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a Strands or LangChain shipment agent to AgentCore Runtime with Box.
+- [`tutorials/google-cloud.md`](./tutorials/google-cloud.md): run a Strands agent with Gemini on Google Compute Engine and verify its deployment retry cooldown.
 
 ## Reference
 

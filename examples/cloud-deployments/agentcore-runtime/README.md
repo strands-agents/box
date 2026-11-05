@@ -4,6 +4,10 @@ A support agent must replace a delayed shipment without sending two replacements
 This example runs a Strands or LangChain agent inside Box and deploys it to Amazon Bedrock AgentCore Runtime.
 The model chooses tools. Box checks each service request against recent response history.
 
+Eligibility checks use `GET /orders/{order_id}/replacement`; dispatch requests use `POST` on the same path.
+The temporal rule matches the earlier response with `input.path: context.input.path`.
+A check for another order cannot satisfy it. The eligibility endpoint returns HTTP 200 only when the order is eligible.
+
 Follow the [full build guide](../../../docs/user/tutorials/agentcore-runtime.md) to prepare dependencies, deploy, invoke, inspect the result, and clean up.
 
 ## Choose a workload
