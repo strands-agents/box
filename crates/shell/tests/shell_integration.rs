@@ -3162,9 +3162,60 @@ fn builder_timeout() {
     }));
 }
 
-// A zero timeout is rejected at build time rather than silently expiring
-// every command immediately. There is no "unlimited" sentinel — callers omit
-// the timeout for no limit.
+#[test]
+fn builder_timeout_can_be_disabled() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for builder in [
+            Shell::builder(),
+            Shell::builder().timeout(std::time::Duration::from_millis(10)),
+        ] {
+            let mut shell = builder.disable_timeout().build().unwrap();
+            assert_eq!(shell.config().timeout_secs, None);
+            for _ in 0..2 {
+                let out = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    shell.run("sleep 0.05; printf FINISHED"),
+                )
+                .await
+                .expect("an unlimited call must still finish its submitted work");
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "FINISHED");
+            }
+        }
+    }));
+}
+
+#[test]
+fn builder_timeout_can_be_restored_after_disabling() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .disable_timeout()
+            .timeout(std::time::Duration::from_millis(10))
+            .build()
+            .unwrap();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            shell.run("sleep 0.05; printf TOO_LATE"),
+        )
+        .await
+        .expect("the restored deadline must return a timeout result");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("execution timeout exceeded"),
+            "{}",
+            out.stderr
+        );
+        assert!(!out.stdout.contains("TOO_LATE"));
+        assert_eq!(
+            shell.run("printf STILL_SERVING").await.stdout,
+            "STILL_SERVING"
+        );
+    }));
+}
+
+// A zero timeout is rejected at build time; disable_timeout selects no deadline.
 #[test]
 fn builder_zero_timeout_rejected() {
     let Err(err) = Shell::builder().timeout(std::time::Duration::ZERO).build() else {

@@ -15,14 +15,12 @@ pub(super) const FETCH_NAME: &str = "fetch";
 /// Cap on a response body handed back to a script.
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// Per-request bound on the gateway call, below the transport's request timeout so a hung fetch
-/// surfaces as a fetch error rather than the transport deadline.
+/// Bound on one Python fetch through the gateway.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
 
 const _: () = assert!(
-    NETWORK_TIMEOUT.as_nanos() < crate::run::broker::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "a fetch's own timeout must fire before the transport's request timeout, so a hung request \
-     reports as a fetch error rather than the transport's generic kill"
+    NETWORK_TIMEOUT.as_nanos() < super::REQUEST_TIMEOUT.as_nanos(),
+    "a fetch's own timeout must fire before the direct Python request timeout"
 );
 
 /// The parsed shape of one `fetch` call, at parity with the gateway's `InterceptedRequest`:

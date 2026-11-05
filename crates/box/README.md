@@ -73,15 +73,23 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eight**: `name`, `box_dir`, `policy`, `[agent]`,
-`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, and `[telemetry.<kind>]`. `name` and `box_dir`
+The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
+`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
+`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
 
-**Four of those eight are keys and not inputs.** The four inputs are policy, credentials, name, and
-workload; a key becomes an input when it decides which requests are governed.
+The four inputs are policy, credentials, name, and workload; a key becomes an input when it decides
+which requests are governed.
+
+`[limits]` accepts `shell.timeout`, a positive integer number of seconds or `false` to disable
+the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
+For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
+The nested table `[limits.shell]` accepts the same values under `timeout`.
+Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
