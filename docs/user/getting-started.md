@@ -78,35 +78,20 @@ a copy that you download in a browser.
 
 ### Linux
 
-Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
-Install tar, gzip, and `sha256sum`. The surrounding OS must permit namespace, mount, and
-system-call filter setup. See [Linux setup requirements](../design/linux-enforcement.md#startup-failures-and-qualification).
-
-From the [Box releases](https://github.com/strands-agents/box/releases), download
-`box-<tag>-aarch64-unknown-linux-gnu.tar.gz` and `SHA256SUMS.txt` from the same release into
-`~/box-tutorial`. The release tag replaces `<tag>`. Keep that directory empty until this download.
-
-From `~/box-tutorial`, verify the checksum before extraction:
+Use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc:
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS.txt &&
-  mkdir box-core &&
-  tar -C box-core -xzf box-*-aarch64-unknown-linux-gnu.tar.gz &&
-  ./box-core/box --version
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+./box-core/box --version
 ```
 
-The checksum command prints the archive name followed by `OK`.
+The script verifies the checksum and unpacks Box and its helpers into `./box-core`. Keep that directory together.
 The version command prints `strands-box` followed by the release version.
-Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together in `box-core`.
 
-For releases that request Linux consent, set `EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the terminal that runs Box:
+If Box requests Linux consent at startup, run `export EXPERIMENTAL_LINUX_SUPPORT=TRUE` in the same terminal.
+See [Linux setup requirements](../design/linux-enforcement.md#startup-failures-and-qualification) for startup constraints.
 
-```sh
-export EXPERIMENTAL_LINUX_SUPPORT=TRUE
-```
-
-Use the [configuration reference](config.md#direct-access-by-operating-system) to write the workload's filesystem grants.
-The [platform comparison](../design/platform-differences.md) explains differences when adapting a macOS configuration.
+Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
 For deployment examples, see [Amazon EKS](tutorials/eks.md) and [AgentCore Runtime](tutorials/agentcore-runtime.md).
 
 ### Build from source
