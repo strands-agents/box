@@ -2,7 +2,16 @@
 # Build the pinned Box source and run the example as an ordinary Linux user.
 set -euo pipefail
 exec > >(tee -a /var/log/box-gcp-setup.log /dev/console) 2>&1
-trap 'code=$?; printf "BOX_GCP_SETUP_EXIT=%s\n" "$code"' EXIT
+log_writer=$!
+finish() {
+    code=$?
+    trap - EXIT
+    printf 'BOX_GCP_SETUP_EXIT=%s\n' "$code"
+    exec 1>&- 2>&-
+    wait "$log_writer" || code=1
+    exit "$code"
+}
+trap finish EXIT
 
 metadata() {
     curl --fail --silent --show-error --retry 5 --max-time 30 \

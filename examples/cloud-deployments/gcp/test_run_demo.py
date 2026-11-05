@@ -4,8 +4,13 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shlex
+import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -148,6 +153,58 @@ class RuntimeGrantTests(unittest.TestCase):
 
 
 class StartupEvidenceTests(unittest.TestCase):
+    def run_startup_log_writer(self, setup_exit=0, writer_exit=0):
+        source = (HERE / "setup-vm.sh").read_text()
+        source = source[:source.index("\nmetadata() {")]
+        system_tee = shutil.which("tee")
+        self.assertIsNotNone(system_tee, "The startup log test requires tee")
+        with tempfile.TemporaryDirectory(prefix="box-gcp-log-test-") as temporary:
+            home = Path(temporary)
+            logs = [home / "setup.log", home / "console.log"]
+            source = source.replace("/var/log/box-gcp-setup.log", shlex.quote(str(logs[0])))
+            source = source.replace("/dev/console", shlex.quote(str(logs[1])))
+            binary = home / "bin"
+            binary.mkdir()
+            writer = binary / "tee"
+            writer.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess, sys, time\n"
+                "data = sys.stdin.buffer.read()\n"
+                "time.sleep(0.2)\n"
+                f"result = subprocess.run([{system_tee!r}, *sys.argv[1:]], input=data)\n"
+                f"raise SystemExit({writer_exit} or result.returncode)\n"
+            )
+            writer.chmod(0o755)
+            payload = "".join("BOX_GCP_RECEIPT_CHUNK=" + "a" * 64 +
+                              f":{index}:6:" + "b" * 1000 + "\n" for index in range(6))
+            program = source + "\nprintf '%s' " + shlex.quote(payload)
+            program += "\nprintf '%s\\n' BOX_GCP_PHASE=complete\n"
+            program += f"exit {setup_exit}\n"
+            process = subprocess.Popen(
+                ["bash", "-c", program], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"PATH": str(binary) + os.pathsep + "/usr/bin:/bin"}, start_new_session=True,
+            )
+            try:
+                code = process.wait(timeout=4)
+            finally:
+                # The startup runner removes remaining children when its main process exits.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=1)
+            expected = payload + f"BOX_GCP_PHASE=complete\nBOX_GCP_SETUP_EXIT={setup_exit}\n"
+            return code, [log.read_text() if log.exists() else "" for log in logs], expected
+
+    def test_final_receipt_and_exit_reach_both_logs_before_cleanup(self):
+        for setup_exit in (0, 7):
+            code, logs, expected = self.run_startup_log_writer(setup_exit=setup_exit)
+            self.assertEqual(code, setup_exit)
+            self.assertEqual(logs, [expected, expected])
+
+    def test_log_writer_failure_makes_setup_fail(self):
+        code, logs, expected = self.run_startup_log_writer(writer_exit=23)
+        self.assertEqual(code, 1)
+        self.assertEqual(logs, [expected, expected])
+
     def test_failed_restart_cannot_reuse_previous_success(self):
         source = (HERE / "setup-vm.sh").read_text()
         runner = source.split("/usr/bin/python3 -I -B - <<'RUN'\n", 1)[1].split("\nRUN\n", 1)[0]
