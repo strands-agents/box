@@ -1,11 +1,12 @@
 # Run Box in a Linux cloud environment
 
-Use these examples to run Box around a workload on Amazon Elastic Kubernetes Service (EKS) or Amazon Bedrock AgentCore Runtime.
+Use these examples to run Box around a workload on Amazon Elastic Kubernetes Service (EKS), Amazon Bedrock AgentCore Runtime, or Google Compute Engine.
 Each example includes source, setup commands, policy checks, and cleanup instructions.
 
 | Example | What you run | What Box demonstrates |
 | --- | --- | --- |
 | [EKS](eks/) | A fixed coding exercise or a Claude Code deployment agent. | File and network restrictions, plus a deployment cooldown after repeated failures while diagnostics remain available. |
+| [Google Cloud](gcp/) | A Strands agent with Gemini on a Compute Engine VM. | Deployment retries pause after repeated failures while status checks remain available. |
 | [AgentCore Runtime](agentcore-runtime/) | A shipment agent using Strands or LangChain, with scripted controls. | A dispatch depends on an earlier eligibility response. A completed shipment or refund closes competing requests for five minutes. |
 
 Start with the [EKS build guide](../../docs/user/tutorials/eks.md) or the [Runtime build guide](../../docs/user/tutorials/agentcore-runtime.md).
