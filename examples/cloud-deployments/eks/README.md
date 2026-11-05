@@ -34,7 +34,7 @@ The fixed coding example passed 11 checks. The Claude Code 2.1.305 coding and fi
 
 The Claude Code 2.1.305 deployment example passed seven checks on EKS, with kernel `6.12.111-136.204.amzn2023.aarch64`.
 The separate ten-minute cooldown test passed 14 checks, including refusal near expiry and a permitted request after expiry.
-The shortened repeated-failure test passed 17 checks. An additional full-duration test passed 26 checks for a second cooldown after three new failures.
+The shortened repeated-failure test passed 17 checks.
 Both Claude examples used a trusted controller with EKS Pod Identity to obtain model access.
 
 The Job requires pod user namespaces, `procMount: Unmasked`, and an outer `seccompProfile: Unconfined`.
