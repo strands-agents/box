@@ -1895,8 +1895,22 @@ done"#;
         drop(running);
     }
 
+    /// Every action an engine reports a verdict for.
+    #[derive(Default)]
+    struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+    impl policy::DecisionObserver for DecidedActions {
+        fn observed(&self, action: &str, _resource: &str, _decision: &policy::Decision) {
+            self.0
+                .lock()
+                .expect("the list locks")
+                .push(action.to_string());
+        }
+    }
+
     /// `mcp_spec_with_policy`'s spec over an engine whose grammar `sh` binds `/bin/sh` as `sh`.
     fn mcp_spec_with_bound_sh(
+        decided: Arc<DecidedActions>,
         marker_directory: &Path,
         history: &Path,
         command: Vec<String>,
@@ -1940,7 +1954,12 @@ done"#;
             .expect("the program binds");
         let mut spec = Arc::into_inner(mcp_spec_with_policy(marker_directory, command, ""))
             .expect("the spec is not shared yet");
-        spec.policy = Arc::new(engine.bound_by(bindings).expect("the engine issued them"));
+        spec.policy = Arc::new(
+            engine
+                .observed_by(decided)
+                .bound_by(bindings)
+                .expect("the engine issued them"),
+        );
         Arc::new(spec)
     }
 
@@ -1957,7 +1976,9 @@ done"#;
         ];
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
 
+        let decided = Arc::new(DecidedActions::default());
         let spec = mcp_spec_with_bound_sh(
+            Arc::clone(&decided),
             markers.path(),
             history.path(),
             command.clone(),
@@ -1968,16 +1989,22 @@ done"#;
             .block_on(start_mcp_server(&spec, &server))
             .err()
             .expect("no rule permits the grammar action");
+        assert_eq!(
+            decided.0.lock().expect("the list locks").as_slice(),
+            [r#"Tool::sh::Action::"unmodeled""#.to_string()]
+        );
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(
             error
                 .to_string()
-                .contains(r#"policy denied Tool::sh::Action::"unmodeled""#),
+                .contains("policy denied this operation on '/")
+                && error.to_string().contains("[default-deny]"),
             "{error}"
         );
 
         let history = tempfile::tempdir().expect("history directory");
         let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
             markers.path(),
             history.path(),
             command,

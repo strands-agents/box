@@ -83,12 +83,8 @@ these shapes:
 - `because the request could not be evaluated.`: the engine hit an internal fault, and it denied
   the request.
 
-A denial of an experimental [tool grammar](config.md#toolnamegrammar) action names the action in
-place of `this operation`, and the tail has the same shapes:
-
-```text
-strands-shell: effect denied: policy denied Tool::git::Action::"push" on '/usr/bin/git' [policy: no_push]: Pushes are not allowed.
-```
+A denial of an experimental [tool grammar](config.md#toolnamegrammar) action reads the same way,
+on the path of the program. The decision log names the grammar action.
 
 Each caller shows the text in its own form:
 

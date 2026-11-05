@@ -96,6 +96,19 @@ fn in_the_shell(box_: &Configured, command: &str) -> Output {
     box_.bash(&format!(r#"zsh -c '{command}; printf "|status=%s" "$?"'"#))
 }
 
+/// The box journaled a denial of the git grammar action `action`.
+fn assert_grammar_decision(box_: &Configured, action: &str) {
+    let journaled = decisions(box_);
+    assert!(
+        journaled.contains(&(
+            "Tool::git".to_string(),
+            action.to_string(),
+            "deny".to_string()
+        )),
+        "telemetry names the grammar action: {journaled:?}"
+    );
+}
+
 /// The `(category, action, verdict)` of each policy decision the box journaled.
 fn decisions(box_: &Configured) -> Vec<(String, String, String)> {
     let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
@@ -186,20 +199,11 @@ fn a_forbid_on_a_grammar_action_denies_the_command_that_raises_it() {
     assert!(stdout(&output).contains("|status=126"), "{output:?}");
     assert!(
         stderr(&output).contains(&format!(
-            "policy denied Tool::git::Action::\"push\" on '{git}' [policy: no_push]: Pushes are \
-             not allowed."
+            "policy denied this operation on '{git}' [policy: no_push]: Pushes are not allowed."
         )),
-        "the denial names the grammar action: {output:?}"
+        "{output:?}"
     );
-    let journaled = decisions(&box_);
-    assert!(
-        journaled.contains(&(
-            "Tool::git".to_string(),
-            "push".to_string(),
-            "deny".to_string()
-        )),
-        "telemetry names the grammar action: {journaled:?}"
-    );
+    assert_grammar_decision(&box_, "push");
 }
 
 #[test]
@@ -231,9 +235,13 @@ fn a_command_the_grammar_cannot_read_is_denied_without_a_permit_that_names_unmod
 
     assert!(stdout(&output).contains("|status=126"), "{output:?}");
     assert!(
-        stderr(&output).contains("policy denied Tool::git::Action::\"unmodeled\""),
+        stderr(&output).contains(&format!(
+            "policy denied this operation on '{git}' [default-deny]: No permit policy matched \
+             this request."
+        )),
         "{output:?}"
     );
+    assert_grammar_decision(&box_, "unmodeled");
 }
 
 #[test]
@@ -244,15 +252,17 @@ fn a_command_through_sh_is_decided_as_the_grammar_action_a_direct_command_raises
     }
     let home = support::fixture::short_temporary_home();
     let box_ = grammar_box(home.path(), GIT_WITHOUT_PUSH);
+    let git = git_program(home.path()).display().to_string();
 
     let output = box_.bash(r#"sh -c 'git push origin; printf "|status=%s" "$?"'"#);
 
     assert!(stdout(&output).contains("|status=126"), "{output:?}");
     assert!(
-        stderr(&output).contains("policy denied Tool::git::Action::\"push\"")
-            && stderr(&output).contains("[policy: no_push]"),
+        stderr(&output).contains(&format!("policy denied this operation on '{git}'"))
+            && stderr(&output).contains("[policy: no_push]: Pushes are not allowed."),
         "the same forbid denies the push through `sh -c`: {output:?}"
     );
+    assert_grammar_decision(&box_, "push");
 }
 
 #[test]

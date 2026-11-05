@@ -8,35 +8,22 @@ const TRUNCATED: &str = "...";
 
 impl fmt::Display for Decision {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&message(self, "this operation"))
+        let mut message = String::new();
+        if describe(self, &mut message).is_none() {
+            message.push_str(TRUNCATED);
+        }
+        formatter.write_str(&message)
     }
 }
 
-impl Decision {
-    /// The message for this verdict, naming `action` where it names no action otherwise.
-    #[cfg(feature = "shell-adapter")]
-    pub(crate) fn message_naming(&self, action: &str) -> String {
-        message(self, action)
-    }
-}
-
-fn message(decision: &Decision, subject: &str) -> String {
-    let mut message = String::new();
-    if describe(decision, subject, &mut message).is_none() {
-        message.push_str(TRUNCATED);
-    }
-    message
-}
-
-fn describe(decision: &Decision, subject: &str, message: &mut String) -> Option<()> {
+fn describe(decision: &Decision, message: &mut String) -> Option<()> {
     let (verb, resource) = match decision {
         Decision::Allow { resource, .. } => ("permitted", resource),
         Decision::Deny { resource, .. } => ("denied", resource),
     };
     append(message, "policy ")?;
     append(message, verb)?;
-    append(message, " ")?;
-    append(message, subject)?;
+    append(message, " this operation")?;
     if let Some(resource) = nonblank(Some(resource)) {
         append(message, " on ")?;
         append_resource(message, resource)?;

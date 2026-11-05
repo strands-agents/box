@@ -294,10 +294,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                     );
                     return match pending {
                         Some(pending) => Ok(self.permit(Admitted::Grammar(pending))),
-                        None => Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            decision.message_naming(&invocation.action_name()),
-                        )),
+                        None => Err(denied(&decision)),
                     };
                 }
             }
@@ -1269,9 +1266,23 @@ mod tests {
         (policy, history)
     }
 
-    /// **The denial of a grammar action names that action**, also for `unmodeled`.
+    /// Every action that an engine reports a verdict for, as a rule spells it.
+    #[derive(Default)]
+    struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+    impl crate::DecisionObserver for DecidedActions {
+        fn observed(&self, action: &str, _resource: &str, _decision: &Decision) {
+            self.0
+                .lock()
+                .expect("the list locks")
+                .push(action.to_string());
+        }
+    }
+
+    /// **A denied grammar action reads as any other denial**, also for `unmodeled`, and the engine
+    /// decided the grammar action.
     #[tokio::test]
-    async fn a_denied_grammar_action_names_the_action() {
+    async fn a_denied_grammar_action_reads_as_any_denial_and_is_decided_as_its_action() {
         let programs = Programs::new();
         let git = programs.path("git");
         let (policy, history) = engine_with_inline_git(
@@ -1279,6 +1290,8 @@ mod tests {
                forbid (principal, action == Tool::git::Action::"push", resource);
                permit (principal, action in Tool::git::Action::"*", resource);"#,
         );
+        let decided = Arc::new(DecidedActions::default());
+        let policy = policy.observed_by(Arc::clone(&decided) as Arc<dyn crate::DecisionObserver>);
         let mut bindings = policy.grammar_bindings();
         bindings.declare(&programs.file("git"), "git");
         let interceptor = InterceptorFixture {
@@ -1290,16 +1303,18 @@ mod tests {
             _history: history,
         };
 
-        for (args, expected) in [
+        for (args, action, expected) in [
             (
                 words(&["push", "origin"]),
-                format!("policy denied Tool::git::Action::\"push\" on '{git}' [policy: no_push]."),
+                r#"Tool::git::Action::"push""#,
+                format!("policy denied this operation on '{git}' [policy: no_push]."),
             ),
             (
                 words(&["frobnicate"]),
+                r#"Tool::git::Action::"unmodeled""#,
                 format!(
-                    "policy denied Tool::git::Action::\"unmodeled\" on '{git}' [default-deny]: \
-                     No permit policy matched this request."
+                    "policy denied this operation on '{git}' [default-deny]: No permit policy \
+                     matched this request."
                 ),
             ),
         ] {
@@ -1309,6 +1324,16 @@ mod tests {
                 .err()
                 .map(|error| error.to_string());
             assert_eq!(refused, Some(expected), "{args:?}");
+            assert_eq!(
+                decided
+                    .0
+                    .lock()
+                    .expect("the list locks")
+                    .last()
+                    .map(String::as_str),
+                Some(action),
+                "{args:?}"
+            );
         }
         assert!(
             interceptor
@@ -1413,8 +1438,8 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             format!(
-                "policy denied Tool::git::Action::\"status\" on '{git}' [default-deny]: No permit \
-                 policy matched this request."
+                "policy denied this operation on '{git}' [default-deny]: No permit policy matched \
+                 this request."
             )
         );
 

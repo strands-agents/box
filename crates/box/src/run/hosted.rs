@@ -1104,11 +1104,16 @@ mod tests {
         spawned(&engine, &path, &["status"])
             .await
             .expect("the grammar action permit admits the spawn");
+        let capture = telemetry::ObservationCapture::begin();
         let refused = spawned(&engine, &path, &["push", "origin"])
             .await
             .expect_err("no rule permits the push, and `shell:spawn` does not decide it");
+        let decided = capture.last().expect("the engine decided the spawn");
+        assert_eq!(decided.action(), r#"Tool::git::Action::"push""#);
         assert!(
-            refused.starts_with(r#"policy denied Tool::git::Action::"push""#),
+            refused.starts_with(&format!(
+                "policy denied this operation on '{path}' [default-deny]"
+            )),
             "{refused}"
         );
     }
