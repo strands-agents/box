@@ -134,12 +134,15 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 ### `limits.shell.timeout`
 
 Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
-`[limits]` to allow ten minutes. The value is a positive integer in seconds; see
+`[limits]` to allow ten minutes, or `shell.timeout = false` for unlimited execution. See
 [`[limits]`](config.md#limits) for the accepted values.
 
 The allowance covers the full text sent in one call, including multiple commands, pipelines,
 and programs the Shell starts. Each new call receives a fresh allowance. Output leaves its
 deadline unchanged. The Shell alias waits for the broker's result.
+
+With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
+Calls remain cancellable, and connection and write operations retain their transport timeouts.
 
 Python called inside the Shell retains Monty's 120-second active execution limit and
 180-second cumulative sleep limit. Synchronous Python execution can delay the Shell's timeout
@@ -223,7 +226,7 @@ refuses makes `curl` exit non-zero.
 |---|---|---|
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
-| `125` | The call exceeded the broker's backup deadline, five seconds after its configured Shell allowance. | `strands-box: the call exceeded its deadline` |
+| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |

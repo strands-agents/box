@@ -946,10 +946,16 @@ impl ShellBuilder {
     /// than `duration` is terminated and its `Output` carries
     /// `status = 1` with `strands-shell: execution timeout exceeded` in stderr.
     ///
-    /// A zero `duration` is rejected by [`build`](Self::build): there is no
-    /// "unlimited" sentinel, so omit the timeout entirely for no limit.
+    /// A zero `duration` is rejected by [`build`](Self::build).
+    /// Use [`disable_timeout`](Self::disable_timeout) for no execution deadline.
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
+        self
+    }
+
+    /// Disable the execution deadline while preserving the other resource limits.
+    pub fn disable_timeout(mut self) -> Self {
+        self.timeout = None;
         self
     }
 
@@ -1166,14 +1172,13 @@ impl ShellBuilder {
     ///
     /// Returns an error if:
     /// - A bind mount source path does not exist
-    /// - The configured timeout is zero (a zero timeout would expire every
-    ///   command immediately; there is no "unlimited" sentinel — simply omit
-    ///   the timeout for no limit)
+    /// - The configured timeout is zero (use [`disable_timeout`](Self::disable_timeout)
+    ///   for no execution deadline)
     pub fn build(self) -> io::Result<Shell> {
         if self.timeout == Some(Duration::ZERO) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "timeout must be greater than zero (omit it for no timeout)",
+                "timeout must be greater than zero (call disable_timeout for no timeout)",
             ));
         }
 

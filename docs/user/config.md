@@ -112,11 +112,14 @@ loses a name during its security assessment.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `shell.timeout` | positive integer | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. |
+| `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
-Zero, negative numbers, fractions, strings, and values too large for the platform's clock are load errors.
+Set `shell.timeout = false` for unlimited execution, or omit the key for the 30-second default.
+Connection and write operations retain their transport timeouts.
+Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
+are load errors.
 
 This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`.
 Python retains its [own limits](monty.md#limits-and-exit-statuses), including when called inside the

@@ -590,6 +590,8 @@ const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 25;
+/// The record version that preserves a disabled Shell timeout.
+const UNLIMITED_SHELL_RECORD_VERSION: u32 = 26;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,7 +636,9 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if !limits.is_default() {
+    if limits.shell.timeout().is_none() {
+        UNLIMITED_SHELL_RECORD_VERSION
+    } else if !limits.is_default() {
         LIMITS_RECORD_VERSION
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
@@ -885,6 +889,7 @@ impl Record {
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
+            UNLIMITED_SHELL_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1348,7 +1353,7 @@ mod tests {
             let configured = load(body).unwrap();
             assert_eq!(
                 configured.limits.shell.timeout(),
-                std::time::Duration::from_secs(600)
+                Some(std::time::Duration::from_secs(600))
             );
             let stored = record_from_config(body).unwrap();
             assert_eq!(stored.limits, configured.limits);
@@ -1366,8 +1371,48 @@ mod tests {
             let stored = pinned_record(body);
             assert_eq!(stored.version, RECORD_VERSION);
             assert!(!stored.to_toml().unwrap().contains("limits"));
-            assert_eq!(stored.limits.shell.timeout(), limits::DEFAULT_SHELL_TIMEOUT);
+            assert_eq!(
+                stored.limits.shell.timeout(),
+                Some(limits::DEFAULT_SHELL_TIMEOUT)
+            );
         }
+    }
+
+    #[test]
+    fn an_unlimited_shell_timeout_round_trips_only_in_its_record_version() {
+        for body in [
+            "[limits]\nshell.timeout = false\n",
+            "[limits.shell]\ntimeout = false\n",
+        ] {
+            let configured = load(body).unwrap();
+            let mut stored = pinned_record(body);
+            assert_eq!(configured.limits.shell.timeout(), None);
+            assert_eq!(stored.limits, configured.limits);
+            assert_eq!(stored.version, UNLIMITED_SHELL_RECORD_VERSION);
+            assert_eq!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                stored
+            );
+            for version in RECORD_VERSION..=LIMITS_RECORD_VERSION {
+                stored.version = version;
+                assert!(matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found,
+                        expected: UNLIMITED_SHELL_RECORD_VERSION
+                    }) if found == version
+                ));
+            }
+        }
+        let mut finite = pinned_record("[limits.shell]\ntimeout = 600\n");
+        finite.version = UNLIMITED_SHELL_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&finite.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: UNLIMITED_SHELL_RECORD_VERSION,
+                expected: LIMITS_RECORD_VERSION,
+            })
+        ));
     }
 
     #[test]
@@ -1433,7 +1478,7 @@ mod tests {
 
     #[test]
     fn invalid_limits_are_refused_in_configuration_and_stored_records() {
-        for value in ["0", "-1", "1.5", "\"60s\"", "9223372036854775807"] {
+        for value in ["0", "-1", "1.5", "\"60s\"", "true", "9223372036854775807"] {
             let body = format!("[limits.shell]\ntimeout = {value}\n");
             let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
             let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
@@ -2058,7 +2103,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, UNLIMITED_SHELL_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

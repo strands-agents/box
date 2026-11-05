@@ -451,7 +451,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<strands_shell::os::HostSpawner>,
-    command_timeout: Duration,
+    command_timeout: Option<Duration>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -472,7 +472,7 @@ fn host(
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
             command_timeout,
-            request_timeout: command_timeout + SHELL_TIMEOUT_GRACE,
+            request_timeout: command_timeout.map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
             reach,
             policy,
             governed,
@@ -1293,10 +1293,10 @@ async fn run_call(
     slot: &mut ProgramSlot,
     command: &str,
     id: ProgramId,
-    request_timeout: Duration,
+    request_timeout: Option<Duration>,
     frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
 ) -> io::Result<i32> {
-    let deadline = tokio::time::Instant::now() + request_timeout;
+    let deadline = request_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
     let control = slot.control.clone();
     if control.is_cancelled() {
         return Ok(BOUNDARY_FAILURE_STATUS);
@@ -1315,7 +1315,7 @@ async fn run_call(
         tokio::select! {
             outcome = &mut call => {
                 // Synchronous interpreter work can return after both the call and timer are ready.
-                if tokio::time::Instant::now() >= deadline {
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
                     break None;
                 }
@@ -1337,7 +1337,12 @@ async fn run_call(
                     break None;
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => {
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
                 break None;
             }
@@ -1783,8 +1788,8 @@ done"#;
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
-            command_timeout: DEFAULT_SHELL_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+            request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
                 Reach::over(
                     &marker_directory
@@ -1865,12 +1870,12 @@ done"#;
     /// `command_timeout` so the broker's backstop fires before the Shell's own bound.
     fn spec_with(
         marker_directory: &Path,
-        command_timeout: Duration,
-        request_timeout: Duration,
+        command_timeout: impl Into<Option<Duration>>,
+        request_timeout: impl Into<Option<Duration>>,
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
-            command_timeout,
-            request_timeout,
+            command_timeout: command_timeout.into(),
+            request_timeout: request_timeout.into(),
             reach: Arc::new(
                 Reach::over(
                     // Canonicalized because `Reach::over` refuses a home with a second
@@ -2201,6 +2206,65 @@ done"#;
                 }
                 other => panic!("expected a timeout refusal, got {other:?}"),
             }
+        }));
+    }
+
+    #[test]
+    fn an_unlimited_call_survives_elapsed_time_and_can_still_be_cancelled() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("unlimited Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control: control.clone(),
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let call = tokio::task::spawn_local(async move {
+                run_call(
+                    &mut slot,
+                    "printf RUNNING; sleep 7200; printf TOO_LATE",
+                    1,
+                    spec.request_timeout,
+                    &frames,
+                )
+                .await
+            });
+            let started = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("call starts promptly")
+                .expect("startup output");
+            assert!(matches!(
+                started.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"RUNNING"
+            ));
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !call.is_finished(),
+                "neither execution deadline may stop the call"
+            );
+            assert!(received.try_recv().is_err(), "no timeout or late output");
+
+            control.signal();
+            let status = tokio::time::timeout(Duration::from_secs(1), call)
+                .await
+                .expect("an unlimited call remains cancellable")
+                .expect("call task joins")
+                .expect("cancellation succeeds");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
+            assert!(
+                received.try_recv().is_err(),
+                "cancelled work never completes"
+            );
         }));
     }
 
@@ -3113,8 +3177,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
-                command_timeout: DEFAULT_SHELL_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3419,8 +3483,8 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: DEFAULT_SHELL_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3575,8 +3639,8 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: DEFAULT_SHELL_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),

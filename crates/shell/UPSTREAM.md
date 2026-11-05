@@ -17,6 +17,19 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Local addition: an embedder can disable the execution timeout
+
+`ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
+defaults to 30 seconds, so omission does not disable the timeout despite the old API prose.
+This additive Rust method lets Box implement an operator's explicit unlimited Shell setting
+without substituting an arbitrary large duration. `timeout(Duration)` can restore a finite
+deadline, zero remains invalid, and the other resource limits remain in force. Shell's own
+TOML, Python, and Node configuration surfaces do not change.
+
+`builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
+repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
+checks cancellation and a successful subsequent call after restoring a finite deadline.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.

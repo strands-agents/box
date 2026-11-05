@@ -243,12 +243,16 @@ refused file operation fails the command the way the operation's own error would
 
 ## Execution deadlines
 
-**Each call has one execution allowance.** The operator sets
-[`limits.shell.timeout`](../user/config.md#limits), or keeps the 30-second default.
-The broker's backup deadline adds five seconds for the Shell to finish and report its result.
-Output resets neither deadline. While a Shell call runs, the connection's idle timer is suspended,
-and the Shell alias waits for the broker's result without a separate response deadline.
-Connection and write operations retain their own transport timeouts.
+**Each call uses the operator's execution limit.** The operator sets
+[`limits.shell.timeout`](../user/config.md#limits), keeps the 30-second default, or selects
+`false` for unlimited execution. A finite limit gives the broker a backup deadline five seconds
+later, so the Shell can finish and report its result. Output resets neither deadline.
+With `false`, neither execution deadline is installed; cancellation, client disconnect, and
+broker shutdown can still end the call.
+
+While a Shell call runs, the connection's idle timer is suspended, and the Shell alias waits for
+the broker's result without a separate response deadline. Connection and write operations retain
+their own transport timeouts.
 
 **Deadline checks depend on the interpreter returning control.** Monty runs synchronous Python
 code on the same thread that checks the Shell and broker deadlines, so a VM turn can delay those

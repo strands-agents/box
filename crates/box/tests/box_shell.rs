@@ -80,6 +80,36 @@ fn a_configured_timeout_allows_a_quiet_shell_call_beyond_thirty_five_seconds() {
 }
 
 #[test]
+fn disabling_the_timeout_allows_a_quiet_call_and_a_subsequent_request() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = Request::with_config(
+        "shell-unlimited-timeout",
+        PERMISSIVE_POLICY,
+        "[limits]\nshell.timeout = false\n",
+    )
+    .expect();
+    let output = box_.bash(
+        r#"
+        zsh -c 'sleep 36; printf FINISHED_UNLIMITED_CALL'
+        printf '\nstatus=%s\n' "$?"
+        zsh -c 'printf STILL_SERVING'
+        "#,
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "FINISHED_UNLIMITED_CALL\nstatus=0\nSTILL_SERVING"
+    );
+    assert!(
+        !stderr(&output).contains("execution timeout exceeded"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn the_configured_deadline_covers_the_whole_call_and_the_next_call_still_runs() {
     if !fixture::namespace_launcher_is_usable() {
         return;
