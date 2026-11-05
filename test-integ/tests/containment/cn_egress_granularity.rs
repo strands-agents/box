@@ -1,7 +1,6 @@
 use std::process::Command;
 
 use strands_det_harness::egress::{GATEWAY_ORIGIN_HEADER, HostRecorder, RECORDER_BODY};
-#[cfg(target_os = "macos")]
 use strands_det_harness::mcp_fixture::server_dir;
 use strands_det_harness::mcp_fixture::{box_sibling, broker_socket, place_server};
 use strands_det_harness::{BoxFixture, RunResult, det_case};
@@ -54,16 +53,12 @@ permit (principal, action == Box::Action::"http:request", resource)
 /// Add the `fetch` MCP server in its DEFAULT (gateway) posture, proxy-aware, pointed at `url`.
 fn with_fetch_server(config: String, url: &str, method: &str) -> String {
     let quote = |s: &str| serde_json::to_string(s).unwrap();
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tables = format!(
         "\n[mcp.fetch]\ntype = \"stdio\"\ncommand = [{}]\n[mcp.fetch.env]\nFIXTURE_FETCH_PROXY = \"1\"\nFIXTURE_FETCH_TARGET = {}\nFIXTURE_FETCH_METHOD = {}\n",
         quote(FETCH_PROGRAM),
         quote(url),
         quote(method),
     );
-    // macOS Seatbelt reads the binary in place, so the leaf needs read+exec of the server dir (Linux
-    // needs neither — /usr/bin binds and the baseline exec grant covers it).
-    #[cfg(target_os = "macos")]
     {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));
@@ -93,7 +88,6 @@ fn call_reach(b: &BoxFixture, url: &str, times: usize, method: &str) -> (Vec<Str
             );
         }
     };
-    #[cfg(target_os = "macos")]
     let run = {
         let path = format!(
             "{}:{}",
@@ -102,8 +96,6 @@ fn call_reach(b: &BoxFixture, url: &str, times: usize, method: &str) -> (Vec<Str
         );
         b.run_sh_with_config_meanwhile_env(edit, BLOCK, &[("PATH", path.as_str())], meanwhile)
     };
-    #[cfg(not(target_os = "macos"))]
-    let run = b.run_sh_with_config_meanwhile(edit, BLOCK, meanwhile);
     (outputs, run)
 }
 

@@ -2,7 +2,7 @@ use std::process::Command;
 
 use strands_det_harness::egress::{HostRecorder, RECORDER_BODY};
 use strands_det_harness::mcp_fixture::{box_sibling, place_server, server_dir};
-use strands_det_harness::{BoxFixture, Platform, RunResult, det_case, sh_quote};
+use strands_det_harness::{BoxFixture, RunResult, det_case, sh_quote};
 
 // Every leaf gets every egress route as a phantom
 // (docs/design/decisions.md#the-box-is-the-credential-boundary). One `[egress.r]` route reads its
@@ -49,7 +49,7 @@ fn configuration(config: String, port: u16, probe: &std::path::Path, mcp_target:
         quote(FETCH_PROGRAM),
         quote(mcp_target),
     );
-    if Platform::current() == Platform::Macos {
+    {
         let dir = quote(&server_dir().display().to_string());
         text.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));
     }
