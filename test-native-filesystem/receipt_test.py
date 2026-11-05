@@ -72,7 +72,7 @@ class ReceiptTests(unittest.TestCase):
             "crates/new-dependency/assets/runtime.json",
             "crates/box/tests/support/bounded_output.rs",
             "test-native-filesystem/tests/enforcement.rs",
-            ".github/workflows/native-filesystem.yml",
+            ".github/workflows/rust-test-lint.yml",
         ):
             with self.subTest(name=name):
                 self.assertTrue(covered(name, packages))
