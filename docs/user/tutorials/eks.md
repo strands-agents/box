@@ -18,7 +18,7 @@ Configure `kubectl` for your cluster. The [EKS connection guide](https://docs.aw
 Cluster and registry usage can incur charges.
 
 The [sample README](../../../examples/cloud-deployments/eks/README.md#tested-configuration) lists the Box revision, platform versions, and results for each example.
-The coding examples were tested on EKS. The deployment example was tested in a Linux ARM64 container and still needs an EKS run.
+The coding and deployment examples passed on EKS, including checks through the full ten-minute cooldown.
 Test the deployment example on your cluster. The recorded versions are tested configurations, not minimum requirements.
 
 ## Build the image
@@ -91,7 +91,8 @@ The agent can still check deployment status.
 The agent uses Model Context Protocol (MCP) to call `deploy_checkout` and `deployment_status`.
 Box checks their HTTP requests before forwarding permitted requests to the mock service.
 Use `us-west-2` and access to the selected `us.anthropic.claude-sonnet-4-6` inference profile.
-The template grants model invocation and `bedrock:CallWithBearerToken` through a dedicated workload role.
+The dedicated workload role grants invocation access to the selected model and the account's default Bedrock project.
+It also grants `bedrock:CallWithBearerToken` for the temporary token.
 
 Use EKS Pod Identity to connect the role to a separate Kubernetes service account.
 The trusted controller obtains credentials outside the agent's sandbox and generates a short-lived Bedrock token.

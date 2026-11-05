@@ -31,12 +31,11 @@ The [Claude README](claude/README.md) explains both examples and how to test the
 The Box source pin is `f0dc6f49ea8bb8608502afffa50c8748f6c24ca2`.
 Recorded EKS checks used Kubernetes 1.35, Amazon Linux 2023 ARM64, kernel 6.12.111, and containerd 2.3.5.
 The fixed coding example passed 11 checks. The Claude Code 2.1.305 coding and file-permission example passed 23 checks.
-That Claude run used a trusted controller with EKS Pod Identity to obtain model access.
-These EKS results apply to the coding examples.
 
-We tested the deployment example in an Amazon Linux 2023 ARM64 container with kernel `6.12.113-138.209.amzn2023.aarch64`.
-Claude Code 2.1.305 passed seven checks. The separate ten-minute cooldown test passed 14 checks.
-The deployment example still needs testing on EKS.
+The Claude Code 2.1.305 deployment example passed seven checks on EKS, with kernel `6.12.111-136.204.amzn2023.aarch64`.
+The separate ten-minute cooldown test passed 14 checks, including refusal near expiry and a permitted request after expiry.
+The shortened repeated-failure test passed 17 checks. An additional full-duration test passed 26 checks for a second cooldown after three new failures.
+Both Claude examples used a trusted controller with EKS Pod Identity to obtain model access.
 
 The Job requires pod user namespaces, `procMount: Unmasked`, and an outer `seccompProfile: Unconfined`.
 These are tested settings, not proven minimum privileges or production approval.

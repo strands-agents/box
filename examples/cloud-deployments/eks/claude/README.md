@@ -6,8 +6,8 @@ The service simulates failed deployments of a checkout application. It does not 
 After three failed responses within five minutes, Box blocks further deployment requests for ten minutes.
 This pause is the cooldown. The agent can still check deployment status.
 
-We tested this deployment example in a Linux container on 64-bit Arm (ARM64).
-It still needs testing on Amazon Elastic Kubernetes Service (EKS).
+We tested this deployment example on Amazon Elastic Kubernetes Service (EKS) with 64-bit Arm (ARM64) workers.
+The agent run and separate full-duration cooldown checks passed.
 The [tested configuration](../README.md#tested-configuration) lists the versions and results for each example.
 
 Use the [EKS build guide](../../../../docs/user/tutorials/eks.md#run-claude-code) to create the workload identity and submit the Job.
