@@ -97,8 +97,8 @@ file of each `[tool]` and each stdio `[mcp.<name>]` whose command runs its `prog
 name. Box refuses a spawn of a
 bound file before any rule decides it, and no rule can permit it, in these cases:
 
-- The name the agent called the file by isn't a name that a `[tool]` or a stdio `[mcp.<name>]`
-  declares for it.
+- The name the agent called the file by isn't a name that a `[tool]` declares for it. A stdio
+  `[mcp.<name>]` declares its program's name only for the start of that server.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
   replaced, so `PATH` would find another file.

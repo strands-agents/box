@@ -13,7 +13,9 @@ use strands_shell::{
 };
 
 use crate::GovernedBox;
-use crate::grammar::{CoverageRefusal, GrammarCoverage, GrammarInvocation, PendingGrammarResponse};
+use crate::grammar::{
+    CoverageRefusal, GrammarCoverage, GrammarInvocation, PendingGrammarResponse, Starter,
+};
 use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
@@ -35,6 +37,7 @@ pub struct ShellPolicyInterceptor {
     home: Option<std::path::PathBuf>,
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
+    starter: Starter,
 }
 
 impl ShellPolicyInterceptor {
@@ -50,6 +53,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
+            starter: Starter::Agent,
         })
     }
 
@@ -70,6 +74,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
+            starter: Starter::Agent,
         })
     }
 
@@ -86,6 +91,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Agent,
         })
     }
 
@@ -103,6 +109,26 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Agent,
+        })
+    }
+
+    /// Construct the handle that decides the start of a declared stdio MCP server, reporting every
+    /// path under `home` as `~/<relative>` when there is one.
+    pub fn into_server_start_handle(
+        policy: Arc<PolicyEngine>,
+        principal: Principal,
+        governed: GovernedBox,
+        home: Option<std::path::PathBuf>,
+        spawn_credentials: BTreeMap<String, Vec<String>>,
+    ) -> Arc<dyn EffectInterceptor> {
+        Arc::new(Self {
+            policy,
+            principal,
+            governed,
+            home,
+            spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Server,
         })
     }
 
@@ -260,7 +286,10 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             ..
         } = effect
         {
-            match self.policy.grammar_coverage(program_path, program) {
+            match self
+                .policy
+                .grammar_coverage(program_path, program, self.starter)
+            {
                 None => {}
                 Some(GrammarCoverage::Refused(refusal)) => {
                     self.policy.observe_refused(
@@ -1549,8 +1578,8 @@ mod tests {
                 &mise,
                 Some(format!(
                     "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` or `[mcp]` declares \
-                     the name `python`. No policy can permit it."
+                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
+                     `python`. No policy can permit it."
                 )),
             ),
             (
@@ -1559,8 +1588,8 @@ mod tests {
                 &mise,
                 Some(format!(
                     "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` or `[mcp]` declares \
-                     the name `python`. No policy can permit it."
+                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
+                     `python`. No policy can permit it."
                 )),
             ),
             (

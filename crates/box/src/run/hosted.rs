@@ -640,7 +640,7 @@ impl HostedBox {
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
-    /// for it, with each stdio `[mcp.<name>]` program declared
+    /// for it, with each stdio `[mcp.<name>]` program declared for its own start
     /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
         policy: PolicyEngine,
@@ -674,7 +674,7 @@ impl HostedBox {
             else {
                 continue;
             };
-            bindings.declare_tool(
+            bindings.declare_server(
                 &opened,
                 program.granted_path(),
                 program.invoked(),
@@ -1199,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_mcp_server_that_shares_a_bound_file_is_declared_under_its_own_name() {
+    async fn an_mcp_server_that_shares_a_bound_file_is_declared_for_its_own_start_alone() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp");
         let program = home.path().join("git");
@@ -1224,10 +1224,12 @@ mod tests {
         );
 
         let args: Vec<String> = Vec::new();
-        let started = policy::ShellPolicyInterceptor::into_handle(
+        let started = policy::ShellPolicyInterceptor::into_server_start_handle(
             Arc::clone(&engine),
             Principal::agent(),
             GovernedBox::assigned("codex"),
+            None,
+            Default::default(),
         )
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",
@@ -1245,6 +1247,28 @@ mod tests {
             started,
             Ok(()),
             "the operator declared the name, so `shell:spawn` decides the start"
+        );
+        let by_the_agent = policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+        assert!(
+            by_the_agent
+                .as_ref()
+                .is_err_and(|refused| refused.contains("[tool-grammar]")),
+            "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
         );
     }
 

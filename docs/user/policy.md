@@ -104,7 +104,7 @@ Three refusals look like a denial, and no `permit` lifts them:
   whatever the policy says.** The decision log records the cause as `enforcement`, and
   [step 4 of the tutorial](tutorials/first-policy.md#step-4-read-the-decision-log) shows how to read
   it. [What Box always enforces](security.md#what-box-always-enforces) states the rule.
-- **A program file that a tool grammar binds, run by a name that no `[tool]` or `[mcp.<name>]` declares or after the
+- **A program file that a tool grammar binds, run by a name that no `[tool]` declares or after the
   file was replaced, is refused whatever the policy says.** The tail is `[tool-grammar]`, then the
   reason, then `No policy can permit it.` [`shell:spawn`](shell.md#shellspawn) states the cases.
 - **A file tool of the harness itself fails with "operation not permitted" on macOS, or "no such

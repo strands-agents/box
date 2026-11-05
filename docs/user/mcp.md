@@ -113,6 +113,9 @@ A `shell:spawn` permit that checks only the program matches every value in those
 The server runs with its own configured permissions, which can exceed the workload's.
 For example, `["npx", "-y", "*"]` lets the caller choose the package that runs with those
 permissions. Put `*` only in positions whose values you intend the caller to choose.
+When an experimental tool grammar binds the server's program file under another name, such as a
+mise shim, the start is a `shell:spawn` decision, and no grammar reads the values in the `*`
+positions.
 
 Only an argument equal to `*` is a wildcard. It accepts one argument, including an empty string.
 The executable, argument count, order, and every other argument must match. `--token=*` is

@@ -305,23 +305,13 @@ async fn authorize_mcp_start(
         .join(" ");
     let credentials =
         std::collections::BTreeMap::from([(host_program_path.clone(), credential_reads.to_vec())]);
-    let interceptor = match home {
-        Some(home) => {
-            policy::ShellPolicyInterceptor::into_handle_reporting_under_with_spawn_credentials(
-                Arc::clone(&spec.policy),
-                policy::Principal::agent(),
-                spec.governed.clone(),
-                home,
-                credentials,
-            )
-        }
-        None => policy::ShellPolicyInterceptor::into_handle_with_spawn_credentials(
-            Arc::clone(&spec.policy),
-            policy::Principal::agent(),
-            spec.governed.clone(),
-            credentials,
-        ),
-    };
+    let interceptor = policy::ShellPolicyInterceptor::into_server_start_handle(
+        Arc::clone(&spec.policy),
+        policy::Principal::agent(),
+        spec.governed.clone(),
+        home.map(std::path::PathBuf::from),
+        credentials,
+    );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
@@ -1980,6 +1970,18 @@ done"#;
                 "sh",
             )
             .expect("the program binds");
+        let server = Path::new(&command[0]);
+        bindings
+            .declare_server(
+                &std::fs::File::open(server).expect("the server program opens"),
+                &server.canonicalize().expect("the server program resolves"),
+                server,
+                server
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("the server program has a name"),
+            )
+            .expect("the server declares");
         let mut spec = Arc::into_inner(mcp_spec_with_policy(marker_directory, command, ""))
             .expect("the spec is not shared yet");
         spec.policy = Arc::new(
@@ -2042,6 +2044,34 @@ done"#;
         let (running, _stdout) = runtime
             .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .expect("the grammar action permit starts the server");
+        drop(running);
+    }
+
+    /// An MCP start under the server's own name on a bound file is decided as `shell:spawn`.
+    #[test]
+    fn an_mcp_start_under_its_own_name_on_a_bound_file_is_decided_as_shell_spawn() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let link = markers.path().join("mcp-sh");
+        std::os::unix::fs::symlink("/bin/sh", &link).expect("a second name for the shell");
+        let command = vec![
+            link.display().to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the operator declared the name for this start");
         drop(running);
     }
 
