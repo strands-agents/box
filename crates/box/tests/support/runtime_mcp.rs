@@ -623,6 +623,17 @@ while True:
         std::fs::write(dot.join("box.toml"), config).expect("write box.toml");
     }
 
+    pub fn set_argument_wildcards(&self, server: &str, enabled: bool) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]
+            .as_table_mut()
+            .unwrap()
+            .insert("argument_wildcards".into(), toml::Value::Boolean(enabled));
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
     pub fn plant_generated_schema_artifacts(&self, schema: &str) -> (PathBuf, PathBuf, PathBuf) {
         let workspace_directory = self.workspace.join(".strands-box");
         let workspace_actions = workspace_directory.join("actions.cedarschema");

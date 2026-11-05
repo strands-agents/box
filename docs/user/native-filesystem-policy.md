@@ -91,14 +91,18 @@ Production use still requires further review and tests for those failures.
 Configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 Any explicit process override requires record version 23.
 A configuration where two stdio MCP servers share a program requires record version 24, whatever the setting and the overrides.
-A configuration that sets [`file-attributes`](config.md#file-attributes) requires record version 25, whatever else it holds.
+A configuration that sets [`file-attributes`](config.md#file-attributes) requires record version 25.
+Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requires version 26 and takes
+precedence over those versions.
 Older binaries refuse unsupported versions rather than silently losing the selection.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides, give each stdio MCP server its own program, and set [`file-attributes`](config.md#file-attributes) to `false`, before returning to a binary that supports only version 21.
+If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
+`argument_wildcards` on each server too.
 Run once with the native-capable build before returning to an older binary.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, 24, or 25 record.
+Changing TOML alone does not authorize an older binary to parse an existing version 22, 23, 24, 25, or 26 record.
 
 ## FAQ
 

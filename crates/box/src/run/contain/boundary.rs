@@ -805,6 +805,11 @@ impl Boundary {
         &self.arguments
     }
 
+    pub(crate) fn with_arguments(mut self, arguments: Vec<String>) -> Self {
+        self.arguments = arguments;
+        self
+    }
+
     pub(crate) fn argument_zero(&self) -> Option<&Path> {
         self.argument_zero.as_deref().map(Path::new)
     }
@@ -1750,18 +1755,22 @@ mod tests {
             let root = crate::record::layout::testing::box_root(operator.path(), "codex");
             let mcp = vec![
                 McpServer {
+                    argument_wildcards: false,
                     name: "alpha".to_string(),
                     command: vec!["alpha-mcp".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "beta".to_string(),
                     command: vec!["beta-mcp".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "memory".to_string(),
                     command: vec!["node".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "github-local".to_string(),
                     command: vec!["github-mcp-server".to_string()],
                 },
@@ -4665,6 +4674,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
         );
 
         let server = McpServer {
+            argument_wildcards: false,
             name: "gamma".to_string(),
             command: vec!["gamma-mcp".to_string()],
         };

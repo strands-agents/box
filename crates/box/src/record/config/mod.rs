@@ -85,7 +85,17 @@ pub(super) const INJECT_ALWAYS: &str = "always";
 /// Read the MCP servers declared in one workspace config.
 pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxError> {
     let file = ConfigFile::read(path)?;
-    mcp::from_entries(&file.mcp)
+    let servers = mcp::from_entries(&file.mcp)?;
+    if let Some(server) = servers
+        .iter()
+        .find(|server| server.has_argument_wildcards())
+    {
+        return Err(ConfigError::Mcp {
+            name: server.name.clone(),
+            reason: "offline schema generation cannot supply wildcard arguments; use a configuration with concrete arguments".into(),
+        }.into());
+    }
+    Ok(servers)
 }
 
 /// A remote MCP server: an `[egress.<name>]` entry speaking `mcp`, resolved to a discovery URL.
@@ -392,6 +402,9 @@ impl RunContract {
     ) -> Result<ConfigureRequest, BoxError> {
         let policy_path = self.file.policy_path(self.source.path());
         let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&self.file.mcp)?;
+        mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
+            Some(server.arguments().to_vec())
+        })?;
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
@@ -602,6 +615,7 @@ const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
 /// The record version of a record that selects `file-attributes`, so an older build refuses the box
 /// rather than resuming it without the write grants it was configured with.
 const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
+const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,7 +662,9 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if file_attributes {
+    if mcp.iter().any(|server| server.argument_wildcards) {
+        MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+    } else if file_attributes {
         FILE_ATTRIBUTES_RECORD_VERSION
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
@@ -898,6 +914,7 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             FILE_ATTRIBUTES_RECORD_VERSION,
         ]
         .contains(&stamped.version)
@@ -1294,6 +1311,96 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_wildcards_require_per_server_opt_in_and_an_enabled_record_version() {
+        let base = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\ncommand = [\"server\", \"*\"]\n";
+        for flag in ["", "argument_wildcards = false\n"] {
+            let config =
+                ConfigFile::parse(&format!("{base}{flag}"), Path::new("box.toml")).unwrap();
+            assert!(!mcp::from_entries(&config.mcp).unwrap()[0].argument_wildcards);
+        }
+        let config = ConfigFile::parse(
+            &format!("{base}argument_wildcards = true\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        stored.mcp[0].argument_wildcards = false;
+        let original = toml::to_string(&stored).unwrap();
+        assert!(!original.contains("argument_wildcards"));
+        stored.mcp[0].argument_wildcards = true;
+        assert_eq!(
+            record_version(
+                stored.file_attributes,
+                &stored.experimental_features,
+                std::iter::empty(),
+                &stored.mcp
+            ),
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+        );
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err()
+        );
+        stored.version = MCP_ARGUMENT_WILDCARDS_RECORD_VERSION;
+        assert_eq!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = 25;
+        assert!(matches!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion { found: 25, .. })
+        ));
+        stored.mcp[0].argument_wildcards = false;
+        stored.version = RECORD_VERSION;
+        assert_eq!(toml::to_string(&stored).unwrap(), original);
+    }
+
+    #[test]
+    fn argument_wildcards_are_only_a_stdio_mcp_setting() {
+        for entry in [
+            "[agent]\ncommand = [\"server\"]",
+            "[tool.server]\ncommand = [\"server\"]",
+            "[mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]",
+        ] {
+            let text = format!(
+                "name = \"test\"\nbox_dir = \"/var/lib/box\"\n{entry}\nargument_wildcards = true\n"
+            );
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{entry}"
+            );
+        }
+        let old = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [experimental-features]\nmcp-argument-wildcards = true\n";
+        assert!(ConfigFile::parse(old, Path::new("box.toml")).is_err());
+    }
+
+    #[test]
+    fn offline_schema_generation_refuses_enabled_wildcard_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let config = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\nargument_wildcards = true\n\
+            command = [\"server\", \"*\"]\n";
+        std::fs::write(&path, config).unwrap();
+        let error = read_mcp_servers(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("offline schema generation cannot supply wildcard arguments"),
+            "{error}"
+        );
+        std::fs::write(&path, config.replace("true", "false")).unwrap();
+        assert_eq!(read_mcp_servers(&path).unwrap()[0].arguments(), &["*"]);
+        std::fs::write(&path, config.replace("\"*\"", "\"concrete\"")).unwrap();
+        assert_eq!(
+            read_mcp_servers(&path).unwrap()[0].arguments(),
+            &["concrete"]
+        );
+    }
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
@@ -2169,7 +2276,10 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, FILE_ATTRIBUTES_RECORD_VERSION + 1] {
+        for found in [
+            RECORD_VERSION - 1,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION + 1,
+        ] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
