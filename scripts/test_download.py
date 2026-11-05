@@ -76,7 +76,7 @@ class DownloaderTests(unittest.TestCase):
                         BOX_VERSION="v1.2.3", BOX_REPO="example/box",
                         BOX_DOWNLOAD_DIR=str(self.destination), TMPDIR=str(self.temp))
 
-    def archive(self, version="v1.2.3", triple="aarch64-unknown-linux-gnu", omit=(),
+    def archive(self, version="v1.2.3", triple="linux-arm64", omit=(),
                 non_executable=(), symlink=None, marker="", mac_bundle=False, box_program=None, modes=None):
         folder = self.releases / version
         folder.mkdir(parents=True, exist_ok=True)
@@ -169,7 +169,46 @@ exec "$1" "$2"
                     self.assertIn(b"fixture v1.2.3", (self.destination / name).read_bytes())
                     self.assertTrue(os.access(self.destination / name, os.X_OK))
                 self.assertEqual((self.destination / "keep.txt").read_bytes(), b"user file")
-                self.assertIn("aarch64-unknown-linux-gnu.tar.gz", self.urls()[-2])
+                self.assertTrue(self.urls()[-1].endswith("box-v1.2.3-linux-arm64.tar.gz"))
+                self.assertIn("(Linux ARM64)", result.stderr)
+                self.assertNotIn("unknown", result.stderr)
+
+    def test_legacy_linux_archive_uses_the_same_release_checksum(self):
+        asset = self.archive(triple="aarch64-unknown-linux-gnu")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.urls(), [
+            "https://github.com/example/box/releases/download/v1.2.3/SHA256SUMS.txt",
+            f"https://github.com/example/box/releases/download/v1.2.3/{asset.name}",
+        ])
+        self.assertIn("(Linux ARM64)", result.stderr)
+
+    def both_linux_names(self):
+        legacy = self.archive(triple="aarch64-unknown-linux-gnu")
+        legacy_entry = (legacy.parent / "SHA256SUMS.txt").read_text()
+        current = self.archive()
+        sums = current.parent / "SHA256SUMS.txt"
+        sums.write_text(sums.read_text() + legacy_entry)
+        return current, legacy
+
+    def test_friendly_name_wins_when_both_are_listed(self):
+        current, legacy = self.both_linux_names()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.urls()[-1].endswith(current.name))
+        self.assertFalse(any(url.endswith(legacy.name) for url in self.urls()))
+
+    def test_invalid_preferred_archive_never_falls_back_to_legacy(self):
+        for failure in ("missing", "corrupt"):
+            with self.subTest(failure=failure):
+                current, legacy = self.both_linux_names()
+                if failure == "missing":
+                    current.unlink()
+                else:
+                    current.write_bytes(b"corrupt")
+                self.requests.write_text("")
+                self.assert_refused("could not download" if failure == "missing" else "checksum mismatch")
+                self.assertFalse(any(url.endswith(legacy.name) for url in self.urls()))
 
     def test_macos_bundle_and_helper_links_survive(self):
         self.archive(triple="aarch64-apple-darwin", mac_bundle=True)
@@ -182,7 +221,8 @@ exec "$1" "$2"
             self.assertIn(b"fixture v1.2.3", (self.destination / name).read_bytes())
         self.assertEqual((self.destination / "Box.app/Contents/embedded.provisionprofile").read_bytes(),
                          b"fixture profile")
-        self.assertIn("aarch64-apple-darwin.tar.gz", self.urls()[-2])
+        self.assertIn("aarch64-apple-darwin.tar.gz", self.urls()[-1])
+        self.assertIn("(macOS ARM64)", result.stderr)
 
     def test_unsupported_platforms_do_not_download(self):
         for system, arch in (("Linux", "x86_64"), ("Darwin", "x86_64"), ("FreeBSD", "aarch64")):
@@ -210,6 +250,7 @@ exec "$1" "$2"
         self.assertIn(b"fixture v9.9.9", (self.destination / "box").read_bytes())
 
     def test_missing_asset_gives_release_and_version_guidance(self):
+        self.archive().unlink()
         result = self.assert_refused("could not download")
         self.assertIn("https://github.com/example/box/releases/tag/v1.2.3", result.stderr)
         self.assertIn("BOX_VERSION=", result.stderr)
@@ -308,7 +349,7 @@ exec "$1" "$2"
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mount test")
     def test_noexec_download_storage_allows_valid_packages(self):
-        for system, triple in (("Linux", "aarch64-unknown-linux-gnu"),
+        for system, triple in (("Linux", "linux-arm64"),
                                ("Darwin", "aarch64-apple-darwin")):
             with self.subTest(platform=system):
                 self.archive(triple=triple, mac_bundle=system == "Darwin")
