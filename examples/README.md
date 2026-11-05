@@ -30,3 +30,5 @@ For Box installation and configuration, follow [getting started](../docs/user/ge
 
 [Linux cloud deployments](./cloud-deployments/): run a coding workload on Amazon EKS or a shipment agent on AgentCore Runtime.
 The samples include source, deployment commands, expected refusals, and tested-platform limits.
+
+For Linux environment requirements and deployment checks, read the [cloud deployment profiles](../docs/user/cloud-deployments.md).

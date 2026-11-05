@@ -249,7 +249,7 @@ when { context.input.server == "runtime_demo" && context.input.method == "tools/
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             environment = {
                 "HOME": str(Path.home()), "PATH": (str(root) + ":" if exercise else "") + "/usr/bin:/bin",
-                "LANG": "C.UTF-8",
+                "LANG": "C.UTF-8", "EXPERIMENTAL_LINUX_SUPPORT": "TRUE",
                 "AWS_BEARER_TOKEN_BEDROCK": token,
                 "TERM": "xterm-256color", "COLORTERM": "truecolor",
             }

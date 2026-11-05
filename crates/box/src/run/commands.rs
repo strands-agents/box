@@ -186,6 +186,7 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
             box_id: "commands-test".to_string(),
             box_dir: path.parent().expect("directory").join("box-state"),
             name: "commands-test".to_string(),
@@ -200,6 +201,7 @@ mod tests {
                     env: Default::default(),
                     filesystem: Default::default(),
                     network: None,
+                    grammar: None,
                 },
             )]),
             egress: Default::default(),

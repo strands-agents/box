@@ -627,6 +627,12 @@ impl Boundary {
             containment = containment.allow_broad_exec();
         }
 
+        // The global `file-attributes` switch reaches the agent, every tool, and every contained MCP
+        // server alike, because each one's write roots are rendered here.
+        if stored.file_attributes {
+            containment = containment.allow_file_attributes();
+        }
+
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
         // these after every allow and Linux overmounts them empty, so each subtracts from the grant
         // rather than sitting beside it.
@@ -725,6 +731,7 @@ impl Boundary {
             program: &program_identity,
             command_listed,
             broad_exec,
+            file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -862,6 +869,7 @@ struct DisclosureInputs<'a> {
     program: &'a Path,
     command_listed: bool,
     broad_exec: bool,
+    file_attributes: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
 }
@@ -921,6 +929,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push(format!(
             "strands-box: {table} broad exec: may run any reachable binary, and \
              load code it writes into its writable grants above"
+        ));
+    }
+    if inputs.file_attributes {
+        lines.push(format!(
+            "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
+             bits, the group, the owner, and access control lists on files in its writable grants"
         ));
     }
     if inputs.native_egress {
@@ -1764,6 +1778,7 @@ mod tests {
             let record = Record {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
+                file_attributes: false,
                 box_id: root.name().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: "codex".to_string(),
@@ -1844,6 +1859,7 @@ mod tests {
                     ..Filesystem::default()
                 },
                 network: None,
+                grammar: None,
             }
         }
 
@@ -2684,6 +2700,33 @@ mod tests {
                 serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
             assert_eq!(config["broad_exec"], expected);
             assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
+        }
+    }
+
+    /// **The file-attributes switch reaches the agent, a tool leaf, and an MCP leaf alike, and is
+    /// disclosed only where it renders.** The wire carries `file_attributes` for each table, and the
+    /// disclosure names the switch on macOS alone, because Linux ignores it.
+    #[test]
+    fn the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos() {
+        let mut fixture = Fixture::new();
+        let spec = fixture.spec();
+        for (switch_on, table, reach, egress) in [
+            (false, "[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            (true, "[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            (true, "[tool.git]", RuntimeReach::Leaf, EgressMode::Gateway),
+            (true, "[mcp.alpha]", RuntimeReach::Leaf, EgressMode::Native),
+        ] {
+            fixture.record.file_attributes = switch_on;
+            let boundary = fixture.translate_full(&spec, table, reach, egress);
+            let config: serde_json::Value =
+                serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+            assert_eq!(config["file_attributes"], switch_on, "{table}");
+            assert_eq!(
+                boundary.disclosure().contains("file attributes:"),
+                switch_on && cfg!(target_os = "macos"),
+                "{table}: {}",
+                boundary.disclosure()
+            );
         }
     }
 

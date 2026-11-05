@@ -47,6 +47,9 @@ pub struct ContainmentConfig {
     /// Whether a leaf executes code from its readable and writable grants.
     #[serde(default)]
     broad_exec: bool,
+    /// Whether write roots may also set file times, set-ID bits, the group, and ACLs on macOS.
+    #[serde(default)]
+    file_attributes: bool,
     /// Whether the process may reach the host services a bundled JS/Node runtime touches at startup:
     /// `getifaddrs` (the `net.*` sysctls it reads and the routing socket it opens) and `getpwuid`
     /// (identity resolution via `opendirectoryd`). Leaf-only; the agent box never sets it. It grants
@@ -91,6 +94,7 @@ impl ContainmentConfig {
             discovery_roots: Vec::new(),
             discovery_denies: Vec::new(),
             broad_exec: false,
+            file_attributes: false,
             runtime_services: false,
         }
     }
@@ -135,6 +139,13 @@ impl ContainmentConfig {
     #[must_use]
     pub fn allow_broad_exec(mut self) -> Self {
         self.broad_exec = true;
+        self
+    }
+
+    /// Let write roots set file times, set-ID bits, the group, and ACLs. macOS renders it; Linux defers.
+    #[must_use]
+    pub fn allow_file_attributes(mut self) -> Self {
+        self.file_attributes = true;
         self
     }
 
@@ -446,6 +457,11 @@ impl ContainmentConfig {
     /// Whether the leaf renders broad `process-exec*` and a `file-map-executable` allow over its writable grants.
     pub(crate) fn broad_exec(&self) -> bool {
         self.broad_exec
+    }
+
+    /// Whether write roots render the `file-write*` wildcard with the attribute denies.
+    pub(crate) fn file_attributes(&self) -> bool {
+        self.file_attributes
     }
 
     /// Whether this exact grant lies at or under its credential-store floor exception.

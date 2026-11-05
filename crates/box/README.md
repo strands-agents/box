@@ -87,7 +87,7 @@ workload; a key becomes an input when it decides which requests are governed.
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
 decided, so a tool needs no authority of its own.
 
-Both tables hold the same four fields:
+Both tables hold the same four fields, and a `[tool.<label>]` also holds `grammar`:
 
 | Field | What it states |
 |---|---|
@@ -95,6 +95,10 @@ Both tables hold the same four fields:
 | `workspace` | The initial working directory. It grants nothing |
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
+| `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
+
+`tool_grammars.rs` pins the `tool-grammars` switch, the startup warning for each grammar, and the
+startup refusals.
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
@@ -107,6 +111,14 @@ What a grant costs is that no `fs:*` decision records these operations, so the b
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
+
+The top-level `file-attributes` key, off by default, lets a macOS write folder set file times, and
+with them the set-ID bits, the group, the owner (as far as the ownership check allows), and access
+control lists through `setattrlist`. It applies to the agent, every tool, and every local MCP server,
+and Linux ignores it.
+`record::config::tests::the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system`
+pins the key, and `run::contain::boundary::tests::the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos`
+pins its reach.
 
 **A `filesystem` list governs one process, and nothing else.** The agent's lists do not govern a
 tool, and a tool's lists do not govern the agent. A path absent from a process's own lists is a path
@@ -187,7 +199,7 @@ its own action, so a permit written for a different verb never inherits it.
 The rest of the fixed vocabulary is `Box::Action::"net:connect"`,
 `Box::Action::"http:request"`, `Box::Action::"shell:exec"`,
 `Box::Action::"shell:spawn"`, and `Box::Action::"mcp:call"`. MCP discovery adds one namespaced
-action for each tool.
+action for each tool, and each tool grammar adds its `Tool::<name>` actions.
 
 **There is no `net:response` action.** The reply is a phase of `http:request`. It takes no
 decision, and one exchange records one `http:request::response` at reply time, carrying the

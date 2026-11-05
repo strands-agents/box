@@ -231,6 +231,51 @@ naming it is `Other`, and so are `/`, `/Users`, and the operator home. A read gr
 reports `Forbidden` with `WholeFilesystem` or `CredentialStore`. The caller can treat a
 `SystemTree` refusal differently from every other refusal without its own copy of the rows.
 
+### File attributes in a macOS write folder
+
+A macOS write folder names six write operations: contents, create, unlink, extended attributes,
+mode, and times. `utimes` and `futimes` use the times operation. `utimensat`, which `touch` calls,
+and `setattrlist` check the whole write family instead, so a write folder refuses them. Nothing
+ordinary needs the flags, the owner, or the access control list, so the folder withholds them.
+
+The `file-attributes` switch grants the whole family over the folder and then denies again the four
+members the folder withholds: the flags, the owner, the access control list, and the Finder
+information. The set-ID operation and mounts lie outside the family, so the grant does not reach
+them, and `chmod` of a set-ID bit stays refused. The switch keeps the folder's own unlink and create
+denies and its no-execute-mapping rule, and every protection and refusal still wins, because it
+renders after the grant.
+`setattrlist` sets the times, the mode, the group, the owner, and the access control list through
+that one family check, and no rule tells them apart. So `touch` works, and a set-user-ID bit, a
+group, an owner (as far as the ownership check lets the caller), and an access control list can
+change through `setattrlist` too. The four leaf operations themselves (`chflags`, `chown`,
+`acl_set_file`, and Finder information) stay refused.
+[File attributes on macOS](../user/security.md#file-attributes-on-macos) states the residual risk
+for an operator, and
+[decisions.md](decisions.md#a-write-root-sets-file-attributes-only-when-selected) states why.
+
+Linux renders nothing for the switch.
+
+### Linux root sandbox launches
+
+A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
+If root starts the workload, new files and symbolic links in granted directories can therefore belong to root in the surrounding OS.
+A separate privileged program can follow one of those links outside the workload's grants.
+
+Box refuses sandbox directory write grants when the launcher's real or effective user ID is zero.
+It checks the composed grants during validation and again before entering the namespaces.
+The restriction applies to agent, tool, and local-server workloads.
+Existing-file writes, read-only directories, and private `/tmp` storage remain available.
+Directory writes require a non-root launch, including when an outer container presents the launcher as user ID zero.
+This check uses the launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
+
+Shell and Python filesystem requests run in the trusted process under policy and reach checks.
+They do not use sandbox grants, and permitted file creation retains that process's file identity.
+This startup restriction does not protect later privileged consumers of those files.
+
+macOS retains root file creation inside granted directories.
+Seatbelt path denials do not establish protection against later privileged consumers of those entries.
+This Linux change does not test or change that macOS behavior.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the host. The mount's `nosuid` option
@@ -253,6 +298,23 @@ that clears both bits can succeed. GNU `chmod` can preserve a directory's inheri
 when changing ordinary permissions, so those commands can fail even when they add no special bit.
 `permission_changes_refuse_existing_special_bits_unless_cleared` checks inherited directories,
 existing special-bit files, refused requests that preserve the bits, and successful requests that clear them.
+
+### What a process sees of other processes on macOS
+
+Every macOS sandbox hides other processes. The agent, each tool, and each local MCP server get the
+same two rules:
+
+- **Itself:** a process can read all of its own process information.
+- **Its direct children:** a process can read the `proc_pidinfo` information of a process it
+  started. Only that one operation is allowed. A harness such as Kiro CLI uses it to watch the
+  programs it runs.
+
+A process still can't read the information of its parent, a sibling, or any other process on the
+machine. That includes the `strands-box run` process that started the box.
+The rules are in
+[`seatbelt-agent.sb`](../../crates/containment/src/backend/macos/seatbelt-agent.sb).
+`CN-I-03` checks that a box can read an own child's information and is refused its parent's, and a
+control outside the box shows the refusal comes from the sandbox.
 
 ### How you check a box's reach
 
@@ -440,7 +502,7 @@ That's also why a `[tool.<name>.filesystem]` table holds six lists: `read`, `wri
 `write_file`, `list`, and `deny`. Box refuses `exec` and `metadata` there, because the tool's sandbox
 already has both.
 
-A tool's sandbox has no route back to Box. Box takes the alias directory off its `PATH`, hides the
+A tool's sandbox has no route back to its own box. Box takes the alias directory off its `PATH`, hides the
 box directory that holds the aliases, and gives it no connect rule for the broker's socket. A tool
 can't ask Box to start another program in a sandbox of its own, or ask Strands Shell to act for the
 agent. What comes back is its output and its exit status. Its network traffic goes through the egress gateway, unless its
@@ -448,6 +510,9 @@ agent. What comes back is its output and its exit status. Its network traffic go
 access with the arguments the agent passes, and removes gateway checks, credential injection, and
 traffic records for it
 ([native egress is an operator-declared exception to the gateway](decisions.md#native-egress-is-an-operator-declared-leaf-escape)).
+
+Another box's broker socket can remain reachable beneath a writable directory.
+Apply the [placement and access guidance](../user/config.md#protect-other-boxes) to other boxes.
 
 <a id="local-mcp-servers"></a>
 ### A local MCP server's sandbox
@@ -503,7 +568,7 @@ argument skips the two things that make a tool's sandbox safe to widen:
 - **Policy admits each tool and each local MCP server:** the operator's `shell:spawn` permits
   decide which programs can start, and each decision admits one launch of one program. The agent's
   sandbox exists from the start of the run and runs model output for all of it.
-- **A tool's or server's sandbox has no route back to Box:** it holds no alias and no route to the
+- **A tool's or server's sandbox has no route back to its own box:** it holds no alias and no route to that
   broker. The agent holds both, so whatever it can do with its own system calls, it can combine with every request it makes
   through Strands Shell, Monty, and the MCP servers.
 
