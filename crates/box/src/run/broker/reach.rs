@@ -24,12 +24,13 @@
 
 use std::fmt;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use policy::{PathRefusal, PathResolver};
 
 use crate::record::config::AuthoritySource;
 use crate::record::layout::{disk_identity, has_ancestor_among, lies_within};
+use crate::run::broker::held::{HeldPath, Unreached};
 use crate::run::broker::invalid_input;
 
 /// The set of paths the interpreters may name, and the resolver that admits one.
@@ -391,24 +392,18 @@ impl Reach {
         Ok(())
     }
 
-    /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
+    /// Whether a path the resolver could not resolve is still an answered metadata probe.
+    ///
+    /// Classification reuses [`HeldPath::reach`]: an `Unreached::Answered` walk is the same
+    /// "the host answered about this path" rule the interpreters use when they open a path, so a
+    /// missing parent, an unsearchable parent, and a non-directory parent count, while a symbolic
+    /// link, a non-canonical spelling, and an overlong or otherwise refused component do not. The
+    /// deny floor still sits beneath that answer.
     fn is_an_unresolved_answer(&self, identity: &Path) -> bool {
-        if identity
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-        {
-            return false;
+        match HeldPath::reach(identity) {
+            Err(Unreached::Answered(_)) => self.refuse_forbidden(identity, "", false).is_ok(),
+            Err(Unreached::Refused(_)) | Ok(_) => false,
         }
-        let mut prefix = PathBuf::new();
-        for component in identity.components() {
-            prefix.push(component);
-            match std::fs::symlink_metadata(&prefix) {
-                Ok(metadata) if metadata.file_type().is_symlink() => return false,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-        self.refuse_forbidden(identity, "", false).is_ok()
     }
 
     /// Whether `named` lies under a root of this box's reachable set.
@@ -789,17 +784,26 @@ mod tests {
         }
     }
 
-    /// Only a path under a missing folder, through no link and beneath no deny floor, is unresolved.
+    /// Only a HeldPath-answered probe under no deny floor is unresolved: missing, unsearchable,
+    /// and non-directory parents count; links, overlong components, `.`/`..`, and floor paths do not.
     #[test]
-    fn only_a_plain_path_under_a_missing_folder_is_unresolved() {
+    fn only_a_held_path_answer_beneath_no_floor_is_unresolved() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let (operator, reach) = operator_home_fixture();
         let resolved = operator.path().canonicalize().expect("the home resolves");
         let private = resolved.join("boxes/codex/private");
         std::fs::create_dir(resolved.join("real")).expect("a real folder");
+        std::fs::write(resolved.join("notes.txt"), "x").expect("a regular file");
         std::os::unix::fs::symlink(resolved.join("real"), resolved.join("link"))
             .expect("a link in the home");
         std::os::unix::fs::symlink(private.join("nodir"), resolved.join("dangle"))
             .expect("a dangling link into box state");
+        let locked = resolved.join("locked");
+        std::fs::create_dir_all(locked.join("inner")).expect("a locked tree");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the directory");
+        let overlong = resolved.join(format!("{}/x", "a".repeat(300)));
         let unresolved = |target: PathBuf| {
             let spelled = target.to_str().expect("UTF-8").to_string();
             crate::test_support::with_operator_home(&resolved, || reach.approve(&target, &spelled))
@@ -810,6 +814,17 @@ mod tests {
 
         assert!(unresolved(resolved.join("absent-dir/x")));
         assert!(unresolved(resolved.join("absent-dir/deeper/x")));
+        assert!(unresolved(resolved.join("notes.txt/child")));
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(
+                unresolved(locked.join("inner/f.txt")),
+                "an unsearchable parent is an answered probe"
+            );
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the directory");
+
         for target in [
             private.join("nodir/x"),
             resolved.join("link/nodir/x"),
@@ -818,6 +833,7 @@ mod tests {
             resolved.join("dangle/x"),
             resolved.join("boxes/codex/private/policy.dw"),
             resolved.join("absent-dir/../boxes/codex/private/policy.dw"),
+            overlong,
         ] {
             let spelled = target.display().to_string();
             assert!(!unresolved(target), "{spelled} must not be unresolved");

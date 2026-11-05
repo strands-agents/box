@@ -87,7 +87,9 @@ the rule matches no request. Use the prefix from the action's row in the table.
 What `path` holds depends on the caller. From Strands Shell, `path` is the target with every
 symlink resolved. From Monty, `path` has `.` and `..` resolved and keeps a symlink as the script
 spelled it. Monty decides a path that goes through a symlink on that spelling and then refuses it,
-whatever the verdict.
+whatever the verdict. So a temporal rule that cares about `.` or `..` sees the path **after** those
+callers normalize it — not the raw spelling the operator typed into a shell line or a Python
+literal.
 
 A rename is three or four decisions: `fs:read` and `fs:move` on the source, `fs:move` on the
 destination, and `fs:delete` on the destination when it exists (`remove_dir` for a directory,
@@ -239,7 +241,7 @@ What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder, under a non-directory parent, or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. Box classifies that case with the same no-follow directory walk the interpreters use to open a path. This holds only when that walk answers about the path (not when it refuses a symbolic link, an overlong component, or a non-canonical spelling) and the path isn't in Box's own state. Shell and Monty resolve `.` and `..` before Reach sees the path, so those components do not appear in the recorded `path` from those callers. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |

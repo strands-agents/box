@@ -835,15 +835,17 @@ that got an answer, in the Shell or in Python, records `::response` even when th
 so a `read_metadata` budget counts a probe of a missing file in an existing folder, which
 `a_read_metadata_budget_counts_probes_of_absent_paths` and
 `a_read_metadata_budget_counts_stats_of_missing_paths` pin. A metadata read of a path that can't be
-resolved, such as one under a missing folder or under a folder the surrounding OS won't let Box
-search, also records `::response`, although the reachable paths check refuses it, which
+resolved, such as one under a missing folder, under a non-directory parent, or under a folder the
+surrounding OS won't let Box search, also records `::response`, although the reachable paths check
+refuses it, which
 `a_metadata_read_under_a_missing_folder_meets_a_response_precondition`,
 `a_metadata_read_under_a_missing_folder_spends_the_budget`, and
-`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box records it so only when
-the path is inside the reachable paths, has no `.` or `..` component, crosses no symbolic link in a folder Box can see, and
-isn't in Box's own state, which `only_a_plain_path_under_a_missing_folder_is_unresolved` and
-`a_stat_outside_the_reachable_set_spends_nothing` pin. The event kind doesn't depend on what a
-symbolic link, a `.` or `..` component, or Box's own state holds, so those refusals stay
+`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box classifies that case with
+the same no-follow directory walk the interpreters use (`HeldPath::reach`), and records
+`::response` only when that walk answers and the path isn't in Box's own state, which
+`only_a_held_path_answer_beneath_no_floor_is_unresolved` and
+`a_stat_outside_the_reachable_set_spends_nothing` pin. Shell and Monty resolve `.` and `..` before
+Reach sees the path. A symbolic link, an overlong component, or another refused walk stays
 `::error`. Any other read that Box refuses stays `::error`: a reach-floor refusal, which
 `a_metadata_read_the_floor_refuses_meets_no_response_precondition` pins; the Shell's
 admission-window guard, which refuses any namespace change and which
