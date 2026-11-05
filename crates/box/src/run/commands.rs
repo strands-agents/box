@@ -445,11 +445,12 @@ mod tests {
 
     /// Report a test that found no [`system_command_with_several_names`]. macOS always has one.
     fn skipping_without_a_system_command() {
-        assert!(
-            !cfg!(target_os = "macos"),
-            "macOS always has a root-owned program with several names, such as /usr/bin/git, so a \
-             skip there hides a regression"
-        );
+        if cfg!(target_os = "macos") {
+            panic!(
+                "macOS always has a root-owned program with several names, such as /usr/bin/git, \
+                 so a skip there hides a regression"
+            );
+        }
         eprintln!(
             "skipping: no root-owned program with several names in /usr/bin or /bin, or the test \
              runs as root"
