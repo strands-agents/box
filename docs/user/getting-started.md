@@ -65,7 +65,7 @@ cd ~/box-tutorial
 Download Box on macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/refs/heads/main/download.sh | sh
 ./box-core/box --version
 ```
 
