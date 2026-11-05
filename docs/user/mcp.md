@@ -119,8 +119,13 @@ with `*`.
 
 Box copies received values into the wildcard positions without expanding them. A received
 `${TOKEN}` stays that literal text. Fixed arguments keep Box's existing expansion.
-Policy checks the effective launch arguments. A request that matches multiple servers is refused;
-keep literal arguments that distinguish servers sharing an executable.
+Policy checks the effective launch arguments.
+
+Commands with no `*` take priority over wildcard commands. For example,
+`["example-server", "--token", "fixed-value"]` wins over the wildcard example above when the
+caller supplies `fixed-value`. Other values select the wildcard entry.
+Box refuses to start if two wildcard commands could match the same request, including after
+configured expansion. Keep fixed arguments that distinguish those wildcard entries.
 
 The setting defaults to `false`. Without it, `*` matches and launches as a literal star.
 The feature applies only to stdio MCP commands, not agent or tool commands.

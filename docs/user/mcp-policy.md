@@ -183,7 +183,8 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
 | `no MCP server declares "<command>"` | The harness's command or arguments differ from every `command` on that program. Copy the `command` of one of the listed servers from `box.toml` into the harness, supplying values for enabled `*` arguments, as in [step 2](#step-2-connect-the-harness). The run's records hold the same refusal, as a `shell:spawn` denial with the rule `enforcement:mcp-command`. |
-| `MCP command matches multiple servers` | More than one server matches the received command. Give each server fixed arguments that distinguish it from the others. |
+| Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |
+| `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |

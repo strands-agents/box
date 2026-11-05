@@ -775,16 +775,24 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
-        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
-            match record.contained_mcp.get(&server.name) {
-                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
-                    &contained.spec,
-                    &attachment,
-                )
-                .ok(),
-                None => Some(server.arguments().to_vec()),
-            }
-        })?;
+        let launched = |server: &crate::record::config::mcp::McpServer| match record
+            .contained_mcp
+            .get(&server.name)
+        {
+            Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                &contained.spec,
+                &attachment,
+            )
+            .ok(),
+            None => Some(server.arguments().to_vec()),
+        };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, launched)?;
+        if record.experimental_features.mcp_argument_wildcards {
+            crate::record::config::mcp::refuse_overlapping_wildcard_commands(
+                &record.mcp,
+                launched,
+            )?;
+        }
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
         let broker_listener = BrokerHost::bind(root)?;

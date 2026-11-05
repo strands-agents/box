@@ -104,6 +104,10 @@ impl McpServer {
         self.command.get(1..).unwrap_or_default()
     }
 
+    pub(crate) fn has_argument_wildcards(&self) -> bool {
+        self.arguments().iter().any(|argument| argument == "*")
+    }
+
     pub(crate) fn matches_arguments(
         &self,
         received: &[String],
@@ -232,6 +236,51 @@ pub(crate) fn refuse_a_shared_command(
                     server.name
                 ),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse wildcard commands that can match the same received arguments.
+pub(crate) fn refuse_overlapping_wildcard_commands(
+    servers: &[McpServer],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> Result<(), ConfigError> {
+    for (index, left) in servers.iter().enumerate() {
+        if !left.has_argument_wildcards() {
+            continue;
+        }
+        let Some(left_expanded) = launched(left) else {
+            continue;
+        };
+        for right in &servers[index + 1..] {
+            if !right.has_argument_wildcards() || left.program() != right.program() {
+                continue;
+            }
+            let Some(right_expanded) = launched(right) else {
+                continue;
+            };
+            let overlaps = [left.arguments(), &left_expanded].into_iter().any(|a| {
+                [right.arguments(), &right_expanded].into_iter().any(|b| {
+                    a.len() == b.len()
+                        && left
+                            .arguments()
+                            .iter()
+                            .zip(right.arguments())
+                            .zip(a.iter().zip(b))
+                            .all(|((left, right), (a, b))| left == "*" || right == "*" || a == b)
+                })
+            });
+            if overlaps {
+                return Err(ConfigError::Mcp {
+                    name: right.name.clone(),
+                    reason: format!(
+                        "`[mcp.{}]` and `[mcp.{}]` declare overlapping wildcard commands; \
+                         use fixed arguments that distinguish the servers",
+                        left.name, right.name,
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -548,6 +597,38 @@ mod tests {
             .is_none(),
             "a server whose command does not expand cannot start, so no launch selects it"
         );
+    }
+
+    #[test]
+    fn wildcard_overlap_checks_allow_exact_entries_and_distinct_patterns() {
+        let first = McpServer {
+            name: "first".into(),
+            command: words(&["server", "--token", "*"]),
+        };
+        for command in [
+            words(&["server", "--token", "abc"]),
+            words(&["server", "--other", "*"]),
+            words(&["server", "--token", "*", "extra"]),
+            words(&["other", "--token", "*"]),
+            words(&["server", "--token=*", "*"]),
+        ] {
+            let second = McpServer {
+                name: "second".into(),
+                command,
+            };
+            assert!(
+                refuse_overlapping_wildcard_commands(&[first.clone(), second], as_declared).is_ok()
+            );
+        }
+        let second = McpServer {
+            name: "second".into(),
+            command: words(&["server", "*", "abc"]),
+        };
+        let error =
+            refuse_overlapping_wildcard_commands(&[first, second], as_declared).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("[mcp.first]") && message.contains("[mcp.second]"));
+        assert!(message.contains("overlapping wildcard commands"));
     }
 
     /// Two entries with one full command are refused.

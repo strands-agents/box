@@ -20,8 +20,17 @@ pub(crate) fn admit_server<'a>(
     use crate::record::config::mcp::{for_command, on_program};
 
     if wildcards {
+        if let Some(server) = declared.iter().find(|server| {
+            !server.has_argument_wildcards()
+                && server.program() == program
+                && launched(server)
+                    .is_some_and(|expanded| server.matches_arguments(arguments, &expanded, false))
+        }) {
+            return Ok(server);
+        }
         let mut matches = declared.iter().filter(|server| {
-            server.program() == program
+            server.has_argument_wildcards()
+                && server.program() == program
                 && launched(server)
                     .is_some_and(|expanded| server.matches_arguments(arguments, &expanded, true))
         });
@@ -321,9 +330,19 @@ mod tests {
         };
         let other = McpServer {
             name: "other".into(),
-            command: words(&["server", "http/protobuf", "value"]),
+            command: words(&["server", "*", "value"]),
         };
-        let launch = |_: &McpServer| Some(words(&["http/protobuf", "*"]));
+        let launch = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf")
+                    })
+                    .collect(),
+            )
+        };
         for args in [
             words(&["${OTEL_EXPORTER_OTLP_PROTOCOL}", "value"]),
             words(&["http/protobuf", "value"]),
@@ -361,6 +380,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("multiple servers"));
+
+        let patterns = [
+            McpServer {
+                name: "one".into(),
+                command: words(&["server", "*", "value"]),
+            },
+            McpServer {
+                name: "two".into(),
+                command: words(&["server", "*", "*"]),
+            },
+        ];
+        assert!(
+            admit_server(&patterns, "server", &words(&["*", "value"]), launch, true)
+                .unwrap_err()
+                .to_string()
+                .contains("multiple servers")
+        );
+    }
+
+    #[test]
+    fn exact_commands_win_over_wildcards_in_either_declaration_order() {
+        let exact = McpServer {
+            name: "exact".into(),
+            command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}"]),
+        };
+        let wildcard = McpServer {
+            name: "wildcard".into(),
+            command: words(&["server", "*"]),
+        };
+        let launch = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf")
+                    })
+                    .collect(),
+            )
+        };
+        for servers in [
+            [wildcard.clone(), exact.clone()],
+            [exact.clone(), wildcard.clone()],
+        ] {
+            for value in ["${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf"] {
+                assert_eq!(
+                    admit_server(&servers, "server", &words(&[value]), launch, true)
+                        .unwrap()
+                        .name,
+                    "exact",
+                );
+            }
+            assert_eq!(
+                admit_server(&servers, "server", &words(&["other"]), launch, true)
+                    .unwrap()
+                    .name,
+                "wildcard",
+            );
+        }
     }
 
     const TOOLS: &str = r#"

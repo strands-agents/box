@@ -398,6 +398,11 @@ impl RunContract {
     ) -> Result<ConfigureRequest, BoxError> {
         let policy_path = self.file.policy_path(self.source.path());
         let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&self.file.mcp)?;
+        if self.file.experimental_features.mcp_argument_wildcards {
+            mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
+                Some(server.arguments().to_vec())
+            })?;
+        }
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),

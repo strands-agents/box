@@ -256,7 +256,9 @@ records. By default, the arguments only select among the servers the operator de
 
 With [argument wildcards](../user/mcp.md#argument-wildcards) enabled, a configured argument equal
 to `*` skips that position's comparison. The executable, argument count, and other arguments
-still match. Multiple matches cause refusal. The launcher expands the configured arguments,
+still match. Commands without wildcards take priority. Otherwise, exactly one wildcard command
+must match. Box refuses overlapping wildcard entries before the workload starts, checking both
+the authored and expanded forms. The launcher expands the configured arguments,
 then replaces only the star positions with received values. Received text is not expanded again.
 Policy sees the effective command and arguments before the existing contained launch starts.
 Any workload process can call the MCP alias. Each operator-declared `*` therefore gives that
