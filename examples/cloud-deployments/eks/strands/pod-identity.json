@@ -1,0 +1,188 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Model permissions for the Box parent and child Strands example",
+  "Parameters": {
+    "ClusterName": {
+      "Type": "String"
+    },
+    "Namespace": {
+      "Type": "String",
+      "Default": "box-example"
+    },
+    "ServiceAccount": {
+      "Type": "String",
+      "Default": "box-strands"
+    },
+    "FoundationModelId": {
+      "Type": "String",
+      "Default": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "AllowedPattern": "[A-Za-z0-9][A-Za-z0-9.:-]+"
+    }
+  },
+  "Resources": {
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "pods.eks.amazonaws.com"
+              },
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/kubernetes-namespace": {
+                    "Ref": "Namespace"
+                  },
+                  "aws:RequestTag/kubernetes-service-account": {
+                    "Ref": "ServiceAccount"
+                  },
+                  "aws:RequestTag/eks-cluster-arn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "InvokeSelectedModel",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "UseShortLivedBearerToken",
+                  "Effect": "Allow",
+                  "Action": "bedrock:CallWithBearerToken",
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "bedrock:bearerTokenType": "SHORT_TERM"
+                    }
+                  }
+                },
+                {
+                  "Sid": "InvokeSelectedProfile",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.${FoundationModelId}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": {
+                        "Ref": "AWS::Region"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "InvokeSourceModel",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${FoundationModelId}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": {
+                        "Ref": "AWS::Region"
+                      },
+                      "bedrock:InferenceProfileArn": {
+                        "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.${FoundationModelId}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "InvokeGlobalModel",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:bedrock:::foundation-model/${FoundationModelId}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "unspecified",
+                      "bedrock:InferenceProfileArn": {
+                        "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.${FoundationModelId}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "UseAccountDefaultProject",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:project/default"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "box-strands-parent-child-example"
+          }
+        ]
+      }
+    },
+    "Association": {
+      "Type": "AWS::EKS::PodIdentityAssociation",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "ClusterName"
+        },
+        "Namespace": {
+          "Ref": "Namespace"
+        },
+        "ServiceAccount": {
+          "Ref": "ServiceAccount"
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "Role",
+            "Arn"
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Role",
+          "Arn"
+        ]
+      }
+    },
+    "ModelId": {
+      "Value": {
+        "Fn::Sub": "global.${FoundationModelId}"
+      }
+    }
+  }
+}

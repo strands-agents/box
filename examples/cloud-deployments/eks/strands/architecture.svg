@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="670" viewBox="0 0 1360 670" role="img" aria-labelledby="title desc">
+<title id="title">A parent agent delegates to a child in a separate Box</title>
+<desc id="desc">One EKS pod contains two separate Boxes and trusted application code outside both. The parent delegates through a tool. The application starts the child Box, collects its result, and returns it to the parent. Each agent calls Bedrock through its own Box.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#526170"/></marker><marker id="green" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#19774d"/></marker></defs>
+<rect width="1360" height="670" fill="#fff"/>
+<g font-family="Arial, Helvetica, sans-serif" fill="#18212a">
+<text x="40" y="46" font-size="28" font-weight="700">A parent agent delegates to a child in a separate Box</text>
+<rect x="550" y="84" width="260" height="66" rx="12" fill="#f4f6f8" stroke="#71808d" stroke-width="1.5"/>
+<text x="680" y="111" text-anchor="middle" font-size="20" font-weight="700">Amazon Bedrock</text>
+<text x="680" y="134" text-anchor="middle" font-size="15">Model inference</text>
+<rect x="24" y="196" width="1312" height="411" rx="18" fill="#fafbfc" stroke="#9aa7b2" stroke-width="1.5"/>
+<text x="48" y="231" font-size="18" font-weight="700">One EKS pod · one container</text>
+<path d="M390 278 V173 H585 V151" fill="none" stroke="#71808d" stroke-width="1.7" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<path d="M1127 278 V173 H775 V151" fill="none" stroke="#71808d" stroke-width="1.7" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<rect x="72" y="249" width="300" height="23" fill="#fafbfc"/><text x="222" y="265" text-anchor="middle" font-size="14" fill="#526170">Model requests through its Box</text>
+<rect x="977" y="249" width="300" height="23" fill="#fafbfc"/><text x="1127" y="265" text-anchor="middle" font-size="14" fill="#526170">Model requests through its Box</text>
+<rect x="60" y="278" width="345" height="231" rx="14" fill="#fff" stroke="#344858" stroke-width="2"/>
+<text x="84" y="311" font-size="20" font-weight="700">Parent Box</text>
+<line x1="60" y1="329" x2="405" y2="329" stroke="#c8d0d7"/>
+<text x="84" y="362" font-size="19" font-weight="700">Parent Strands agent</text>
+<text x="84" y="393" font-size="17">Calls the delegation tool</text>
+<text x="84" y="422" font-size="17">Continues after the result returns</text>
+<rect x="61" y="461" width="343" height="47" rx="12" fill="#edf3f5"/>
+<text x="232" y="489" text-anchor="middle" font-size="15">Own files, policy, and history</text>
+<rect x="507" y="297" width="346" height="212" rx="14" fill="#f0f2f4" stroke="#9aa7b2" stroke-width="1.5"/>
+<text x="680" y="332" text-anchor="middle" font-size="20" font-weight="700">Trusted application</text>
+<text x="680" y="358" text-anchor="middle" font-size="15" fill="#526170">Outside both Boxes</text>
+<text x="531" y="395" font-size="17">Starts the child with fixed controls</text>
+<text x="531" y="424" font-size="17">Collects and returns its result</text>
+<rect x="955" y="278" width="345" height="231" rx="14" fill="#fff" stroke="#344858" stroke-width="2"/>
+<text x="979" y="311" font-size="20" font-weight="700">Child Box</text>
+<line x1="955" y1="329" x2="1300" y2="329" stroke="#c8d0d7"/>
+<text x="979" y="362" font-size="19" font-weight="700">Child Strands agent</text>
+<text x="979" y="393" font-size="17">Reads its release note through a tool</text>
+<text x="979" y="422" font-size="17">Returns its review</text>
+<rect x="956" y="461" width="343" height="47" rx="12" fill="#edf3f5"/>
+<text x="1127" y="489" text-anchor="middle" font-size="15">Own files, policy, and history</text>
+<path d="M406 370 H505" fill="none" stroke="#526170" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="456" y="355" text-anchor="middle" font-size="14">Delegates</text>
+<path d="M854 370 H953" fill="none" stroke="#526170" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="904" y="355" text-anchor="middle" font-size="14">Starts</text>
+<path d="M953 449 H855" fill="none" stroke="#19774d" stroke-width="2" marker-end="url(#green)"/>
+<text x="904" y="439" text-anchor="middle" font-size="14" fill="#19774d">Result</text>
+<path d="M505 449 H407" fill="none" stroke="#19774d" stroke-width="2" marker-end="url(#green)"/>
+<text x="456" y="439" text-anchor="middle" font-size="14" fill="#19774d">Result</text>
+<text x="48" y="557" font-size="17">The application manages delegation and data transfer. Each Box enforces its own configured access limits.</text>
+<text x="48" y="585" font-size="15" fill="#526170">Parent and child describe the task relationship. The two Boxes run beside each other.</text>
+<text x="40" y="645" font-size="15" fill="#526170">Both agents run full Strands model and tool loops. Model inference runs remotely on Amazon Bedrock.</text>
+</g></svg>

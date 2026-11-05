@@ -118,6 +118,16 @@ The trusted controller needs network access to the AWS endpoints used for creden
 The expected result is `passed: true` with 23 successful checks.
 Model responses can vary. Inspect the verifier's result separately from the agent's written report.
 
+## Delegate work to a separate agent
+
+The [Strands delegation example](../../../examples/cloud-deployments/eks/strands/) runs two complete agents in separate Boxes within one pod.
+The parent calls a tool. Trusted application code starts the child with its own configuration and policy, then returns the child's result.
+The parent continues its work using that result.
+
+Follow the example's build and Pod Identity instructions to run the `strands` image target.
+It uses a separate model policy and runs as user 1000. The coding variants above run as user 991.
+The example includes checks for the delegation, the return to the parent, and each agent's filesystem access.
+
 ## Clean up
 
 Use the Job name printed by the runner:

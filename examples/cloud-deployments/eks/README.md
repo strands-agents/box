@@ -1,18 +1,22 @@
-# Run a coding workload on EKS
+# Run agents on EKS
 
 A coding workload needs to change project files while protected files remain outside its access.
 This example runs that workload in a Kubernetes Job with Box inside its container.
 A fixed script checks the deployment. An optional Claude Code agent chooses tools against the same kinds of restrictions.
 
+The [Strands delegation example](strands/) runs a parent and child agent in separate Boxes.
+Trusted application code starts the child and returns its result to the parent.
+
 Follow the [full build guide](../../../docs/user/tutorials/eks.md) for prerequisites, image creation, deployment, result checks, and cleanup.
 
 ## Source
 
-- `Dockerfile` builds the pinned Box source and offers `scripted` and `claude` image targets.
+- `Dockerfile` builds the pinned Box source and offers `scripted`, `claude`, and `strands` image targets.
 - `run.py` renders a Job or submits it through your selected Kubernetes context.
 - `app/practice.py` performs the fixed coding exercise and checks protected files and policy decisions.
 - `claude/` contains the agent controller, fixed task, synthetic tool service, and dependency pins.
-- `pod-identity.json` creates a workload identity for the optional model calls.
+- `pod-identity.json` creates a workload identity for Claude model calls.
+- `strands/` contains the parent/subagent example, its identity template, and its dependency lock.
 
 Preview the Job without contacting a cluster:
 
@@ -24,7 +28,7 @@ The output is a Kubernetes Job document. The script performs no cloud operation 
 
 ## Tested configuration
 
-The Box source pin is `f0dc6f49ea8bb8608502afffa50c8748f6c24ca2`.
+The coding variants use Box source pin `f0dc6f49ea8bb8608502afffa50c8748f6c24ca2`.
 Recorded EKS checks used Kubernetes 1.35, Amazon Linux 2023 ARM64, kernel 6.12.111, and containerd 2.3.5.
 The fixed exercise passed 11 checks. The Claude Code 2.1.305 variant passed 23 checks.
 The model variant used a trusted controller with EKS Pod Identity to obtain model access.
