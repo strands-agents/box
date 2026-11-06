@@ -76,9 +76,12 @@ A hard link gives one file another filesystem name. Box inventories these names 
 installation directory and its immediate `deps` directory, which supports Cargo builds.
 Box refuses startup when that inventory cannot account for every hard link.
 
-Linux also maps these files through the current mount table and verifies each resulting file identity.
+Linux also maps these files through the current mount table and verifies each accessible file identity.
 This covers file and directory bind mounts, which expose existing files at other paths.
-Box refreshes these aliases for each grant check and hosted mutation. It refuses incomplete or unstable inventories.
+Box refreshes these aliases for each grant check and hosted mutation.
+When permissions prevent inspection, Box protects the possible alias and its enclosing paths instead of refusing unrelated operations.
+This also protects aliases that a workload could make accessible by changing directory permissions.
+Other inspection errors and unstable inventories still refuse the check.
 On macOS, Box also checks verified spellings through the Data volume. Mounted aliases do not increase the hard-link count.
 
 Box protects these programs because they start containment or route workload operations to its checks
