@@ -37,8 +37,8 @@
 //! # The configuration holds eleven keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
-//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
-//! additional inputs: none decides which requests are governed.
+//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
+//! are keys and not additional inputs: none decides which requests are governed.
 //!
 //! `[agent] env` names variables the box adds to the composed environment. It cannot name a
 //! reserved variable, so it cannot reach proxy routing, CA trust, or the fixed identity, and it

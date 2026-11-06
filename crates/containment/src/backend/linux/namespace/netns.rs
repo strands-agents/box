@@ -1,6 +1,6 @@
-//! The egress transport across the network namespace.
+//! The transport across the network namespace: egress listeners out, and sockets for inbound connections.
 
-use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
 use crate::error::ContainmentError;
 
@@ -60,12 +60,30 @@ pub(crate) fn listen_on_loopback(port: u16) -> Result<OwnedFd, ContainmentError>
     Ok(OwnedFd::from(listener))
 }
 
-/// Send one descriptor over a Unix socket with `SCM_RIGHTS`.
+/// Send one listening descriptor over a Unix socket with `SCM_RIGHTS`.
 pub(crate) fn send_descriptor(
     socket: &std::os::unix::net::UnixStream,
     descriptor: &OwnedFd,
 ) -> Result<(), ContainmentError> {
-    let payload = *b"L";
+    send_tagged_descriptor(socket, descriptor, LISTENER_TAG)
+}
+
+/// The payload byte beside an egress listener.
+const LISTENER_TAG: u8 = b'L';
+/// The payload byte beside a new, unconnected socket for an inbound connection.
+const SOCKET_TAG: u8 = b'S';
+/// The payload byte that answers a socket request with no descriptor.
+const REFUSED_TAG: u8 = b'E';
+/// The request byte for an IPv4 socket.
+const IPV4_REQUEST: u8 = b'4';
+
+/// Send one descriptor over a Unix socket with `SCM_RIGHTS`, beside `tag`.
+fn send_tagged_descriptor(
+    socket: &std::os::unix::net::UnixStream,
+    descriptor: &OwnedFd,
+    tag: u8,
+) -> Result<(), ContainmentError> {
+    let payload = [tag];
     let mut io = libc::iovec {
         iov_base: payload.as_ptr().cast_mut().cast(),
         iov_len: payload.len(),
@@ -114,6 +132,52 @@ pub(crate) fn send_descriptor(
     }
 
     Ok(())
+}
+
+/// Mark `descriptor` close-on-exec, so the workload's `exec` closes the copy it inherits.
+pub(crate) fn close_on_exec(descriptor: std::os::fd::RawFd) -> Result<(), ContainmentError> {
+    // SAFETY: `fcntl` on a descriptor number, with scalar arguments.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1
+    {
+        return Err(failure(format!(
+            "marking the handoff socket close-on-exec: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+/// Answer each socket request on `handoff` until the box closes it.
+///
+/// A request is [`IPV4_REQUEST`]. The answer is a new, unconnected IPv4 TCP socket created in this
+/// namespace, or [`REFUSED_TAG`] alone when no socket can be created. Any other byte ends the loop. Creating a
+/// socket does not block, so a workload that accepts nothing cannot stall this loop.
+pub(crate) fn serve_inbound(handoff: std::os::unix::net::UnixStream) {
+    use std::io::{Read as _, Write as _};
+    let mut handoff = handoff;
+    loop {
+        let mut request = [0u8; 1];
+        if handoff.read_exact(&mut request).is_err() {
+            return;
+        }
+        if request[0] != IPV4_REQUEST {
+            return;
+        }
+        // SAFETY: `socket` with scalar arguments; a non-negative result is a new descriptor.
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        let answered = if raw < 0 {
+            handoff.write_all(&[REFUSED_TAG]).is_ok()
+        } else {
+            // SAFETY: `raw` is a descriptor this process just opened and owns.
+            let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+            send_tagged_descriptor(&handoff, &socket, SOCKET_TAG).is_ok()
+        };
+        if !answered {
+            return;
+        }
+    }
 }
 
 /// Receive one descriptor sent with [`send_descriptor`].
@@ -190,8 +254,6 @@ impl InterfaceRequest {
         }
     }
 }
-
-use std::os::fd::FromRawFd as _;
 
 /// A failure in the egress transport, carrying this backend's mechanism name.
 fn failure(reason: String) -> ContainmentError {

@@ -225,7 +225,7 @@ fn a_reaper_that_remains_dumpable_terminates_its_namespace() {
         refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         let keep = [0, 1, 2];
-        establish_pid_namespace_and_reaper(&view, &keep, None).unwrap();
+        establish_pid_namespace_and_reaper(&view, &keep, None, None).unwrap();
     });
 }
 
@@ -361,7 +361,7 @@ fn failed_reaper_channel_refuses_setup_before_forking() {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_socketpair, None);
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "creating reaper lifetime channel",
         );
     });
@@ -373,7 +373,7 @@ fn failed_pid_namespace_refuses_setup_before_forking() {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_unshare, Some((0, libc::CLONE_NEWPID as u64)));
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "creating a PID namespace",
         );
     });
@@ -397,13 +397,13 @@ fn failed_filter_installation_refuses_launch() {
 fn a_failed_wait_is_not_reported_as_workload_success() {
     in_fresh_process(|| {
         refuse_syscall(libc::SYS_wait4, None);
-        assert_eq!(reaper::supervise(12345), 125);
+        assert_eq!(reaper::supervise(12345, None), 125);
     });
 }
 
 #[test]
 fn a_reaper_with_no_children_exits_successfully() {
-    in_fresh_process(|| assert_eq!(reaper::supervise(12345), 0));
+    in_fresh_process(|| assert_eq!(reaper::supervise(12345, None), 0));
 }
 
 #[test]
@@ -575,7 +575,7 @@ fn failed_reaper_creation_refuses_launch_before_any_child_starts() {
         #[cfg(target_arch = "x86_64")]
         refuse_syscall(libc::SYS_fork, None);
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "forking the namespace reaper",
         );
     });
@@ -586,7 +586,7 @@ fn failed_reaper_handshake_terminates_the_launcher_before_materialization() {
     in_fresh_process_expecting_exit(true, Some(127), None, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_sendto, Some((2, 1)));
-        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
         unsafe { libc::_exit(98) };
     });
 }
@@ -597,7 +597,7 @@ fn failed_native_reaper_wait_reports_setup_failure() {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_sendto, Some((2, 1)));
         refuse_syscall(libc::SYS_wait4, None);
-        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
         unsafe { libc::_exit(98) };
     });
 }
@@ -613,7 +613,7 @@ fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
             let victim = std::fs::File::open("/dev/null").unwrap();
             let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
             refuse_syscall(libc::SYS_close, Some((0, victim.as_raw_fd() as u64)));
-            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
             unsafe { libc::_exit(98) };
         },
     );
@@ -628,7 +628,7 @@ fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
         || {
             let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
             refuse_syscall(libc::SYS_capset, None);
-            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
             unsafe { libc::_exit(98) };
         },
     );
@@ -643,7 +643,7 @@ fn a_reaper_that_cannot_lock_privileges_terminates_its_namespace() {
         || {
             let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
             refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_NO_NEW_PRIVS as u64)));
-            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+            let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
             unsafe { libc::_exit(98) };
         },
     );
@@ -665,7 +665,7 @@ fn a_failed_workload_fork_terminates_the_namespace_reaper() {
         // Leave room for the reaper, but not its workload, in this fresh user namespace.
         limit.rlim_cur = (threads + 1) as libc::rlim_t;
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &limit) }, 0);
-        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None);
+        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
         unsafe { libc::_exit(98) };
     });
 }
@@ -709,7 +709,7 @@ fn a_traced_child_stop_is_not_reported_as_a_successful_exit() {
                 libc::_exit(92);
             }
         }
-        let code = reaper::supervise(child);
+        let code = reaper::supervise(child, None);
         if code == 91 {
             println!("skipping: this host refuses PTRACE_TRACEME");
             return;

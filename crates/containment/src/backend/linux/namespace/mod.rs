@@ -91,17 +91,15 @@ impl ContainmentBackend for NamespaceBackend {
         // `AllowAll` is the operator's `contain_egress = false` trust grant: this leaf joins the host
         // network namespace (see `enter_namespaces`) rather than a private, routeless one, so the
         // host's routes are already present and there is nothing to lower here. `Blocked` and
-        // `Localhost` are set up in `apply`. The listen-port refusal below still applies to
-        // `Localhost`; `AllowAll` carries no listen ports.
+        // `Localhost` are set up in `apply`.
 
-        if let Network::Localhost { listen, .. } = config.network()
-            && !listen.is_empty()
+        if let Network::Localhost { connect, listen } = config.network()
+            && let Some(port) = listen.iter().find(|port| connect.contains(port))
         {
-            return Err(unenforceable(
-                "Localhost listen ports: this backend passes one listening \
-                 descriptor into the namespace and has no lowering for an \
-                 inbound bind",
-            ));
+            return Err(unenforceable(&format!(
+                "Localhost listen port {port}: the port is also a connect port, and that port's \
+                 listener already holds it inside the namespace"
+            )));
         }
 
         // Breadth before cell.
@@ -180,8 +178,9 @@ impl ContainmentBackend for NamespaceBackend {
         // descriptor and that order is the wire contract. A socket's network namespace is fixed
         // when the socket is created, so none of them can be bound anywhere else.
         let mut listeners = Vec::new();
+        let mut connector = None;
         match config.network() {
-            Network::Localhost { connect, .. } => {
+            Network::Localhost { connect, listen } => {
                 // Without a handoff the endpoint would be bound and unreachable: the box could
                 // never accept on it, so every request would hang rather than fail.
                 let handoff = egress_handoff.ok_or_else(|| {
@@ -198,6 +197,16 @@ impl ContainmentBackend for NamespaceBackend {
                     let listener = netns::listen_on_loopback(*port)?;
                     netns::send_descriptor(handoff, &listener)?;
                     listeners.push(listener);
+                }
+                // PID 1 creates each inbound connection's socket in this namespace, on the box's
+                // request, and the box connects it. The workload's copy of the handoff closes at its
+                // `exec`.
+                if !listen.is_empty() {
+                    use std::os::fd::AsRawFd as _;
+                    netns::close_on_exec(handoff.as_raw_fd())?;
+                    connector = Some(reaper::Connector {
+                        handoff: handoff.as_raw_fd(),
+                    });
                 }
             }
             // `Blocked` gets the namespace and no listener, so there is no route.
@@ -216,7 +225,8 @@ impl ContainmentBackend for NamespaceBackend {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
-        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        keep.extend(connector.as_ref().map(|connector| connector.handoff));
+        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -449,6 +459,7 @@ fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
+    connector: Option<reaper::Connector>,
 ) -> Result<(), ContainmentError> {
     let (parent_control, reaper_control) = std::os::unix::net::UnixStream::pair()
         .map_err(|source| apply_failure(format!("creating reaper lifetime channel: {source}")))?;
@@ -559,7 +570,7 @@ fn establish_pid_namespace_and_reaper(
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
-        let code = reaper::supervise(workload);
+        let code = reaper::supervise(workload, connector);
         // SAFETY: terminating namespace PID 1.
         unsafe { libc::_exit(code) };
     }
@@ -722,18 +733,28 @@ mod tests {
             .expect("Localhost is this backend's supported network");
     }
 
-    /// An inbound bind has no lowering, so asking for one is refused rather than silently dropped
-    /// -- a dropped bind port would look like a working listener that no one can reach.
     #[test]
-    fn a_requested_bind_port_is_refused_rather_than_dropped() {
+    fn a_listen_port_validates() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::localhost().connect(33085).listen(8080))
             .expect("a listen port is a valid request to make");
 
+        backend
+            .validate_config(&config)
+            .expect("a listen port has a lowering");
+    }
+
+    #[test]
+    fn a_listen_port_that_is_also_a_connect_port_is_refused() {
+        let backend = NamespaceBackend::with_probe_result(true);
+        let config = acceptable()
+            .set_network(Network::localhost().connect(33085).listen(33085))
+            .expect("the vocabulary does not compare the two lists");
+
         let error = backend
             .validate_config(&config)
-            .expect_err("a bind port must be refused, not dropped");
+            .expect_err("the connect port's listener already holds the port");
 
         assert!(
             matches!(error, ContainmentError::UnsupportedCapability { .. }),
