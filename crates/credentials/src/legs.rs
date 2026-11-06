@@ -392,108 +392,12 @@ fn signing_name(endpoint_prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attach::Outbound;
-    use crate::vault::drain_captured_warnings;
-    use crate::{Backend, Destination, DestinationPattern, RouteSpec, Vault, VaultConfig};
 
-    /// A bare-`aws://` sign emits exactly one ambient-identity warning; a scoped-profile sign emits
-    /// none. The warning is observed through the vault's test-only warn sink.
-    #[test]
-    fn sign_aws_warns_on_bare_aws() {
-        let host = "s3.us-west-2.amazonaws.com";
-        let url = "https://s3.us-west-2.amazonaws.com/bucket/key";
-        let sign = |vault: &Vault| {
-            let _ = drain_captured_warnings();
-            vault
-                .attach_for(Outbound {
-                    destination: Destination {
-                        host,
-                        port: 443,
-                        path: "/bucket/key",
-                    },
-                    method: "GET",
-                    url,
-                    query: "",
-                    headers: &[],
-                    body: b"",
-                })
-                .expect("the signed route attaches")
-                .expect("a credential is bound for this destination");
-            drain_captured_warnings()
-        };
-
-        // Bare: the default chain resolves the ambient environment credentials, and the sign warns.
-        // SAFETY (test): the AWS_* names are process-global, but no other in-crate test mutates
-        // them, and this is the only test that drives the real default-chain provider.
-        unsafe {
-            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIATESTONLYNOTREAL");
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test-only-not-real");
-            std::env::set_var("AWS_REGION", "us-west-2");
-        }
-        let bare = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
-            RouteSpec::signed_aws(
-                DestinationPattern::parse("*.amazonaws.com").unwrap(),
-                Locator::parse_uri("aws://").unwrap(),
-            ),
-        ))
-        .expect("a bare aws route opens against the default chain")
-        .into_vault();
-        let warnings = sign(&bare);
-        assert_eq!(
-            warnings.len(),
-            1,
-            "a bare sign warns exactly once: {warnings:?}"
-        );
-        assert!(
-            warnings[0].contains("ambient"),
-            "the warning names the ambient identity: {}",
-            warnings[0]
-        );
-
-        // Scoped: a profile with static keys, read from a temp credentials file, names its identity
-        // and so warns on neither resolve nor sign.
-        let dir = std::env::temp_dir().join(format!(
-            "sb-sign-warn-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let creds_file = dir.join("credentials");
-        std::fs::write(
-            &creds_file,
-            "[prod]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = \
-             wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY\n",
-        )
-        .expect("write credentials");
-        // SAFETY (test): as above; no other in-crate test reads or writes these names.
-        unsafe {
-            std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_file);
-            std::env::set_var("AWS_CONFIG_FILE", &creds_file);
-        }
-        let scoped = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
-            RouteSpec::signed_aws(
-                DestinationPattern::parse("*.amazonaws.com").unwrap(),
-                Locator::parse_uri("aws://prod").unwrap(),
-            ),
-        ))
-        .expect("a scoped aws route opens")
-        .into_vault();
-        let warnings = sign(&scoped);
-        assert!(
-            warnings.is_empty(),
-            "a scoped-profile sign emits no warning: {warnings:?}"
-        );
-
-        // SAFETY (test): clean up the process-global names this test set.
-        unsafe {
-            std::env::remove_var("AWS_ACCESS_KEY_ID");
-            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-            std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
-            std::env::remove_var("AWS_CONFIG_FILE");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // `sign_aws`'s warn-on-bare / no-warn-on-scoped behaviour is pinned hermetically at the
+    // acquisition level by `aws::tests::default_chain_acquisition_warns` and
+    // `scoped_profile_acquisition_does_not_warn`: `sign_aws` warns exactly when
+    // `resolution.acquisition.warning()` is `Some`. An end-to-end test through `Vault::sign_aws`
+    // would have to drive the real SDK chain and the process-wide provider, which is not hermetic.
 
     #[test]
     fn regional_and_global_hosts_derive_their_scope() {
