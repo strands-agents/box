@@ -464,11 +464,12 @@ reach. Neither set grants an exec cell or states a denial, and the only write in
 device, which `os_paths.rs::a_set_has_no_list_for_an_exec_grant_a_denial_or_a_write_tree` and
 `os_paths.rs::only_the_null_device_is_written` pin.
 
-A list entry that encloses a credential store, such as `~/.aws`, `~/.ssh`, a keychain, or a browser
-profile, refuses access to the store. An entry that names the store exactly grants access with a
-disclosure. The exact name states deliberate access, while an enclosing tree can include the store
-by accident. **That floor covers the process's own syscalls and nothing else.** A read through an
-interpreter is a policy decision, and no credential floor sits beneath it. See [no credential floor
+Box refuses a list entry that encloses a credential store, such as `~/.aws`, `~/.ssh`, a keychain, or
+a browser profile, and the box does not start. A read or write entry that names the store itself or
+a path inside it grants access with a disclosure. The named path states deliberate access, while an
+enclosing tree can include the store by accident. **That floor covers the process's own syscalls and
+nothing else.** A read through an interpreter is a policy decision, and no credential floor sits
+beneath it. See [no credential floor
 sits beneath the interpreters](#no-credential-floor-sits-beneath-the-interpreters).
 
 <a id="the-agent-gets-one-exec-rule-per-grant"></a>

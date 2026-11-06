@@ -193,9 +193,9 @@ surrounding OS does not have is left out. Each platform's paths are listed in
 Box refuses some grants whatever the configuration says. See [the deny-only
 floors](decisions.md#the-deny-only-floors-run-beneath-every-backend). The floors include:
 
-- A broad grant cannot expose credential stores such as `~/.aws`, `~/.ssh`, keychains, or browser
-  profiles by enclosing them. An operator can still name one exactly, and Box reports that grant at
-  startup. See [one forbidden-path
+- Box refuses a grant that encloses a credential store such as `~/.aws`, `~/.ssh`, a keychain, or a
+  browser profile, and the box does not start. An operator can grant read or write access by naming
+  the store itself or a path inside it. Box reports that grant at startup. See [one forbidden-path
   list](decisions.md#one-forbidden-path-list-and-each-row-states-its-rule).
 - Box refuses grants over the whole filesystem, every home, or system trees such as `/System` and
   `/etc`. It also refuses grants that reach the password database, `sudo` configuration, or machine
