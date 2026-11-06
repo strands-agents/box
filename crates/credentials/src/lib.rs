@@ -19,6 +19,7 @@ pub use attach::{Attachment, Inbound, Outbound, Redactions};
 pub use backend::Backend;
 pub use config::VaultConfig;
 pub use error::{CredentialError, Result};
+pub use legs::aws_scope_is_derivable;
 pub use model::{Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec};
 pub use opened::{Opened, Phantom, Skipped};
 pub use preflight::credsd_preflight;

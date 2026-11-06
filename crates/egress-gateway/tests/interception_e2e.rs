@@ -449,6 +449,40 @@ fn a_backend_aws_auth_signs_over_the_backend_host() {
         !seen.raw.contains("wJalrXUtnFEMI"),
         "the secret key never reaches the wire"
     );
+    // The signature is computed over the bytes the backend receives, not a fixed value: a request
+    // differing only in the forwarded path produces a different signature. (The scope above already
+    // ties it to the backend host; this ties it to the forwarded request.)
+    let signature = |authz: &str| {
+        authz
+            .rsplit("Signature=")
+            .next()
+            .expect("a signature field")
+            .to_string()
+    };
+    let sig_zen = signature(&authz);
+    let mut other = WorkloadClient::connect(proxy_port(&handle), original, port);
+    other.send_request("GET", "/octocat", &[], b"");
+    assert_eq!(
+        other.read_status(),
+        200,
+        "the second signed re-route succeeded"
+    );
+    let seen_other = upstream.last_request();
+    assert!(
+        seen_other.raw.starts_with("GET /github/octocat "),
+        "the second request forwarded its own joined path: {:?}",
+        seen_other.raw.lines().next()
+    );
+    let sig_octocat = signature(
+        seen_other
+            .header("authorization")
+            .expect("a SigV4 signature over the backend")
+            .as_str(),
+    );
+    assert_ne!(
+        sig_zen, sig_octocat,
+        "a different forwarded path changes the signature, so it covers the sent bytes"
+    );
     // Policy judged the ORIGINAL host, never the backend.
     assert!(
         records().iter().any(|r| r.host == original),

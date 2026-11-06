@@ -362,6 +362,13 @@ fn observe_phantom(req: &Outbound<'_>, location: &InjectMode) -> Option<Zeroizin
 /// The two suffixes are disjoint — no host ends with both — so the order here carries no meaning.
 const AWS_HOST_SUFFIXES: [&str; 2] = [".amazonaws.com", ".api.aws"];
 
+/// Whether an AWS SigV4 service and region can be derived from `host`. A signed route over a host
+/// this rejects fails closed at request time, so the box's config validation calls this to refuse an
+/// `aws://` backend auth whose backend host is not AWS-signable — at load, not per request.
+pub fn aws_scope_is_derivable(host: &str) -> bool {
+    derive_service_region(host).is_some()
+}
+
 /// Derive `(service, region)` from an AWS endpoint host.
 pub(crate) fn derive_service_region(host: &str) -> Option<(String, String)> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
