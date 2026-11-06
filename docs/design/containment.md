@@ -279,6 +279,16 @@ macOS retains root file creation inside granted directories. Seatbelt path denia
 protection against later privileged consumers of those entries. This Linux change does not test or
 change that macOS behavior.
 
+### Linux filesystem metadata
+
+Linux workloads can use `statfs` to query the filesystem behind a path in their sandbox view.
+The result includes the filesystem type, capacity, and mount flags. Programs can use the type to
+select database behavior for network filesystems before opening a database.
+
+The call resolves paths inside the sandbox's mount namespace. Ungranted files remain absent, and
+read-only binds remain read-only. The result describes the underlying filesystem, so its capacity
+can include storage outside the granted directory.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the surrounding OS. The mount's `nosuid`

@@ -225,6 +225,10 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         number: libc::SYS_fstat,
     },
     PermittedSyscall {
+        name: "statfs",
+        number: libc::SYS_statfs,
+    },
+    PermittedSyscall {
         name: "fsync",
         number: libc::SYS_fsync,
     },
@@ -1221,11 +1225,11 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 111);
+    fn permit_filter_has_112_workload_entries_and_one_installer_entry() {
+        assert_eq!(WORKLOAD_PERMITTED.len(), 112);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 114);
+        assert_eq!(rules.len(), 115);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
