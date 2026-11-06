@@ -92,10 +92,10 @@ a client that takes a command and its arguments apart gets:
 { "mcpServers": { "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] } } }
 ```
 
-A harness entry that sets only the program, `"command": "npx"` with no `args`, is refused for this
-server with `no MCP server declares "npx"; servers on npx: playwright`. Add the
-arguments to the harness entry. The same applies to every `stdio` server whose `command` has
-arguments.
+A harness entry that sets only the program, `"command": "npx"` with no `args`, does not select this
+server. It attempts to run ordinary `npx` inside the agent's sandbox. Add the declared arguments
+to the harness entry to select the MCP server. The same applies to every `stdio` server whose
+`command` has arguments.
 
 The server URL must match the server declared in `box.toml`.
 
@@ -182,7 +182,8 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | Error message (excerpt) or symptom | What to do |
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
-| `no MCP server declares "<command>"` | The harness command or arguments do not match a declared server. Copy its `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| The harness starts an ordinary program instead of its MCP server | Its command does not match a declared server. Copy the full `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| `no MCP server declares "<command>"` | The program is undeclared, or a command on that program cannot expand. Check that the harness uses a declared program, and correct any command expansion named in the error. |
 | Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |
 | `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |

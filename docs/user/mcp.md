@@ -77,7 +77,13 @@ server:
 |---|---|
 | `npx -y @playwright/mcp` | `playwright` |
 | `npx -y @modelcontextprotocol/server-github` | `github` |
-| `npx -y some-other-server` | Nothing. The launch is refused. |
+| `npx --version` | The ordinary `npx` program, inside the agent's sandbox. |
+
+If no declared command matches, the alias runs the next ordinary program on the agent's `PATH`.
+It skips Box's alias directory and retains the agent's existing sandbox grants and environment.
+It receives none of a server's extra sandbox grants or credentials. The program still needs the
+agent's execution and filesystem grants. A mistyped server command takes this same path.
+A policy denial, ambiguous match, or broker failure never falls back.
 
 Words that mean the same thing to the server are still different words. `--port=3000` and
 `--port 3000` don't match, and neither do `~/data` and `/Users/me/data`. Write each argument the same
@@ -255,9 +261,13 @@ The harness gets these errors when it starts a server, and the box keeps running
 
 | Message | Cause |
 |---|---|
-| `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no `command` on that program. Set the harness's command and arguments to the `command` of one of the listed servers in `box.toml`. |
+| `no MCP server declares "<command>"; servers on <program>: <name>, ...` | A command on that program cannot expand, so Box cannot safely select ordinary fallback. Check the declaration named in the error. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
+
+An ordinary fallback reports the program's own exit status. If no ordinary executable exists on
+the agent's `PATH`, the alias reports status 127. If execution fails, it reports status 126.
+Broker failures report status 125.
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 
