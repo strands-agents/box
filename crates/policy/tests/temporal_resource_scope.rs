@@ -71,6 +71,7 @@ fn delivered() -> Outcome<'static> {
         path: "/v1/upload",
         delivery: Delivery::Completed { bytes: 60 },
         status: Some(200),
+        intercepted: true,
     }
 }
 
@@ -78,33 +79,29 @@ fn delivered() -> Outcome<'static> {
 fn temporal_history_uses_the_fixed_identities() {
     let policy = open(FIXED_IDENTITY_BUDGET).expect("policy opens");
 
-    assert!(
-        policy
-            .decide(
-                &GovernedBox::assigned("codex"),
-                &Principal::agent().with_id("worker-1"),
-                &request(),
-            )
-            .is_allow(),
-        "a fresh budget must allow"
+    let (decision, request_id) = policy.decide(
+        &GovernedBox::assigned("codex"),
+        &Principal::agent().with_id("worker-1"),
+        &request(),
     );
+    assert!(decision.is_allow(), "a fresh budget must allow");
 
     policy
         .record(
             &GovernedBox::assigned("codex"),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &delivered(),
         )
         .expect("first outcome records");
 
+    let (decision, request_id) = policy.decide(
+        &GovernedBox::assigned("review"),
+        &Principal::agent().with_id("worker-2"),
+        &request(),
+    );
     assert!(
-        policy
-            .decide(
-                &GovernedBox::assigned("review"),
-                &Principal::agent().with_id("worker-2"),
-                &request(),
-            )
-            .is_allow(),
+        decision.is_allow(),
         "one delivery must remain below the cap"
     );
 
@@ -112,6 +109,7 @@ fn temporal_history_uses_the_fixed_identities() {
         .record(
             &GovernedBox::assigned("review"),
             &Principal::agent().with_id("worker-2"),
+            &request_id.expect("the request records"),
             &delivered(),
         )
         .expect("second outcome records");
@@ -123,6 +121,7 @@ fn temporal_history_uses_the_fixed_identities() {
                 &Principal::agent(),
                 &request(),
             )
+            .0
             .is_allow(),
         "all integration metadata must share the fixed Agent and Resource history"
     );

@@ -16,7 +16,7 @@ use crate::GovernedBox;
 use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
-use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request};
+use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request, RequestId};
 
 /// Binds one policy and egress principal to outbound effect interception.
 pub struct EgressPolicyInterceptor {
@@ -102,26 +102,29 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<(), String> {
-        let Some(frame) = mcp else { return Ok(()) };
+    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<Option<RequestId>, String> {
+        let Some(frame) = mcp else { return Ok(None) };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
         let request = mcp_request(frame);
-        if let Err(reason) = authorize(&self.policy, &self.governed, &self.principal, &request) {
-            // A denied `tools/list` produces no reply, so the server is marked terminal here, and
-            // discovery can finish with that one server degraded.
-            if let McpFrame::List { server, method } = *frame
-                && method == "tools/list"
-            {
-                self.catalogs.list_denied(server);
-                self.report_if_remote_finished();
+        let request_id = match authorize(&self.policy, &self.governed, &self.principal, &request) {
+            Ok(request_id) => request_id,
+            Err(reason) => {
+                // A denied `tools/list` produces no reply, so the server is marked terminal here, and
+                // discovery can finish with that one server degraded.
+                if let McpFrame::List { server, method } = *frame
+                    && method == "tools/list"
+                {
+                    self.catalogs.list_denied(server);
+                    self.report_if_remote_finished();
+                }
+                return Err(format!(
+                    "mcp:call gate (server {:?} method {:?}): {reason}",
+                    diagnostic_context(frame.server()),
+                    diagnostic_context(frame.method())
+                ));
             }
-            return Err(format!(
-                "mcp:call gate (server {:?} method {:?}): {reason}",
-                diagnostic_context(frame.server()),
-                diagnostic_context(frame.method())
-            ));
-        }
+        };
         // Gate two: the namespaced per-tool action, a refinement of the `mcp:call` allow. A tracked
         // server's tool must first be named exactly by its accepted `tools/list`. The refinement then
         // blocks only on an explicit `forbid`, and an unruled tool rides the coarse allow. `McpFrame`
@@ -157,7 +160,7 @@ impl EgressPolicyInterceptor {
                 ));
             }
         }
-        Ok(())
+        Ok(Some(request_id))
     }
 }
 
@@ -167,9 +170,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
         let decision = match effect {
-            // The host, decided before it is resolved. No address exists yet, so an address rule does
-            // not apply here; it applies to the per-address `Connect` that follows.
-            EgressEffectAttempt::Resolve { host, port } => match self.policy.decide(
+            // Name resolution records a request only; each address has its own connect attempt.
+            EgressEffectAttempt::Resolve { host, port } => match self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::Connect {
@@ -178,19 +180,20 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             ) {
-                Decision::Deny {
+                Ok(request_id) => Ok((Some(request_id), None)),
+                Err(Decision::Deny {
                     reason: DenyReason::PolicyPending,
                     ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
+                }) if self.mcp_hosts.contains(*host) => Ok((None, None)),
+                Err(decision) => Err(decision.to_string()),
             },
             EgressEffectAttempt::Connect {
                 host,
                 port,
                 address,
                 ..
-            } => match self.policy.decide(
+            } => authorize(
+                &self.policy,
                 &self.governed,
                 &self.principal,
                 &Request::Connect {
@@ -198,15 +201,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     ip: Some(address.ip()),
                     port: *port,
                 },
-            ) {
-                // Unreachable: a `Connect` never carries `PolicyPending`, so this arm never fires.
-                Decision::Deny {
-                    reason: DenyReason::PolicyPending,
-                    ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
-            },
+            )
+            .map(|request_id| (Some(request_id), None)),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -216,9 +212,9 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 intercepted,
                 mcp,
             } => {
-                // The `http:request` gate. `decide` records to history, so it is called exactly
-                // once here; the `mcp:call` gate below is the second recorded decision.
-                match self.policy.decide(
+                // HTTP and MCP decisions are separate requests, even in one gateway exchange.
+                authorize(
+                    &self.policy,
                     &self.governed,
                     &self.principal,
                     &Request::Http {
@@ -229,44 +225,27 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
                     },
-                ) {
-                    // Unreachable: an `Http` request never carries `PolicyPending`, so this arm never
-                    // fires.
-                    Decision::Deny {
-                        reason: DenyReason::PolicyPending,
-                        ..
-                    } if self.mcp_hosts.contains(*host)
-                        && !matches!(
-                            mcp,
-                            Some(
-                                McpFrame::ToolCall { .. }
-                                    | McpFrame::PromptGet { .. }
-                                    | McpFrame::ResourceRead { .. }
-                            )
-                        ) =>
-                    {
-                        Ok(())
-                    }
-                    decision @ Decision::Deny { .. } => {
-                        Err(format!("http:request gate: {decision}"))
-                    }
-                    // Allowed; the `mcp:call` gate and per-tool refinement run on the Ready authority.
-                    Decision::Allow { .. } => self.mcp_gates(mcp),
-                }
+                )
+                .map_err(|reason| format!("http:request gate: {reason}"))
+                .and_then(|request_id| {
+                    self.mcp_gates(mcp)
+                        .map(|mcp_request_id| (Some(request_id), mcp_request_id))
+                })
             }
-            // The release of a reply to the workload decides nothing and records nothing. The
-            // reply reaches history once, on the `HttpRequest` permit, as `output.status`.
-            EgressEffectAttempt::ResponseRelease { .. } => Ok(()),
+            // Response release records nothing: the HTTP permit already records the reply.
+            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, None)),
             _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
-            .map(|()| {
+            .map(|(request_id, mcp_request_id)| {
                 Box::new(LocalPolicyEffectPermit {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
                     governed: self.governed.clone(),
                     attempt: AttemptIdentity::capture(effect),
+                    request_id,
+                    mcp_request_id,
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
@@ -378,6 +357,9 @@ enum AttemptIdentity {
         port: u16,
         method: String,
         path: String,
+        /// Whether the gateway decrypted a TLS exchange, carried from the attempt so the
+        /// response leg reports the transport the request leg reported.
+        intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
     },
@@ -404,6 +386,7 @@ impl AttemptIdentity {
                 port,
                 method,
                 path,
+                intercepted,
                 mcp,
                 ..
             } => Self::Http {
@@ -411,6 +394,7 @@ impl AttemptIdentity {
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
+                intercepted: *intercepted,
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -451,12 +435,18 @@ struct LocalPolicyEffectPermit {
     /// Integration metadata for the box this boundary serves.
     governed: GovernedBox,
     attempt: AttemptIdentity,
+    request_id: Option<RequestId>,
+    mcp_request_id: Option<RequestId>,
 }
 
 impl LocalPolicyEffectPermit {
     /// Submit this effect's history, translating the proxy's outcome into the policy
     /// vocabulary.
     fn submit(&self, outcome: EgressEffectOutcome) -> io::Result<()> {
+        let Some(request_id) = self.request_id.as_ref() else {
+            // Response release and bootstrap resolution have no outcome event.
+            return Ok(());
+        };
         let delivery = delivery_of(outcome);
         let recorded = match (&self.attempt, delivery) {
             (
@@ -469,6 +459,7 @@ impl LocalPolicyEffectPermit {
             ) => self.policy.record(
                 &self.governed,
                 &self.principal,
+                request_id,
                 &Outcome::Connect {
                     host,
                     port: *port,
@@ -485,6 +476,7 @@ impl LocalPolicyEffectPermit {
                     port,
                     method,
                     path,
+                    intercepted,
                     mcp,
                 },
                 Some(delivery),
@@ -492,6 +484,7 @@ impl LocalPolicyEffectPermit {
                 let http = self.policy.record(
                     &self.governed,
                     &self.principal,
+                    request_id,
                     &Outcome::Http {
                         host,
                         port: *port,
@@ -499,6 +492,7 @@ impl LocalPolicyEffectPermit {
                         path,
                         delivery,
                         status: reply_status_of(outcome),
+                        intercepted: *intercepted,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -512,11 +506,12 @@ impl LocalPolicyEffectPermit {
                 // call is a `response` whatever the server then replies (a JSON-RPC error is still
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
-                match mcp {
-                    Some(mcp) if !matches!(delivery, Delivery::Failed) => {
-                        http.and(self.policy.record(
+                match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
+                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
+                        .and(self.policy.record(
                             &self.governed,
                             &self.principal,
+                            mcp_request_id,
                             &Outcome::Mcp {
                                 server: &mcp.server,
                                 method: &mcp.method,
@@ -524,8 +519,7 @@ impl LocalPolicyEffectPermit {
                                 prompt: mcp.prompt.as_deref(),
                                 uri: mcp.uri.as_deref(),
                             },
-                        ))
-                    }
+                        )),
                     _ => http,
                 }
             }
@@ -635,11 +629,10 @@ fn authorize(
     governed: &GovernedBox,
     principal: &Principal,
     request: &Request<'_>,
-) -> Result<(), String> {
-    match policy.decide(governed, principal, request) {
-        Decision::Allow { .. } => Ok(()),
-        decision @ Decision::Deny { .. } => Err(decision.to_string()),
-    }
+) -> Result<RequestId, String> {
+    policy
+        .admit(governed, principal, request)
+        .map_err(|decision| decision.to_string())
 }
 
 fn diagnostic_context(value: &str) -> String {
@@ -719,6 +712,38 @@ mod tests {
             interceptor,
             _history: history,
         }
+    }
+
+    #[test]
+    fn http_and_mcp_outcomes_keep_their_own_ids_when_calls_finish_out_of_order() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let fixture = interceptor(DEMO_PERMITS);
+        let path = fixture._history.path().join("dogwood.redb");
+        let attempt = mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#);
+        let first = fixture.intercept(&attempt).expect("first call admitted");
+        let second = fixture
+            .intercept(&attempt)
+            .expect("identical second call admitted");
+        second
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("second records");
+        first
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("first records");
+        drop(fixture.interceptor);
+        let events = events(&path);
+        assert_eq!(
+            events.len(),
+            8,
+            "two HTTP and two MCP request/response pairs"
+        );
+        assert_pair(&events[2], &events[4]);
+        assert_pair(&events[3], &events[5]);
+        assert_pair(&events[0], &events[6]);
+        assert_pair(&events[1], &events[7]);
+        assert_eq!(events[0].action(), "http:request");
+        assert_eq!(events[1].action(), "mcp:call");
+        assert_eq!(events[..4].iter().map(id).collect::<BTreeSet<_>>().len(), 4);
     }
 
     /// The demo server's `tools/list`, which generates the typed `demo::Action::"add"` action.
@@ -1318,7 +1343,7 @@ mod tests {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && context.input.ip like "10.*" };"#,
+               when { context.input has ip4 && context.input.ip4 like "10.*" };"#,
         );
         assert!(
             fixture
@@ -1583,14 +1608,15 @@ mod tests {
         }
     }
 
-    /// A forbid on `ip` refuses the pinned address and leaves every other address to the permit.
+    /// A clause per family refuses the pinned address and leaves every other address to the
+    /// permit. One `ip4` clause covers every IPv6 encoding that carries the address.
     #[test]
     fn an_address_forbid_refuses_only_its_addresses() {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && (context.input.ip like "169.254.*"
-                      || context.input.ip == "fd00:ec2::254") };"#,
+               when { (context.input has ip4 && context.input.ip4 like "169.254.*")
+                      || (context.input has ip6 && context.input.ip6 == "fd00:ec2::254") };"#,
         );
         for refused in [
             "169.254.169.254:80",
@@ -1598,6 +1624,8 @@ mod tests {
             "[fd00:ec2::254]:80",
             "[::ffff:169.254.169.254]:80",
             "[2002:a9fe:a9fe::]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[::ffff:0:a9fe:a9fe]:80",
         ] {
             assert!(
                 fixture
@@ -1618,7 +1646,32 @@ mod tests {
         }
     }
 
-    /// `ip` is a string, so the Cedar `ipaddr` form fails when the policy loads.
+    /// An `ip6` clause refuses the translator prefix itself, which no `ip4` clause can state: the
+    /// wrapped address is reachable under a different IPv6 prefix.
+    #[test]
+    fn a_translator_prefix_forbid_refuses_the_wire_form_and_not_the_address_it_carries() {
+        let fixture = interceptor(
+            r#"permit(principal, action == Box::Action::"net:connect", resource);
+               @id("no_nat64_translator")
+               forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input has ip6 && context.input.ip6 like "64:ff9b::*" };"#,
+        );
+        for refused in ["[64:ff9b::5db8:d822]:443", "[64:ff9b::a9fe:a9fe]:80"] {
+            assert!(
+                fixture
+                    .intercept(&connect_attempt(refused.parse().unwrap()))
+                    .is_err(),
+                "{refused} routes through the translator"
+            );
+        }
+        for admitted in ["93.184.216.34:443", "[2002:5db8:d822::]:443"] {
+            fixture
+                .intercept(&connect_attempt(admitted.parse().unwrap()))
+                .unwrap_or_else(|error| panic!("{admitted} is admitted: {error}"));
+        }
+    }
+
+    /// `ip4` is a string, so the Cedar `ipaddr` form fails when the policy loads.
     #[test]
     fn an_ipaddr_rule_is_refused_when_the_policy_loads() {
         let history = tempfile::tempdir().expect("history directory");
@@ -1626,7 +1679,7 @@ mod tests {
             vec![Policy {
                 origin: PathBuf::from("adapter-test.cedar"),
                 text: r#"forbid(principal, action == Box::Action::"net:connect", resource)
-                    when { context.input has ip && context.input.ip.isInRange(ip("10.0.0.0/8")) };"#
+                    when { context.input has ip4 && context.input.ip4.isInRange(ip("10.0.0.0/8")) };"#
                     .to_string(),
             }],
             &history.path().join("dogwood.redb"),
@@ -1634,7 +1687,10 @@ mod tests {
             panic!("an ipaddr comparison does not load");
         };
         let refusal = refusal.to_string();
-        assert!(refusal.contains("schema validation"), "{refusal}");
+        assert!(
+            refusal.contains("expected ipaddr but saw String"),
+            "{refusal}"
+        );
     }
 
     /// The request leg projects `port` and `body_bytes` into its decision. No rule runs on the
@@ -1704,6 +1760,58 @@ mod tests {
         assert!(
             interceptor.intercept(&request(false)).is_err(),
             "a plain-HTTP request must not satisfy a rule that requires intercepted"
+        );
+    }
+
+    /// A `http:request::response` reports the transport the exchange really used. A plain-HTTP
+    /// exchange records `intercepted: false`, and a TLS-intercepted exchange records `true`.
+    #[test]
+    fn the_response_leg_reports_the_real_transport() {
+        // One `::response` with `input.intercepted: true` arms the forbid. A plain-HTTP
+        // exchange must leave it unarmed; a TLS-intercepted exchange must arm it.
+        let tls_only_history = || {
+            interceptor(
+                r#"permit(principal, action == Box::Action::"http:request", resource);
+                   forbid(principal, action == Box::Action::"http:request", resource)
+                   when temporal {
+                     formerly within 3600s (
+                       Box::Action::"http:request"::response{ input.intercepted: true }
+                     )
+                   };"#,
+            )
+        };
+        let request = |intercepted| EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "POST",
+            path: "/v1/messages",
+            body_bytes: 0,
+            intercepted,
+            mcp: None,
+        };
+        let exchange = |fixture: &InterceptorFixture, intercepted| {
+            fixture
+                .intercept(&request(intercepted))
+                .expect("the permit admits the request")
+                .record_outcome(EgressEffectOutcome::Replied {
+                    accepted_bytes: 10,
+                    status: 200,
+                })
+                .expect("the reply records");
+        };
+
+        let plain = tls_only_history();
+        exchange(&plain, false);
+        plain
+            .intercept(&request(false))
+            .expect("a plain-HTTP response records intercepted: false, so the forbid stays unarmed")
+            .mark_indeterminate();
+
+        let tls = tls_only_history();
+        exchange(&tls, true);
+        assert!(
+            tls.intercept(&request(true)).is_err(),
+            "a TLS-intercepted response records intercepted: true, which arms the forbid"
         );
     }
 }

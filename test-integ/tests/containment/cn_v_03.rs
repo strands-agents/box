@@ -21,7 +21,7 @@ det_case! {
     id:   "CN-V-03",
     desc: "Leaf symlink escape: a link inside a tool's read grant to a secret outside it yields no bytes and takes no write; a link to a file inside the grant reads; the secret is unchanged on the host",
     run: |b| {
-        let probe = b.compile_probe("fsprobe-v03", PROBE);
+        let probe = b.install_tool(&b.compile_probe("fsprobe-v03", PROBE));
         let root = b.workspace().parent().unwrap().to_path_buf();
         let grant = root.join("v03-grant");
         std::fs::create_dir(&grant).expect("DET_ERROR: the tool's grant");

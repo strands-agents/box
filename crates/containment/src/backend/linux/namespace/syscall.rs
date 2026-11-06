@@ -595,19 +595,45 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "changes mount attributes, so a read-only bind could be made \
                  writable; absent on 5.10 but named so a newer kernel is covered",
     },
-    // KNOWN GAP: `open_tree_attr` (467, kernel >= 6.15) clones a mount and sets
-    // attributes in one call, and is not in this table — the pinned libc 0.2.189
-    // exports `SYS_open_tree_attr` for no supported arch, and a hand-written
-    // number is against this crate's rule. Two backstops hold meanwhile: every
-    // capability set is cleared and `no_new_privs` is set, so the whole mount
-    // API returns `EPERM`. Add the entry when libc carries the constant.
+    // The permit filter refuses unlisted mount calls, including `open_tree_attr`.
     // Privilege and identity surfaces the namespaces do not close.
+    MediatedSyscall {
+        name: "fchmod",
+        number: libc::SYS_fchmod,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat",
+        number: libc::SYS_fchmodat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat2",
+        number: FCHMODAT2,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "openat",
+        number: libc::SYS_openat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    // This checks explicit directory modes, so ordinary subdirectories can still
+    // inherit the parent's group and set-group-ID bit.
+    MediatedSyscall {
+        name: "mkdirat",
+        number: libc::SYS_mkdirat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
     MediatedSyscall {
         name: "ioctl",
         number: libc::SYS_ioctl,
         disposition: Disposition::ArgumentScoped,
-        reason: "terminal input injection can feed commands to the operator's shell \
-                 through an inherited terminal",
+        reason: "terminal requests can change shared input, display, or console state",
     },
     MediatedSyscall {
         name: "setuid",
@@ -815,8 +841,20 @@ impl SyscallPolicy {
         &self,
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
+        if entry.number == libc::SYS_fchmod {
+            return special_file_mode_rules(1, None);
+        }
+        if entry.number == libc::SYS_fchmodat || entry.number == FCHMODAT2 {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_mkdirat {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_openat {
+            return special_file_mode_rules(3, Some(2));
+        }
         if entry.number == libc::SYS_ioctl {
-            return terminal_input_injection_rules();
+            return terminal_control_rules();
         }
         if entry.number == libc::SYS_socket {
             return self.socket_rules();
@@ -870,21 +908,101 @@ impl SyscallPolicy {
     }
 }
 
-fn terminal_input_injection_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    Ok(vec![
+fn special_file_mode_rules(
+    mode_argument: u8,
+    flags_argument: Option<u8>,
+) -> Result<Vec<SeccompRule>, ContainmentError> {
+    let mut rules = Vec::new();
+    for bit in [u64::from(libc::S_ISUID), u64::from(libc::S_ISGID)] {
+        let mode = SeccompCondition::new(
+            mode_argument,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(bit),
+            bit,
+        )
+        .map_err(filter_error)?;
+        if let Some(argument) = flags_argument {
+            for flag in [libc::O_CREAT, libc::O_TMPFILE] {
+                let flag = flag as u64;
+                let flags = SeccompCondition::new(
+                    argument,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::MaskedEq(flag),
+                    flag,
+                )
+                .map_err(filter_error)?;
+                rules.push(SeccompRule::new(vec![mode.clone(), flags]).map_err(filter_error)?);
+            }
+        } else {
+            rules.push(SeccompRule::new(vec![mode]).map_err(filter_error)?);
+        }
+    }
+    Ok(rules)
+}
+
+fn terminal_control_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    // Linux console request numbers from include/uapi/linux/{kd,vt}.h.
+    const KDSETMODE: u32 = 0x4b3a;
+    const KDSKBMODE: u32 = 0x4b45;
+    const KDSKBMETA: u32 = 0x4b63;
+    const KDSKBLED: u32 = 0x4b65;
+    const KDSETLED: u32 = 0x4b32;
+    const KDSKBDIACR: u32 = 0x4b4b;
+    const KDSKBDIACRUC: u32 = 0x4bfb;
+    const KDFONTOP: u32 = 0x4b72;
+    const PIO_CMAP: u32 = 0x4b71;
+    const PIO_SCRNMAP: u32 = 0x4b41;
+    const PIO_UNISCRNMAP: u32 = 0x4b6a;
+    const PIO_UNIMAPCLR: u32 = 0x4b68;
+    const PIO_UNIMAP: u32 = 0x4b67;
+    const VT_SETMODE: u32 = 0x5602;
+    const VT_ACTIVATE: u32 = 0x5606;
+    const VT_SETACTIVATE: u32 = 0x560f;
+    const VT_RELDISP: u32 = 0x5605;
+    const VT_DISALLOCATE: u32 = 0x5608;
+    const VT_RESIZE: u32 = 0x5609;
+    const VT_RESIZEX: u32 = 0x560a;
+
+    [
+        libc::TIOCSTI as u32,
+        libc::TIOCLINUX as u32,
+        libc::TIOCSETD as u32,
+        KDSETMODE,
+        KDSKBMODE,
+        KDSKBMETA,
+        KDSKBLED,
+        KDSETLED,
+        KDSKBDIACR,
+        KDSKBDIACRUC,
+        KDFONTOP,
+        PIO_CMAP,
+        PIO_SCRNMAP,
+        PIO_UNISCRNMAP,
+        PIO_UNIMAPCLR,
+        PIO_UNIMAP,
+        VT_SETMODE,
+        VT_ACTIVATE,
+        VT_SETACTIVATE,
+        VT_RELDISP,
+        VT_DISALLOCATE,
+        VT_RESIZE,
+        VT_RESIZEX,
+    ]
+    .into_iter()
+    .map(|request| {
         SeccompRule::new(vec![
-            // Linux interprets the ioctl request as an unsigned int. Match its low
-            // 32 bits so nonzero upper bits cannot bypass the refusal.
+            // Linux interprets the ioctl request as an unsigned 32-bit integer.
             SeccompCondition::new(
                 1,
                 SeccompCmpArgLen::Dword,
                 SeccompCmpOp::Eq,
-                u64::from(libc::TIOCSTI as u32),
+                u64::from(request),
             )
             .map_err(filter_error)?,
         ])
-        .map_err(filter_error)?,
-    ])
+        .map_err(filter_error)
+    })
+    .collect()
 }
 
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1124,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn the_file_mode_calls_and_the_creation_mask_are_permitted() {
+    fn file_mode_calls_are_restricted_but_the_creation_mask_is_not() {
         for required in ["fchmod", "fchmodat", "fchmodat2", "umask"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1134,7 +1252,15 @@ mod tests {
                  EPERM, and a caller that tries the newest spelling first would read that as a \
                  real failure instead of falling back"
             );
-            assert!(!MEDIATED.iter().any(|entry| entry.name == required));
+            let restriction = MEDIATED.iter().find(|entry| entry.name == required);
+            if required == "umask" {
+                assert!(restriction.is_none());
+            } else {
+                assert!(matches!(
+                    restriction.unwrap().disposition,
+                    Disposition::ArgumentScoped
+                ));
+            }
         }
     }
 

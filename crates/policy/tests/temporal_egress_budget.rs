@@ -47,6 +47,7 @@ fn delivered(bytes: usize) -> Outcome<'static> {
         path: "/v1/upload",
         delivery: Delivery::Completed { bytes },
         status: Some(200),
+        intercepted: true,
     }
 }
 
@@ -56,31 +57,40 @@ fn budget_allows_until_recorded_deliveries_exceed_it() {
     let egress = Principal::agent();
 
     // Nothing has egressed: the sum is 0, under budget.
+    let (decision, request_id) =
+        policy.decide(&GovernedBox::assigned("test-box"), &egress, &request(60));
     assert!(
-        policy
-            .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
-            .is_allow(),
+        decision.is_allow(),
         "first request is under the empty budget"
     );
     policy
-        .record(&GovernedBox::assigned("test-box"), &egress, &delivered(60))
+        .record(
+            &GovernedBox::assigned("test-box"),
+            &egress,
+            &request_id.expect("the request records"),
+            &delivered(60),
+        )
         .expect("history records");
 
     // 60 delivered, still under 100.
-    assert!(
-        policy
-            .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
-            .is_allow(),
-        "second request is still under budget"
-    );
+    let (decision, request_id) =
+        policy.decide(&GovernedBox::assigned("test-box"), &egress, &request(60));
+    assert!(decision.is_allow(), "second request is still under budget");
     policy
-        .record(&GovernedBox::assigned("test-box"), &egress, &delivered(60))
+        .record(
+            &GovernedBox::assigned("test-box"),
+            &egress,
+            &request_id.expect("the request records"),
+            &delivered(60),
+        )
         .expect("history records");
 
     // 120 delivered: over budget. This is the assertion the whole integration exists
     // for — a request identical to the two that were allowed is now denied, purely
     // because of recorded history.
-    let verdict = policy.decide(&GovernedBox::assigned("test-box"), &egress, &request(60));
+    let verdict = policy
+        .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
+        .0;
     assert!(
         !verdict.is_allow(),
         "third request must be denied by the byte budget, got {verdict:?}"
@@ -100,6 +110,7 @@ fn an_unrecorded_delivery_does_not_consume_budget() {
         assert!(
             policy
                 .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
+                .0
                 .is_allow(),
             "without recorded history the budget is never consumed"
         );
@@ -118,18 +129,22 @@ fn a_denied_request_still_advances_history() {
 
     // Exhaust the budget through recorded deliveries.
     for _ in 0..2 {
-        assert!(
-            policy
-                .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
-                .is_allow()
-        );
+        let (decision, request_id) =
+            policy.decide(&GovernedBox::assigned("test-box"), &egress, &request(60));
+        assert!(decision.is_allow());
         policy
-            .record(&GovernedBox::assigned("test-box"), &egress, &delivered(60))
+            .record(
+                &GovernedBox::assigned("test-box"),
+                &egress,
+                &request_id.expect("the request records"),
+                &delivered(60),
+            )
             .expect("records");
     }
     assert!(
         !policy
             .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
+            .0
             .is_allow()
     );
 
@@ -139,6 +154,7 @@ fn a_denied_request_still_advances_history() {
     assert!(
         !policy
             .decide(&GovernedBox::assigned("test-box"), &egress, &request(60))
+            .0
             .is_allow(),
         "a denial is stable: denied attempts add no delivered bytes"
     );
@@ -158,7 +174,9 @@ fn a_non_temporal_request_is_unaffected_by_the_budget() {
     };
     // No `permit` covers `net:connect`, so this denies by default — not by budget.
     assert!(matches!(
-        policy.decide(&GovernedBox::assigned("test-box"), &egress, &connect),
+        policy
+            .decide(&GovernedBox::assigned("test-box"), &egress, &connect)
+            .0,
         Decision::Deny { .. }
     ));
 }
@@ -179,24 +197,33 @@ fn a_reply_adds_nothing_to_an_outbound_budget() {
     let egress = Principal::agent();
     let governed = GovernedBox::assigned("test-box");
 
-    assert!(
-        policy.decide(&governed, &egress, &request(60)).is_allow(),
-        "nothing has egressed yet"
-    );
+    let (decision, request_id) = policy.decide(&governed, &egress, &request(60));
+    assert!(decision.is_allow(), "nothing has egressed yet");
     policy
-        .record(&governed, &egress, &delivered(60))
+        .record(
+            &governed,
+            &egress,
+            &request_id.expect("the request records"),
+            &delivered(60),
+        )
         .expect("the exchange records once, with its reply");
 
+    let (decision, request_id) = policy.decide(&governed, &egress, &request(60));
     assert!(
-        policy.decide(&governed, &egress, &request(60)).is_allow(),
+        decision.is_allow(),
         "one exchange delivering 60 bytes must charge 60 against a budget of 100, whatever the \
          reply carried"
     );
     policy
-        .record(&governed, &egress, &delivered(60))
+        .record(
+            &governed,
+            &egress,
+            &request_id.expect("the request records"),
+            &delivered(60),
+        )
         .expect("the second exchange records");
     assert!(
-        !policy.decide(&governed, &egress, &request(60)).is_allow(),
+        !policy.decide(&governed, &egress, &request(60)).0.is_allow(),
         "120 delivered bytes exceed the budget at the same threshold as before"
     );
 }
@@ -209,11 +236,13 @@ fn a_delivery_with_no_reply_still_charges_the_budget() {
     let governed = GovernedBox::assigned("test-box");
 
     for _ in 0..2 {
-        assert!(policy.decide(&governed, &egress, &request(60)).is_allow());
+        let (decision, request_id) = policy.decide(&governed, &egress, &request(60));
+        assert!(decision.is_allow());
         policy
             .record(
                 &governed,
                 &egress,
+                &request_id.expect("the request records"),
                 &Outcome::Http {
                     host: "api.example.com",
                     port: 443,
@@ -221,12 +250,13 @@ fn a_delivery_with_no_reply_still_charges_the_budget() {
                     path: "/v1/upload",
                     delivery: Delivery::Completed { bytes: 60 },
                     status: None,
+                    intercepted: true,
                 },
             )
             .expect("a reply-less delivery records");
     }
     assert!(
-        !policy.decide(&governed, &egress, &request(60)).is_allow(),
+        !policy.decide(&governed, &egress, &request(60)).0.is_allow(),
         "bytes that left the box count whether or not a reply came back"
     );
 }

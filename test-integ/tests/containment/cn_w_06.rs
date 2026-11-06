@@ -163,17 +163,18 @@ det_case! {
         assert!(host.status.success(), "The contained build output must run on the host: {host:?}");
         assert!(String::from_utf8_lossy(&host.stdout).contains("CARGO_OUTPUT_RAN"),
             "The host must run the contained build output: {host:?}");
+        let installed = b.install_tool(&built);
         let hello = format!(
             "\n[tool.hello]\ncommand = [{}]\nworkspace = {}\n\
              [tool.hello.filesystem]\nread = [{}]\n",
-            quoted(&built), quoted(&crate_root),
+            quoted(&installed), quoted(&crate_root),
             roots(libraries.into_iter().chain([crate_root.clone()])),
         );
         let edit = |text: String| text + &tool + &hello;
-        let r = b.run_mediated_with_config(edit, &shell(&built));
+        let r = b.run_mediated_with_config(edit, &shell(&installed));
         assert_eq!(r.rc, 0, "Declared output must run: {}", r.out);
         r.assert_contains("CARGO_OUTPUT_RAN");
-        r.assert_spawn_permitted_exactly(&journal_path(&built));
+        r.assert_spawn_permitted_exactly(&journal_path(&installed));
         let stranger = built.with_file_name("other");
         std::fs::copy(&built, &stranger).expect("DET_ERROR: copy the undeclared output");
         let r = b.run_mediated_with_config(edit, &shell(&stranger));

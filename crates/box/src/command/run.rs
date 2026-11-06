@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use policy::Policy;
+use policy::{Policy, ToolGrammars};
 
 use crate::error::{BoxError, ConfigError, DaemonError};
 use crate::record::config::process::ProcessSpec;
@@ -13,6 +13,7 @@ use crate::record::config::{
     AuthoritySource, ConfigureRequest, Record, RunContract, trailing_arguments,
 };
 use crate::record::layout::BoxRoot;
+use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
 };
@@ -30,6 +31,7 @@ struct LockedRun {
     /// The arguments `run` appends to `[agent] command`.
     trailing: Vec<String>,
     policy: Option<Policy>,
+    grammars: ToolGrammars,
     sources: Vec<AuthoritySource>,
     owned: Lock,
 }
@@ -67,6 +69,42 @@ fn write_credential_stores(
                 output,
                 "strands-box: {table}: exposes {spelling} ({})",
                 kind.key()
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
+/// `shell:spawn`.
+fn write_grammar_disclosures(
+    record: &Record,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::called_name;
+    let programs: std::collections::BTreeSet<&str> = record
+        .tool
+        .values()
+        .filter(|spec| spec.grammar.is_some())
+        .map(called_name)
+        .collect();
+    let tables = record
+        .tool
+        .iter()
+        .map(|(label, spec)| (format!("[tool.{label}]"), spec))
+        .chain(
+            record
+                .contained_mcp
+                .iter()
+                .map(|(label, contained)| (format!("[mcp.{label}]"), &contained.spec)),
+        );
+    for (table, spec) in tables {
+        let program = called_name(spec);
+        if programs.contains(program) {
+            writeln!(
+                output,
+                "strands-box: {table}: a spawn of `{program}` is decided by its tool grammar, and \
+                 no `shell:spawn` rule applies to it"
             )?;
         }
     }
@@ -117,9 +155,10 @@ async fn hosted(
     signals: Option<crate::run::contain::supervise::Signals>,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
-    let subject = policy_subject(&sources);
+    let subject = telemetry::policy_subject(&sources);
     let operator = crate::record::config::policy_operator()?;
-    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources) {
+    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
+    {
         Ok(engine) => {
             for warning in engine.warnings() {
                 eprintln!("strands-box: warning: {warning}");
@@ -158,11 +197,20 @@ async fn hosted(
         .clone()
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
+    let commands = Arc::new(ConfiguredCommands::load(&locked.record)?);
+    let policy = Arc::new(HostedBox::bind_tool_grammars(
+        policy,
+        &locked.record,
+        &commands,
+    )?);
+    write_grammar_disclosures(&locked.record, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
         policy,
+        commands,
         collector,
         &locked.sources,
         locked.owned,
@@ -284,6 +332,7 @@ fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
         workspace,
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
+        grammars: request.grammars,
         sources: request.sources,
         owned,
     })
@@ -300,23 +349,6 @@ fn acquire_run_lock(root: &BoxRoot) -> Result<Lock, BoxError> {
         }
         .into()
     })
-}
-
-/// Which policy a control record names, by file name rather than by path.
-fn policy_subject(sources: &[Policy]) -> String {
-    if sources.is_empty() {
-        return "<no authored policy>".to_string();
-    }
-    sources
-        .iter()
-        .map(|source| {
-            source.origin.file_name().map_or_else(
-                || source.origin.to_string_lossy().into_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn project_matches_record(request: &ConfigureRequest, root: &BoxRoot) -> Result<bool, BoxError> {
@@ -340,6 +372,8 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -366,6 +400,7 @@ mod tests {
                 ..Filesystem::default()
             },
             network: None,
+            grammar: None,
         }
     }
 
@@ -387,6 +422,44 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws (read)\n\
              strands-box: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
+        );
+    }
+
+    #[test]
+    fn startup_discloses_each_tool_that_a_grammar_decides() {
+        let git: ProcessSpec =
+            toml::from_str("command = [\"/usr/bin/git\"]\n[grammar]\nformat = 1\n")
+                .expect("the tool parses");
+        let record = record_with(
+            None,
+            BTreeMap::from([
+                ("git".to_string(), git),
+                (
+                    "brew_git".to_string(),
+                    spec("/opt/homebrew/bin/git", &[], &[]),
+                ),
+                ("make".to_string(), spec("make", &[], &[])),
+            ]),
+        );
+        let mut record = record;
+        record.contained_mcp.insert(
+            "wrapped".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: spec("/opt/wrap/git", &[], &[]),
+            },
+        );
+        let mut output = Vec::new();
+
+        write_grammar_disclosures(&record, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.brew_git]: a spawn of `git` is decided by its tool grammar, and \
+             no `shell:spawn` rule applies to it\n\
+             strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it\n\
+             strands-box: [mcp.wrapped]: a spawn of `git` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it\n"
         );
     }
 

@@ -3,30 +3,38 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
+use cedar_policy::EntityUid;
 use dogwood_local_engine::DurableError;
 
 use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
-    DogwoodEngine, check_canonical_policy_set, check_policy_source, parse_policy_source,
-    refuse_input_across_families_before_discovery, validate_canonical_policy_set,
+    DogwoodEngine, check_canonical_policy_set, expand_policy_source,
+    refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
 };
-use crate::schema::{ActionIdentity, GovernedBox};
+use crate::request::ActionRequest;
+use crate::schema::{
+    ActionIdentity, GovernedBox, composed_action_schema, mcp_action_namespace, mcp_tool_action,
+};
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request};
+use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request, RequestId};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
     ordinal: usize,
     expanded_source: String,
+    /// The per-tool actions the head names, decoded at parse time.
+    head_tools: BTreeSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
 struct ProposalState {
     operator: Operator,
     candidates: Vec<CandidatePolicy>,
+    grammar_schemas: Vec<String>,
     schemas: BTreeMap<String, String>,
     ready: BTreeSet<usize>,
     pending: BTreeMap<usize, String>,
@@ -70,8 +78,19 @@ impl Authority {
         mcp_schemas: &[String],
         history: &Path,
     ) -> Result<Self, PolicyError> {
-        let (engine, warnings) = DogwoodEngine::open_with_mcp_schemas(
+        Self::open_complete_with_grammars(sources, &[], mcp_schemas, history)
+    }
+
+    /// Opens a ready authority with a complete policy set, tool grammar schemas, and MCP schemas.
+    pub(super) fn open_complete_with_grammars(
+        sources: Vec<Policy>,
+        grammar_schemas: &[String],
+        mcp_schemas: &[String],
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let (engine, warnings) = DogwoodEngine::open_with_schemas(
             &authored(&sources),
+            grammar_schemas,
             mcp_schemas,
             history,
             &Operator::unanchored(),
@@ -94,18 +113,26 @@ impl Authority {
         sources: Vec<Policy>,
         history: &Path,
     ) -> Result<Self, PolicyStagingError> {
-        Self::open_staged_with_engine(operator, sources, DogwoodEngine::open_for_staging(history)?)
+        Self::open_staged_with_engine(
+            operator,
+            sources,
+            Vec::new(),
+            DogwoodEngine::open_for_staging(history)?,
+        )
     }
 
+    /// Opens a staging authority. Each schema set holds `grammar_schemas` below the MCP schemas.
     pub(super) fn open_staged_file(
         operator: &Operator,
         sources: Vec<Policy>,
+        grammar_schemas: Vec<String>,
         history: File,
         label: std::path::PathBuf,
     ) -> Result<Self, PolicyStagingError> {
         Self::open_staged_with_engine(
             operator,
             sources,
+            grammar_schemas,
             DogwoodEngine::open_for_staging_file(history, label)?,
         )
     }
@@ -113,66 +140,61 @@ impl Authority {
     fn open_staged_with_engine(
         operator: &Operator,
         sources: Vec<Policy>,
+        grammar_schemas: Vec<String>,
         mut engine: DogwoodEngine,
     ) -> Result<Self, PolicyStagingError> {
-        let candidates = parse_policy_source(&authored(&sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect::<Vec<_>>();
+        let candidates = candidates(&authored(&sources)).map_err(Refused::into_error)?;
         let mut proposal = ProposalState {
             operator: operator.clone(),
             candidates,
+            grammar_schemas,
             schemas: BTreeMap::new(),
             ready: BTreeSet::new(),
             pending: BTreeMap::new(),
         };
         let complete = proposal.complete_policy_set();
-        refuse_input_across_families_before_discovery(&complete).map_err(Refused::into_error)?;
-        let (readiness, pending_tools, warnings) =
-            match validate_canonical_policy_set(&complete, &[], operator, &[]) {
-                Ok((effective_schema, warnings)) => {
-                    engine
-                        .commit_staged(&complete, effective_schema)
-                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                    proposal.mark_all_ready();
-                    (Readiness::Ready, BTreeSet::new(), warnings)
-                }
-                Err(
-                    inert @ (PolicyError::Spelling(_)
-                    | PolicyError::InputAcrossFamilies(_)
-                    | PolicyError::SharedRuleId(_)
-                    | PolicyError::ReservedAction(_)
-                    | PolicyError::InertTemporalPermit(_)),
-                ) => {
-                    return Err(inert.into());
-                }
-                Err(_) => {
-                    proposal.classify(&[])?;
-                    // Serve the schema-independent subset while typed schemas stage
-                    // (`Discovering`), instead of denying every request. A per-tool rule whose server
-                    // never stages (its `tools/list` is denied) is not refused here;
-                    // `finish_mcp_discovery` degrades that one server instead.
-                    let subset = proposal.ready_policy_set();
-                    let (effective_schema, warnings) = validate_canonical_policy_set(
-                        &subset,
-                        &[],
-                        operator,
-                        &proposal.ready_positions(),
-                    )?;
-                    engine
-                        .commit_staged(&subset, effective_schema)
-                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                    (
-                        Readiness::Discovering,
-                        pending_typed_tools(&proposal),
-                        warnings,
-                    )
-                }
-            };
+        refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
+        let (readiness, pending_tools, warnings) = match validate_canonical_policy_set(
+            &complete,
+            &proposal.grammar_schemas,
+            &[],
+            operator,
+            &[],
+        ) {
+            Ok((effective_schema, warnings)) => {
+                engine
+                    .commit_staged(&complete, effective_schema)
+                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                proposal.mark_all_ready();
+                (Readiness::Ready, BTreeSet::new(), warnings)
+            }
+            Err(inert) if is_inert(&inert) => {
+                return Err(inert.into());
+            }
+            Err(_) => {
+                proposal.classify(&[])?;
+                // Serve the schema-independent subset while typed schemas stage
+                // (`Discovering`), instead of denying every request. A per-tool rule whose server
+                // never stages (its `tools/list` is denied) is not refused here;
+                // `finish_mcp_discovery` degrades that one server instead.
+                let subset = proposal.ready_policy_set();
+                let (effective_schema, warnings) = validate_canonical_policy_set(
+                    &subset,
+                    &proposal.grammar_schemas,
+                    &[],
+                    operator,
+                    &proposal.ready_positions(),
+                )?;
+                engine
+                    .commit_staged(&subset, effective_schema)
+                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                (
+                    Readiness::Discovering,
+                    pending_typed_tools(&proposal),
+                    warnings,
+                )
+            }
+        };
 
         Ok(Self {
             proposal: Mutex::new(Some(proposal)),
@@ -198,9 +220,7 @@ impl Authority {
     /// set is replaced wholesale and refused wholesale: `open_staged` may install the
     /// schema-independent subset and open `Discovering`, because at startup the typed schemas
     /// have not arrived yet and a box that denied everything until they did would be useless.
-    /// A reload has no such excuse — the schemas are already here, so a set that cannot
-    /// validate is an operator error, and installing the part of it that happens to validate
-    /// would report success for a rule that is not live.
+    /// Reject the entire replacement if any rule fails validation, and keep the current policy.
     pub(super) fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
         // Same order as `stage_mcp_schema`: proposal first, then live. A reload that took them
         // the other way round would deadlock against a schema staging mid-discovery.
@@ -215,21 +235,19 @@ impl Authority {
         };
         let mut proposed = current.clone();
         // The operator and the discovered schemas carry over; only the authored rules change.
-        proposed.candidates = parse_policy_source(&authored(sources))?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, expanded_source)| CandidatePolicy {
-                ordinal,
-                expanded_source,
-            })
-            .collect();
+        proposed.candidates = candidates(&authored(sources)).map_err(Refused::into_error)?;
         proposed.ready = BTreeSet::new();
         proposed.pending = BTreeMap::new();
 
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
-        let (effective_schema, _) =
-            validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[])?;
+        let (effective_schema, _) = validate_canonical_policy_set(
+            &complete,
+            &proposed.grammar_schemas,
+            &schemas,
+            &proposed.operator,
+            &[],
+        )?;
 
         let mut live = self.live.lock().map_err(|_| {
             PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -240,6 +258,7 @@ impl Authority {
         proposed.mark_all_ready();
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
+        live.degraded_tools.clear();
         drop(live);
         *proposal_guard = Some(proposed);
         Ok(())
@@ -271,7 +290,13 @@ impl Authority {
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
 
-        match validate_canonical_policy_set(&complete, &schemas, &proposed.operator, &[]) {
+        match validate_canonical_policy_set(
+            &complete,
+            &proposed.grammar_schemas,
+            &schemas,
+            &proposed.operator,
+            &[],
+        ) {
             Ok((effective_schema, _)) => {
                 let mut live = self.live.lock().map_err(|_| {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
@@ -317,6 +342,7 @@ impl Authority {
                 let subset = proposed.ready_policy_set();
                 let (subset_schema, _) = validate_canonical_policy_set(
                     &subset,
+                    &proposed.grammar_schemas,
                     &schemas,
                     &proposed.operator,
                     &proposed.ready_positions(),
@@ -344,8 +370,13 @@ impl Authority {
     /// Every door has drained, so a candidate still pending means its server's `tools/list` was
     /// denied and its schema will never arrive. Rather than fatally refuse the whole box, the still
     /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
-    /// schema-independent subset becomes the final `Ready` authority, and the degraded server
-    /// namespaces are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    /// schema-independent subset becomes the final `Ready` authority, and the servers whose catalog
+    /// never arrived are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    ///
+    /// The tools held and the servers named answer different questions, so they come from different
+    /// scans. A rule decides no call to a tool it only reads from history, and yet it still waits
+    /// for that tool to be declared. `servers_a_pending_rule_waits_for` states which servers reach
+    /// the warning.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
         let proposal = self
             .proposal
@@ -363,13 +394,13 @@ impl Authority {
             .as_ref()
             .map(pending_typed_tools)
             .unwrap_or_default();
-        live.degraded_tools = degraded.clone();
+        live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
-        let servers: BTreeSet<String> = degraded
-            .into_iter()
-            .map(|(namespace, _)| namespace)
-            .collect();
+        let servers = proposal
+            .as_ref()
+            .map(|proposal| servers_a_pending_rule_waits_for(proposal, &live.engine))
+            .unwrap_or_default();
         Ok(servers.into_iter().collect())
     }
 
@@ -378,9 +409,9 @@ impl Authority {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        request: &Request<'_>,
-        identity: &ActionIdentity,
-    ) -> Decision {
+        request: ActionRequest<'_>,
+    ) -> (Decision, Option<RequestId>) {
+        let identity = &request.identity();
         match self.live.lock() {
             Ok(live) => {
                 // Fail-closed for a degraded tool: its schema will never stage, so its
@@ -391,7 +422,7 @@ impl Authority {
                         .degraded_tools
                         .contains(&(namespace.clone(), tool.clone()))
                 {
-                    return Decision::no_match();
+                    return (Decision::no_match(), None);
                 }
                 match live.readiness {
                     Readiness::Discovering => {
@@ -404,17 +435,14 @@ impl Authority {
                                 .pending_tools
                                 .contains(&(namespace.clone(), tool.clone()))
                         {
-                            return Decision::policy_pending();
+                            return (Decision::policy_pending(), None);
                         }
-                        live.engine
-                            .decide_with_identity(governed, principal, request, identity)
+                        live.engine.decide(governed, principal, request)
                     }
-                    Readiness::Ready => live
-                        .engine
-                        .decide_with_identity(governed, principal, request, identity),
+                    Readiness::Ready => live.engine.decide(governed, principal, request),
                 }
             }
-            Err(_) => Decision::internal_fault(),
+            Err(_) => (Decision::internal_fault(), None),
         }
     }
 
@@ -424,54 +452,83 @@ impl Authority {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
-        live.engine.observe_outcome(governed, principal, outcome)
+        live.engine
+            .observe_outcome(governed, principal, request_id, outcome)
     }
 
-    /// Returns whether the live authority declares a tool action, or true when its lock is unavailable.
-    pub(super) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        match self.live.lock() {
-            Ok(live) => live.engine.declares_tool_action(action),
-            Err(_) => true,
-        }
+    /// Records the `::response` of one completed action whose `input` is a JSON record.
+    #[cfg_attr(
+        not(any(test, feature = "shell-adapter")),
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
+    )]
+    pub(super) fn record_response(
+        &self,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+        request_id: &RequestId,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine
+            .observe_response(identity, input, request_id, status)
     }
 
-    /// Whether a tool call names a typed action whose schema has not staged yet while
-    /// `Discovering`. Such a call is held transiently rather than letting it ride the coarse allow
-    /// with its argument constraint unenforceable. A poisoned lock fails closed (held).
-    pub(super) fn is_tool_pending(&self, identity: &ActionIdentity) -> bool {
-        let ActionIdentity::McpTool { namespace, tool } = identity else {
-            return false;
+    /// Decides one `tools/call` under a single live-lock read: a degraded tool is denied, a
+    /// pending tool is held, and a tool that no per-tool rule matches rides the coarse allow.
+    pub(super) fn refine_tool_call(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+    ) -> Decision {
+        let Ok(live) = self.live.lock() else {
+            return Decision::internal_fault();
         };
-        match self.live.lock() {
-            Ok(live) => {
-                live.readiness == Readiness::Discovering
-                    && live
-                        .pending_tools
-                        .contains(&(namespace.clone(), tool.clone()))
+        if let ActionIdentity::McpTool { namespace, tool } = identity {
+            let key = (namespace.clone(), tool.clone());
+            if live.degraded_tools.contains(&key) {
+                return Decision::no_match();
             }
-            Err(_) => true,
+            if live.readiness == Readiness::Discovering && live.pending_tools.contains(&key) {
+                return Decision::policy_pending();
+            }
         }
-    }
-
-    /// Whether a tool call names a degraded typed action — one whose server's `tools/list` was
-    /// denied so its schema never staged. Such a call is denied fail-closed at the per-tool
-    /// gate, so it cannot ride the coarse allow with its argument constraint unenforceable. A
-    /// poisoned lock fails closed (degraded).
-    pub(super) fn is_tool_degraded(&self, identity: &ActionIdentity) -> bool {
-        let ActionIdentity::McpTool { namespace, tool } = identity else {
-            return false;
+        let Ok(action) = identity.cedar_uid() else {
+            return Decision::internal_fault();
         };
-        match self.live.lock() {
-            Ok(live) => live
-                .degraded_tools
-                .contains(&(namespace.clone(), tool.clone())),
-            Err(_) => true,
+        let decision = if live.engine.declares_tool_action(&action) {
+            live.engine
+                .decide(governed, principal, ActionRequest::Request(request))
+                .0
+        } else {
+            Decision::no_match()
+        };
+        match decision {
+            // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
+            Decision::Deny {
+                reason: crate::DenyReason::NoMatch,
+                ..
+            } => Decision::Allow {
+                rule: crate::RuleId::default_deny(),
+                attribution: Vec::new(),
+                resource: String::new(),
+            },
+            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
+            other => other,
         }
     }
 
@@ -583,6 +640,7 @@ impl ProposalState {
     fn validate_ready(&self, schemas: &[String]) -> Result<(), PolicyError> {
         validate_canonical_policy_set(
             &self.ready_policy_set(),
+            &self.grammar_schemas,
             schemas,
             &self.operator,
             &self.ready_positions(),
@@ -606,6 +664,7 @@ impl ProposalState {
                 let candidate = self.candidate_policy_set(ordinal);
                 match check_canonical_policy_set(
                     &candidate,
+                    &self.grammar_schemas,
                     schemas,
                     &self.operator,
                     &self.candidate_positions(ordinal),
@@ -619,7 +678,9 @@ impl ProposalState {
                         return Err((ordinal, refused));
                     }
                     Err(refused) => {
-                        if !self.names_a_typed_action(ordinal) {
+                        if !self.names_a_typed_action(ordinal)
+                            || self.names_an_undeclared_qualified_action(ordinal)
+                        {
                             return Err((ordinal, refused));
                         }
                         self.pending.insert(ordinal, refused.error.to_string());
@@ -634,12 +695,35 @@ impl ProposalState {
 
     /// Whether a candidate names a per-tool action. A rule over the fixed vocabulary alone cannot
     /// become valid when a tool schema stages, so its load error is a refusal and not a pending state.
+    /// A history reference counts, because a rule that only reads one still waits for that schema.
     fn names_a_typed_action(&self, ordinal: usize) -> bool {
         let mut typed = BTreeSet::new();
         if let Some(candidate) = self.candidates.get(ordinal) {
-            collect_typed_actions(&candidate.expanded_source, &mut typed);
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Named,
+                &mut typed,
+            );
         }
         !typed.is_empty()
+    }
+
+    /// Whether a candidate names a qualified action, such as `Tool::git::Action::"push"`, that no
+    /// tool grammar schema declares. No MCP schema can declare one, so the rule cannot wait for it.
+    fn names_an_undeclared_qualified_action(&self, ordinal: usize) -> bool {
+        let Some(candidate) = self.candidates.get(ordinal) else {
+            return false;
+        };
+        let named = qualified_actions(&candidate.expanded_source);
+        if named.is_empty() {
+            return false;
+        }
+        let Ok(schema) = composed_action_schema(&self.grammar_schemas, &[]) else {
+            return true;
+        };
+        named
+            .iter()
+            .any(|action| !schema.cedar.actions().any(|declared| declared == action))
     }
 
     /// The rule that candidate `ordinal` stands for, with the `@id` its expanded source carries.
@@ -672,23 +756,209 @@ impl ProposalState {
     }
 }
 
-/// The pending typed `(namespace, tool)` pairs a proposal still needs a discovered schema for.
+/// Parse and macro-expand an authored bundle into one candidate per rule.
+fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
+    Ok(expand_policy_source(source)?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, policy)| CandidatePolicy {
+            ordinal,
+            expanded_source: policy.source,
+            head_tools: policy.head_tools,
+        })
+        .collect())
+}
+
+/// The typed `(namespace, tool)` pairs whose calls a proposal holds back, from each pending rule's
+/// decoded head, from a scan of its rendered text, and from the tool its conditions pin to
+/// literals. A tool that a pending rule only reads from history is left out: that rule decides no
+/// call to it, so holding it would refuse a healthy server's tool over another rule's mistake
+/// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
     for &ordinal in proposal.pending.keys() {
         if let Some(candidate) = proposal.candidates.get(ordinal) {
-            collect_typed_actions(&candidate.expanded_source, &mut out);
+            out.extend(candidate.head_tools.iter().cloned());
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Skipped,
+                &mut out,
+            );
+            out.extend(pinned_tool_action(candidate));
         }
     }
     out
 }
 
+/// The one `(namespace, tool)` a rule's conditions pin to literals, through `context.input.server`
+/// and `context.input.tool`. Such a rule decides exactly that call, so the hold covers it. `None`
+/// for a rule whose head already names a typed tool, because the head states that rule's whole
+/// reach and a pin beside it can only contradict it. `None` too unless one server and one tool
+/// survive, because any other count leaves the set of calls the rule decides wider than the pins
+/// state.
+fn pinned_tool_action(candidate: &CandidatePolicy) -> Option<(String, String)> {
+    if !candidate.head_tools.is_empty() {
+        return None;
+    }
+    let mut servers = BTreeSet::new();
+    let mut tools = BTreeSet::new();
+    for condition in rule_conditions(&candidate.expanded_source) {
+        for atom in conjuncts(&condition) {
+            if let Some(name) = pinned_literal(atom, "server") {
+                servers.insert(name.to_string());
+            }
+            if let Some(name) = pinned_literal(atom, "tool") {
+                tools.insert(name.to_string());
+            }
+        }
+    }
+    Some((
+        mcp_action_namespace(single(&servers)?),
+        single(&tools)?.to_string(),
+    ))
+}
+
+/// Each node a condition joins with `&&`, so that every one of them has to hold and a pin read out
+/// of one is a pin the rule requires. A node under any other operator stays whole, and
+/// `pinned_literal` then declines it.
+fn conjuncts(condition: &serde_json::Value) -> Vec<&serde_json::Value> {
+    match condition.get("&&") {
+        Some(both) => {
+            let mut out = Vec::new();
+            for side in ["left", "right"] {
+                if let Some(operand) = both.get(side) {
+                    out.extend(conjuncts(operand));
+                }
+            }
+            out
+        }
+        None => vec![condition],
+    }
+}
+
+/// The string literal an atom compares `context.input.<attribute>` to with `==`, in either operand
+/// order. `None` for every other node, so a negation, a disjunction, an `if`, a `like`, a set
+/// membership, and a comparison of comparisons each state no pin. An `unless` condition reaches
+/// here as a negation, so it states none either.
+fn pinned_literal<'a>(atom: &'a serde_json::Value, attribute: &str) -> Option<&'a str> {
+    let equality = atom.get("==")?;
+    let (left, right) = (equality.get("left")?, equality.get("right")?);
+    if reads_input(left, attribute) {
+        literal(right)
+    } else if reads_input(right, attribute) {
+        literal(left)
+    } else {
+        None
+    }
+}
+
+/// Whether a node is exactly the read `context.input.<attribute>`.
+fn reads_input(node: &serde_json::Value, attribute: &str) -> bool {
+    let outer = node.get(".");
+    let names = |access: Option<&serde_json::Value>, attr: &str| {
+        access.is_some_and(|access| access.get("attr").and_then(|a| a.as_str()) == Some(attr))
+    };
+    names(outer, attribute)
+        && outer
+            .and_then(|access| access.get("left"))
+            .map(|input| {
+                names(input.get("."), "input")
+                    && input
+                        .get(".")
+                        .and_then(|access| access.get("left"))
+                        .and_then(|root| root.get("Var"))
+                        .and_then(|var| var.as_str())
+                        == Some("context")
+            })
+            .unwrap_or(false)
+}
+
+/// The string a literal node carries, already decoded by the parse.
+fn literal(node: &serde_json::Value) -> Option<&str> {
+    node.get("Value")?.as_str()
+}
+
+/// The only name in `names`, or `None` when it holds none or several.
+fn single(names: &BTreeSet<String>) -> Option<&str> {
+    match names.iter().next() {
+        Some(name) if names.len() == 1 => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Every `(namespace, tool)` one candidate names, in its head, in a condition, or through a
+/// `when temporal` history reference.
+fn named_typed_tools(candidate: &CandidatePolicy) -> BTreeSet<(String, String)> {
+    let mut out: BTreeSet<(String, String)> = candidate.head_tools.iter().cloned().collect();
+    collect_typed_actions(
+        &candidate.expanded_source,
+        HistoryReferences::Named,
+        &mut out,
+    );
+    out
+}
+
+/// The servers each pending rule still waits for, which is what the operator must fix. A rule waits
+/// for every tool it names to be declared, so an undeclared tool names its own server. A rule that
+/// stays pending for another reason — an argument name or a type its server declares differently —
+/// leaves every tool declared, and then every server it names is what it waits on. Falling back
+/// that way is what keeps the warning from going silent, because `names_a_typed_action` parks a
+/// rule only when it names at least one typed tool, so no pending rule contributes nothing.
+fn servers_a_pending_rule_waits_for(
+    proposal: &ProposalState,
+    engine: &DogwoodEngine,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for &ordinal in proposal.pending.keys() {
+        let Some(candidate) = proposal.candidates.get(ordinal) else {
+            continue;
+        };
+        let named = named_typed_tools(candidate);
+        let undeclared: BTreeSet<String> = named
+            .iter()
+            .filter(|(namespace, tool)| !declares(engine, namespace, tool))
+            .map(|(namespace, _)| namespace.clone())
+            .collect();
+        if undeclared.is_empty() {
+            out.extend(named.into_iter().map(|(namespace, _)| namespace));
+        } else {
+            out.extend(undeclared);
+        }
+    }
+    out
+}
+
+/// Whether the committed schema declares `<namespace>::Action::"<tool>"`. A name the engine cannot
+/// parse counts as undeclared, so the server reaches the warning rather than going quiet.
+fn declares(engine: &DogwoodEngine, namespace: &str, tool: &str) -> bool {
+    let identity = ActionIdentity::McpTool {
+        namespace: namespace.to_string(),
+        tool: tool.to_string(),
+    };
+    EntityUid::from_str(&identity.observer_action())
+        .map(|action| engine.declares_tool_action(&action))
+        .unwrap_or(false)
+}
+
+/// Whether a scan keeps the tool names that only a `when temporal` history reference spells.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryReferences {
+    /// Keep them: such a rule still needs that tool's schema before it can load.
+    Named,
+    /// Drop them: such a rule reads that tool's history and decides no call to it.
+    Skipped,
+}
+
 /// Extracts every `<ns>::Action::"<tool>"` typed action from a macro-expanded policy source,
-/// excluding the fixed `Box::Action` vocabulary. A per-tool rule's head is
-/// `action == <ns>::Action::"<tool>"`, and `<ns>` is a single normalized identifier
-/// ([`mcp_action_namespace`](crate::schema::mcp_action_namespace)), so a scan for the marker
-/// recovers `(namespace, tool)`.
-fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
+/// excluding the fixed `Box::Action` vocabulary and every qualified namespace, such as a tool
+/// grammar's `Tool::<name>`, which no MCP schema declares. It keeps one that only a condition
+/// names, and treats a `when temporal` history reference as `references` says. The scan finds the
+/// candidate text, and `decoded_tool_action` is the one decoder that says which tool it names.
+fn collect_typed_actions(
+    source: &str,
+    references: HistoryReferences,
+    out: &mut BTreeSet<(String, String)>,
+) {
     const MARKER: &str = "::Action::\"";
     let mut rest = source;
     while let Some(pos) = rest.find(MARKER) {
@@ -700,36 +970,89 @@ fn collect_typed_actions(source: &str, out: &mut BTreeSet<(String, String)>) {
             .chars()
             .rev()
             .collect();
+        let qualified = rest[..pos - namespace.len()].ends_with("::");
         let after = &rest[pos + MARKER.len()..];
-        match after.find('"') {
+        match closing_quote(after) {
             Some(end) => {
-                if !namespace.is_empty() && namespace != "Box" {
-                    out.insert((namespace, after[..end].to_string()));
-                }
+                let literal = &after[..end];
                 rest = &after[end + 1..];
+                // A name that `::` follows is an event a `when temporal` predicate reads
+                // (`::request{`, `::response{`, `::error{`), and not an action the rule decides.
+                let history = rest.starts_with("::");
+                let keep = !history || references == HistoryReferences::Named;
+                if keep && !qualified {
+                    out.extend(decoded_tool_action(&namespace, literal));
+                }
             }
             None => break,
         }
     }
 }
 
+/// Every action under a qualified namespace, such as `Tool::git::Action::"push"`, in `source`.
+fn qualified_actions(source: &str) -> Vec<EntityUid> {
+    const MARKER: &str = "::Action::\"";
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find(MARKER) {
+        let start = rest[..pos]
+            .rfind(|character: char| {
+                !(character.is_ascii_alphanumeric() || character == '_' || character == ':')
+            })
+            .map_or(0, |index| index + 1);
+        let namespace = &rest[start..pos];
+        let after = &rest[pos + MARKER.len()..];
+        let Some(end) = closing_quote(after) else {
+            break;
+        };
+        if namespace.contains("::")
+            && let Ok(action) =
+                EntityUid::from_str(&format!("{namespace}::Action::\"{}\"", &after[..end]))
+        {
+            out.push(action);
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The offset of the quote that ends a Cedar string literal, where `\` escapes the character
+/// after it.
+fn closing_quote(literal: &str) -> Option<usize> {
+    let mut characters = literal.char_indices();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '"' => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `(namespace, tool)` that a rendered `<ns>::Action::"<literal>"` names, through the decoder
+/// a parsed head uses, or `None` for the fixed `Box::Action` vocabulary.
+fn decoded_tool_action(namespace: &str, literal: &str) -> Option<(String, String)> {
+    if namespace.is_empty() {
+        return None;
+    }
+    let action = EntityUid::from_str(&format!("{namespace}::Action::\"{literal}\"")).ok()?;
+    mcp_tool_action(&action)
+}
+
 /// What `open_staged` refuses in `sources`, or its warnings and the rules it holds pending.
 pub(super) fn check_staged(
     operator: &Operator,
     sources: &[Policy],
+    grammar_schemas: Vec<String>,
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
-    let candidates = check_policy_source(&authored(sources))
-        .map_err(|refused| refused.findings)?
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, expanded_source)| CandidatePolicy {
-            ordinal,
-            expanded_source,
-        })
-        .collect::<Vec<_>>();
+    let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
         candidates,
+        grammar_schemas,
         schemas: BTreeMap::new(),
         ready: BTreeSet::new(),
         pending: BTreeMap::new(),
@@ -737,9 +1060,15 @@ pub(super) fn check_staged(
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
     };
-    refuse_input_across_families_before_discovery(&proposal.complete_policy_set())
+    refuse_input_reads_before_discovery(&proposal.complete_policy_set())
         .map_err(|refused| unlocated(refused.findings))?;
-    match check_canonical_policy_set(&proposal.complete_policy_set(), &[], operator, &[]) {
+    match check_canonical_policy_set(
+        &proposal.complete_policy_set(),
+        &proposal.grammar_schemas,
+        &[],
+        operator,
+        &[],
+    ) {
         Ok((_, warnings)) => return Ok((warnings, Vec::new())),
         Err(refused) if is_inert(&refused.error) => return Err(unlocated(refused.findings)),
         Err(_) => {}
@@ -758,6 +1087,7 @@ pub(super) fn check_staged(
     }
     let (_, warnings) = check_canonical_policy_set(
         &proposal.ready_policy_set(),
+        &proposal.grammar_schemas,
         &[],
         operator,
         &proposal.ready_positions(),
@@ -780,6 +1110,7 @@ fn is_inert(error: &PolicyError) -> bool {
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)
+            | PolicyError::UnsupportedClause(_)
     )
 }
 
@@ -795,7 +1126,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{Delivery, DenyReason};
+    use crate::{Delivery, DenyReason, Request};
 
     fn source(text: &str) -> Vec<Policy> {
         vec![Policy {
@@ -849,8 +1180,31 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
     }
 
     fn decide(authority: &Authority, request: &Request<'_>) -> Decision {
-        let identity = ActionIdentity::for_request(request);
-        authority.decide(&governed(), &Principal::agent(), request, &identity)
+        authority
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(request),
+            )
+            .0
+    }
+
+    fn submitted_http_request(authority: &Authority) -> RequestId {
+        authority
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&Request::Http {
+                    host: "api.example.com",
+                    port: 443,
+                    method: "POST",
+                    path: "/v1",
+                    body_bytes: 1,
+                    intercepted: true,
+                }),
+            )
+            .1
+            .expect("the fixture request is submitted")
     }
 
     fn http_outcome() -> Outcome<'static> {
@@ -861,6 +1215,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             path: "/v1",
             delivery: Delivery::Completed { bytes: 1 },
             status: Some(200),
+            intercepted: true,
         }
     }
 
@@ -981,6 +1336,73 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
     }
 
     #[test]
+    fn a_grammar_action_decides_the_same_while_mcp_discovery_holds_or_degrades_a_tool() {
+        let grammar = crate::grammar::Grammar::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/grammars/valid/git.grammar.toml"
+        )))
+        .expect("the git grammar loads");
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_complete_with_grammars(
+            source(
+                r#"permit (principal, action == Tool::git::Action::"push", resource);
+                forbid (principal, action == Tool::git::Action::"push", resource)
+                when { context.input.force };"#,
+            ),
+            &[grammar.schema()],
+            &[],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("authority opens");
+        let decide = |words: &[&str]| {
+            let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+            let request = crate::grammar::GrammarInvocation::new(
+                &grammar,
+                "git",
+                &crate::grammar::ProgramFile::fixed("/usr/bin/git", 1),
+                None,
+                "/work",
+                &args,
+                &[],
+            )
+            .request();
+            authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Grammar(&request),
+                )
+                .0
+        };
+        let push = ["push", "origin", "main"];
+        let forced = ["push", "--force", "origin", "main"];
+        let before = (decide(&push), decide(&forced));
+
+        {
+            let mut live = authority.live.lock().expect("the live authority lock");
+            live.readiness = Readiness::Discovering;
+            let held = ("Tool::git".to_string(), "push".to_string());
+            live.pending_tools.insert(held.clone());
+            live.degraded_tools.insert(held);
+        }
+        let during = (decide(&push), decide(&forced));
+
+        assert!(before.0.is_allow(), "{:?}", before.0);
+        assert!(
+            matches!(
+                before.1,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "{:?}",
+            before.1
+        );
+        assert_eq!(during, before);
+    }
+
+    #[test]
     fn live_authority_lock_poison_denies_decisions() {
         let history = tempfile::tempdir().expect("history directory");
         let authority = Authority::open_complete(
@@ -1009,10 +1431,16 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             &history.path().join("dogwood.redb"),
         )
         .expect("the fixed authority opens");
+        let request_id = submitted_http_request(&authority);
         poison(&authority.live);
 
         let error = authority
-            .record(&governed(), &Principal::agent(), &http_outcome())
+            .record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            )
             .expect_err("a poisoned live-authority lock must refuse records");
         assert!(error.to_string().contains("authority lock poisoned"));
     }
@@ -1026,6 +1454,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             &history.path().join("dogwood.redb"),
         )
         .expect("the fixed authority opens");
+        let request_id = submitted_http_request(&authority);
         authority
             .live
             .lock()
@@ -1034,7 +1463,12 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             .poison_scope_for_test();
 
         let error = authority
-            .record(&governed(), &Principal::agent(), &http_outcome())
+            .record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            )
             .expect_err("a poisoned Dogwood scope must refuse records");
         assert!(
             error
@@ -1430,10 +1864,14 @@ permit(principal, action == issues_mcp::Action::"search", resource);"#,
             uri: None,
             arguments: Some(&serde_json::Value::Null),
         };
-        let identity = ActionIdentity::for_request(&call);
         assert!(
             !authority
-                .decide(&governed(), &Principal::agent(), &call, &identity)
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&call)
+                )
+                .0
                 .is_allow(),
             "a hyphenated degraded server's tool call is denied fail-closed"
         );
@@ -1571,6 +2009,15 @@ permit(principal, action == alpha::Action::"read", resource);"#,
             &history.path().join("initial.redb"),
         )
         .expect("the blocked authority opens");
+        // The recording thread completes a request submitted before the staged transaction.
+        // Seed the replacement test store with a policy so that request has a real token.
+        drop(
+            DogwoodEngine::open(
+                r#"permit(principal, action == Box::Action::"http:request", resource);"#,
+                &history.path().join("faulted.redb"),
+            )
+            .expect("the pre-transaction policy installs"),
+        );
         let faults = Arc::new(FaultInjector::new());
         let _release = ReleaseFaultOnDrop(Arc::clone(&faults));
         let engine = DogwoodEngine::open_for_staging_with_faults(
@@ -1579,6 +2026,7 @@ permit(principal, action == alpha::Action::"read", resource);"#,
         )
         .expect("the faulted durable engine opens");
         authority.live.lock().expect("live authority lock").engine = engine;
+        let request_id = submitted_http_request(&authority);
         let authority = Arc::new(authority);
 
         faults.arm(FaultPoint::CommitBeforeCommit);
@@ -1596,8 +2044,12 @@ permit(principal, action == alpha::Action::"read", resource);"#,
         let recording_authority = Arc::clone(&authority);
         let recording = std::thread::spawn(move || {
             let _ = started.send(());
-            let result =
-                recording_authority.record(&governed(), &Principal::agent(), &http_outcome());
+            let result = recording_authority.record(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &http_outcome(),
+            );
             let _ = recorded.send(result);
         });
         start

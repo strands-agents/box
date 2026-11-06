@@ -41,8 +41,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
   `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
   `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
-  `Request`, `GovernedBox`, `Operator`, `PolicyWarning`. That is 52 names with `--all-features` and
-  46 by default; recompute it when you touch the façade.
+  `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
+  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 58 names with `--all-features`
+  and 52 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -57,6 +58,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   endpoint you own; never read it from a request.
 - `decide` is not a pure query: it observes the request into history first, so a denied request
   can advance history. The code and its tests own the exact verdict contract.
+- Retain the confirmed `RequestId` from `decide` for each corresponding `record` call.
+  Refuse an ordinary effect if its allow verdict has no token.
 - One resource entity, `Box::Resource`, always uses the id `"unused"`. It carries no policy
   information, so a rule discriminates on the action and `context.input`.
 - One principal, `Box::Agent`, always uses the id `"self"`. `Principal::with_id` retains integration
@@ -112,7 +115,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
-- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip`.
+- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
+  or `ip6`. Each needs its own `has` guard, so a rule that covers both families has one clause for
+  each.
 - `context.input.path` also carries a URL path, so a rule that reads `context.input` names actions
   of one family, and the load refuses any other
   (`spelling::refuse_input_across_families`). Pinned by
@@ -184,7 +189,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Do not align the Script adapter with upstream `monty-dogwood`, which leaves an unmapped call
   ungated and authorizes the caller's spelling. Deny an unmapped call, and normalize before you
   decide.
-- Write every field a temporal predicate reads to both bags: `.field()` and `.request_context()`.
+- Fill both the logged event and Cedar request context for input data read by both policy types.
+  Use `EventBuilder::logged_field` alone for reserved history fields such as `requestId`.
 - Keep both saturations deny-ward: `Clock::now()` to 0, and `clamp(bytes)` to `i64::MAX`.
 - A dropped `ScriptPermit` submits `FsResult::Indeterminate` from `Drop`. Keep `#[must_use]`, claim
   `reported` before you submit, and discard a `Drop` recording failure. `EffectPermit` and

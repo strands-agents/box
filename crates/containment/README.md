@@ -21,11 +21,13 @@ The public API describes one complete request and applies it once:
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
 | `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
+| `ForbiddenClass`, `ContainmentError::forbidden_class` | What a floor row protects, and the class of the row that refused a grant. |
 
-The crate root exports **13 names**: `Containment`, `ContainmentConfig`,
-`ContainmentError`, `Platform`, `PreparedFilesystemPath`, `Operation`, `Scope`,
-`Network`, `BackendOverride`, `IpcMode`, `ProcessInfoMode`, `SignalMode`, and
-`home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
+The crate root exports **19 names**: `Containment`, `ContainmentConfig`,
+`ContainmentError`, `ContainmentWarning`, `ForbiddenClass`, `Platform`,
+`PreparedFilesystemPath`, `Operation`, `Scope`, `Network`, `BackendOverride`,
+`IpcMode`, `ProcessInfoMode`, `SignalMode`, `os_minimum_cells`, `os_runtime_cells`,
+`validate_grant`, `validate_grants`, and `home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
 which judges a `~/`-relative spelling at authoring time so a caller that holds no
 resolved path still gets the one refusal this crate owns.
 Two further items are not in that count:
@@ -60,9 +62,11 @@ localhost port that already exists. The Linux namespace launcher **refuses**
 that nothing can accept on.
 
 The third argument, `confirm_fd`, is an optional setup-status pipe writer.
-The Linux reaper writes a status byte when the filesystem view is ready.
-The supervisor uses that byte to confirm startup before a long-lived workload exits.
-macOS ignores this argument because successful `exec` closes the status pipe.
+The Linux launcher preserves it in the workload and reports namespace setup failures through it.
+The reaper writes byte `6` after its own setup completes.
+Its waiting processes then close their copies.
+The macOS backend leaves this descriptor to the trampoline.
+The trampoline owns the completion protocol described below.
 
 The fourth argument, `native_filesystem_handoff`, reserves an optional Unix stream
 for native filesystem registration. This preparation does not implement that registration.
@@ -128,7 +132,7 @@ shape:
 | `Metadata` + `Dir` | `file-read-metadata` on the literal and its ancestors, and no data rule at all |
 | `Metadata` + `Root` | ancestor metadata, and `file-read-metadata` over the subtree |
 | `Write` + `File` | `file-write*` on that literal |
-| `Write` + `Root` | `file-write*` over the subtree, and two denies pinning the root's own identity |
+| `Write` + `Root` | Six named write operations over the subtree (contents, create, unlink, extended attributes, mode, and times), and two denies pinning the root's own identity. With `allow_file_attributes`, also `file-write*` over the subtree, with the flags, owner, ACL, and Finder information operations denied again. Linux ignores the builder |
 | `Connect` + `File` | `network-outbound` on that socket path |
 
 **One block per cell, and every cell repeats.** The profile has a placeholder per
@@ -156,15 +160,16 @@ that file's metadata.
 ### The minimum process authority the profile grants
 
 An execute grant renders exactly two lines on one canonical literal, and the
-profile grants the unscoped fork once:
+profile grants the unscoped fork and the signal to its own children once:
 
 ```scheme
 (allow process-exec (literal "<granted executable>"))
 (allow file-read-metadata (literal "<granted executable>"))
 (allow process-fork)
+(allow signal (target children))
 ```
 
-Three properties of that block:
+Four properties of that block:
 
 - **The paired `file-read-metadata` is required, and it is not a widening.** A
   `PATH` search stats each candidate before it execs it. A program that can be
@@ -179,6 +184,12 @@ Three properties of that block:
   processes without limit, and process exhaustion is an unbounded residual.
   Closing it needs a separate resource boundary. Descendants inherit the profile,
   so the fork expands no filesystem, network, or exec authority.
+- **A contained process signals only the children it forked.** A harness stops
+  a child it started; without the grant `kill` refuses with `EPERM`, and a
+  harness that waits for the child to stop waits out its own timeout. A child
+  inherits the profile, so the signal reaches no authority the sender lacks.
+  Every other target stays refused, the box's own trusted process included.
+  `CN-I-03` proves both arms. On Linux the PID namespace already permits it.
 - **The crate recognizes an execute grant by its shape, not by the role the
   caller assigns it.** An alias is
   simply a second execute-only file, so the profile needs no `{{EXECUTABLE_PATH}}`
@@ -272,6 +283,18 @@ names an inherited descriptor for compact pre-exec failure reporting, and must
 not be `0`, `1`, or `2`. `--relay-control-fd` carries the workload's egress
 listener back to the box, and is Linux-only.
 
+Byte `128` reports completed preparation.
+Failure bytes `1` through `5` report configuration read, configuration validation, apply, environment decode, or executable launch failure.
+The trampoline writes `128` after apply, environment decode, and working-directory selection, immediately before its executable launch attempt.
+A launch failure can therefore produce `128, 5`. The supervisor requires both completion markers on Linux, waits for channel closure, and lets a failure byte override completion.
+Channel closure without all required markers is a protocol failure. A successful executable launch closes the workload's descriptor through `FD_CLOEXEC`.
+
+The completion marker confirms preparation, not successful executable launch or application readiness.
+A process killed between the marker and the executable launch can also close the channel without a failure byte.
+The pipe cannot distinguish that interval from a successful executable launch.
+The reader rejects the obsolete completion byte `0` immediately, so mixed helper versions cannot retain a streaming setup wait.
+Buffered execution still reports the process outcome. Streaming users must use their application protocol to establish application readiness.
+
 The digest and target-environment carrier are supervisor-owned internal launch
 metadata, not `ContainmentConfig` fields or user policy.
 `strands-box-contain-trampoline` starts with an empty ambient environment, reads the exact config
@@ -328,8 +351,11 @@ forks into it instead.
 On Linux, `apply` returns in a different process than the one that called it.
 The launcher unshares a PID namespace and forks twice: the caller waits, a
 reaper becomes namespace PID 1, and the workload is namespace PID 2, where
-`apply` returns `Ok`. No post-apply code may depend on `getpid()` being stable
-across the call. The exit status propagates outward unchanged.
+`apply` returns `Ok`. Before it forks the workload, PID 1 sets
+`PR_SET_DUMPABLE` to `0`, so the workload cannot open PID 1 memory through
+procfs. If that setup step fails, PID 1 reports an apply failure before it exits.
+No post-apply code may depend on `getpid()` being stable across the call. The
+exit status propagates outward unchanged.
 
 Run the macOS enforcement proof on a macOS host:
 

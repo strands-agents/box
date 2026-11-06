@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
 
@@ -525,18 +525,21 @@ impl BoxRoot {
             .collect()
     }
 
-    /// Every Python alias path, one per name a harness might resolve.
+    /// One MCP alias path per declared program, however many servers share it.
     pub(crate) fn mcp_aliases(
         &self,
         servers: &[crate::record::config::mcp::McpServer],
     ) -> Vec<PathBuf> {
         let directory = self.bin_directory();
+        let mut placed = std::collections::BTreeSet::new();
         servers
             .iter()
+            .filter(|server| placed.insert(server.program()))
             .map(|server| directory.join(server.program()))
             .collect()
     }
 
+    /// Every Python alias path, one per name a harness might resolve.
     pub(crate) fn python_aliases(&self) -> Vec<PathBuf> {
         let bin = self.bin_directory();
         PYTHON_ALIAS_NAMES
@@ -910,7 +913,7 @@ impl BoxRoot {
     /// copy elsewhere, renamed into place so the name never names a partial file.
     pub(crate) fn install_private_image(
         &self,
-        source: &Path,
+        source: &std::fs::File,
         destination: &Path,
         mode: u32,
     ) -> Result<(), BoxError> {
@@ -1653,18 +1656,17 @@ fn link_relative_file(
 fn place_private_image(
     parent: &std::fs::File,
     name: &std::ffi::OsStr,
-    source: &Path,
+    source: &std::fs::File,
     mode: u32,
 ) -> std::io::Result<()> {
     let pending = c_name(std::ffi::OsStr::new(ALIAS_IMAGE_PENDING_FILE))?;
     let final_name = c_name(name)?;
     // SAFETY: pending is one valid component and unlinkat uses the retained parent.
     let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), pending.as_ptr(), 0) };
-    let mut source = open_without_following(source)?;
-    if let Err(clone_error) = clone_image(&source, parent, pending.as_c_str()) {
+    if let Err(clone_error) = clone_image(source, parent, pending.as_c_str()) {
         // SAFETY: pending is one valid component and unlinkat uses the retained parent.
         let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), pending.as_ptr(), 0) };
-        copy_image(&mut source, parent, pending.as_c_str(), mode).map_err(|copy_error| {
+        copy_image(source, parent, pending.as_c_str(), mode).map_err(|copy_error| {
             std::io::Error::new(
                 copy_error.kind(),
                 format!("clone failed ({clone_error}), then copy failed: {copy_error}"),
@@ -1697,7 +1699,7 @@ fn place_private_image(
 fn place_private_image(
     _parent: &std::fs::File,
     _name: &std::ffi::OsStr,
-    _source: &Path,
+    _source: &std::fs::File,
     _mode: u32,
 ) -> std::io::Result<()> {
     Err(std::io::Error::new(
@@ -1736,7 +1738,7 @@ fn clone_image(
 /// Copy `source` byte for byte to a new file `name` in `parent`.
 #[cfg(unix)]
 fn copy_image(
-    source: &mut std::fs::File,
+    source: &std::fs::File,
     parent: &std::fs::File,
     name: &std::ffi::CStr,
     mode: u32,
@@ -1748,7 +1750,16 @@ fn copy_image(
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         mode as libc::mode_t,
     )?;
-    let copied = std::io::copy(source, &mut destination)?;
+    let mut copied = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source.read_at(&mut buffer, copied)?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+        copied += read as u64;
+    }
     if copied != expected {
         return Err(std::io::Error::other(format!(
             "copied {copied} of {expected} bytes"
@@ -3795,6 +3806,7 @@ mod tests {
             env: std::collections::BTreeMap::from([("REFRESHED".to_string(), "yes".to_string())]),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         });
         let updated_text = updated.to_toml().expect("updated record");
 
@@ -4525,9 +4537,9 @@ mod tests {
         let source_path = layout.root().join("source-image");
         std::fs::write(&source_path, b"the installed image").expect("a source image");
         let bin = std::fs::File::open(layout.bin_directory()).expect("bin/ opens");
-        let mut source = std::fs::File::open(&source_path).expect("the source opens");
+        let source = std::fs::File::open(&source_path).expect("the source opens");
 
-        copy_image(&mut source, &bin, c"copied", 0o500).expect("the copy is placed");
+        copy_image(&source, &bin, c"copied", 0o500).expect("the copy is placed");
 
         let copied = layout.bin_directory().join("copied");
         assert_eq!(
@@ -4547,7 +4559,7 @@ mod tests {
         // The placement path renames the pending file over the final name and leaves no pending
         // file behind, whichever of clone or copy produced it.
         layout
-            .install_private_image(&source_path, &layout.alias_image(), 0o500)
+            .install_private_image(&source, &layout.alias_image(), 0o500)
             .expect("the image is placed");
         assert_eq!(
             std::fs::read(layout.alias_image()).expect("the image reads"),
@@ -4561,6 +4573,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_byte_copy_fallback_preserves_the_source_offset_and_opened_identity() {
+        let (layout, _fixture) = layout("codex");
+        let source_path = layout.root().join("source-image");
+        std::fs::write(&source_path, b"complete opened image").expect("a source image");
+        let source = std::fs::File::open(&source_path).expect("the source opens");
+        let mut shared = source.try_clone().expect("the descriptor clones");
+        shared
+            .seek(std::io::SeekFrom::Start(5))
+            .expect("the shared offset advances");
+        std::fs::rename(&source_path, source_path.with_extension("retained"))
+            .expect("the original image moves aside");
+        std::fs::write(&source_path, b"replacement image").expect("a replacement image");
+        let bin = std::fs::File::open(layout.bin_directory()).expect("bin/ opens");
+
+        copy_image(&source, &bin, c"copied", 0o500).expect("the retained image copies");
+
+        assert_eq!(
+            std::fs::read(layout.bin_directory().join("copied")).expect("the copy reads"),
+            b"complete opened image"
+        );
+        assert_eq!(shared.stream_position().expect("the offset reads"), 5);
+    }
+
     /// The workload's `PATH` directory starts empty.
     #[test]
     fn the_executable_directory_starts_empty() {
@@ -4570,6 +4606,30 @@ mod tests {
             std::fs::read_dir(layout.bin_directory()).unwrap().count(),
             0,
             "bin/ must hold no executable until one is deliberately materialized"
+        );
+    }
+
+    /// One alias serves every server on one program.
+    #[test]
+    fn one_alias_serves_every_server_on_one_program() {
+        let (layout, _fixture) = layout("codex");
+        let server = |name: &str, command: &[&str]| crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
+            name: name.to_string(),
+            command: command.iter().map(ToString::to_string).collect(),
+        };
+        let servers = [
+            server("playwright", &["npx", "-y", "@playwright/mcp"]),
+            server("fetch", &["uvx", "mcp-server-fetch"]),
+            server(
+                "github",
+                &["npx", "-y", "@modelcontextprotocol/server-github"],
+            ),
+        ];
+        let bin = layout.bin_directory();
+        assert_eq!(
+            layout.mcp_aliases(&servers),
+            [bin.join("npx"), bin.join("uvx")]
         );
     }
 

@@ -34,8 +34,8 @@ const MAX_SCRIPT_BYTES: usize = MAX_FRAME_BYTES / 16;
 /// Bound on one framed read or write against the daemon's Shell socket.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on waiting for the daemon's Shell to answer.
-const SERVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
+/// Bound on waiting for the daemon's direct Python interpreter to answer.
+const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
@@ -127,9 +127,20 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
     if PYTHON_ALIAS_NAMES.contains(&name) {
         return parse_script_alias(executable, arguments);
     }
-    // A name that is neither a shell nor a Python alias is an MCP server name. The box places one
-    // alias per declared server and no others, and `PATH` holds only this box's `bin/`, so the only
+    // Any other name is an MCP server's program.
     if !SHELL_ALIAS_NAMES.contains(&name) {
+        let arguments = arguments
+            .into_iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                argument.into_string().map_err(|_| {
+                    invalid_input(format!(
+                        "MCP server argument {} is not valid UTF-8",
+                        index + 1
+                    ))
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         return Ok(Mode {
             socket: socket_beside(
                 executable
@@ -140,6 +151,7 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
             ),
             interpreter: Interpreter::Mcp {
                 server: name.to_string(),
+                arguments,
             },
             // An MCP server takes no program text: it is a stream, and the client's own frames are
             // the traffic. `forward` sends no `Call` for this interpreter.
@@ -366,6 +378,7 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
     if let Interpreter::Mcp { .. } = &interpreter {
         return stream_mcp(stream, interpreter).await;
     }
+    let python = matches!(interpreter, Interpreter::Python);
 
     // `InputEof` immediately after the Call, because this alias forwards no input: a harness
     // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
@@ -395,13 +408,16 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
     // while it runs.
     loop {
-        let frame =
-            tokio::time::timeout(SERVE_RESPONSE_TIMEOUT, read_frame::<Frame, _>(&mut stream))
+        let response = read_frame::<Frame, _>(&mut stream);
+        let frame = if python {
+            tokio::time::timeout(PYTHON_RESPONSE_TIMEOUT, response)
                 .await
-                .map_err(|_| timed_out("read a transport frame"))??
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed")
-                })?;
+                .map_err(|_| timed_out("read a transport frame"))?
+        } else {
+            // The broker owns the configured Shell deadline.
+            response.await
+        }?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
         match frame.body {
             Body::Output {
                 stream: which,
@@ -714,7 +730,8 @@ mod tests {
             assert_eq!(
                 mode.interpreter,
                 Interpreter::Mcp {
-                    server: name.to_string()
+                    server: name.to_string(),
+                    arguments: Vec::new(),
                 },
                 "a name outside the shell and Python lists selects an MCP server"
             );
@@ -728,6 +745,58 @@ mod tests {
                 "an MCP server takes no program text"
             );
         }
+    }
+
+    /// An MCP alias forwards its arguments in order and unchanged.
+    #[test]
+    fn an_mcp_alias_forwards_its_arguments_unchanged() {
+        let arguments = [
+            "-y",
+            "@playwright/mcp",
+            "--serve",
+            "/tmp/attacker.sock",
+            "",
+            "a b",
+        ];
+        let mode = parse_mode(
+            PathBuf::from("/private/run/public/bin/npx"),
+            arguments.iter().map(OsString::from).collect(),
+        )
+        .expect("an MCP alias accepts any UTF-8 arguments");
+        assert_eq!(
+            mode.interpreter,
+            Interpreter::Mcp {
+                server: "npx".to_string(),
+                arguments: arguments.iter().map(ToString::to_string).collect(),
+            }
+        );
+        assert_eq!(
+            mode.socket,
+            PathBuf::from("/private/run/public/run/box.sock"),
+            "an argument never chooses the socket"
+        );
+    }
+
+    /// An MCP alias refuses a non-UTF-8 argument.
+    #[cfg(unix)]
+    #[test]
+    fn an_mcp_alias_refuses_a_non_utf8_argument() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let error = parse_mode(
+            PathBuf::from("/private/run/public/bin/npx"),
+            vec![
+                OsString::from("-y"),
+                OsString::from_vec(vec![0x66, 0xff, 0x6f]),
+            ],
+        )
+        .expect_err("a non-UTF-8 argument must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("MCP server argument 2 is not valid UTF-8"),
+            "the refusal must name the argument: {error}"
+        );
     }
 
     /// This image cannot be made to serve, by name or by flag.
@@ -781,7 +850,7 @@ mod tests {
             }
             Ok(Mode {
                 socket,
-                interpreter: Interpreter::Mcp { server },
+                interpreter: Interpreter::Mcp { server, .. },
                 ..
             }) => {
                 panic!("a shell name must not route to an MCP server {server:?}: {socket:?}")

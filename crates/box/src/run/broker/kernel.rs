@@ -156,6 +156,18 @@ impl Kernel for CallKernel {
         self.backend.access(proc, path, mode).await
     }
 
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        self.backend.stat_answer(proc, path).await
+    }
+
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        self.backend.lstat_answer(proc, path).await
+    }
+
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool> {
+        self.backend.access_answer(proc, path, mode).await
+    }
+
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf> {
         self.backend.canonicalize(proc, path).await
     }

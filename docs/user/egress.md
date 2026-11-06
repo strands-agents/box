@@ -1,4 +1,4 @@
-# The `[egress.<name>]` table
+# Egress credential configuration
 
 An `[egress.<name>]` table in `box.toml` binds a credential to a set of destinations. The box's
 egress gateway adds the credential to each request to those destinations. Policy decides whether
@@ -7,6 +7,10 @@ each request goes out.
 Audience: an operator with a working box from [getting started](./getting-started.md) who gives
 the agent a credential for a service. For how the gateway decides and forwards each request, read
 [how Box controls outbound traffic](../design/egress.md).
+
+A tool or local MCP server with `network.contain_egress = false` can connect directly, outside
+gateway policy. On Linux, this includes IPv4 access to reachable private networks, loopback
+services, and instance metadata endpoints. See [server network settings](./mcp.md#network).
 
 ## Example
 
@@ -91,7 +95,7 @@ paths in policy.
 
 | `secret.ref` | Read from | When |
 |---|---|---|
-| `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. |
+| `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
 
@@ -156,6 +160,7 @@ names is refused.
 | `header` is not a valid header name, or `prefix` holds a control character or a brace | Use a plain header name and prefix. |
 | `inject` is a value other than `phantom` or `always` | Use `phantom` or `always`. |
 | `phantom_prefix` is empty, longer than 64 characters, or holds another character | Use 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
+| Two routes name one `env://NAME` with a different `phantom_prefix` | Set the same `phantom_prefix` on both. `NAME` holds one placeholder. |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:

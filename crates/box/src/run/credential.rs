@@ -36,9 +36,6 @@ pub(crate) struct Projection {
     /// The credential capabilities the proxy drives.
     pub(crate) capabilities: Vec<(credentials::DestinationPattern, Arc<Vault>)>,
 
-    /// The phantom values, for the proxy to recognize on the way out.
-    pub(crate) phantom_environment: Vec<(String, String)>,
-
     /// What every process's environment receives: every phantom, plus the signing placeholders.
     pub(crate) workload_environment: Vec<ProvisionedVariable>,
 }
@@ -59,33 +56,57 @@ const SIGNING_PLACEHOLDERS: [(&str, &str); 2] = [
     ),
 ];
 
-/// Resolve every declared binding, minting one phantom per opaque route.
+/// The bindings that share one vault: every binding provisioned under one variable, or one binding
+/// that provisions none.
+fn credential_groups(bindings: &[EgressRoute]) -> Vec<Vec<&EgressRoute>> {
+    let mut groups: Vec<Vec<&EgressRoute>> = Vec::new();
+    for binding in bindings {
+        let shared = binding.provisioned_name().and_then(|name| {
+            groups
+                .iter_mut()
+                .find(|group| group[0].provisioned_name() == Some(name))
+        });
+        match shared {
+            Some(group) => group.push(binding),
+            None => groups.push(vec![binding]),
+        }
+    }
+    groups
+}
+
+/// Resolve every declared binding, minting one phantom per provisioned variable.
 pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
-    let mut phantom_environment = Vec::new();
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
-    for binding in bindings {
+    for group in credential_groups(bindings) {
+        let binding = group[0];
+        let hosts = group
+            .iter()
+            .map(|binding| binding.host())
+            .collect::<Vec<_>>()
+            .join(", ");
         // `require_every_route` is the box's fail-closed stance, now owned by the vault:
-        let opened = Vault::open(
-            VaultConfig::new(
-                Backend::local(),
-                format!("strands-box-{}", std::process::id()),
-            )
-            .route(binding.to_route_spec()?)
-            .require_every_route(),
+        let mut config = VaultConfig::new(
+            Backend::local(),
+            format!("strands-box-{}", std::process::id()),
         )
-        .map_err(|source| {
+        .require_every_route();
+        for member in &group {
+            config = config.route(member.to_route_spec()?);
+        }
+        let opened = Vault::open(config).map_err(|source| {
             Internal::CredentialProjection(format!(
-                "credential for {host} did not resolve: {source}",
-                host = binding.host()
+                "credential for {hosts} did not resolve: {source}"
             ))
         })?;
 
         // A signed binding mints no phantom (nothing is placed for the proxy to
-        // match); an opaque one mints exactly one.
+        // match); the routes of one variable share exactly one.
         match (binding.provisioned_name(), opened.phantoms()) {
-            (Some(name), [phantom]) => {
-                phantom_environment.push((name.to_string(), phantom.token().to_string()));
+            (Some(name), [phantom, rest @ ..])
+                if rest.len() + 1 == group.len()
+                    && rest.iter().all(|other| other.token() == phantom.token()) =>
+            {
                 workload_environment.push(ProvisionedVariable {
                     name: name.to_string(),
                     value: phantom.token().to_string(),
@@ -115,20 +136,24 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             }
             (Some(_), phantoms) => {
                 return Err(Internal::CredentialProjection(format!(
-                    "credential for {} produced {} phantom bindings, expected one",
-                    binding.host(),
-                    phantoms.len()
+                    "credential for {hosts} produced {} phantom bindings for {} routes, expected \
+                     one shared phantom",
+                    phantoms.len(),
+                    group.len()
                 ))
                 .into());
             }
         }
-        capabilities.push((binding.destination().clone(), Arc::new(opened.into_vault())));
+        // One vault serves every destination of the group; each destination is its own capability.
+        let vault = Arc::new(opened.into_vault());
+        for member in &group {
+            capabilities.push((member.destination().clone(), Arc::clone(&vault)));
+        }
     }
 
     Ok(Projection {
         workload_environment,
         capabilities,
-        phantom_environment,
     })
 }
 
@@ -162,16 +187,6 @@ mod tests {
         let projection = workspace(&binding).expect("the locator resolves");
 
         assert_eq!(projection.capabilities.len(), 1);
-        let placed: Vec<(String, String)> = projection
-            .workload_environment
-            .iter()
-            .map(|variable| (variable.name.clone(), variable.value.clone()))
-            .collect();
-        assert_eq!(
-            projection.phantom_environment, placed,
-            "with no signed route the two sets are equal: the proxy and the workload must watch \
-             for the same literal"
-        );
         let variable = &projection.workload_environment[0];
         let (name, value) = (&variable.name, &variable.value);
         assert_eq!(
@@ -236,6 +251,73 @@ mod tests {
         }
     }
 
+    /// One key that serves two hosts gets one phantom, and a strict check accepts it at each host,
+    /// whether one route lists both hosts or two routes name one variable.
+    #[test]
+    fn one_variable_for_two_hosts_provisions_one_phantom_accepted_at_both() {
+        // SAFETY: the variable is namespaced to this test, so no other test reads or writes it,
+        // and it is removed before the test returns.
+        unsafe { std::env::set_var("STRANDS_BOX_SHARED_FOR_TESTS", "ksk-real-secret") };
+        let one_route = vec![
+            r#"
+            destinations = ["management.example.dev", "runtime.example.dev"]
+            secret.ref = "env://STRANDS_BOX_SHARED_FOR_TESTS"
+            "#,
+        ];
+        let two_routes = vec![
+            r#"
+            destinations = ["management.example.dev"]
+            secret.ref = "env://STRANDS_BOX_SHARED_FOR_TESTS"
+            "#,
+            r#"
+            destinations = ["runtime.example.dev"]
+            secret.ref = "env://STRANDS_BOX_SHARED_FOR_TESTS"
+            secret.inject = "always"
+            "#,
+        ];
+        for shape in [one_route, two_routes] {
+            let bindings: Vec<_> = shape
+                .into_iter()
+                .flat_map(|toml| target(toml).to_bindings().unwrap())
+                .collect();
+
+            let projection = workspace(&bindings).expect("the locator resolves");
+
+            let [variable] = projection.workload_environment.as_slice() else {
+                panic!(
+                    "one variable is provisioned once: {:?}",
+                    projection.workload_environment
+                );
+            };
+            assert_eq!(projection.capabilities.len(), 2, "one capability per host");
+            let headers = vec![(
+                "Authorization".to_string(),
+                format!("Bearer {}", variable.value),
+            )];
+            for (pattern, vault) in &projection.capabilities {
+                let host = pattern.as_written();
+                let url = format!("https://{host}/");
+                let attachment = vault
+                    .attach_for(credentials::Outbound {
+                        destination: credentials::Destination {
+                            host: &host,
+                            port: 443,
+                            path: "/",
+                        },
+                        method: "GET",
+                        url: &url,
+                        query: "",
+                        headers: &headers,
+                        body: b"",
+                    })
+                    .unwrap_or_else(|error| panic!("{host} must accept the one phantom: {error}"));
+                assert!(attachment.is_some(), "{host} attaches the credential");
+            }
+        }
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("STRANDS_BOX_SHARED_FOR_TESTS") };
+    }
+
     /// A box that declares no egress resolves nothing.
     #[test]
     fn a_box_with_no_declared_egress_resolves_nothing() {
@@ -243,10 +325,9 @@ mod tests {
 
         assert!(projection.capabilities.is_empty());
         assert!(projection.workload_environment.is_empty());
-        assert!(projection.phantom_environment.is_empty());
     }
 
-    /// **A signed route gives the workload placeholder AWS credentials, and the proxy none.**
+    /// **A signed route gives the workload placeholder AWS credentials.**
     ///
     /// The two sets differ here and are equal for an opaque route. That asymmetry is the whole
     #[test]
@@ -267,10 +348,6 @@ mod tests {
             return;
         };
 
-        assert!(
-            projection.phantom_environment.is_empty(),
-            "a signed route places nothing for the proxy to match"
-        );
         let names: Vec<&str> = projection
             .workload_environment
             .iter()
@@ -306,10 +383,6 @@ mod tests {
         let projection =
             workspace(&bindings).expect("a credsd route opens without contacting the daemon");
 
-        assert!(
-            projection.phantom_environment.is_empty(),
-            "a signed route places nothing for the proxy to match"
-        );
         let names: Vec<&str> = projection
             .workload_environment
             .iter()

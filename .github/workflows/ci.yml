@@ -2,50 +2,53 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep]
+    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   detect-changes:
     name: Detect Changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 5
     permissions:
       pull-requests: read
       contents: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      site_manifest: ${{ steps.filter.outputs.site_manifest }}
       containment: ${{ steps.filter.outputs.containment }}
       verdict: ${{ steps.filter.outputs.verdict }}
-      native: ${{ steps.filter.outputs.native }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
-          # `**/!(*.md)` excludes docs-only changes from the matrix; keep it an
-          # extglob, not a `!**/*.md` negation (paths-filter OR-s patterns, so a
-          # bare negation fires on everything).
+          # `**/!(*.md)` excludes docs-only changes from the Rust matrix. Keep
+          # this an extglob because paths-filter OR-s its patterns.
           filters: |
-            native:
+            rust:
               - '.cargo/**'
               - 'crates/**/!(*.md)'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'test-native-filesystem/**/!(*.md)'
-              - '.github/workflows/**'
-            rust:
-              - 'crates/**/!(*.md)'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
               - '.github/workflows/rust-*'
+              - 'scripts/check-linux-test-output.py'
+              - 'scripts/test_linux_test_output.py'
+              - '.github/workflows/ci.yml'
+            site_manifest:
+              - 'docs/site-manifest.json'
+              - 'docs/site-manifest-retirements.json'
+              - 'docs/user/**/*.md'
+              - 'crates/box/tests/site_manifest.rs'
               - '.github/workflows/ci.yml'
             containment:
               - 'crates/**/!(*.md)'
@@ -55,6 +58,9 @@ jobs:
               # test-integ re-exports the shared decision-journal reader, so a
               # change there changes what every containment case parses.
               - 'test-common/**/!(*.md)'
+              # The macOS leg also runs the downloader tests.
+              - 'download.sh'
+              - 'scripts/test_download.py'
               - '.github/workflows/containment-deterministic.yml'
               - '.github/workflows/ci.yml'
             verdict:
@@ -67,7 +73,7 @@ jobs:
 
   packaging:
     name: Packaging tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     cache-mode: read
     permissions:
@@ -78,7 +84,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Check release source and archive selection
+      - name: Check downloader syntax
+        run: sh -n download.sh
+      - name: Enable private mount tests on Linux
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount true
+      - name: Check release source, archive selection, and downloader behavior
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
   rust:
@@ -93,12 +107,56 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
+  site-manifest:
+    name: Site manifest
+    needs: detect-changes
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.site_manifest == 'true' }}
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Prepare the base publication contract
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_MANIFEST: ${{ runner.temp }}/base-site-manifest.json
+          BASE_RETIREMENTS: ${{ runner.temp }}/base-site-manifest-retirements.json
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:docs/site-manifest.json" 2>/dev/null; then
+            git show "$BASE_SHA:docs/site-manifest.json" > "$BASE_MANIFEST"
+            echo "SITE_MANIFEST_BASE=$BASE_MANIFEST" >> "$GITHUB_ENV"
+          fi
+          if git cat-file -e "$BASE_SHA:docs/site-manifest-retirements.json" 2>/dev/null; then
+            git show "$BASE_SHA:docs/site-manifest-retirements.json" > "$BASE_RETIREMENTS"
+            echo "SITE_MANIFEST_RETIREMENTS_BASE=$BASE_RETIREMENTS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate the external publication contract
+        run: cargo test -p strands-box --test site_manifest --locked --all-features
+
   containment:
     name: Containment
     needs: detect-changes
     # Same unconditional-on-push rule as `rust`: detect-changes runs but its
-    # filter outputs are unset outside a pull_request.
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.containment == 'true' }}
+    # filter outputs are unset outside a pull_request. A draft pull request
+    # skips this suite; `ready_for_review` starts it.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
     uses: ./.github/workflows/containment-deterministic.yml
     permissions:
       contents: read
@@ -106,30 +164,30 @@ jobs:
   verdict:
     name: Verdict
     needs: detect-changes
-    # Same unconditional-on-push rule as the legs above.
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.verdict == 'true' }}
+    # Same unconditional-on-push rule as the legs above. A draft pull request
+    # skips this suite; `ready_for_review` starts it.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.verdict == 'true') }}
     uses: ./.github/workflows/verdict-hermetic.yml
     permissions:
       contents: read
     with:
       ref: ${{ github.sha }}
 
-  native:
-    name: Native Filesystem
-    needs: detect-changes
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.native == 'true' }}
-    uses: ./.github/workflows/native-filesystem.yml
-    permissions:
-      contents: read
-
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [detect-changes, packaging, rust, containment, verdict, native]
-    runs-on: ubuntu-latest
+    needs: [detect-changes, packaging, rust, site-manifest, containment, verdict]
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 5
     permissions: {}
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
         with:
-          allowed-skips: rust, containment, verdict, native
+          allowed-skips: rust, site-manifest, containment, verdict
           jobs: ${{ toJSON(needs) }}
+
+      - name: Refuse a draft as merge evidence
+        if: ${{ github.event.pull_request.draft == true }}
+        run: |
+          echo "::error::Draft run: containment and verdict did not run. Mark the pull request ready to run the full suite."
+          exit 1

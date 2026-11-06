@@ -66,8 +66,9 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
   `require_every_route` makes it hard; every other failure aborts `open`.
 - Treat an unreadable `file://` (`NotFound` or `PermissionDenied`) as soft. A non-UTF-8 file, any
   other I/O error, and content `Secret::new` refuses are hard.
-- Enforce phantom uniqueness across the whole vault. A collision is hard, and a
-  `PhantomToken::generate(prefix)` CSPRNG failure is hard rather than a weak fallback.
+- Enforce phantom uniqueness across the whole vault. Routes with an equal `Locator` and prefix share
+  one phantom, because they name one credential; two credentials never share one. A collision is
+  hard, and a `PhantomToken::generate(prefix)` CSPRNG failure is hard rather than a weak fallback.
 - Refuse a route the vault cannot credential; never register it. A `cmd://` or `oauth2://` locator is
   hard at `open`, or the route loads clean and sends an uncredentialed request.
 - Check the phantom before every edit, per the binding's `PhantomCheck`. `swap_phantom` compares the

@@ -54,7 +54,8 @@ jobs:
     name: Check access
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
+    timeout-minutes: 5
     outputs:
       approval-env: ${{ steps.auth.outputs.approval-env }}
       # Head resolved once here so downstream jobs act on the same commit the
@@ -83,7 +84,8 @@ jobs:
       # Both needed to add the `strands-running` label to issues and PRs.
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       # The reviewer prompt comes from the commit this workflow runs from (the
       # default branch for a comment, the dispatched ref for a dispatch), never
@@ -133,7 +135,7 @@ jobs:
       issues: read
       pull-requests: read
       id-token: write # Required for OIDC
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
       # Add environment setup here if an agent needs it (a Rust toolchain, a
@@ -158,7 +160,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Execute write operations

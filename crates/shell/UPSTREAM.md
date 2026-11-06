@@ -17,6 +17,27 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Local addition: an embedder can disable the execution timeout
+
+`ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
+defaults to 30 seconds, so omission does not disable the timeout despite the old API prose.
+This additive Rust method lets Box implement an operator's explicit unlimited Shell setting
+without substituting an arbitrary large duration. `timeout(Duration)` can restore a finite
+deadline, zero remains invalid, and the other resource limits remain in force. Shell's own
+TOML, Python, and Node configuration surfaces do not change.
+
+`builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
+repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
+checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Execution deadlines refuse clock overflow
+
+The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout
+returns `InvalidInput` at build time; if it becomes unrepresentable later, the call expires
+before executing its commands. This fixes an upstream panic without treating overflow as
+unlimited execution. `builder_refuses_a_timeout_that_overflows_the_clock` and
+`an_unrepresentable_refreshed_deadline_stops_work` cover the builder, `run`, and `execute`.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.
@@ -25,6 +46,26 @@ Previously, those tasks could outlive cancellation or wait indefinitely for a ho
 The actual Box process cleanup tests cover configured tools and their descendants.
 Background jobs stop when their owning process is dropped or a pending `wait` is cancelled.
 An open shell retains background jobs across completed foreground calls.
+
+### A synchronous command finishing after its deadline reports a timeout
+
+A command that blocked the runtime past its deadline could return success: Tokio's timeout
+wrapper can receive a completed task before polling its timer. `run_pipeline` now checks the
+clock after each task join and reports the existing execution-timeout error when the deadline
+has passed. It also checks limits before expansion and after expansion, so a substitution that
+consumes the deadline stops that pipeline before command dispatch and redirection.
+`execute_item` checks again before returning, so `!` cannot turn the timeout into success. These
+checks do not interrupt synchronous work or undo its completed effects.
+
+This is an upstream deadline-accounting bug, exercised through the script-interpreter hook.
+`a_synchronous_interpreter_cannot_return_success_after_the_shell_deadline` covers late completion
+with `!` and `||`, and a successful subsequent call.
+`an_expired_interpreter_cannot_start_following_commands_or_redirects` covers subsequent commands
+and command substitution.
+`a_late_interpreter_does_not_wait_for_an_open_output_channel` covers cancellation of the output
+drain when a synchronous command finishes late with a writer still open.
+`a_synchronous_interpreter_finishes_with_an_adequate_or_unlimited_deadline` covers both ways to
+complete successfully with a sufficient or disabled limit.
 
 ### Local addition: an effect says which words the script stated (2026-09-25)
 
@@ -1761,3 +1802,20 @@ limit, the `output size limit exceeded` message, and the exit status do not chan
 The two upstream tests are copied unchanged. `subst_max_output_truncate_multibyte` panics without
 the change. `stdout_max_output_truncate_multibyte` passes before and after the change, and pins
 that the captured-output path agrees with upstream.
+
+## 2026-10-21 — a metadata probe answered "no" reported a failed effect
+
+`stat`, `lstat`, and `access` reported a "no" answer as `EffectResult::Failed(NotFound)`. The
+probe ran and its caller received the answer, so the effect occurred. A consumer that counts
+completed effects did not count these probes. Upstream would call this a bug, because `Failed`
+means that the effect did not occur.
+
+This copy reports `EffectResult::Completed` for each answered `stat`, `lstat`, and `access`,
+through `Mediated::report_answer`. A probe that the admission-window guard refuses reports
+`EffectResult::Failed`, because `Kernel` now has `stat_answer`, `lstat_answer`, and
+`access_answer`, which return the refusal as an error. They have no default implementation, so
+each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `find_in_path`, and
+`glob` still report through `Mediated::report_probe` unchanged. A denied probe still records no
+outcome, because admission refuses it first.
+`tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
+`a_probe_the_admission_window_refuses_reports_a_failure` pin the change.

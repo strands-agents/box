@@ -1,11 +1,11 @@
 # Getting started with Box
 
-Box runs an agent on your Mac under a policy; the agent can only reach the files, programs, and
-network hosts you allow, and everything else is refused. You describe a box in two files:
+Box runs an agent on Linux or macOS under a policy.
+The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
-in a box. You'll give it one tool, a shell, so your policy decides every command it runs and every
+in a box on macOS. You'll give it one tool, a shell, so your policy decides every command it runs and every
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
@@ -43,7 +43,10 @@ Rules:
 
 ## Before you start
 
-You need:
+Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm).
+On Linux, use Amazon Linux 2023 ARM64 with glibc 2.34 or newer and libgcc.
+[Step 1](#step-1-download-box) installs Box on either platform.
+The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
 - Node.js 22.21 or later from Homebrew: `brew install node`.
@@ -59,20 +62,40 @@ cd ~/box-tutorial
 
 ## Step 1. Download Box
 
+Download Box on macOS or Linux:
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/refs/heads/main/download.sh | sh
 ./box-core/box --version
 ```
 
-The script downloads the latest release, checks it, and unpacks it into `./box-core`. You run
-`box` by its path. Keep the entire directory together. The signed macOS package contains
-`Box.app`, with a `box` launcher and helper links into that bundle. Moving only an executable
-out of the bundle loses its provisioning profile. Signing does not mean the release is notarized.
+The script downloads the latest release for your operating system, verifies its checksum, and checks the extracted files in temporary storage.
+It then unpacks the archive into `./box-core`.
+Run `box` by its path, and keep the entire directory together.
+The version command prints `strands-box` followed by the release version.
 
-### Build from source
+Set `BOX_VERSION` to select a release tag and `BOX_DOWNLOAD_DIR` to select a destination.
+Use a fresh destination to keep a previous installation if the final extraction fails.
 
-To build Box yourself in place of the download, install [rustup](https://rustup.rs/), then build it
-and copy the binaries into `./box-core`:
+### macOS
+
+The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
+Moving only an executable out of the bundle loses its provisioning profile.
+The package is also notarized, so macOS runs a copy that you download in a browser.
+
+### Linux
+
+After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+Steps 2–8 below follow the macOS Strands CLI example.
+
+Check [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
+Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
+
+<a id="build-from-source"></a>
+<details>
+<summary>Build from source (optional)</summary>
+
+To build Box yourself, install [rustup](https://rustup.rs/). Build it and copy the binaries into `./box-core`:
 
 ```sh
 git clone https://github.com/strands-agents/box.git box-src
@@ -81,6 +104,8 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
+
+</details>
 
 ## Step 2. Install the Strands CLI
 

@@ -2054,27 +2054,33 @@ impl Kernel for VfsKernel {
     }
 
     async fn stat(&self, proc: &Process, path: Resolved) -> FileStat {
-        debug_assert_eq!(path.follow(), Follow::Yes, "stat follows a final symlink");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return FileStat::default();
-        };
-        self.stat_effect(proc, path.path()).await
+        self.stat_answer(proc, path).await.unwrap_or_default()
     }
 
     async fn lstat(&self, proc: &Process, path: Resolved) -> FileStat {
-        debug_assert_eq!(path.follow(), Follow::No, "lstat acts on the link itself");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return FileStat::default();
-        };
-        self.lstat_effect(proc, path.path()).await
+        self.lstat_answer(proc, path).await.unwrap_or_default()
     }
 
     async fn access(&self, proc: &Process, path: Resolved, mode: i32) -> bool {
+        self.access_answer(proc, path, mode).await.unwrap_or(false)
+    }
+
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        debug_assert_eq!(path.follow(), Follow::Yes, "stat follows a final symlink");
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.stat_effect(proc, path.path()).await)
+    }
+
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat> {
+        debug_assert_eq!(path.follow(), Follow::No, "lstat acts on the link itself");
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.lstat_effect(proc, path.path()).await)
+    }
+
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool> {
         debug_assert_eq!(path.follow(), Follow::Yes, "access follows to its target");
-        let Ok(_generation) = self.guard_resolution(&path).await else {
-            return false;
-        };
-        self.access_effect(proc, path.path(), mode).await
+        let _generation = self.guard_resolution(&path).await?;
+        Ok(self.access_effect(proc, path.path(), mode).await)
     }
 
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf> {

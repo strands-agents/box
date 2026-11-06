@@ -351,15 +351,13 @@ fn a_sibling_boxs_authority_under_a_write_grant_is_reachable_and_disclosed() {
     );
 }
 
-/// **This box's own authority stays refused when the workload renames the directory above it**,
-/// and the two platforms get there differently.
+/// **This box's own authority stays refused when the workload attempts to rename the directory above it.**
 ///
-/// The subtraction refuses the directory holding the loaded sources at the path the run judged. On
-/// Linux the refusal is a mount that follows a renamed ancestor, so the rename lands and the sources
-/// stay hidden at their new name. On macOS the refusal is a set of path denies, so the renderer fixes
-/// the directory entries between the write root and the refusal, and the rename itself is refused.
-/// Either way the policy is unreadable and unwritable wherever it sits, and the host holds the
-/// authored bytes. The authority sits one level below the grant so that an ancestor exists to rename.
+/// Both platforms refuse the native rename and keep the loaded sources at their original path.
+/// Linux fixes intermediate ancestors with mounts inside the workload's mount namespace and returns
+/// `EBUSY`. macOS denies changes to their directory entries and returns `EPERM`. The authority sits
+/// below an intermediate directory so that an ancestor exists to rename. The policy stays unreadable
+/// and unwritable, and the host retains the authored bytes.
 ///
 /// **The mover is the compiled probe, exec'd natively under the agent's own `exec` entry.** Its
 /// `move-authority-parent` verb renames through `renameat(2)` and prints one named line per outcome,
@@ -367,10 +365,8 @@ fn a_sibling_boxs_authority_under_a_write_grant_is_reachable_and_disclosed() {
 ///
 /// **The controls carry as much of the assertion as the refusals.** A sibling directory with nothing
 /// refused inside still moves; inside the fixed directory the probe creates, renames, and removes a
-/// file and a directory (`sibling_mutation`), and the shell edits an ordinary file. The probe's
-/// `source_replacement` line, a new file written at the vacated path after a permitted move, is the
-/// Linux residual that docs/design/decisions.md#direct-filesystem-reach-is-declared-and-disclosed
-/// states, and is not asserted.
+/// file and a directory (`sibling_mutation`), and the shell edits an ordinary file. The native
+/// ancestor rename must fail, so the host must retain the original directory and policy bytes.
 #[test]
 fn this_boxs_authority_survives_a_rename_of_its_parent() {
     if !fixture::namespace_launcher_is_usable() {

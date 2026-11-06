@@ -5,6 +5,7 @@ mod request;
 mod response;
 mod verdict;
 
-pub use request::{BodyRef, HeaderMap, InterceptedRequest, Target};
+pub use request::{HeaderMap, InterceptedRequest, Target};
 pub use response::InterceptedResponse;
-pub use verdict::{DenyReason, Mutation, MutationTarget, Verdict};
+pub(crate) use verdict::hex_value;
+pub use verdict::{Mutation, MutationTarget};
