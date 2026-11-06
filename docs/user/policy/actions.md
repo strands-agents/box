@@ -1,7 +1,8 @@
 # Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships ten actions, and generates one more for each MCP tool it discovers.
+ships ten actions, and generates one more for each MCP tool it discovers. Each experimental [tool
+grammar](../config.md#toolnamegrammar) adds its own `Tool::<name>` actions.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
@@ -159,6 +160,11 @@ more:
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
 
+When a tool grammar binds the program, the grammar action decides the spawn, and the spawn enters
+history as that action and not as `shell:spawn`. A spawn that the grammar binding refuses before
+any rule decides it enters history as a `shell:spawn` request.
+[`shell:spawn`](../shell.md#shellspawn) states when Box refuses one.
+
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
 the shell's own programs, and a `shell:spawn` permit covers a program of the surrounding OS. A
@@ -179,8 +185,12 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 | `uri?` | String | The resource URI, on `resources/read`. |
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
-`[mcp.<name>]` table names. A policy with no matching `shell:spawn` permit refuses the server at
-startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+`[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
+A policy with no matching permit refuses the server at startup. For an enabled [MCP wildcard
+command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
+spaces. Its argument fields contain the same values, including the caller's values in wildcard
+positions.
+A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 
@@ -197,8 +207,8 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ./box-core/box policy generate-schema --config my-box/box.toml --output-dir ./schema
 ```
 
-It writes `actions.cedarschema`, with every action and its fields, and `events.dwschema`, with what
-a `when temporal` clause observes. The namespace is the server name with every character other
+It writes `actions.cedarschema`, with every action and its fields, including the actions of each
+tool grammar, and `events.dwschema`, with what a `when temporal` clause observes. The namespace is the server name with every character other
 than a letter, a digit, or `_` changed to `_`. A leading digit gets a `_` prefix. Server `demo-mcp`
 and tool `lookup` give `demo_mcp::Action::"lookup"`.
 
@@ -224,9 +234,15 @@ A `when temporal { … }` clause reads recorded events. The box records three ev
 
 | Event | Recorded when | Fields |
 |---|---|---|
-| `A::request` | Every decision, permitted or denied | The action's `input` fields |
-| `A::response` | The operation ended, or its end is `indeterminate` | The `input` fields, plus `output` |
-| `A::error` | The operation did not happen | The `input` fields |
+| `A::request` | Every submitted decision, permitted or denied | `requestId` and the action's `input` fields |
+| `A::response` | The operation ended, or its end is `indeterminate` | `requestId`, the `input` fields, and `output` when available |
+| `A::error` | The operation did not happen | `requestId` and the `input` fields |
+
+`requestId` is a nonempty string that identifies one policy request within this box's history.
+Its recorded response or error carries the same identifier. Separate requests receive separate identifiers, even when their inputs are identical.
+Bind the same variable to `requestId` in two predicates to require events from the same request.
+Treat the identifier's spelling as opaque.
+Older events that lack this field remain in history, but cannot match a predicate that requires it.
 
 To cap how many times the agent tries an action, count `A::request`, which also counts denied
 attempts. Use `A::response` when a later rule needs evidence that an earlier operation happened.

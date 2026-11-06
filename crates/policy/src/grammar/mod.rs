@@ -32,8 +32,9 @@ use std::fmt;
 use std::path::Path;
 
 pub(crate) use bindings::ProgramFile;
+pub use bindings::{BindingRefusal, GrammarBindings};
 #[cfg(feature = "shell-adapter")]
-pub(crate) use bindings::{CoverageRefusal, GrammarBindings, GrammarCoverage};
+pub(crate) use bindings::{CoverageRefusal, GrammarCoverage, Starter};
 pub(crate) use invocation::{GrammarInvocation, GrammarRequest, PendingGrammarResponse};
 pub(crate) use model::Grammar;
 pub(crate) use schema::TOOL_NAMESPACE;

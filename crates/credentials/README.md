@@ -156,9 +156,10 @@ A reader deciding whether to trust this boundary needs four claims, each enforce
 rather than by a convention.
 
 **The workload never holds a secret.** It holds a phantom: a `strands_box_`-prefixed 64-hex
-token from the OS CSPRNG, bound to one destination. Presenting it against a different
-destination attaches nothing. A workload that exfiltrated its whole environment would be
-leaking values that authenticate nowhere.
+token from the OS CSPRNG, bound to one credential's destinations. Routes with an equal
+`Locator` and prefix share one phantom; two credentials never do. Presenting it against a
+destination outside that credential's routes attaches nothing. A workload that exfiltrated its
+whole environment would be leaking values that authenticate nowhere.
 
 **A value that cannot authenticate never becomes a credential.** Every source returns a
 crate-internal `Secret`, and its only constructor refuses an empty value, a whitespace-only

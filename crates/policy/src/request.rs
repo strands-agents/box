@@ -1,10 +1,53 @@
 //! The [`Request`] enum — the single value a PEP hands the PDP.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use crate::path::ApprovedPath;
 
 pub(crate) const DEFAULT_PRINCIPAL_ID: &str = "self";
+
+/// The identifier of one confirmed policy request in its opened history.
+#[derive(Clone)]
+pub struct RequestId {
+    value: String,
+    scope: Arc<()>,
+}
+
+impl RequestId {
+    pub(crate) fn new(scope: &Arc<()>, offset: u64) -> Self {
+        Self {
+            value: offset.to_string(),
+            scope: Arc::clone(scope),
+        }
+    }
+
+    /// Return the opaque identifier recorded on the request and its outcome.
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    pub(crate) fn belongs_to(&self, scope: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.scope, scope)
+    }
+}
+
+impl std::fmt::Debug for RequestId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("RequestId")
+            .field(&self.value)
+            .finish()
+    }
+}
+
+impl PartialEq for RequestId {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.belongs_to(&other.scope)
+    }
+}
+
+impl Eq for RequestId {}
 
 /// Integration metadata for the fixed `Box::Agent::"self"` policy principal.
 ///

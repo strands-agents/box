@@ -89,8 +89,8 @@ def verify(workload, service, decisions, exit_code, duration, timed_out):
     steps = workload.get("steps", [])
     observed_steps = [(x.get("phase"), x.get("operation"), x.get("status"), x.get("box_refused")) for x in steps]
     expected_requests = [("GET", "/orders/42", 200),
-                         ("GET", "/orders/42/eligibility", 200),
-                         ("POST", "/orders/42/dispatch", 201)]
+                         ("GET", "/orders/42/replacement", 200),
+                         ("POST", "/orders/42/replacement", 201)]
     observed_requests = [(x.get("method"), x.get("path"), x.get("status")) for x in service.get("requests", [])]
     expected_effect = {"order_id": 42, "kind": "dispatch", "effect_id": "dispatch-42-001", "idempotency_key": "replacement-42"}
     denied_rules = [x.get("strands.box.policy.rule") for x in decisions

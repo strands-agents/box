@@ -161,6 +161,17 @@
       }
     },
     {
+      "id": "tutorial-google-cloud",
+      "source": "docs/user/tutorials/google-cloud.md",
+      "slug": "guides/deploy-to-google-cloud",
+      "title": "Run Strands Box on Google Cloud",
+      "description": "Deploy a Strands agent with Gemini to a Google Compute Engine VM and verify Box's deployment retry cooldown.",
+      "nav": {
+        "group": "Guides",
+        "order": 14
+      }
+    },
+    {
       "id": "security",
       "source": "docs/user/security.md",
       "slug": "security",
@@ -235,6 +246,17 @@
       "nav": {
         "group": "Reference",
         "order": 5
+      }
+    },
+    {
+      "id": "cloud-deployments",
+      "source": "docs/user/cloud-deployments.md",
+      "slug": "reference/cloud-deployments",
+      "title": "Cloud deployment profiles",
+      "description": "Check Linux environment requirements and service configuration for AgentCore Runtime and Lambda MicroVM deployments.",
+      "nav": {
+        "group": "Reference",
+        "order": 6
       }
     }
   ]

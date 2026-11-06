@@ -1,4 +1,5 @@
 """Run and independently verify the Claude Code exercise on EKS."""
+import argparse
 import hashlib
 import json
 import os
@@ -23,6 +24,13 @@ class Practice(ClaudeRuntime):
         self.control_passed = True
         return root
 
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--exercise", choices=["deployment-cooldown", "boundaries"], default="deployment-cooldown")
+args = parser.parse_args()
+if args.exercise == "deployment-cooldown":
+    from deployment_demo import run_agent
+    raise SystemExit(run_agent())
 
 box = Path("/opt/box/box")
 expected_box = Path("/opt/box/box.sha256").read_text().strip()
@@ -59,7 +67,7 @@ result = {
     "kernel": platform.release(),
     "architecture": platform.machine(),
     "uid_map": Path("/proc/self/uid_map").read_text(),
-    "source_revision": "f0dc6f49ea8bb8608502afffa50c8748f6c24ca2",
+    "source_revision": Path("/opt/box/box.revision").read_text().strip(),
     "box_sha256": hashlib.sha256(box.read_bytes()).hexdigest(),
     "aws_identity": {k: identity[k] for k in ["Account", "Arn"]},
 }

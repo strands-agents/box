@@ -137,6 +137,9 @@ impl Vault {
         // Every minted phantom, to enforce vault-wide uniqueness: a collision is a
         // fail-closed error, never two credentials sharing one placeholder.
         let mut seen_phantoms = std::collections::HashSet::new();
+        // The phantom each credential minted, keyed by its reference and prefix. Routes that name
+        // one credential share its phantom, so one placeholder works at every destination it serves.
+        let mut minted: Vec<(Locator, String, PhantomToken)> = Vec::new();
 
         for route in &routes {
             // Refuse before dispatching, so no branch can claim a route first and leave an unsupported
@@ -169,16 +172,29 @@ impl Vault {
 
             match vault.resolve_secret(route) {
                 Ok(secret) => {
-                    // Mint a unique phantom for the resolved secret. Generation failure or a
-                    // vault-wide collision fails closed — never a weak or duplicated value.
-                    let phantom = PhantomToken::generate(&phantom_prefix)?;
-                    if !seen_phantoms.insert(phantom.as_str().to_string()) {
-                        return Err(CredentialError::Credential(
-                            "phantom-token collision across the vault; refusing to bind two \
-                             credentials to one placeholder"
-                                .to_string(),
-                        ));
-                    }
+                    let phantom = match minted.iter().find(|(locator, prefix, _)| {
+                        locator == route.credential_ref() && *prefix == phantom_prefix
+                    }) {
+                        Some((_, _, phantom)) => phantom.clone(),
+                        None => {
+                            // Mint a unique phantom for a new credential. Generation failure or a
+                            // vault-wide collision fails closed — never a weak or duplicated value.
+                            let phantom = PhantomToken::generate(&phantom_prefix)?;
+                            if !seen_phantoms.insert(phantom.as_str().to_string()) {
+                                return Err(CredentialError::Credential(
+                                    "phantom-token collision across the vault; refusing to bind \
+                                     two credentials to one placeholder"
+                                        .to_string(),
+                                ));
+                            }
+                            minted.push((
+                                route.credential_ref().clone(),
+                                phantom_prefix.clone(),
+                                phantom.clone(),
+                            ));
+                            phantom
+                        }
+                    };
                     phantoms.push(Phantom::new(route.destination().clone(), phantom.clone()));
                     vault.opaque.push((
                         route.destination().clone(),
@@ -430,14 +446,22 @@ mod tests {
 
     // --- open ----------------------------------------------------------------
 
-    /// Every resolved route is bound and mints exactly one phantom, and the vault comes up with no
-    /// skips.
+    fn opaque_route_for(dest: &str, reference: &str) -> RouteSpec {
+        RouteSpec::opaque(
+            DestinationPattern::parse(dest).unwrap(),
+            Locator::parse_uri(reference).unwrap(),
+            header_mode(),
+        )
+    }
+
+    /// Every resolved route is bound and two credentials mint two phantoms, and the vault comes up
+    /// with no skips.
     #[test]
     fn open_binds_every_resolved_route_and_mints_one_phantom_each() {
         let opened = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "tenant-a")
-                .route(opaque_route("api.github.com"))
-                .route(opaque_route("api.stripe.com")),
+                .route(opaque_route_for("api.github.com", "test://github"))
+                .route(opaque_route_for("api.stripe.com", "test://stripe")),
         )
         .expect("both routes resolve");
 
@@ -448,6 +472,49 @@ mod tests {
             tokens[0], tokens[1],
             "two secrets sharing one phantom would let either be swapped for the other"
         );
+    }
+
+    /// Routes that name one credential share one phantom, so one placeholder works at each host.
+    #[test]
+    fn routes_that_name_one_credential_share_one_phantom() {
+        let vault_for = |second: &str| {
+            Vault::open(
+                VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                    .route(opaque_route_for("management.example.dev", "test://key"))
+                    .route(opaque_route_for("runtime.example.dev", second)),
+            )
+            .unwrap()
+        };
+
+        let shared = vault_for("test://key");
+        let tokens: Vec<&str> = shared.phantoms().iter().map(Phantom::token).collect();
+        assert_eq!(tokens.len(), 2, "one phantom entry per route");
+        assert_eq!(tokens[0], tokens[1], "one credential, one placeholder");
+
+        let distinct = vault_for("test://other");
+        let tokens: Vec<&str> = distinct.phantoms().iter().map(Phantom::token).collect();
+        assert_ne!(
+            tokens[0], tokens[1],
+            "two credentials sharing one phantom would let either be swapped for the other"
+        );
+    }
+
+    /// One credential with two phantom prefixes mints two phantoms: each carries its own prefix.
+    #[test]
+    fn one_credential_with_two_prefixes_mints_two_phantoms() {
+        let route = |dest: &str, prefix: &str| {
+            opaque_route_for(dest, "test://key")
+                .phantom_prefix(prefix.to_string())
+                .unwrap()
+        };
+        let opened = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                .route(route("a.example.dev", "sk-a-"))
+                .route(route("b.example.dev", "sk-b-")),
+        )
+        .unwrap();
+        let tokens: Vec<&str> = opened.phantoms().iter().map(Phantom::token).collect();
+        assert!(tokens[0].starts_with("sk-a-") && tokens[1].starts_with("sk-b-"));
     }
 
     /// A phantom names the destination it stands in for, so a supervisor can seed it correctly.

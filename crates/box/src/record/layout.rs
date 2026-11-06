@@ -3806,6 +3806,7 @@ mod tests {
             env: std::collections::BTreeMap::from([("REFRESHED".to_string(), "yes".to_string())]),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         });
         let updated_text = updated.to_toml().expect("updated record");
 
@@ -4613,6 +4614,7 @@ mod tests {
     fn one_alias_serves_every_server_on_one_program() {
         let (layout, _fixture) = layout("codex");
         let server = |name: &str, command: &[&str]| crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: name.to_string(),
             command: command.iter().map(ToString::to_string).collect(),
         };

@@ -25,6 +25,28 @@ pub(crate) struct ConfiguredCommand {
     routes: Vec<PathBuf>,
     opened: File,
     identity: (u64, u64),
+    loaded: FileState,
+}
+
+/// The link count, owner, group, and mode of a command file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileState {
+    links: u64,
+    owner: u32,
+    group: u32,
+    mode: u32,
+}
+
+impl FileState {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            links: metadata.nlink(),
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.mode(),
+        }
+    }
 }
 
 impl ConfiguredCommands {
@@ -44,11 +66,19 @@ impl ConfiguredCommands {
                     refusal(&table, &path, &format!("cannot be inspected: {error}"))
                 })?;
                 use std::os::unix::fs::MetadataExt as _;
-                if !metadata.is_file() || metadata.nlink() != 1 {
+                if !metadata.is_file() {
+                    return Err(refusal(&table, &path, "must be a regular file"));
+                }
+                let loaded = FileState::of(&metadata);
+                if loaded.links > 1 && writable_by_this_user(&opened, &path, loaded) {
                     return Err(refusal(
                         &table,
                         &path,
-                        "must be a regular file with exactly one hard link",
+                        &format!(
+                            "has {} hard links, and the user that runs Box may be able to write \
+                             it. Use a copy with one hard link",
+                            loaded.links
+                        ),
                     ));
                 }
                 let invoked = resolved.invoked().to_path_buf();
@@ -64,6 +94,7 @@ impl ConfiguredCommands {
                     routes,
                     opened,
                     identity: (metadata.dev(), metadata.ino()),
+                    loaded,
                 };
                 command.verify()?;
                 Ok((label.clone(), Arc::new(command)))
@@ -122,17 +153,40 @@ impl ConfiguredCommand {
         &self.invoked
     }
 
+    pub(crate) const fn has_several_names(&self) -> bool {
+        self.loaded.links > 1
+    }
+
+    /// Refuse a tool grammar on this command when its file has more than one name.
+    pub(crate) fn refuse_a_grammar_on_several_names(&self) -> Result<(), BoxError> {
+        if !self.has_several_names() {
+            return Ok(());
+        }
+        Err(refusal(
+            &self.table,
+            &self.path,
+            &format!(
+                "has {} names, and a tool grammar on it refuses each name that no `[tool]` \
+                 declares. Point `command` at a copy with one name",
+                self.loaded.links
+            ),
+        ))
+    }
+
     pub(crate) fn opened(&self) -> &File {
         &self.opened
     }
 
     pub(crate) fn verify(&self) -> Result<(), BoxError> {
-        use std::os::unix::fs::MetadataExt as _;
-        let one_name = self
-            .opened
-            .metadata()
-            .is_ok_and(|metadata| metadata.nlink() == 1);
-        if one_name
+        let unchanged_names = self.opened.metadata().is_ok_and(|metadata| {
+            let now = FileState::of(&metadata);
+            if self.loaded.links == 1 {
+                now.links == 1
+            } else {
+                now == self.loaded && !writable_by_this_user(&self.opened, &self.path, now)
+            }
+        });
+        if unchanged_names
             && disk_identity(&self.path) == Some(self.identity)
             && self
                 .routes
@@ -161,6 +215,110 @@ impl ConfiguredCommand {
     }
 }
 
+/// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
+fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
+    // SAFETY: these calls read the process credentials without changing them.
+    let users = unsafe { [libc::getuid(), libc::geteuid()] };
+    may_change(
+        state,
+        users,
+        || write_access(opened, path),
+        || may_carry_access_list(opened),
+    )
+}
+
+/// Whether a file in `state` may change through some name, for the real and effective `users`, the
+/// kernel's answer to a write check, and whether the file may carry an access-control list.
+fn may_change(
+    state: FileState,
+    users: [u32; 2],
+    access: impl FnOnce() -> std::io::Result<()>,
+    access_list: impl FnOnce() -> bool,
+) -> bool {
+    users.contains(&0)
+        || users.contains(&state.owner)
+        || state.mode & 0o022 != 0
+        || match access() {
+            Ok(()) => true,
+            Err(error) => match error.raw_os_error() {
+                Some(libc::EACCES) => false,
+                Some(libc::EPERM | libc::EROFS) if cfg!(target_os = "macos") => access_list(),
+                _ => true,
+            },
+        }
+}
+
+// macOS access-control-list calls, which the `libc` crate does not declare.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+}
+
+/// `ACL_TYPE_EXTENDED`, the one list type macOS stores.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+/// Whether `opened` may carry an access-control list, which can grant a write that its mode does not.
+#[cfg(target_os = "macos")]
+fn may_carry_access_list(opened: &File) -> bool {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor is live for the call.
+    let list = unsafe { acl_get_fd_np(opened.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if list.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+    }
+    // SAFETY: `list` came from `acl_get_fd_np`, and this frees it once.
+    unsafe { acl_free(list) };
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn may_carry_access_list(_opened: &File) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn write_access(opened: &File, _path: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor is live, and the empty path is a terminated string.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_faccessat2,
+            opened.as_raw_fd(),
+            c"".as_ptr(),
+            libc::W_OK,
+            libc::AT_EACCESS | libc::AT_EMPTY_PATH,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let spelled = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: `spelled` is a NUL-terminated path that outlives the call.
+    let result = unsafe {
+        libc::faccessat(
+            libc::AT_FDCWD,
+            spelled.as_ptr(),
+            libc::W_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn refusal(table: &str, path: &Path, reason: &str) -> BoxError {
     ConfigError::Process {
         table: table.to_string(),
@@ -186,6 +344,8 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: "commands-test".to_string(),
             box_dir: path.parent().expect("directory").join("box-state"),
             name: "commands-test".to_string(),
@@ -200,6 +360,7 @@ mod tests {
                     env: Default::default(),
                     filesystem: Default::default(),
                     network: None,
+                    grammar: None,
                 },
             )]),
             egress: Default::default(),
@@ -260,7 +421,34 @@ mod tests {
     }
 
     #[test]
-    fn configured_commands_refuse_preexisting_hard_links() {
+    fn a_grammar_is_refused_on_a_command_with_several_names() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        program(&command);
+        let mut commands = ConfiguredCommands::load(&record(&command)).expect("commands");
+        let mut loaded = commands
+            .tools
+            .remove("reader")
+            .and_then(Arc::into_inner)
+            .expect("the command is not shared");
+        loaded
+            .refuse_a_grammar_on_several_names()
+            .expect("a command with one name takes a grammar");
+
+        loaded.loaded.links = 78;
+
+        let refusal = loaded
+            .refuse_a_grammar_on_several_names()
+            .expect_err("a command with several names takes no grammar")
+            .to_string();
+        assert!(
+            refusal.contains("has 78 names, and a tool grammar on it refuses each name"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
         let directory = tempfile::tempdir().expect("directory");
         let command = directory.path().join("reader");
         program(&command);
@@ -268,7 +456,332 @@ mod tests {
         let error = ConfiguredCommands::load(&record(&command))
             .expect_err("an unseen writable alias cannot be protected")
             .to_string();
-        assert!(error.contains("exactly one hard link"), "{error}");
+        assert!(
+            error.contains("has 2 hard links, and the user that runs Box may be able to write it"),
+            "{error}"
+        );
+    }
+
+    /// A root-owned regular file in a system folder with several names and no group or other write.
+    fn system_command_with_several_names() -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt as _;
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        let user = unsafe { libc::geteuid() };
+        if user == 0 {
+            return None;
+        }
+        ["/usr/bin", "/bin"]
+            .into_iter()
+            .filter_map(|folder| std::fs::read_dir(folder).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && metadata.nlink() > 1
+                        && metadata.uid() == 0
+                        && metadata.mode() & 0o022 == 0
+                        && metadata.mode() & 0o111 != 0
+                })
+            })
+    }
+
+    /// Report a test that found no [`system_command_with_several_names`]. macOS always has one.
+    fn skipping_without_a_system_command() {
+        if cfg!(target_os = "macos") {
+            panic!(
+                "macOS always has a root-owned program with several names, such as /usr/bin/git, \
+                 so a skip there hides a regression"
+            );
+        }
+        eprintln!(
+            "skipping: no root-owned program with several names in /usr/bin or /bin, or the test \
+             runs as root"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apples_git_loads_as_a_configured_command() {
+        use std::os::unix::fs::MetadataExt as _;
+        let git = Path::new("/usr/bin/git");
+        let metadata = std::fs::symlink_metadata(git).expect("macOS ships /usr/bin/git");
+        assert!(
+            metadata.is_file()
+                && metadata.nlink() > 1
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0,
+            "/usr/bin/git is not a root-owned file with several names, so this test checks \
+             nothing: {metadata:?}"
+        );
+        let opened = open_without_following(git).expect("opened");
+        assert!(
+            !may_carry_access_list(&opened),
+            "/usr/bin/git carries an access-control list"
+        );
+        let commands = ConfiguredCommands::load(&record(git))
+            .unwrap_or_else(|error| panic!("/usr/bin/git: {error}"));
+        commands
+            .get("reader")
+            .unwrap()
+            .verify()
+            .unwrap_or_else(|error| panic!("/usr/bin/git: {error}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_with_an_access_control_list_may_be_written() {
+        let directory = tempfile::tempdir().expect("directory");
+        let listed = directory.path().join("listed");
+        program(&listed);
+        let opened = open_without_following(&listed).expect("opened");
+        assert!(
+            !may_carry_access_list(&opened),
+            "a new file carries no list"
+        );
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny write"])
+            .arg(&listed)
+            .status()
+            .expect("chmod");
+        assert!(status.success(), "chmod +a: {status}");
+        assert!(
+            may_carry_access_list(&opened),
+            "a file with an entry carries a list"
+        );
+    }
+
+    #[test]
+    fn a_root_owned_command_with_several_names_loads_and_launches() {
+        let Some(command) = system_command_with_several_names() else {
+            skipping_without_a_system_command();
+            return;
+        };
+        let commands = ConfiguredCommands::load(&record(&command))
+            .unwrap_or_else(|error| panic!("{}: {error}", command.display()));
+        commands
+            .get("reader")
+            .unwrap()
+            .verify()
+            .unwrap_or_else(|error| panic!("{}: {error}", command.display()));
+    }
+
+    #[test]
+    fn this_user_can_write_a_file_it_owns_even_without_a_write_bit() {
+        let directory = tempfile::tempdir().expect("directory");
+        let owned = directory.path().join("owned");
+        program(&owned);
+        std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o555)).expect("mode");
+        let opened = open_without_following(&owned).expect("opened");
+        let state = FileState::of(&opened.metadata().expect("metadata"));
+        assert!(
+            writable_by_this_user(&opened, &owned, state),
+            "an owner can change its own mode"
+        );
+        let Some(system) = system_command_with_several_names() else {
+            skipping_without_a_system_command();
+            return;
+        };
+        let opened = open_without_following(&system).expect("opened system command");
+        let state = FileState::of(&opened.metadata().expect("system metadata"));
+        assert!(
+            !writable_by_this_user(&opened, &system, state),
+            "{}",
+            system.display()
+        );
+    }
+
+    #[test]
+    fn only_a_permission_refusal_shows_that_no_name_can_change_a_file() {
+        let foreign = FileState {
+            links: 2,
+            owner: 4242,
+            group: 4242,
+            mode: 0o100_755,
+        };
+        let users = [501, 501];
+        let refused = |code: i32| move || Err(std::io::Error::from_raw_os_error(code));
+        let no_list = || false;
+        assert!(!may_change(foreign, users, refused(libc::EACCES), no_list));
+        assert!(
+            may_change(foreign, users, || Ok(()), no_list),
+            "an allowed write"
+        );
+        for code in [libc::ENOENT, libc::ENOSYS, libc::EINVAL] {
+            assert!(
+                may_change(foreign, users, refused(code), no_list),
+                "errno {code}"
+            );
+        }
+        assert!(
+            may_change(
+                foreign,
+                users,
+                || Err(std::io::ErrorKind::InvalidInput.into()),
+                no_list
+            ),
+            "an answer with no errno"
+        );
+        assert_eq!(
+            may_change(foreign, users, refused(libc::EPERM), no_list),
+            !cfg!(target_os = "macos"),
+            "EPERM is a refusal only where System Integrity Protection answers it"
+        );
+        assert_eq!(
+            may_change(foreign, users, refused(libc::EROFS), no_list),
+            !cfg!(target_os = "macos"),
+            "macOS answers EROFS before it checks permissions, so the owner, mode, and list decide"
+        );
+        for code in [libc::EPERM, libc::EROFS] {
+            assert!(
+                may_change(foreign, users, refused(code), || true),
+                "errno {code}: an access-control list can grant a write that the mode does not"
+            );
+        }
+        for (state, users, why) in [
+            (
+                FileState {
+                    owner: 501,
+                    ..foreign
+                },
+                users,
+                "the owner",
+            ),
+            (foreign, [501, 4242], "the effective user owns it"),
+            (foreign, [4242, 501], "the real user owns it"),
+            (foreign, [0, 0], "root"),
+            (
+                FileState {
+                    mode: 0o100_775,
+                    ..foreign
+                },
+                users,
+                "group write",
+            ),
+            (
+                FileState {
+                    mode: 0o100_757,
+                    ..foreign
+                },
+                users,
+                "other write",
+            ),
+        ] {
+            assert!(
+                may_change(state, users, refused(libc::EACCES), no_list),
+                "{why}"
+            );
+            assert!(
+                may_change(state, users, refused(libc::EROFS), no_list),
+                "{why} on a read-only mount"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_path_the_kernel_cannot_take_counts_as_writable() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        program(&command);
+        let opened = open_without_following(&command).expect("opened");
+        let foreign = FileState {
+            links: 2,
+            owner: 4242,
+            group: 4242,
+            mode: 0o100_755,
+        };
+        assert!(writable_by_this_user(
+            &opened,
+            Path::new("reader\0alias"),
+            foreign
+        ));
+    }
+
+    #[test]
+    fn a_command_with_several_names_refuses_launch_when_its_names_owner_or_mode_change() {
+        let Some(system) = system_command_with_several_names() else {
+            skipping_without_a_system_command();
+            return;
+        };
+        use std::os::unix::fs::MetadataExt as _;
+        let loaded_as = |path: &Path, loaded: Option<FileState>| {
+            let opened = open_without_following(path).expect("opened");
+            let metadata = opened.metadata().expect("metadata");
+            ConfiguredCommand {
+                table: "[tool.reader]".to_string(),
+                path: path.to_path_buf(),
+                invoked: path.to_path_buf(),
+                routes: vec![path.to_path_buf()],
+                identity: (metadata.dev(), metadata.ino()),
+                loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
+                opened,
+            }
+        };
+        loaded_as(&system, None)
+            .verify()
+            .expect("an unchanged system command launches");
+        let now = FileState::of(&std::fs::metadata(&system).expect("metadata"));
+        for (loaded, why) in [
+            (
+                FileState {
+                    links: now.links + 1,
+                    ..now
+                },
+                "a removed name",
+            ),
+            (
+                FileState {
+                    links: now.links - 1,
+                    ..now
+                },
+                "an added name",
+            ),
+            (
+                FileState {
+                    mode: now.mode ^ 0o004,
+                    ..now
+                },
+                "a changed mode",
+            ),
+            (
+                FileState {
+                    owner: now.owner + 1,
+                    ..now
+                },
+                "a changed owner",
+            ),
+            (
+                FileState {
+                    group: now.group + 1,
+                    ..now
+                },
+                "a changed group",
+            ),
+        ] {
+            let error = loaded_as(&system, Some(loaded))
+                .verify()
+                .expect_err(why)
+                .to_string();
+            assert!(
+                error.contains("changed after this run loaded it"),
+                "{why}: {error}"
+            );
+        }
+
+        let directory = tempfile::tempdir().expect("directory");
+        let owned = directory.path().join("reader");
+        program(&owned);
+        std::fs::hard_link(&owned, directory.path().join("alias")).expect("hard link");
+        let error = loaded_as(&owned, None)
+            .verify()
+            .expect_err("a file this user can write")
+            .to_string();
+        assert!(
+            error.contains("changed after this run loaded it"),
+            "{error}"
+        );
     }
 
     #[test]
