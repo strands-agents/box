@@ -6,6 +6,14 @@
 #[path = "../run/broker/protocol.rs"]
 mod shell_protocol;
 
+// Depends on nothing but `libc` and `std`, so the test probe binary includes this same file by
+// path too, and calls its functions directly without pulling in `shell_protocol` or `tokio`. In
+// a subdirectory, not directly under `src/bin/`, so Cargo's `autobins` does not also treat it as
+// its own binary target (it has no `main`).
+#[path = "strands-box-sock-alias/close_descriptors.rs"]
+mod close_descriptors;
+use close_descriptors::close_inherited_descriptors;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -69,31 +77,6 @@ fn main() -> ExitCode {
             ExitCode::from(SHELL_FAILURE_EXIT)
         }
     }
-}
-
-/// Close every descriptor above stdio before doing anything else.
-#[cfg(unix)]
-fn close_inherited_descriptors() -> io::Result<()> {
-    let maximum = unsafe { libc::getdtablesize() };
-    if maximum < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    for descriptor in (libc::STDERR_FILENO + 1)..maximum {
-        // SAFETY: close only receives a descriptor number. EBADF means the
-        // descriptor was already closed, which is the desired state.
-        if unsafe { libc::close(descriptor) } == -1 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EBADF) {
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn close_inherited_descriptors() -> io::Result<()> {
-    Ok(())
 }
 
 async fn run() -> io::Result<i32> {
