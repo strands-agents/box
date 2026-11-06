@@ -672,7 +672,7 @@ impl HostedBox {
                 crate::record::config::grammar::called_name(spec),
             )?;
         }
-        for contained in record.contained_mcp.values() {
+        for (label, contained) in &record.contained_mcp {
             let spec = &contained.spec;
             let Ok(program) =
                 crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
@@ -683,6 +683,23 @@ impl HostedBox {
             else {
                 continue;
             };
+            let called = crate::record::config::grammar::called_name(spec);
+            let names = opened.metadata().map_or(1, |metadata| {
+                use std::os::unix::fs::MetadataExt as _;
+                metadata.nlink()
+            });
+            if programs.contains(called) && names > 1 {
+                return Err(ConfigError::Process {
+                    table: format!("[mcp.{label}]"),
+                    reason: format!(
+                        "configured command {} has {names} names, and a tool grammar on it \
+                         refuses each name that no `[tool]` declares. Point `command` at a copy \
+                         with one name",
+                        program.granted_path().display()
+                    ),
+                }
+                .into());
+            }
             bindings.declare_server(
                 &opened,
                 program.granted_path(),
@@ -1281,6 +1298,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_mcp_server_that_a_grammar_binds_is_refused_when_its_file_has_several_names() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp-names");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let shared = home.path().join("shared");
+        std::fs::create_dir(&shared).expect("a second directory");
+        let server = shared.join("git");
+        install_program(&server);
+        std::fs::hard_link(&server, shared.join("make")).expect("a second name");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "repo".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine =
+            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
+                .expect("the policy opens");
+
+        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
+            .expect_err("a grammar on a server file with several names is refused")
+            .to_string();
+
+        assert!(
+            refusal.contains("[mcp.repo]") && refusal.contains("has 2 names"),
+            "{refusal}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_grammar_on_apples_git_is_refused_because_its_file_has_several_names() {
@@ -1295,8 +1349,7 @@ mod tests {
                 .expect("the policy opens");
 
         let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
-            .err()
-            .expect("a grammar on a file with several names is refused")
+            .expect_err("a grammar on a file with several names is refused")
             .to_string();
 
         assert!(

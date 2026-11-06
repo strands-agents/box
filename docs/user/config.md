@@ -631,7 +631,7 @@ Each of these is refused at startup, before any box state exists:
 - A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
   policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
 - A grammar for a program whose command file has more than one name, such as macOS
-  `/usr/bin/git`. A grammar would refuse each other name of that file, such as `make`: ``configured
+  `/usr/bin/git`, in a `[tool]` or in a stdio `[mcp.<name>]` that runs that program. A grammar would refuse each other name of that file, such as `make`: ``configured
   command /usr/bin/git has 78 names, and a tool grammar on it refuses each name that no `[tool]`
   declares. Point `command` at a copy with one name``.
 - An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
