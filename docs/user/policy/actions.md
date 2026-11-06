@@ -227,6 +227,37 @@ A few protocol methods pass with no decision, and the set depends on the transpo
 Over HTTP, each frame is also decided as `http:request` first. Because `tools/list` is decided, a
 rule can refuse it and hide a server's tools.
 
+<a id="tool-grammar-actions"></a>
+## Tool grammar actions
+
+Each experimental [tool grammar](../tool-grammars.md) adds the actions `Tool::<name>::Action::"<action>"`,
+one for each `[shell.<action>]` table, and `Tool::<name>::Action::"unmodeled"`. Version 2 and later
+of a grammar use the namespace `Tool::<name>::v<version>`. `Tool::<name>::Action::"*"` is the group
+of every action except `unmodeled`.
+
+Every action of a grammar carries these fields, and `unmodeled` carries only these:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `program` | String | The first word after expansion, as on `shell:spawn`. |
+| `program_path` | String | The resolved program file, spelled `~/…` under the operator's home and absolute elsewhere. |
+| `cwd` | String | The Shell's working directory, as an absolute path. |
+| `args` | Set of String | Every word after the program. |
+| `effects` | Set of `Tool::<name>::Effect` | The effects of this command. A grammar that declares no effect has no `effects` field. |
+| `credential_reads?` | Set of String | The credential stores that the program's `[tool.<name>]` lists name, as on `shell:spawn`. |
+
+Each other action also carries one field for each of its options and operands, named by its key in
+`options` or `operands`:
+
+| The option or operand | Type |
+|---|---|
+| An option with no `value` | Bool |
+| An option with one value, or an operand `<name>` | String, and optional |
+| A `repeated` option, an option with `value = "many"`, or an operand `<name>...` | Set of String |
+
+Box refuses to load a rule that reads `context.input` over two grammars, or over a grammar action
+and a `Box::` action.
+
 ## What a temporal rule observes
 
 A `when temporal { … }` clause reads recorded events. The box records three events for each action
