@@ -187,6 +187,8 @@ To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent 
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
 Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
 Connection and write operations retain their transport timeouts.
+Configured-command [hard-link scans](#configured-command-integrity) retain their separate
+30-second budget per tree, including when `shell.timeout` is `false`.
 Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
 are load errors.
 
@@ -558,7 +560,9 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 | A writable directory contains another name for an operator-writable configured command. | `this write grant contains a hard link to a configured tool command` | Narrow the writable directory to exclude the command's hard-link names. |
 | Box cannot finish scanning a writable directory for configured-command hard links. | `cannot be inspected for configured command hard links` | Restore access to the directory, or narrow the writable grant. |
 | The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
-| A directory change through Strands Shell or Monty reaches a protected command, or its hard-link scan cannot finish. | `cannot establish that this mutation preserves a configured tool command` | Select a smaller directory that excludes the command's hard-link names and can be fully inspected. |
+| A change through Strands Shell or Monty reaches a configured command or its ancestor. | `is a configured tool command or its ancestor, which this run does not allow to change` | Select a path outside the configured command and its enclosing directories. |
+| A directory change through Strands Shell or Monty reaches a hard-link alias for a configured command. | `contains a hard link to a configured tool command, so this mutation is not allowed` | Select a directory that excludes the command's hard-link names. |
+| Box cannot finish a directory scan for a change through Strands Shell or Monty. | `cannot finish checking for configured tool command hard links`, followed by the scan failure | Correct the reported access or inspection-limit problem, or select a smaller directory that Box can fully inspect. |
 
 Box accepts a command with more than one hard link when ownership and access checks rule out
 writes by the operator through every name. The file belongs to another account, such as `root`,
@@ -567,9 +571,11 @@ Most system programs are like this, such as `/usr/bin/git` on macOS and `/usr/bi
 
 On macOS and Linux, a command with multiple hard links can remain writable by the operator. A startup scan
 must find none of its names in the declared writable directories of the agent, tools, or local
-MCP servers. The scan includes subdirectories excluded by `deny`. An incomplete scan, including
-one that exceeds 100,000 entries or 128 directory levels per tree, refuses startup. The command
-and its paths must still pass the writable-grant checks.
+MCP servers. The scan includes subdirectories excluded by `deny`. Each tree has a 30-second
+inspection budget and a depth limit of 128 directory levels. Box refuses an incomplete scan.
+It checks elapsed time between filesystem calls and before accepting a completed scan.
+This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
+budgets. The command and its paths must still pass the writable-grant checks.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. For commands admitted through scanning, directory

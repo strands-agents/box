@@ -485,10 +485,13 @@ writes through every name, such as for a root-owned system program.
 On macOS and Linux, Box can also accept a command with multiple hard links that the operator can
 write. Before the workload starts, Box scans the declared writable directories of the agent,
 every tool, and every local MCP server, including subdirectories excluded by `deny`.
-The scan must finish without finding a hard-link name for the command. An unreadable entry or
-exceeding 100,000 entries or 128 directory levels per tree prevents startup. The command's own
-path, its symbolic-link routes, and their enclosing directories must remain outside writable
-grants.
+The scan must finish without finding a hard-link name for the command. Each tree has one
+30-second inspection budget, shared across its recursive calls, and a depth limit of 128
+directory levels. An unreadable entry, expired budget, or excessive depth prevents startup.
+Box checks elapsed time between filesystem calls and before accepting completion; it cannot
+interrupt a blocked filesystem call. Separate trees receive separate budgets, so this does
+not bound total startup time. The command's own path, its symbolic-link routes, and their
+enclosing directories must remain outside writable grants.
 
 Before each launch, a command with multiple hard links must retain its link count, owner, group,
 and mode. Box also repeats the write-access check for a command admitted through ownership and

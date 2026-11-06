@@ -20,6 +20,16 @@ pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
 }
 
+/// Why command protection refuses a mutation.
+#[derive(Debug)]
+pub(crate) enum CommandMutationRefusal {
+    CommandOrAncestor,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    HardLinkAlias,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    IncompleteScan(std::io::Error),
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfiguredCommand {
     table: String,
@@ -120,21 +130,23 @@ impl ConfiguredCommands {
         self.tools.get(label)
     }
 
-    pub(crate) fn refuses_mutation(&self, path: &Path) -> bool {
+    pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
         if self.tools.values().any(|command| command.enclosed_by(path)) {
-            return true;
+            return Some(CommandMutationRefusal::CommandOrAncestor);
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let identities = self.mutable_aliases();
             if !identities.is_empty() {
                 return match aliases::contains(path, &identities) {
-                    Ok(found) => found,
-                    Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                    Ok(true) => Some(CommandMutationRefusal::HardLinkAlias),
+                    Ok(false) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(CommandMutationRefusal::IncompleteScan(error)),
                 };
             }
         }
-        false
+        None
     }
 
     pub(crate) fn validate_reach(&self, table: &str, reach: &DirectReach) -> Result<(), BoxError> {
@@ -915,12 +927,19 @@ mod tests {
         std::fs::hard_link(&command, &alias).expect("later hard link");
         for mutation in [&command, &route, &alias, &tools, &routes, &home] {
             assert!(
-                commands.refuses_mutation(mutation),
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
                 "{}",
                 mutation.display()
             );
         }
-        assert!(!commands.refuses_mutation(&tools.join("unrelated-output")));
+        assert!(
+            commands
+                .mutation_refusal(&tools.join("unrelated-output"))
+                .is_none()
+        );
         commands
             .get("reader")
             .unwrap()

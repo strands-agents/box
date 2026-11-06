@@ -7,85 +7,145 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 use std::ptr::NonNull;
+use std::time::{Duration, Instant};
 
-const MAX_ENTRIES: usize = 100_000;
+const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DEPTH: usize = 128;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// Inspect existing names without following symbolic links or accepting an incomplete directory walk.
 pub(super) fn contains(path: &Path, identities: &[(u64, u64)]) -> io::Result<bool> {
-    let before = std::fs::symlink_metadata(path)?;
+    contains_before_deadline(
+        path,
+        identities,
+        Instant::now() + SCAN_TIMEOUT,
+        &check_deadline,
+    )
+}
+
+fn contains_before_deadline(
+    path: &Path,
+    identities: &[(u64, u64)],
+    deadline: Instant,
+    check: &impl Fn(Instant) -> io::Result<()>,
+) -> io::Result<bool> {
+    let before = checked_io(deadline, check, || std::fs::symlink_metadata(path))?;
     if before.is_file() {
-        return Ok(identities.contains(&(before.dev(), before.ino())));
+        return finish_before_deadline(
+            deadline,
+            check,
+            Ok(identities.contains(&(before.dev(), before.ino()))),
+        );
     }
     if !before.is_dir() {
-        return Ok(false);
+        return finish_before_deadline(deadline, check, Ok(false));
     }
     // Once the root exists, every later missing name means the inspection was incomplete.
     let inspect_existing = || {
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(DIRECTORY_FLAGS)
-            .open(path)?;
-        let mut remaining = MAX_ENTRIES;
-        let found = inspect(&directory, &before, identities, &mut remaining, 0)?;
-        require_unchanged(&before, &std::fs::symlink_metadata(path)?)?;
-        Ok(found)
+        let directory = checked_io(deadline, check, || {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(DIRECTORY_FLAGS)
+                .open(path)
+        })?;
+        let found = inspect(&directory, &before, identities, deadline, check, 0)?;
+        let after = checked_io(deadline, check, || std::fs::symlink_metadata(path))?;
+        require_unchanged(&before, &after)?;
+        finish_before_deadline(deadline, check, Ok(found))
     };
-    inspect_existing().map_err(|error: io::Error| {
+    finish_before_deadline(deadline, check, inspect_existing()).map_err(|error: io::Error| {
         io::Error::other(format!("directory inspection failed: {error}"))
     })
+}
+
+fn check_deadline(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "directory inspection exceeded 30 seconds",
+        ));
+    }
+    Ok(())
+}
+
+// Check the deadline around an operation; a blocked filesystem call must return first.
+fn checked_io<T>(
+    deadline: Instant,
+    check: &impl Fn(Instant) -> io::Result<()>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    check(deadline)?;
+    finish_before_deadline(deadline, check, operation())
+}
+
+fn finish_before_deadline<T>(
+    deadline: Instant,
+    check: &impl Fn(Instant) -> io::Result<()>,
+    result: io::Result<T>,
+) -> io::Result<T> {
+    check(deadline)?;
+    result
 }
 
 fn inspect(
     directory: &File,
     before: &Metadata,
     identities: &[(u64, u64)],
-    remaining: &mut usize,
+    deadline: Instant,
+    check: &impl Fn(Instant) -> io::Result<()>,
     depth: usize,
 ) -> io::Result<bool> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory depth exceeds 128"));
     }
-    require_unchanged(before, &directory.metadata()?)?;
-    let stream = DirectoryStream::new(directory)?;
-    while let Some(name) = stream.next()? {
-        *remaining = remaining
-            .checked_sub(1)
-            .ok_or_else(|| io::Error::other("directory inspection exceeds 100000 entries"))?;
-        let metadata = entry_metadata(directory, &name)?;
+    let opened = checked_io(deadline, check, || directory.metadata())?;
+    require_unchanged(before, &opened)?;
+    let stream = DirectoryStream::new(directory, deadline, check)?;
+    while let Some(name) = stream.next(deadline, check)? {
+        let metadata = checked_io(deadline, check, || entry_metadata(directory, &name))?;
         match metadata.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
                 if identities.contains(&entry_identity(&metadata)) {
-                    return Ok(true);
+                    return finish_before_deadline(deadline, check, Ok(true));
                 }
             }
             libc::S_IFDIR => {
-                // SAFETY: the directory descriptor and terminated entry name stay live during openat.
-                let descriptor = unsafe {
-                    libc::openat(
-                        directory.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | DIRECTORY_FLAGS,
-                    )
-                };
-                if descriptor == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                // SAFETY: openat returned a new descriptor, now owned by child.
-                let child = unsafe { File::from_raw_fd(descriptor) };
-                let child_before = child.metadata()?;
+                let child = checked_io(deadline, check, || {
+                    // SAFETY: the directory descriptor and terminated name stay live during openat.
+                    let descriptor = unsafe {
+                        libc::openat(
+                            directory.as_raw_fd(),
+                            name.as_ptr(),
+                            libc::O_RDONLY | DIRECTORY_FLAGS,
+                        )
+                    };
+                    if descriptor == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    // SAFETY: openat returned a new descriptor, now owned by child.
+                    Ok(unsafe { File::from_raw_fd(descriptor) })
+                })?;
+                let child_before = checked_io(deadline, check, || child.metadata())?;
                 require_same_entry(&metadata, &child_before)?;
-                if inspect(&child, &child_before, identities, remaining, depth + 1)? {
-                    return Ok(true);
+                if inspect(
+                    &child,
+                    &child_before,
+                    identities,
+                    deadline,
+                    check,
+                    depth + 1,
+                )? {
+                    return finish_before_deadline(deadline, check, Ok(true));
                 }
-                require_same_entry(&entry_metadata(directory, &name)?, &child_before)?;
+                let after = checked_io(deadline, check, || entry_metadata(directory, &name))?;
+                require_same_entry(&after, &child_before)?;
             }
             _ => {}
         }
     }
-    require_unchanged(before, &directory.metadata()?)?;
-    Ok(false)
+    let after = checked_io(deadline, check, || directory.metadata())?;
+    require_unchanged(before, &after)?;
+    finish_before_deadline(deadline, check, Ok(false))
 }
 
 fn require_unchanged(before: &Metadata, after: &Metadata) -> io::Result<()> {
@@ -159,47 +219,65 @@ fn entry_metadata(directory: &File, name: &CStr) -> io::Result<libc::stat> {
 struct DirectoryStream(NonNull<libc::DIR>);
 
 impl DirectoryStream {
-    fn new(directory: &File) -> io::Result<Self> {
-        let descriptor = directory.try_clone()?.into_raw_fd();
-        // SAFETY: fdopendir consumes the duplicated descriptor only on success.
-        let stream = unsafe { libc::fdopendir(descriptor) };
-        match NonNull::new(stream) {
-            Some(stream) => Ok(Self(stream)),
-            None => {
-                let error = io::Error::last_os_error();
-                // SAFETY: fdopendir failed, leaving ownership of the descriptor here.
-                unsafe { libc::close(descriptor) };
-                Err(error)
+    fn new(
+        directory: &File,
+        deadline: Instant,
+        check: &impl Fn(Instant) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let duplicate = checked_io(deadline, check, || directory.try_clone())?;
+        checked_io(deadline, check, || {
+            let descriptor = duplicate.into_raw_fd();
+            // SAFETY: fdopendir consumes the duplicated descriptor only on success.
+            let stream = unsafe { libc::fdopendir(descriptor) };
+            match NonNull::new(stream) {
+                Some(stream) => Ok(Self(stream)),
+                None => {
+                    let error = io::Error::last_os_error();
+                    // SAFETY: fdopendir failed, leaving ownership of the descriptor here.
+                    unsafe { libc::close(descriptor) };
+                    Err(error)
+                }
             }
-        }
+        })
     }
 
-    fn next(&self) -> io::Result<Option<CString>> {
+    fn next(
+        &self,
+        deadline: Instant,
+        check: &impl Fn(Instant) -> io::Result<()>,
+    ) -> io::Result<Option<CString>> {
         loop {
-            // SAFETY: the platform accessor gives this thread's errno; the directory stream is live.
-            let entry = unsafe {
-                #[cfg(target_os = "macos")]
-                {
-                    *libc::__error() = 0;
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    *libc::__errno_location() = 0;
-                }
-                libc::readdir(self.0.as_ptr())
-            };
-            if entry.is_null() {
-                let error = io::Error::last_os_error();
-                return if error.raw_os_error() == Some(0) {
-                    Ok(None)
-                } else {
-                    Err(error)
+            let name = checked_io(deadline, check, || {
+                // SAFETY: the accessor gives this thread's errno; the directory stream is live.
+                let entry = unsafe {
+                    #[cfg(target_os = "macos")]
+                    {
+                        *libc::__error() = 0;
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        *libc::__errno_location() = 0;
+                    }
+                    libc::readdir(self.0.as_ptr())
                 };
-            }
-            // SAFETY: readdir returned a live entry with a terminated name, copied before the next call.
-            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-            if name != c"." && name != c".." {
-                return Ok(Some(name.to_owned()));
+                if entry.is_null() {
+                    let error = io::Error::last_os_error();
+                    return if error.raw_os_error() == Some(0) {
+                        Ok(None)
+                    } else {
+                        Err(error)
+                    };
+                }
+                // SAFETY: readdir returned a terminated name, copied before the next call.
+                Ok(Some(
+                    unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_owned(),
+                ))
+            })?;
+            let Some(name) = name else {
+                return Ok(None);
+            };
+            if name.as_c_str() != c"." && name.as_c_str() != c".." {
+                return Ok(Some(name));
             }
         }
     }
@@ -215,6 +293,7 @@ impl Drop for DirectoryStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     fn identity(path: &Path) -> (u64, u64) {
@@ -271,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_directory_or_an_exhausted_budget_refuses() {
+    fn a_changed_directory_refuses() {
         let root = tempfile::tempdir().unwrap();
         let directory = File::open(root.path()).unwrap();
         directory
@@ -280,18 +359,125 @@ mod tests {
         let before = directory.metadata().unwrap();
         std::fs::write(root.path().join("new-entry"), "ordinary").unwrap();
         assert!(
-            inspect(&directory, &before, &[(0, 0)], &mut 10, 0).is_err(),
+            inspect(
+                &directory,
+                &before,
+                &[(0, 0)],
+                Instant::now() + SCAN_TIMEOUT,
+                &check_deadline,
+                0,
+            )
+            .is_err(),
             "changes after opening must refuse"
         );
+    }
+
+    #[test]
+    fn excessive_depth_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = File::open(root.path()).unwrap();
         let before = directory.metadata().unwrap();
         assert!(
-            inspect(&directory, &before, &[(0, 0)], &mut 0, 0).is_err(),
-            "a partial enumeration must refuse"
-        );
-        assert!(
-            inspect(&directory, &before, &[(0, 0)], &mut 10, MAX_DEPTH).is_err(),
+            inspect(
+                &directory,
+                &before,
+                &[(0, 0)],
+                Instant::now() + SCAN_TIMEOUT,
+                &check_deadline,
+                MAX_DEPTH,
+            )
+            .is_err(),
             "excessive depth must refuse"
         );
+    }
+
+    #[test]
+    fn an_expired_deadline_refuses_even_an_empty_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let error =
+            contains_before_deadline(root.path(), &[(0, 0)], expired, &check_deadline).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("30 seconds"));
+    }
+
+    #[test]
+    fn recursive_inspection_keeps_the_original_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let command = root.path().join("command");
+        let tree = root.path().join("tree");
+        let nested = tree.join("child").join("grandchild");
+        std::fs::write(&command, "command").unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::hard_link(&command, nested.join("alias")).unwrap();
+        let deadline = Instant::now() + SCAN_TIMEOUT;
+        let check = |seen| {
+            assert_eq!(seen, deadline, "recursion must not restart the time budget");
+            check_deadline(seen)
+        };
+        assert!(
+            contains_before_deadline(&tree, &[identity(&command)], deadline, &check).unwrap(),
+            "the alias in the grandchild must be inspected"
+        );
+    }
+
+    #[test]
+    fn a_successful_metadata_call_cannot_finish_after_the_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + SCAN_TIMEOUT;
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let completed = Cell::new(false);
+        let check = |seen| {
+            assert_eq!(seen, deadline);
+            check_deadline(if completed.get() { expired } else { seen })
+        };
+        let result = checked_io(deadline, &check, || {
+            let metadata = std::fs::symlink_metadata(root.path());
+            assert!(metadata.is_ok(), "the filesystem result must be successful");
+            completed.set(true);
+            metadata
+        });
+        assert!(completed.get(), "the filesystem operation must run");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_missing_root_after_the_deadline_does_not_count_as_absent() {
+        let root = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + SCAN_TIMEOUT;
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let completed = Cell::new(false);
+        let check = |seen| {
+            assert_eq!(seen, deadline);
+            check_deadline(if completed.get() { expired } else { seen })
+        };
+        let result = checked_io(deadline, &check, || {
+            let metadata = std::fs::symlink_metadata(root.path().join("new-output"));
+            assert_eq!(
+                metadata.as_ref().unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            );
+            completed.set(true);
+            metadata
+        });
+        assert!(completed.get(), "the filesystem operation must run");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn more_than_one_hundred_thousand_entries_are_fully_inspected() {
+        let root = tempfile::tempdir().unwrap();
+        let command = root.path().join("command");
+        let tree = root.path().join("tree");
+        std::fs::write(&command, "command").unwrap();
+        std::fs::create_dir(&tree).unwrap();
+        for entry in 0..100_001 {
+            File::create(tree.join(format!("ordinary-{entry}"))).unwrap();
+        }
+        let identities = [identity(&command)];
+        assert!(!contains(&tree, &identities).unwrap());
+        std::fs::hard_link(&command, tree.join("alias")).unwrap();
+        assert!(contains(&tree, &identities).unwrap());
     }
 
     #[test]

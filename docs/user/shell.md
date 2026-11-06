@@ -252,7 +252,9 @@ refuses makes `curl` exit non-zero.
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
-| Any other | The operation reaches a configured tool program or its path, or Box cannot complete its directory scan. [Check the command and scan constraints](config.md#configured-command-integrity). | `<path>: cannot establish that this mutation preserves a configured tool command` |
+| Any other | The operation reaches a configured tool command or its ancestor. Select another path. | `<path>: is a configured tool command or its ancestor, which this run does not allow to change` |
+| Any other | The directory contains a hard-link alias for a configured command. Select a directory without the alias. | `<path>: contains a hard link to a configured tool command, so this mutation is not allowed` |
+| Any other | Box cannot complete its directory scan. [Check the reported cause and scan constraints](config.md#configured-command-integrity). | `<path>: cannot finish checking for configured tool command hard links: <cause>` |
 | Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
 
 ## See also
