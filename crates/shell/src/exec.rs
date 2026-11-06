@@ -2464,24 +2464,28 @@ async fn execute_item(
     proc: &mut Process,
     item: &parser::Item,
 ) -> Result<i32, ControlFlow> {
-    let result = Box::pin(execute_item_unsettled(os.clone(), proc, item)).await;
+    let mut result = Box::pin(execute_item_unsettled(os.clone(), proc, item)).await;
     let failures = os.settle_writes().await;
-    if failures.is_empty() {
-        return result;
+    if !failures.is_empty() {
+        let program = item_program(item);
+        for failure in &failures {
+            let message = match &program {
+                Some(program) => format!(
+                    "strands-shell: {program}: {}: {}",
+                    failure.path, failure.error
+                ),
+                None => format!("strands-shell: {}: {}", failure.path, failure.error),
+            };
+            proc.err_msg(&message);
+        }
+        proc.last_exit = 1;
+        result = result.map(|_| 1);
     }
-    let program = item_program(item);
-    for failure in &failures {
-        let message = match &program {
-            Some(program) => format!(
-                "strands-shell: {program}: {}: {}",
-                failure.path, failure.error
-            ),
-            None => format!("strands-shell: {}: {}", failure.path, failure.error),
-        };
-        proc.err_msg(&message);
+    if let Some(msg) = proc.check_limits() {
+        proc.err_msg(msg);
+        return Err(ControlFlow::Exit(1));
     }
-    proc.last_exit = 1;
-    result.map(|_| 1)
+    result
 }
 
 /// The literal program word of a pipeline item's last stage, if it has one.
@@ -3289,6 +3293,10 @@ async fn run_pipeline(
     pipeline: &[parser::Command],
     capture: bool,
 ) -> (i32, String) {
+    if let Some(msg) = shell_proc.check_limits() {
+        shell_proc.err_msg(msg);
+        return (1, String::new());
+    }
     let len = pipeline.len();
 
     if shell_proc.max_pipeline > 0 && len > shell_proc.max_pipeline {
@@ -3340,6 +3348,12 @@ async fn run_pipeline(
             redirs.push((word, expanded));
         }
         expanded_redirects.push(redirs);
+    }
+
+    // A command substitution can consume the deadline before redirects or dispatch.
+    if let Some(msg) = shell_proc.check_limits() {
+        shell_proc.err_msg(msg);
+        return (1, String::new());
     }
 
     // Abort if nounset error occurred during expansion
@@ -3962,16 +3976,18 @@ async fn run_pipeline(
         let joined = {
             let mut handle = handle;
             if let Some(deadline) = shell_proc.deadline {
-                match tokio::time::timeout_at(deadline, &mut handle).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        expired = true;
-                        // Discard incomplete capture so the deadline cannot wait on output drains.
-                        for task in &tasks.0 {
-                            task.abort();
-                        }
-                        handle.await
+                let result = tokio::time::timeout_at(deadline, &mut handle).await;
+                // A synchronous task can finish after the deadline before the timer is polled.
+                if !expired && (result.is_err() || tokio::time::Instant::now() >= deadline) {
+                    expired = true;
+                    // Discard incomplete capture so the deadline cannot wait on output drains.
+                    for task in &tasks.0 {
+                        task.abort();
                     }
+                }
+                match result {
+                    Ok(joined) => joined,
+                    Err(_) => handle.await,
                 }
             } else {
                 handle.await

@@ -87,6 +87,7 @@ fn reads(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
                 operation: FsOperation::ReadContent,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -101,6 +102,7 @@ fn connects(engine: &PolicyEngine, host: &str) -> bool {
                 port: 443,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -115,6 +117,7 @@ fn connects_to(engine: &PolicyEngine, address: &str) -> bool {
                 port: 443,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -132,6 +135,7 @@ fn spawns(engine: &PolicyEngine, program: &str) -> bool {
                 cwd: "/workspace",
             },
         )
+        .0
         .is_allow()
 }
 
@@ -402,6 +406,7 @@ fn requests(engine: &PolicyEngine, path: &str) -> bool {
                 intercepted: true,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -484,18 +489,20 @@ fn a_multi_word_program_literal_loads_without_a_finding_and_never_matches() {
         "KNOWN GAP: no finding names the literal; got {:?}",
         engine.warnings()
     );
-    let decision = engine.decide(
-        &GovernedBox::assigned("spelling"),
-        &Principal::agent(),
-        &Request::ShellSpawn {
-            command: "git status",
-            program: "git",
-            program_path: "/usr/bin/git",
-            credential_reads: &[],
-            args: &["status".to_string()],
-            cwd: "/workspace",
-        },
-    );
+    let decision = engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::ShellSpawn {
+                command: "git status",
+                program: "git",
+                program_path: "/usr/bin/git",
+                credential_reads: &[],
+                args: &["status".to_string()],
+                cwd: "/workspace",
+            },
+        )
+        .0;
     assert!(
         !decision.is_allow(),
         "the permit the author believes exists matches no spawn: {decision:?}"

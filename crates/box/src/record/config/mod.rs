@@ -15,6 +15,7 @@
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
+//! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -26,6 +27,7 @@ pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
 pub(crate) mod grammar;
+pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -51,6 +53,7 @@ use self::egress::{
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -85,7 +88,17 @@ pub(super) const INJECT_ALWAYS: &str = "always";
 /// Read the MCP servers declared in one workspace config.
 pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxError> {
     let file = ConfigFile::read(path)?;
-    mcp::from_entries(&file.mcp)
+    let servers = mcp::from_entries(&file.mcp)?;
+    if let Some(server) = servers
+        .iter()
+        .find(|server| server.has_argument_wildcards())
+    {
+        return Err(ConfigError::Mcp {
+            name: server.name.clone(),
+            reason: "offline schema generation cannot supply wildcard arguments; use a configuration with concrete arguments".into(),
+        }.into());
+    }
+    Ok(servers)
 }
 
 /// The tool grammars that one workspace config installs, checked.
@@ -398,10 +411,13 @@ impl RunContract {
     ) -> Result<ConfigureRequest, BoxError> {
         let policy_path = self.file.policy_path(self.source.path());
         let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&self.file.mcp)?;
+        mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
+            Some(server.arguments().to_vec())
+        })?;
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
-            mcp_servers.is_empty(),
+            mcp_servers.is_empty() && http_mcp.is_empty(),
             &policy_operator()?,
             &self.grammars,
         )?;
@@ -460,7 +476,9 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    self.file.file_attributes,
                     &self.file.experimental_features,
+                    &self.file.limits,
                     self.file
                         .agent
                         .iter()
@@ -469,6 +487,8 @@ impl RunContract {
                     &mcp_servers,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                file_attributes: self.file.file_attributes,
+                limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -526,6 +546,17 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// Whether each macOS write grant may also set file attributes.
+    #[serde(
+        default,
+        rename = "file-attributes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) file_attributes: bool,
+    /// The operator-selected execution limits.
+    #[serde(default, skip_serializing_if = "Limits::is_default")]
+    pub(crate) limits: Limits,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -590,11 +621,17 @@ pub(crate) struct Record {
 /// key.
 pub(crate) const RECORD_VERSION: u32 = 21;
 
-/// Version 22 prevents older builds from resuming a box without its selected enforcement.
+/// Version 22 prevents older builds from resuming a box without each experimental feature it selects.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
 /// The record version of a record with two stdio MCP servers on one program.
 const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// The record version of a record that selects `file-attributes`, so an older build refuses the box
+/// rather than resuming it without the write grants it was configured with.
+const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
+const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
+/// The record version that preserves configured execution limits.
+const LIMITS_RECORD_VERSION: u32 = 27;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,11 +673,19 @@ impl ExperimentalFeatures {
 
 /// The record version for what a record holds.
 fn record_version<'a>(
+    file_attributes: bool,
     features: &ExperimentalFeatures,
+    limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if crate::record::config::mcp::shares_a_program(mcp) {
+    if !limits.is_default() {
+        LIMITS_RECORD_VERSION
+    } else if mcp.iter().any(|server| server.argument_wildcards) {
+        MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+    } else if file_attributes {
+        FILE_ATTRIBUTES_RECORD_VERSION
+    } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
         process_record_version(features, specs)
@@ -888,6 +933,9 @@ impl Record {
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
             SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -902,7 +950,9 @@ impl Record {
             source,
         })?;
         let expected = record_version(
+            record.file_attributes,
             &record.experimental_features,
+            &record.limits,
             record
                 .agent
                 .iter()
@@ -1024,7 +1074,7 @@ pub(crate) fn read_checked_policy(
     let (source, text) = AuthoritySource::read(path, "configuration")?;
     let file = ConfigFile::parse(&text, source.path())?;
     let grammars = grammar::tool_grammars(&file.tool)?;
-    let (mcp_servers, _) = crate::record::config::mcp::partition(&file.mcp)?;
+    let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&file.mcp)?;
     let policy = match file.policy_path(source.path()) {
         Some(policy_path) => {
             let (identity, text) = AuthoritySource::read(&policy_path, "policy")?;
@@ -1035,7 +1085,11 @@ pub(crate) fn read_checked_policy(
         }
         None => None,
     };
-    Ok((policy, mcp_servers.is_empty(), grammars))
+    Ok((
+        policy,
+        mcp_servers.is_empty() && http_mcp.is_empty(),
+        grammars,
+    ))
 }
 
 /// The operator a policy loads for, anchored at the operator's own home.
@@ -1142,6 +1196,13 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// Whether each macOS write grant may also set file times, set-ID bits, the group, the owner,
+    /// and ACLs. Linux accepts the key and renders nothing for it.
+    #[serde(default, rename = "file-attributes")]
+    file_attributes: bool,
+    /// The execution limits for hosted interpreters.
+    #[serde(default)]
+    limits: Limits,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1290,6 +1351,97 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_wildcards_require_per_server_opt_in_and_an_enabled_record_version() {
+        let base = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\ncommand = [\"server\", \"*\"]\n";
+        for flag in ["", "argument_wildcards = false\n"] {
+            let config =
+                ConfigFile::parse(&format!("{base}{flag}"), Path::new("box.toml")).unwrap();
+            assert!(!mcp::from_entries(&config.mcp).unwrap()[0].argument_wildcards);
+        }
+        let config = ConfigFile::parse(
+            &format!("{base}argument_wildcards = true\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        stored.mcp[0].argument_wildcards = false;
+        let original = toml::to_string(&stored).unwrap();
+        assert!(!original.contains("argument_wildcards"));
+        stored.mcp[0].argument_wildcards = true;
+        assert_eq!(
+            record_version(
+                stored.file_attributes,
+                &stored.experimental_features,
+                &stored.limits,
+                std::iter::empty(),
+                &stored.mcp
+            ),
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+        );
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err()
+        );
+        stored.version = MCP_ARGUMENT_WILDCARDS_RECORD_VERSION;
+        assert_eq!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = 25;
+        assert!(matches!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion { found: 25, .. })
+        ));
+        stored.mcp[0].argument_wildcards = false;
+        stored.version = RECORD_VERSION;
+        assert_eq!(toml::to_string(&stored).unwrap(), original);
+    }
+
+    #[test]
+    fn argument_wildcards_are_only_a_stdio_mcp_setting() {
+        for entry in [
+            "[agent]\ncommand = [\"server\"]",
+            "[tool.server]\ncommand = [\"server\"]",
+            "[mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]",
+        ] {
+            let text = format!(
+                "name = \"test\"\nbox_dir = \"/var/lib/box\"\n{entry}\nargument_wildcards = true\n"
+            );
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{entry}"
+            );
+        }
+        let old = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [experimental-features]\nmcp-argument-wildcards = true\n";
+        assert!(ConfigFile::parse(old, Path::new("box.toml")).is_err());
+    }
+
+    #[test]
+    fn offline_schema_generation_refuses_enabled_wildcard_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let config = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\nargument_wildcards = true\n\
+            command = [\"server\", \"*\"]\n";
+        std::fs::write(&path, config).unwrap();
+        let error = read_mcp_servers(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("offline schema generation cannot supply wildcard arguments"),
+            "{error}"
+        );
+        std::fs::write(&path, config.replace("true", "false")).unwrap();
+        assert_eq!(read_mcp_servers(&path).unwrap()[0].arguments(), &["*"]);
+        std::fs::write(&path, config.replace("\"*\"", "\"concrete\"")).unwrap();
+        assert_eq!(
+            read_mcp_servers(&path).unwrap()[0].arguments(),
+            &["concrete"]
+        );
+    }
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
@@ -1348,6 +1500,8 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1360,6 +1514,133 @@ mod tests {
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn shell_limits_round_trip_in_the_required_record_version() {
+        for (limits, timeout, explicit) in [
+            ("", Some(30), false),
+            ("[limits]\n", Some(30), false),
+            ("[limits.shell]\n", Some(30), false),
+            ("[limits]\nshell.timeout = 30\n", Some(30), true),
+            ("[limits.shell]\ntimeout = 30\n", Some(30), true),
+            ("[limits]\nshell.timeout = 600\n", Some(600), true),
+            ("[limits.shell]\ntimeout = 600\n", Some(600), true),
+            ("[limits]\nshell.timeout = false\n", None, true),
+            ("[limits.shell]\ntimeout = false\n", None, true),
+        ] {
+            for file_attributes in [false, true] {
+                let version = match (explicit, file_attributes) {
+                    (true, _) => 27,
+                    (false, true) => 25,
+                    (false, false) => 21,
+                };
+                let body = format!("file-attributes = {file_attributes}\n{limits}");
+                let configured = load(&body).unwrap();
+                assert_eq!(
+                    configured.limits.shell.timeout(),
+                    timeout.map(std::time::Duration::from_secs),
+                    "{body}"
+                );
+                let mut stored = pinned_record(&body);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.limits, configured.limits);
+                assert_eq!(stored.version, version, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("[limits"), explicit, "{body}");
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored,
+                    "{body}"
+                );
+                for found in 21..=27 {
+                    if found == version {
+                        continue;
+                    }
+                    stored.version = found;
+                    assert!(
+                        matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion {
+                                found: refused,
+                                expected,
+                            }) if refused == found && expected == version
+                        ),
+                        "{body}: version {found}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_limits_preserve_other_versioned_record_fields() {
+        let mut spec = agent(&["/bin/true"]);
+        for (timeout, argument_wildcards) in [
+            ("600", false),
+            ("600", true),
+            ("false", false),
+            ("false", true),
+        ] {
+            let shared_program = SHARED_PROGRAM.replace(
+                "type = \"stdio\"\n",
+                &format!("type = \"stdio\"\nargument_wildcards = {argument_wildcards}\n"),
+            );
+            let shared = pinned_record(&shared_program);
+            let limits: Limits =
+                toml::from_str(&format!("[shell]\ntimeout = {timeout}\n")).unwrap();
+            for file_attributes in [false, true] {
+                for native_filesystem_policy in [false, true] {
+                    let features = ExperimentalFeatures {
+                        native_filesystem_policy,
+                        tool_grammars: true,
+                    };
+                    for override_value in [None, Some(false)] {
+                        spec.native_filesystem_policy = override_value;
+                        for servers in [&[][..], shared.mcp.as_slice()] {
+                            assert_eq!(
+                                record_version(
+                                    file_attributes,
+                                    &features,
+                                    &limits,
+                                    std::iter::once(&spec),
+                                    servers,
+                                ),
+                                27
+                            );
+                        }
+                    }
+                }
+                let body = format!(
+                    "file-attributes = {file_attributes}\n\
+                     {shared_program}\n[limits.shell]\ntimeout = {timeout}\n"
+                );
+                let mut stored = pinned_record(&body);
+                stored.experimental_features.tool_grammars = true;
+                stored.tool = grammar_record().tool;
+                assert_eq!(stored.version, 27);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.mcp, shared.mcp);
+                assert_eq!(stored.contained_mcp, shared.contained_mcp);
+                assert_eq!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                    stored
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_limits_are_refused_in_configuration_and_stored_records() {
+        let body = "[limits.shell]\ntimeout = true\n";
+        let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+        let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
+        let mut stored = record(None, BTreeMap::new());
+        stored.version = LIMITS_RECORD_VERSION;
+        let text = format!("{}\n{body}", stored.to_toml().unwrap());
+        let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
     }
 
     #[test]
@@ -1446,6 +1727,76 @@ native-filesystem-policy = false
                 Err(ConfigError::ExperimentalFeatureUnavailable { .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(!absent.file_attributes);
+        let enabled = ConfigFile::parse(
+            &format!("file-attributes = true\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(enabled.file_attributes);
+        assert!(enabled.experimental_features.is_disabled());
+        let disabled = ConfigFile::parse(
+            &format!("file-attributes = false\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(!disabled.file_attributes);
+    }
+
+    #[test]
+    fn file_attributes_is_refused_as_an_experimental_feature_and_when_misspelled() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("{required}[experimental-features]\nfile-attributes = true\n"),
+            format!("file-attribute = true\n{required}"),
+            format!("file_attributes = true\n{required}"),
+            format!("file-attributes = \"yes\"\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_attributes_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.file_attributes = true;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("file-attributes = true"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: FILE_ATTRIBUTES_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = FILE_ATTRIBUTES_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("file-attributes"), "{ordinary}");
     }
 
     #[test]
@@ -2130,7 +2481,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHARED_PROGRAM_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2223,15 +2574,14 @@ env = {}
     }
 
     #[test]
-    fn a_loader_hook_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
+    fn a_dynamic_loader_name_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
         use super::env::refused_name;
         use crate::EnvRefusal;
-        for prefix in LOADER_HOOK_PREFIXES {
-            let name = format!("{prefix}ANY");
-            assert_eq!(refused_name(&name), Some(EnvRefusal::LoadsCode), "{name}");
+        for name in ["LD_ANY", "DYLD_ANY"] {
+            assert_eq!(refused_name(name), Some(EnvRefusal::LoadsCode), "{name}");
         }
-        for hook in LOADER_HOOKS {
-            assert_eq!(refused_name(hook), Some(EnvRefusal::LoadsCode), "{hook}");
+        for name in ["PYTHONANY", "NODE_OPTIONS", "BASH_ENV"] {
+            assert_eq!(refused_name(name), None, "{name}");
         }
         for name in ["HTTPS_PROXY", "OTEL_EXPORTER_OTLP_ENDPOINT", "PWD", "USER"] {
             assert_eq!(refused_name(name), Some(EnvRefusal::SetByBox), "{name}");
@@ -2700,6 +3050,69 @@ env = {}
                     .into_request(&root)
                     .is_err(),
                 "configuration without MCP servers must keep strict schema validation"
+            );
+        });
+    }
+
+    #[test]
+    fn http_only_mcp_configuration_defers_complete_schema_validation() {
+        let directory = tempfile::tempdir().expect("configuration directory");
+        crate::test_support::with_operator_home(directory.path(), || {
+            let workspace = directory.path().join("workspace");
+            let box_directory = directory.path().join("box");
+            std::fs::create_dir(&workspace).expect("workspace");
+            std::fs::create_dir(&box_directory).expect("box directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&box_directory, std::fs::Permissions::from_mode(0o700))
+                    .expect("private box directory");
+            }
+            let policy_path = directory.path().join("policy.dw");
+            let config_path = directory.path().join("box.toml");
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == alpha::Action::"read", resource);"#,
+            )
+            .expect("write policy");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\
+                 [mcp.alpha]\ntype = \"http\"\ndestinations = [\"example.com\"]\n",
+                    box_directory.display().to_string()
+                ),
+            )
+            .expect("write MCP configuration");
+
+            let mut root = crate::record::layout::BoxRoot::open_directory(&box_directory)
+                .expect("box directory opens");
+            root.initialize().expect("box layout initializes");
+            let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
+                .expect("lock opens")
+                .expect("box is free");
+            root.settle_identity().expect("identity settles");
+            RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .expect("MCP configuration defers complete action-schema validation");
+
+            std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
             );
         });
     }

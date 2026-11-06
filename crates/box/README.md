@@ -73,15 +73,23 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eight**: `name`, `box_dir`, `policy`, `[agent]`,
-`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, and `[telemetry.<kind>]`. `name` and `box_dir`
+The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
+`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
+`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
 
-**Four of those eight are keys and not inputs.** The four inputs are policy, credentials, name, and
-workload; a key becomes an input when it decides which requests are governed.
+The four inputs are policy, credentials, name, and workload; a key becomes an input when it decides
+which requests are governed.
+
+`[limits]` accepts `shell.timeout`, a positive integer number of seconds or `false` to disable
+the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
+For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
+The nested table `[limits.shell]` accepts the same values under `timeout`.
+Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
@@ -112,6 +120,14 @@ on stderr when it starts. A grant that would expose the box's own directory is r
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
 
+The top-level `file-attributes` key, off by default, lets a macOS write folder set file times, and
+with them the set-ID bits, the group, the owner (as far as the ownership check allows), and access
+control lists through `setattrlist`. It applies to the agent, every tool, and every local MCP server,
+and Linux ignores it.
+`record::config::tests::the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system`
+pins the key, and `run::contain::boundary::tests::the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos`
+pins its reach.
+
 **A `filesystem` list governs one process, and nothing else.** The agent's lists do not govern a
 tool, and a tool's lists do not govern the agent. A path absent from a process's own lists is a path
 that process cannot reach; it does not mean nothing in the box reaches it, because the Shell reaches
@@ -134,6 +150,13 @@ program in its own contained leaf box, once `shell:spawn` permits it. The first 
 exposes the server after its schema is accepted and the complete policy bundle is ready. Each tool
 call uses its generated `<normalized-server>::Action::"<tool>"` action. Other MCP methods use
 `Box::Action::"mcp:call"`.
+
+`[mcp.<name>] argument_wildcards = true` lets that local MCP `command` use `"*"`
+for one complete argument. For example, `command = ["server", "--token", "*"]` accepts the
+harness's token argument and starts the server with that value after `shell:spawn` permits the
+effective command. The program, argument count, and fixed arguments must still match. This flag
+defaults to false. See [argument wildcards](../../docs/user/mcp.md#argument-wildcards) for the
+matching rules and offline schema generation limit.
 
 For example, server `issues-mcp` and tool `SearchIssues` use
 `issues_mcp::Action::"SearchIssues"`. Run `strands-box policy generate-schema` and copy the
@@ -304,7 +327,8 @@ unambiguous credential.
 
 An `env://` credential mints one phantom and places it in the workload's
 environment under that name; the real secret is read by the box and never crosses
-the boundary, and the proxy swaps the phantom back at the edge.
+the boundary, and the proxy swaps the phantom back at the edge. Every destination that names
+one variable, in one route or in several, shares that one phantom.
 
 **Every process in the box gets every route.** The agent, each tool, and each MCP server receive
 every phantom and every signing placeholder the box provisions. No table selects a subset, because

@@ -24,6 +24,9 @@ use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::error::{BoxError, ShellError};
+#[cfg(test)]
+use crate::record::config::limits::DEFAULT_SHELL_TIMEOUT;
+use crate::record::config::limits::SHELL_TIMEOUT_GRACE;
 use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
@@ -35,7 +38,7 @@ use crate::run::broker::protocol::{
     write_frame,
 };
 use crate::run::broker::reach::Reach;
-use crate::run::broker::shell::{EgressRouting, SHELL_COMMAND_TIMEOUT, ShellSpec};
+use crate::run::broker::shell::{EgressRouting, ShellSpec};
 
 /// How many client connections may be in flight at once.
 const SERVE_CONNECTION_CAPACITY: usize = 64;
@@ -43,14 +46,8 @@ const SERVE_CONNECTION_CAPACITY: usize = 64;
 /// Bound on one framed read or write with an untrusted peer.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on one Shell Call's framing, outside the interpreter's own deadline.
-pub(super) const SERVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-
-const _: () = assert!(
-    SERVE_REQUEST_TIMEOUT.as_nanos() > SHELL_COMMAND_TIMEOUT.as_nanos(),
-    "the transport's bound must outlast the interpreter's, or a command stopped at its own \
-     deadline is reported as a boundary failure"
-);
+#[cfg(test)]
+const SERVE_REQUEST_TIMEOUT: Duration = DEFAULT_SHELL_TIMEOUT.saturating_add(SHELL_TIMEOUT_GRACE);
 
 /// How long a REQUEST-shaped connection may sit idle between frames before it is dropped.
 const SERVE_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -180,6 +177,7 @@ impl BrokerHost {
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
+        let command_timeout = record.limits.shell.timeout();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -211,6 +209,7 @@ impl BrokerHost {
                     egress,
                     recorder,
                     host_spawner,
+                    command_timeout,
                     &ready_sender,
                     shutdown_receiver,
                 );
@@ -295,29 +294,24 @@ async fn authorize_mcp_start(
     let host_program_path = program_path.display().to_string();
     let reported_program_path = reported(program_path);
     let cwd = reported(working_directory);
+    let command_arguments = if server.has_argument_wildcards() {
+        arguments
+    } else {
+        server.arguments()
+    };
     let command = std::iter::once(server.program())
-        .chain(server.arguments().iter().map(String::as_str))
+        .chain(command_arguments.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
     let credentials =
         std::collections::BTreeMap::from([(host_program_path.clone(), credential_reads.to_vec())]);
-    let interceptor = match home {
-        Some(home) => {
-            policy::ShellPolicyInterceptor::into_handle_reporting_under_with_spawn_credentials(
-                Arc::clone(&spec.policy),
-                policy::Principal::agent(),
-                spec.governed.clone(),
-                home,
-                credentials,
-            )
-        }
-        None => policy::ShellPolicyInterceptor::into_handle_with_spawn_credentials(
-            Arc::clone(&spec.policy),
-            policy::Principal::agent(),
-            spec.governed.clone(),
-            credentials,
-        ),
-    };
+    let interceptor = policy::ShellPolicyInterceptor::into_server_start_handle(
+        Arc::clone(&spec.policy),
+        policy::Principal::agent(),
+        spec.governed.clone(),
+        home.map(std::path::PathBuf::from),
+        credentials,
+    );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
@@ -367,6 +361,7 @@ async fn authorize_mcp_start(
 async fn start_mcp_server(
     spec: &ShellSpec,
     server: &crate::record::config::mcp::McpServer,
+    received: &[String],
 ) -> io::Result<(
     crate::run::broker::mcp::RunningMcpServer,
     tokio::process::ChildStdout,
@@ -387,7 +382,7 @@ async fn start_mcp_server(
         && launcher.contains(&server.name)
     {
         let boundary = launcher
-            .prepare(&server.name)
+            .prepare(server, received)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let credential_reads = launcher.credential_reads(&server.name, Path::new(home));
         authorize_mcp_start(
@@ -494,6 +489,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<strands_shell::os::HostSpawner>,
+    command_timeout: Option<Duration>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -513,8 +509,8 @@ fn host(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            command_timeout,
+            request_timeout: command_timeout.map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
             reach,
             policy,
             governed,
@@ -774,15 +770,16 @@ async fn serve_transport(
                             let _ = changed;
                             return Ok(());
                         }
-                        next = tokio::time::timeout(
-                            idle_timeout(!mcp.is_empty()),
-                            &mut next_frame,
-                        ) => {
-                            match next.map_err(|_| timed_out("read a transport frame"))?? {
+                        next = &mut next_frame => {
+                            match next? {
                                 Some(frame) => break frame,
                                 // A clean close ends the connection, which reaps every Program on it.
                                 None => return Ok(()),
                             }
+                        }
+                        _ = tokio::time::sleep(idle_timeout(!mcp.is_empty())),
+                            if running.is_empty() => {
+                            return Err(timed_out("read a transport frame"));
                         }
                     }
                 },
@@ -863,7 +860,7 @@ async fn serve_transport(
                         let next_mcp_opened = mcp_opened
                             .checked_add(1)
                             .ok_or_else(|| invalid_input("too many MCP programs were opened"))?;
-                        match start_mcp_server(&spec, admitted).await {
+                        match start_mcp_server(&spec, admitted, arguments).await {
                             Ok((running, stdout)) => {
                                 let sequence = mcp_opened;
                                 mcp_opened = next_mcp_opened;
@@ -1334,10 +1331,21 @@ async fn run_call(
     slot: &mut ProgramSlot,
     command: &str,
     id: ProgramId,
-    request_timeout: Duration,
+    request_timeout: Option<Duration>,
     frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
 ) -> io::Result<i32> {
-    let deadline = tokio::time::Instant::now() + request_timeout;
+    let deadline =
+        request_timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+    if request_timeout.is_some() && deadline.is_none() {
+        deny(
+            frames,
+            id,
+            DeniedKind::Internal,
+            "the call deadline exceeds this platform's clock range",
+        )
+        .await?;
+        return Ok(BOUNDARY_FAILURE_STATUS);
+    }
     let control = slot.control.clone();
     if control.is_cancelled() {
         return Ok(BOUNDARY_FAILURE_STATUS);
@@ -1353,8 +1361,18 @@ async fn run_call(
 
     // Drained inside the loop, so a chunk reaches the client while the Call is still running.
     let outcome = loop {
+        if control.is_cancelled() {
+            break None;
+        }
         tokio::select! {
-            outcome = &mut call => break Some(outcome),
+            outcome = &mut call => {
+                // Synchronous interpreter work can return after both the call and timer are ready.
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
+                    break None;
+                }
+                break Some(outcome);
+            }
             chunk = output.next_chunk(), if !over_budget => {
                 let mut pending = Vec::new();
                 if output.admit(chunk, &mut pending) == DrainOutcome::CapReached {
@@ -1363,15 +1381,14 @@ async fn run_call(
                 }
                 flush(frames, id, &mut pending).await?;
             }
-            // Poll for a signal rather than awaiting it, because the flag is not a future.
-            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {
-                // Dropping the Call future is the stop: `select!` abandons the losing branch, so
-                // leaving this loop releases it.
-                if control.is_cancelled() {
-                    break None;
+            // Wake quiet calls to observe cancellation.
+            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {}
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
                 }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
+            } => {
                 deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
                 break None;
             }
@@ -1617,7 +1634,7 @@ done"#;
             marker.path(),
             vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         );
-        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0])
+        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0], spec.mcp[0].arguments())
             .await
             .expect("the MCP server starts");
         let (frames, mut output) =
@@ -1758,7 +1775,7 @@ done"#;
     fn connection_spec(marker_directory: &Path) -> Arc<ShellSpec> {
         spec_with(
             marker_directory,
-            SHELL_COMMAND_TIMEOUT,
+            DEFAULT_SHELL_TIMEOUT,
             SERVE_REQUEST_TIMEOUT,
         )
     }
@@ -1812,13 +1829,14 @@ done"#;
         )
         .expect("MCP schema generates");
         let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: "test-mcp".to_string(),
             command,
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+            request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
                 Reach::over(
                     &marker_directory
@@ -1874,7 +1892,7 @@ done"#;
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let spec = mcp_spec_with_policy(markers.path(), command.clone(), forbid);
         let server = spec.mcp[0].clone();
-        let refused = runtime.block_on(start_mcp_server(&spec, &server));
+        let refused = runtime.block_on(start_mcp_server(&spec, &server, server.arguments()));
         let error = refused.err().expect("the forbidden start is refused");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("no_marker_start"), "{error}");
@@ -1885,7 +1903,7 @@ done"#;
         let spec = mcp_spec_with_policy(markers.path(), command, permit);
         let server = spec.mcp[0].clone();
         let (running, _stdout) = runtime
-            .block_on(start_mcp_server(&spec, &server))
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .expect("the permitted start runs");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !started.exists() && std::time::Instant::now() < deadline {
@@ -1952,6 +1970,18 @@ done"#;
                 "sh",
             )
             .expect("the program binds");
+        let server = Path::new(&command[0]);
+        bindings
+            .declare_server(
+                &std::fs::File::open(server).expect("the server program opens"),
+                &server.canonicalize().expect("the server program resolves"),
+                server,
+                server
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("the server program has a name"),
+            )
+            .expect("the server declares");
         let mut spec = Arc::into_inner(mcp_spec_with_policy(marker_directory, command, ""))
             .expect("the spec is not shared yet");
         spec.policy = Arc::new(
@@ -1986,7 +2016,7 @@ done"#;
         );
         let server = spec.mcp[0].clone();
         let error = runtime
-            .block_on(start_mcp_server(&spec, &server))
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .err()
             .expect("no rule permits the grammar action");
         assert_eq!(
@@ -2012,8 +2042,36 @@ done"#;
         );
         let server = spec.mcp[0].clone();
         let (running, _stdout) = runtime
-            .block_on(start_mcp_server(&spec, &server))
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .expect("the grammar action permit starts the server");
+        drop(running);
+    }
+
+    /// An MCP start under the server's own name on a bound file is decided as `shell:spawn`.
+    #[test]
+    fn an_mcp_start_under_its_own_name_on_a_bound_file_is_decided_as_shell_spawn() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let link = markers.path().join("mcp-sh");
+        std::os::unix::fs::symlink("/bin/sh", &link).expect("a second name for the shell");
+        let command = vec![
+            link.display().to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the operator declared the name for this start");
         drop(running);
     }
 
@@ -2021,12 +2079,12 @@ done"#;
     /// `command_timeout` so the broker's backstop fires before the Shell's own bound.
     fn spec_with(
         marker_directory: &Path,
-        command_timeout: Duration,
-        request_timeout: Duration,
+        command_timeout: impl Into<Option<Duration>>,
+        request_timeout: impl Into<Option<Duration>>,
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
-            command_timeout,
-            request_timeout,
+            command_timeout: command_timeout.into(),
+            request_timeout: request_timeout.into(),
             reach: Arc::new(
                 Reach::over(
                     // Canonicalized because `Reach::over` refuses a home with a second
@@ -2357,6 +2415,152 @@ done"#;
                 }
                 other => panic!("expected a timeout refusal, got {other:?}"),
             }
+        }));
+    }
+
+    #[test]
+    fn a_deadline_that_no_longer_fits_the_clock_is_refused_before_execution() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control,
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let now = tokio::time::Instant::now();
+            let (mut fits, mut exceeds) = (0, u64::MAX);
+            while fits < exceeds {
+                let candidate = fits + (exceeds - fits) / 2 + 1;
+                if now.checked_add(Duration::from_secs(candidate)).is_some() {
+                    fits = candidate;
+                } else {
+                    exceeds = candidate - 1;
+                }
+            }
+            let timeout = Duration::from_secs(fits);
+            assert!(now.checked_add(timeout).is_some());
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(tokio::time::Instant::now().checked_add(timeout).is_none());
+
+            let status = run_call(
+                &mut slot,
+                "printf EXECUTED > \"$HOME/executed\"",
+                1,
+                Some(timeout),
+                &frames,
+            )
+            .await
+            .expect("the unrepresentable deadline is reported");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
+            assert!(!marker.path().join("executed").exists());
+            assert!(matches!(
+                received.try_recv().expect("the refusal").frame.body,
+                Body::Denied { kind: DeniedKind::Internal, reason }
+                    if reason == "the call deadline exceeds this platform's clock range"
+            ));
+            assert!(
+                received.try_recv().is_err(),
+                "the command produces no output"
+            );
+
+            let status = run_call(
+                &mut slot,
+                "printf STILL_SERVING",
+                1,
+                Some(Duration::from_secs(1)),
+                &frames,
+            )
+            .await
+            .expect("a valid subsequent call succeeds");
+            assert_eq!(status, 0);
+            assert!(matches!(
+                received.try_recv().expect("subsequent output").frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"STILL_SERVING"
+            ));
+        }));
+    }
+
+    #[test]
+    fn an_unlimited_call_survives_elapsed_time_and_can_still_be_cancelled() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("unlimited Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control: control.clone(),
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let mut call = tokio::task::spawn_local(async move {
+                run_call(
+                    &mut slot,
+                    "printf RUNNING; read proceed; while true; do printf TICK; sleep 0.001; done",
+                    1,
+                    spec.request_timeout,
+                    &frames,
+                )
+                .await
+            });
+            let started = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("call starts promptly")
+                .expect("startup output");
+            assert!(matches!(
+                started.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"RUNNING"
+            ));
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !call.is_finished(),
+                "neither execution deadline may stop the call"
+            );
+            assert!(received.try_recv().is_err(), "no timeout or late output");
+
+            control.feed_stdin(b"proceed\n").expect("resume output");
+            let tick = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("the call resumes promptly")
+                .expect("resumed output");
+            assert!(matches!(
+                tick.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+            ));
+            control.signal();
+            let status = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    tokio::select! {
+                        outcome = &mut call => break outcome,
+                        Some(frame) = received.recv() => assert!(matches!(
+                            frame.frame.body,
+                            Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+                        )),
+                    }
+                }
+            })
+            .await
+            .expect("output must not delay cancellation")
+            .expect("call task joins")
+            .expect("cancellation succeeds");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
         }));
     }
 
@@ -3231,6 +3435,7 @@ id=$(printf '%s\n' "$list" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"PrivateSearch","inputSchema":{"type":"object"}}]}}\n' "$id"
 while test ! -e "$1"; do sleep 0.01; done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -3269,8 +3474,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3544,6 +3749,7 @@ done"#,
                 list_calls.display()
             );
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec!["/bin/sh".to_string(), "-c".to_string(), script],
             }]);
@@ -3575,8 +3781,8 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3698,6 +3904,7 @@ case "$frame" in
 esac
 done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -3731,8 +3938,8 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),

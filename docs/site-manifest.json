@@ -161,6 +161,17 @@
       }
     },
     {
+      "id": "tutorial-google-cloud",
+      "source": "docs/user/tutorials/google-cloud.md",
+      "slug": "guides/deploy-to-google-cloud",
+      "title": "Run Strands Box on Google Cloud",
+      "description": "Deploy a Strands agent with Gemini to a Google Compute Engine VM and verify Box's deployment retry cooldown.",
+      "nav": {
+        "group": "Guides",
+        "order": 14
+      }
+    },
+    {
       "id": "security",
       "source": "docs/user/security.md",
       "slug": "security",

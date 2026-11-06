@@ -101,6 +101,16 @@ pub struct GrammarBindings {
     spellings: BTreeMap<PathBuf, FileIdentity>,
     named: BTreeMap<String, BTreeMap<PathBuf, FileIdentity>>,
     declared: BTreeSet<(FileIdentity, String)>,
+    servers: BTreeSet<(FileIdentity, String)>,
+}
+
+/// Who starts a spawn that the bindings cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Starter {
+    /// The agent, through the hosted Shell.
+    Agent,
+    /// The box, for a declared stdio MCP server.
+    Server,
 }
 
 /// How the installed grammars cover one spawn.
@@ -147,6 +157,32 @@ pub enum BindingRefusal {
     AnotherEngine,
 }
 
+/// The program file `opened`, at the canonical `path`, with each spelling that `invoked` leads through.
+fn opened_program(
+    opened: &std::fs::File,
+    path: &Path,
+    invoked: &Path,
+) -> Result<ProgramFile, BindingRefusal> {
+    let metadata = opened
+        .metadata()
+        .map_err(|reason| BindingRefusal::UnreadableProgram {
+            program_path: path.to_path_buf(),
+            reason: reason.to_string(),
+        })?;
+    let mut spellings = links_from(invoked);
+    if !spellings.iter().any(|spelling| spelling == path) {
+        spellings.push(path.to_path_buf());
+    }
+    Ok(ProgramFile {
+        identity: FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+        path: path.to_path_buf(),
+        spellings,
+    })
+}
+
 /// The name a program was called by: the last component of its spelling.
 pub(crate) fn called_name(spelling: &str) -> &str {
     Path::new(spelling)
@@ -168,6 +204,7 @@ impl GrammarBindings {
             spellings: BTreeMap::new(),
             named: BTreeMap::new(),
             declared: BTreeSet::new(),
+            servers: BTreeSet::new(),
         }
     }
 
@@ -187,33 +224,38 @@ impl GrammarBindings {
         invoked: &Path,
         called: &str,
     ) -> Result<(), BindingRefusal> {
-        let metadata = opened
-            .metadata()
-            .map_err(|reason| BindingRefusal::UnreadableProgram {
-                program_path: path.to_path_buf(),
-                reason: reason.to_string(),
-            })?;
-        let mut spellings = links_from(invoked);
-        if !spellings.iter().any(|spelling| spelling == path) {
-            spellings.push(path.to_path_buf());
-        }
-        let program = ProgramFile {
-            identity: FileIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            },
-            path: path.to_path_buf(),
-            spellings,
-        };
+        let program = opened_program(opened, path, invoked)?;
         self.declare(&program, called);
+        Ok(())
+    }
+
+    /// Declare that a stdio `[mcp]` server runs the program file `opened` under the name `called`,
+    /// as [`declare_tool`](Self::declare_tool) does, but only for a start of that server. A spawn
+    /// that the agent starts under that name stays undeclared.
+    pub fn declare_server(
+        &mut self,
+        opened: &std::fs::File,
+        path: &Path,
+        invoked: &Path,
+        called: &str,
+    ) -> Result<(), BindingRefusal> {
+        let program = opened_program(opened, path, invoked)?;
+        self.declare_as(&program, called, Starter::Server);
         Ok(())
     }
 
     /// Declare that a `[tool]` runs `program` under the name `called`, and bind the grammar whose
     /// `program` is `called`, when one is installed.
     pub(crate) fn declare(&mut self, program: &ProgramFile, called: &str) {
+        self.declare_as(program, called, Starter::Agent);
+    }
+
+    fn declare_as(&mut self, program: &ProgramFile, called: &str, starter: Starter) {
         let pair = (program.identity, called.to_string());
-        self.declared.insert(pair.clone());
+        match starter {
+            Starter::Agent => self.declared.insert(pair.clone()),
+            Starter::Server => self.servers.insert(pair.clone()),
+        };
         let Some(index) = self
             .grammars
             .iter()
@@ -277,12 +319,24 @@ impl GrammarBindings {
         })
     }
 
-    /// How the grammars cover a spawn spelled `spelling` of the program file that `read` found, or
-    /// `None` when no grammar does.
+    /// How the grammars cover a spawn that the agent starts, spelled `spelling`, of the program file
+    /// that `read` found, or `None` when no grammar does.
+    #[cfg(test)]
     pub(crate) fn coverage(
         &self,
         read: Result<ProgramFile, UnreadableProgramFile>,
         spelling: &str,
+    ) -> Option<GrammarCoverage<'_>> {
+        self.coverage_for(read, spelling, Starter::Agent)
+    }
+
+    /// How the grammars cover a spawn that `starter` starts, spelled `spelling`, of the program file
+    /// that `read` found, or `None` when no grammar does.
+    pub(crate) fn coverage_for(
+        &self,
+        read: Result<ProgramFile, UnreadableProgramFile>,
+        spelling: &str,
+        starter: Starter,
     ) -> Option<GrammarCoverage<'_>> {
         let name = called_name(spelling);
         let refused = |refusal: fn(String, PathBuf) -> CoverageRefusal, path: &Path| {
@@ -316,7 +370,9 @@ impl GrammarBindings {
         {
             return refused(replaced, gone);
         }
-        if self.binds_file(program.identity) && !self.declared.contains(&pair) {
+        let declared = self.declared.contains(&pair)
+            || (starter == Starter::Server && self.servers.contains(&pair));
+        if self.binds_file(program.identity) && !declared {
             return refused(undeclared, &program.path);
         }
         None
@@ -617,6 +673,34 @@ mod tests {
                 "{case}: {MISE} called as {name}"
             );
         }
+    }
+
+    #[test]
+    fn a_server_name_on_a_bound_file_is_declared_for_the_server_start_alone() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        let mise = host.program(MISE);
+        bindings.declare(&mise, "git");
+        let opened = std::fs::File::open(mise.path()).expect("the program opens");
+        bindings
+            .declare_server(&opened, mise.path(), mise.path(), "mise")
+            .expect("the server declares");
+
+        let covered = |starter| {
+            bindings
+                .coverage_for(Ok(mise.clone()), "mise", starter)
+                .map(|coverage| matches!(coverage, GrammarCoverage::Refused(_)))
+        };
+        assert_eq!(
+            covered(Starter::Server),
+            None,
+            "the server starts as `shell:spawn`"
+        );
+        assert_eq!(
+            covered(Starter::Agent),
+            Some(true),
+            "the agent cannot use the server's name to leave the grammar"
+        );
     }
 
     #[test]

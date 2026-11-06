@@ -246,6 +246,14 @@ fn a_policy_naming_a_grammar_action_starts_with_its_grammar_and_the_switch() {
         "a rule on a grammar action fires, so startup warns of nothing: {}",
         stderr(&output)
     );
+    assert!(
+        stderr(&output).contains(
+            "strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it"
+        ),
+        "startup names the tool that its grammar decides: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

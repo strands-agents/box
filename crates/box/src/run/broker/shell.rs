@@ -20,10 +20,6 @@ use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
-/// The Shell's own wall-clock bound on a single command. Must stay under the transport's
-/// `SERVE_REQUEST_TIMEOUT`, which a `const` assert there enforces.
-pub(super) const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The most command text the broker will accept into the Shell.
 const SHELL_MAX_INPUT: usize = 256 * 1024;
 const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -47,12 +43,12 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
-    /// The Shell's own bound on one command.
-    pub(super) command_timeout: Duration,
+    /// The Shell's own bound on one submitted Shell call.
+    pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
     /// timeout normally fires first (and reports an `Exit`); this catches a Call that outlives it
     /// and answers `DeniedKind::Timeout`.
-    pub(super) request_timeout: Duration,
+    pub(super) request_timeout: Option<Duration>,
     /// What both interpreters may name, and the one resolver over it.
     pub(super) reach: Arc<Reach>,
     /// The box's one authority, shared rather than opened here.
@@ -168,8 +164,11 @@ impl ShellSpec {
             .max_input(SHELL_MAX_INPUT)
             .max_output(MAX_CAPTURE_STREAM_BYTES)
             .max_file_size(SHELL_MAX_FILE_SIZE)
-            .max_inodes(SHELL_MAX_INODES)
-            .timeout(self.command_timeout);
+            .max_inodes(SHELL_MAX_INODES);
+        let builder = match self.command_timeout {
+            Some(timeout) => builder.timeout(timeout),
+            None => builder.disable_timeout(),
+        };
         // Route outbound HTTP through this box's egress gateway, so a Shell `curl` meets the
         // same `net:connect`/`http:request` policy the workload's own traffic does.
         // With no gateway the network stays off — a fail-closed refusal, never a direct dial

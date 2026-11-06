@@ -93,10 +93,12 @@ A program's filesystem lists bound its own file operations.
 When an experimental [tool grammar](config.md#toolnamegrammar) binds the program, Box decides the
 spawn as the grammar's action, such as `Tool::git::Action::"push"`, or as `unmodeled` when the
 grammar can't read the command, and `shell:spawn` doesn't decide it. A grammar binds the program
-file of each `[tool]` whose command runs its `program`, under that name. Box refuses a spawn of a
+file of each `[tool]` and each stdio `[mcp.<name>]` whose command runs its `program`, under that
+name. Box refuses a spawn of a
 bound file before any rule decides it, and no rule can permit it, in these cases:
 
-- The name the agent called the file by isn't a name that a `[tool]` declares for it.
+- The name the agent called the file by isn't a name that a `[tool]` declares for it. A stdio
+  `[mcp.<name>]` declares its program's name only for the start of that server.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
   replaced, so `PATH` would find another file.
@@ -144,6 +146,24 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 1. A [`[tool.<name>]`](#toolname) table that matches it.
 2. An [`[agent.filesystem] exec`](#agentfilesystem-exec) entry.
 3. Neither: the program is refused with status `126`.
+
+### `limits.shell.timeout`
+
+Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
+`[limits]` to allow ten minutes, or `shell.timeout = false` to disable this limit. See
+[`[limits]`](config.md#limits) for the accepted values.
+
+The allowance covers the full text sent in one call, including multiple commands, pipelines,
+Python called inside the Shell, and programs the Shell starts. Each new call receives a fresh
+allowance. Output leaves its deadline unchanged. The Shell alias waits for the broker's result.
+
+With `false`, both the Shell execution deadline and the broker's backup deadline are disabled.
+Calls remain cancellable, and connection and write operations retain their transport timeouts.
+
+Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply to
+Python called inside the Shell, including with `shell.timeout = false`. Synchronous Python
+execution can delay timeout reporting. The direct `python` and `python3` aliases use their
+[own limits](monty.md#limits-and-exit-statuses).
 
 ### `[tool.<name>]`
 
@@ -222,7 +242,10 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
+| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
+| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box: the call deadline exceeds this platform's clock range` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |

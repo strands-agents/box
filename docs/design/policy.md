@@ -123,9 +123,13 @@ A history rule, which Dogwood calls a temporal rule, is an ordinary `permit` or 
 context](decisions.md#temporal-rules-ride-the-closed-context)). For each action, the history holds
 three kinds of event:
 
-- **`::request`** for every attempt, whether it was allowed or denied.
+- **`::request`** for every durably submitted attempt, whether it was allowed or denied.
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
+
+For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled,
+the `shell:spawn` request records the effective launch command and arguments, including the
+received values in the `*` positions.
 
 A metadata read is an operation that happened once the workload has its answer, so a Shell
 `test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
@@ -139,6 +143,18 @@ a guard refuses it because a path
 changed between the decision and the check (in the Shell, any change to the namespace; in Python, a
 symbolic link swapped into the path). A cap on attempts counts `::request` instead, because that
 counts denied attempts too.
+
+Each recorded request carries a nonempty `requestId`, and its existing response or error carries the same value.
+Box allocates the identifier from the next durable log offset while holding the engine lock.
+Offsets distinguish identical concurrent attempts and continue across reopening and pruning.
+The public interface returns an opaque request token with the verdict and requires that token when recording an outcome.
+A token belongs to the opened engine. Reload preserves it; a separately opened engine refuses it.
+
+One gateway exchange can contain separate HTTP and MCP requests, each with its own identifier.
+A filesystem rename also has separate checks for its source, source contents, destination removal, and destination mutation.
+Each recorded outcome uses its own check's token. A check that records no outcome remains request-only.
+Existing events without identifiers remain unchanged; their other facts and recovered monitor state remain available.
+Those events cannot satisfy a predicate that requires `requestId`, because the missing association cannot be reconstructed.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
@@ -226,8 +242,11 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
-tool programs with multiple hard links or overlap with direct writable grants.
+tool programs that have more than one hard link and that its user can write, or that overlap with
+direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
+When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also
+refuses wildcard commands that can select different servers for the same request.
 Box also refuses installed trusted programs with unaccounted hard-link names or overlap with any
 process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
 describes these refusals.

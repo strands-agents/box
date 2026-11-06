@@ -85,6 +85,7 @@ fn a_catch_all_permit_loads_and_grants_what_it_says() {
                     port: 443,
                 },
             )
+            .0
             .is_allow(),
         "a catch-all permit grants net:connect"
     );

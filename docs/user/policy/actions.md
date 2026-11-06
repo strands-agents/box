@@ -186,7 +186,11 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
 `[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
-A policy with no matching permit refuses the server at startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+A policy with no matching permit refuses the server at startup. For an enabled [MCP wildcard
+command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
+spaces. Its argument fields contain the same values, including the caller's values in wildcard
+positions.
+A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 
@@ -230,9 +234,15 @@ A `when temporal { … }` clause reads recorded events. The box records three ev
 
 | Event | Recorded when | Fields |
 |---|---|---|
-| `A::request` | Every decision, permitted or denied | The action's `input` fields |
-| `A::response` | The operation ended, or its end is `indeterminate` | The `input` fields, plus `output` |
-| `A::error` | The operation did not happen | The `input` fields |
+| `A::request` | Every submitted decision, permitted or denied | `requestId` and the action's `input` fields |
+| `A::response` | The operation ended, or its end is `indeterminate` | `requestId`, the `input` fields, and `output` when available |
+| `A::error` | The operation did not happen | `requestId` and the `input` fields |
+
+`requestId` is a nonempty string that identifies one policy request within this box's history.
+Its recorded response or error carries the same identifier. Separate requests receive separate identifiers, even when their inputs are identical.
+Bind the same variable to `requestId` in two predicates to require events from the same request.
+Treat the identifier's spelling as opaque.
+Older events that lack this field remain in history, but cannot match a predicate that requires it.
 
 To cap how many times the agent tries an action, count `A::request`, which also counts denied
 attempts. Use `A::response` when a later rule needs evidence that an earlier operation happened.
