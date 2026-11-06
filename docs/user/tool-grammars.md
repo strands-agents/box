@@ -195,6 +195,11 @@ a command the grammar read as `cargo test` exited `0`, in a working directory an
 the agent chose. Without `input.cwd`, a passing `cargo test` in a scratch crate would allow the
 push.
 
+The rule proves that a command read as `cargo test` exited `0` in that directory, not that the
+project's tests ran. If the agent can write the project, it can change what `cargo test` does,
+for example with a `runner` in `.cargo/config.toml` or an `#[ignore]` on every test. Then treat the
+rule as a guard against mistakes, not as an enforcement boundary.
+
 Pin the arguments through the grammar. `args` is a set, and a temporal predicate can't compare a
 field to a set, so `input.args: ["test"]` is refused at startup. Here the `test` action's `usage` is
 `cargo test` and nothing more. A command such as `cargo test --manifest-path ~/scratch/Cargo.toml`
