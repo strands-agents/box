@@ -351,8 +351,9 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
     let outcome = async {
         let mut stdout = tokio::io::stdout();
         loop {
-            let Some(frame) = read_frame::<Frame, _>(&mut readable).await? else {
-                return Ok(Outcome::Status(0));
+            let frame = match read_frame::<Frame, _>(&mut readable).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(_) => return Ok(Outcome::Status(0)),
             };
             validate_mcp_frame(&frame)?;
             match frame.body {
@@ -366,11 +367,7 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
                     return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
                 }
                 Body::Exit { status } => return Ok(Outcome::Status(status)),
-                other => {
-                    return Err(invalid_input(format!(
-                        "unexpected MCP stream response: {other:?}"
-                    )));
-                }
+                _ => {}
             }
         }
     }

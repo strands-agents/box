@@ -56,6 +56,7 @@ pub(super) fn execute(program: &str, arguments: &[String]) -> io::Result<u8> {
             Err(error) => return execution_error(program, &error),
         }
         let candidate = CString::new(candidate.as_os_str().as_bytes())?;
+        // Scripts require a shebang; no implicit shell runs.
         // SAFETY: the signal disposition is process-local and exec receives live, terminated arrays.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -69,6 +70,7 @@ pub(super) fn execute(program: &str, arguments: &[String]) -> io::Result<u8> {
             refused = true;
             continue;
         }
+        // Unexpected execution errors stop the search.
         return execution_error(program, &error);
     }
     if refused {

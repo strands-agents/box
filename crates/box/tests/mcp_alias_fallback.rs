@@ -289,3 +289,46 @@ fn only_a_valid_nonmatch_response_can_execute_fallback() {
         assert!(output.stdout.is_empty(), "{reply}: {output:?}");
     }
 }
+
+#[test]
+fn a_ready_mcp_stream_preserves_legacy_completion() {
+    for malformed in [false, true] {
+        let alias = Alias::new("npx");
+        alias.program("#!/bin/sh\nprintf 'FALLBACK RAN'\n");
+        let output = alias.serve(&[], b"", move |stream, open| {
+            let mut frame = unmatched(open).remove(0);
+            frame["frame_type"] = json!("mcp_ready");
+            write(stream, &frame);
+            if malformed {
+                stream.write_all(&1u32.to_be_bytes()).unwrap();
+                stream.write_all(b"[").unwrap();
+            } else {
+                frame["frame_type"] = json!("input_eof");
+                write(stream, &frame);
+            }
+        });
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn an_incompatible_frame_after_readiness_fails_without_fallback() {
+    for wrong_version in [false, true] {
+        let alias = Alias::new("npx");
+        alias.program("#!/bin/sh\nprintf 'FALLBACK RAN'\n");
+        let output = alias.invoke(&[], b"", move |open| {
+            let mut ready = unmatched(open).remove(0);
+            ready["frame_type"] = json!("mcp_ready");
+            let mut incompatible = ready.clone();
+            if wrong_version {
+                incompatible["version"] = json!(0);
+            } else {
+                incompatible["program"] = json!(42);
+            }
+            vec![ready, incompatible]
+        });
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+    }
+}

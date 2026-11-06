@@ -841,6 +841,20 @@ async fn serve_transport(
                         ) {
                             Ok(Some(admitted)) => admitted,
                             Ok(None) => {
+                                spec.recorder.record(
+                                    crate::run::telemetry::EffectiveDecision::enforcement_deny(
+                                        r#"Box::Action::"shell:spawn""#,
+                                        server.as_str(),
+                                        "mcp-unmatched",
+                                        "No declared MCP command matches; ordinary execution may proceed under the agent's sandbox grants.",
+                                    )
+                                    .about(Some(telemetry::Subject::process(
+                                        server,
+                                        arguments,
+                                        &[],
+                                        "",
+                                    ))),
+                                );
                                 send(&frames, id, Body::McpUnmatched).await?;
                                 continue;
                             }
