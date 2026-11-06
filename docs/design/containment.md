@@ -146,6 +146,14 @@ the same four plus `network`. One translator turns each of them into a set of sa
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
 
+On Linux, the trusted process prepares filesystem grants for each new sandbox launch.
+It keeps open references to the objects it approved and sends their recorded identities to the launcher.
+The launcher reopens each grant's path and refuses a different object before applying the sandbox.
+
+This check covers the handoff for one launch. It compares object identity, not file contents.
+A replacement directory can be selected when grants are prepared for a later launch.
+Configured tool commands and denied paths retain their separate identity checks.
+
 ### Script interpreter grants on Linux
 
 Box reads a declared script's `#!` line before building its sandbox. It follows the named

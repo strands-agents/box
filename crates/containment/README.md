@@ -305,6 +305,15 @@ through helper read/unlink, not for the workload lifetime. Only after apply
 succeeds does the trampoline install the target environment and execute the
 command in the same process.
 
+On Linux, serialized authorizing grants carry their recorded device, inode, and object type.
+An inode identifies one filesystem object on a device. Denials omit the identity field.
+Loading reopens each path and refuses an identity mismatch before applying the sandbox.
+Keep the originating `ContainmentConfig` alive through loading so its open references prevent reuse of the recorded object identifiers.
+Box retains this configuration for the launched process's lifetime.
+
+Older configurations can omit this identity field and bind the object when loaded.
+Older trampolines reject the added field. Use the library and trampoline from the same build.
+
 The caller finds `strands-box-contain-trampoline` beside its own executable and
 nowhere else; no configuration key names another path. The caller assumes its
 package or update channel installed the intended image, and this launch path does
