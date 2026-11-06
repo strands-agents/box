@@ -80,6 +80,17 @@ impl DestinationPattern {
         })
     }
 
+    /// The pattern binding one IPv6 address and port, on every path. [`parse`](Self::parse) reads
+    /// a `:` as the start of the port, so it cannot express this address.
+    pub fn ipv6(address: std::net::Ipv6Addr, port: u16) -> Self {
+        Self {
+            // A URL writes the address in brackets, so the matched host has them too.
+            host: HostPattern::Exact(format!("[{address}]")),
+            port: Some(port),
+            path: PathPattern::Prefix(String::new()),
+        }
+    }
+
     /// Classify the path component: a leading `/*` selects the suffix form (storing the text after
     /// the `*`), anything else is a prefix. Case-sensitive; the raw path is kept verbatim.
     fn parse_path(path: String) -> PathPattern {
@@ -311,6 +322,22 @@ mod tests {
                 parsed
             );
         }
+    }
+
+    /// **An IPv6 pattern matches its address and port only**, in the bracketed form a URL writes.
+    #[test]
+    fn an_ipv6_pattern_matches_its_address_and_port() {
+        let pattern = DestinationPattern::ipv6(std::net::Ipv6Addr::LOCALHOST, 4318);
+        let at = |host, port| Destination {
+            host,
+            port,
+            path: "/v1/traces",
+        };
+        assert!(pattern.matches(&at("[::1]", 4318)));
+        assert!(!pattern.matches(&at("[::2]", 4318)));
+        assert!(!pattern.matches(&at("[::1]", 4319)));
+        assert!(!pattern.matches(&at("::1", 4318)));
+        assert_eq!(pattern.as_written(), "[::1]:4318");
     }
 
     // --- overlaps ------------------------------------------------------------

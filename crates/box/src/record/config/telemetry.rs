@@ -20,7 +20,8 @@ use telemetry::{Payload, Signal, Target, TargetKind, TargetSecret, TelemetryConf
 use crate::error::{BoxError, ConfigError};
 // The `[[egress]]` vocabulary owns these: a telemetry target's secret is a credential,
 // and it follows the same header convention.
-use super::{BEARER_PREFIX, DEFAULT_HEADER, ENV_SCHEME};
+use super::egress::Placement;
+use super::{BASIC_AUTH_PLACEMENT, BEARER_PREFIX, DEFAULT_HEADER, ENV_SCHEME, HEADER_PLACEMENT};
 
 /// Refuse a file destination the workload could truncate.
 ///
@@ -82,17 +83,15 @@ fn expanded_home_path(destination: &str, operator_home: Option<&Path>) -> Option
 /// The spelling an operator may use beside the credential vocabulary's own.
 const TELEMETRY_ALIAS_SCHEME: &str = "secret://";
 
-/// The schemes a telemetry credential may name, beside `env://` and its alias.
-const VAULT_SCHEMES: [&str; 4] = ["file://", "op://", "aws://", "credsd://"];
+/// The schemes whose credential signs the request instead of sitting in one header. With `env://`
+/// and its alias, these are every scheme a telemetry credential may name.
+const SIGNING_SCHEMES: [&str; 2] = [AWS_REFERENCE, CREDSD_REFERENCE];
 
-/// The schemes whose credential signs the request instead of sitting in one header.
-const SIGNING_SCHEMES: [&str; 2] = ["aws://", "credsd://"];
+/// The scheme of a credential signed from an AWS profile.
+const AWS_REFERENCE: &str = "aws://";
 
-/// The `secret.placement` that sends the credential as HTTP Basic auth.
-const BASIC_AUTH_PLACEMENT: &str = "basic_auth";
-
-/// The `secret.placement` that sends the credential in one header.
-const HEADER_PLACEMENT: &str = "header";
+/// The scheme of a credential signed from a `credsd` environment.
+const CREDSD_REFERENCE: &str = "credsd://";
 
 /// The user half a Basic-auth phantom is presented under. The vault reads only the password half.
 const PHANTOM_USER: &str = "strands-box";
@@ -249,7 +248,8 @@ pub(crate) struct TelemetryEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TelemetrySecret {
-    /// The secret to attach, as a URI: `env://NAME` or `secret://NAME`.
+    /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`, or
+    /// `credsd://ENVIRONMENT`.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -267,106 +267,80 @@ pub(crate) struct TelemetrySecret {
     pub(crate) placement: Option<String>,
 }
 
-/// How a telemetry credential reaches the request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CredentialShape {
-    /// `name: <prefix><secret>`.
-    Header { name: String, prefix: String },
-    /// `Authorization: Basic <base64 of the secret>`, the secret being `user:password`.
-    BasicAuth,
-    /// SigV4, signed by the vault for the destination's service and region.
-    Signed,
-}
-
-impl CredentialShape {
-    /// The shape a secret declares, refusing a field its scheme or placement cannot use.
-    fn of(secret: &TelemetrySecret) -> Result<Self, String> {
-        let reference = secret.reference.trim();
-        if SIGNING_SCHEMES
-            .iter()
-            .any(|scheme| reference.starts_with(scheme))
-        {
-            if secret.header.is_some() || secret.prefix.is_some() || secret.placement.is_some() {
+/// Where a telemetry secret lands, in the placement vocabulary egress uses. A telemetry target
+/// takes a header, Basic auth, or a signature, and never a query parameter.
+fn placement_of(secret: &TelemetrySecret) -> Result<Placement, String> {
+    let reference = secret.reference.trim();
+    if SIGNING_SCHEMES
+        .iter()
+        .any(|scheme| reference.starts_with(scheme))
+    {
+        if secret.header.is_some() || secret.prefix.is_some() || secret.placement.is_some() {
+            return Err(
+                "an `aws://` or `credsd://` credential signs the whole request, so it takes \
+                 no `header`, `prefix` or `placement`"
+                    .to_string(),
+            );
+        }
+        return Ok(Placement::SignedInBoundary);
+    }
+    match secret.placement.as_deref() {
+        None | Some(HEADER_PLACEMENT) => {
+            let name = secret
+                .header
+                .as_deref()
+                .unwrap_or(DEFAULT_HEADER)
+                .to_string();
+            let prefix = secret.prefix.clone().unwrap_or_else(|| {
+                if name.eq_ignore_ascii_case(DEFAULT_HEADER) {
+                    BEARER_PREFIX.to_string()
+                } else {
+                    String::new()
+                }
+            });
+            Ok(Placement::Header { name, prefix })
+        }
+        Some(BASIC_AUTH_PLACEMENT) => {
+            if secret.header.is_some() || secret.prefix.is_some() {
                 return Err(
-                    "an `aws://` or `credsd://` credential signs the whole request, so it takes \
-                     no `header`, `prefix` or `placement`"
+                    "a `basic_auth` credential is sent as `Authorization: Basic …`, so it \
+                     takes no `header` or `prefix`"
                         .to_string(),
                 );
             }
-            return Ok(Self::Signed);
+            Ok(Placement::BasicAuth)
         }
-        match secret.placement.as_deref() {
-            None | Some(HEADER_PLACEMENT) => {
-                let name = secret
-                    .header
-                    .as_deref()
-                    .unwrap_or(DEFAULT_HEADER)
-                    .to_string();
-                let prefix = secret.prefix.clone().unwrap_or_else(|| {
-                    if name.eq_ignore_ascii_case(DEFAULT_HEADER) {
-                        BEARER_PREFIX.to_string()
-                    } else {
-                        String::new()
-                    }
-                });
-                Ok(Self::Header { name, prefix })
-            }
-            Some(BASIC_AUTH_PLACEMENT) => {
-                if secret.header.is_some() || secret.prefix.is_some() {
-                    return Err(
-                        "a `basic_auth` credential is sent as `Authorization: Basic …`, so it \
-                         takes no `header` or `prefix`"
-                            .to_string(),
-                    );
-                }
-                Ok(Self::BasicAuth)
-            }
-            Some(other) => Err(format!(
-                "`secret.placement = {other:?}` is not a placement a telemetry target takes; write \
-                 `{HEADER_PLACEMENT}` or `{BASIC_AUTH_PLACEMENT}`"
-            )),
-        }
+        Some(other) => Err(format!(
+            "`secret.placement = {other:?}` is not a placement a telemetry target takes; write \
+             `{HEADER_PLACEMENT}` or `{BASIC_AUTH_PLACEMENT}`"
+        )),
     }
+}
 
-    /// The header the credential occupies, or `None` when it signs several.
-    fn header(&self) -> Option<&str> {
-        match self {
-            Self::Header { name, .. } => Some(name),
-            Self::BasicAuth => Some(DEFAULT_HEADER),
-            Self::Signed => None,
-        }
+/// The header a placement's credential occupies, or `None` when it signs several.
+fn credential_header(placement: &Placement) -> Option<&str> {
+    match placement {
+        Placement::Header { name, .. } => Some(name),
+        Placement::BasicAuth => Some(DEFAULT_HEADER),
+        Placement::QueryParam { .. } | Placement::SignedInBoundary => None,
     }
+}
 
-    /// The vault's placement for this shape, or `None` for a signed credential.
-    fn inject_mode(&self) -> Result<Option<credentials::InjectMode>, String> {
-        match self {
-            Self::Header { name, prefix } => credentials::InjectMode::header(
-                format!("{prefix}{{}}"),
-                (!name.eq_ignore_ascii_case(DEFAULT_HEADER)).then(|| name.clone()),
-            )
-            .map(Some)
-            .map_err(|error| error.to_string()),
-            Self::BasicAuth => Ok(Some(credentials::InjectMode::basic_auth())),
-            Self::Signed => Ok(None),
+/// The header that presents `phantom` where the vault looks for it.
+fn presented(placement: &Placement, phantom: &str) -> Option<(String, String)> {
+    match placement {
+        Placement::Header { name, prefix } => Some((name.clone(), format!("{prefix}{phantom}"))),
+        Placement::BasicAuth => {
+            let pair = format!("{PHANTOM_USER}:{phantom}");
+            Some((
+                DEFAULT_HEADER.to_string(),
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(pair)
+                ),
+            ))
         }
-    }
-
-    /// The header that presents `phantom` where the vault looks for it.
-    fn presented(&self, phantom: &str) -> Option<(String, String)> {
-        match self {
-            Self::Header { name, prefix } => Some((name.clone(), format!("{prefix}{phantom}"))),
-            Self::BasicAuth => {
-                let pair = format!("{PHANTOM_USER}:{phantom}");
-                Some((
-                    DEFAULT_HEADER.to_string(),
-                    format!(
-                        "Basic {}",
-                        base64::engine::general_purpose::STANDARD.encode(pair)
-                    ),
-                ))
-            }
-            Self::Signed => None,
-        }
+        Placement::QueryParam { .. } | Placement::SignedInBoundary => None,
     }
 }
 
@@ -382,7 +356,7 @@ fn telemetry_secret_uri(reference: &str) -> Result<String, String> {
         return Ok(format!("{ENV_SCHEME}{name}"));
     }
     if reference.starts_with(ENV_SCHEME)
-        || VAULT_SCHEMES
+        || SIGNING_SCHEMES
             .iter()
             .any(|scheme| reference.starts_with(scheme))
     {
@@ -390,7 +364,7 @@ fn telemetry_secret_uri(reference: &str) -> Result<String, String> {
     }
     Err(format!(
         "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
-         `{TELEMETRY_ALIAS_SCHEME}NAME`, `file:///path`, `op://…`, `aws://profile` or \
+         `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile` or \
          `credsd://environment`, never the value itself. The value is deliberately not echoed \
          here, in case it is one"
     ))
@@ -698,14 +672,14 @@ fn log_names(entry: &TelemetryEntry) -> Result<(String, String), String> {
 /// Refuse a fixed header that would stand where the credential or a signature goes.
 fn refuse_a_credential_header(
     headers: &BTreeMap<String, String>,
-    shape: Option<&CredentialShape>,
+    placement: Option<&Placement>,
 ) -> Result<(), String> {
     for name in headers.keys() {
         let lowered = name.to_ascii_lowercase();
         if lowered == DEFAULT_HEADER.to_ascii_lowercase()
             || lowered.starts_with(SIGNING_HEADER_PREFIX)
-            || shape
-                .and_then(CredentialShape::header)
+            || placement
+                .and_then(credential_header)
                 .is_some_and(|credential| credential.eq_ignore_ascii_case(name))
         {
             return Err(format!(
@@ -717,39 +691,39 @@ fn refuse_a_credential_header(
     Ok(())
 }
 
-/// The host and port a destination's credential is bound to.
-fn credential_destination(destination: &str) -> Result<String, String> {
-    let dialed = if destination.contains("://") {
+/// A destination as the exporter dials it, with `http://` when the operator wrote no scheme.
+fn dialed(destination: &str) -> String {
+    if destination.contains("://") {
         destination.to_string()
     } else {
         format!("http://{destination}")
-    };
-    let url = url::Url::parse(&dialed)
+    }
+}
+
+/// The host and port a destination's credential is bound to.
+fn credential_destination(destination: &str) -> Result<credentials::DestinationPattern, String> {
+    let url = url::Url::parse(&dialed(destination))
         .map_err(|_| "the destination is not a URL a credential can be bound to".to_string())?;
-    let host = match url.host() {
-        Some(url::Host::Domain(name)) => name.to_string(),
-        Some(url::Host::Ipv4(address)) => address.to_string(),
-        _ => {
-            return Err(
-                "a credential is bound to a host name or an IPv4 address, and this destination \
-                 names neither"
-                    .to_string(),
-            );
-        }
-    };
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "the destination names no port".to_string())?;
-    Ok(format!("{host}:{port}"))
+    let host = match url.host() {
+        Some(url::Host::Ipv6(address)) => {
+            return Ok(credentials::DestinationPattern::ipv6(address, port));
+        }
+        Some(url::Host::Domain(name)) => name.to_string(),
+        Some(url::Host::Ipv4(address)) => address.to_string(),
+        None => return Err("the destination names no host".to_string()),
+    };
+    credentials::DestinationPattern::parse(&format!("{host}:{port}"))
+        .map_err(|error| error.to_string())
 }
 
 /// One target's vault, and the header that presents its phantom when the credential has one.
 type ResolvedCredential = (Arc<credentials::Vault>, Option<(String, String)>);
 
-/// The vault holding one target's credential, and the header presenting its phantom.
-///
-/// Each target gets its own vault, apart from the egress gateway's, so no request the workload
-/// sends can carry this credential.
+/// The vault holding one target's credential, apart from the egress gateway's so no workload
+/// request can carry it, and the header presenting its phantom.
 fn resolved_secret(
     label: &str,
     destination: &str,
@@ -761,12 +735,12 @@ fn resolved_secret(
         locator: "<telemetry secret>".to_string(),
         source,
     })?;
-    let shape = CredentialShape::of(secret).map_err(refused)?;
-    let pattern = credentials::DestinationPattern::parse(
-        &credential_destination(destination).map_err(refused)?,
-    )
-    .map_err(|error| refused(error.to_string()))?;
-    let route = match shape.inject_mode().map_err(refused)? {
+    let placement = placement_of(secret).map_err(refused)?;
+    let pattern = credential_destination(destination).map_err(refused)?;
+    let route = match placement
+        .inject_mode(destination)
+        .map_err(|error| refused(error.to_string()))?
+    {
         Some(mode) => credentials::RouteSpec::opaque(pattern, locator, mode),
         None => credentials::RouteSpec::signed_aws(pattern, locator),
     };
@@ -782,14 +756,14 @@ fn resolved_secret(
         locator: "<telemetry secret>".to_string(),
         source,
     })?;
-    let presented = match (shape.presented(""), opened.phantoms()) {
+    let presented = match (presented(&placement, ""), opened.phantoms()) {
         (None, []) => None,
-        (Some(_), [phantom]) => shape.presented(phantom.token()),
+        (Some(_), [phantom]) => presented(&placement, phantom.token()),
         (_, phantoms) => {
             return Err(refused(format!(
-                "the credential minted {} phantoms, and this shape presents {}",
+                "the credential minted {} phantoms, and this placement presents {}",
                 phantoms.len(),
-                usize::from(shape.presented("").is_some())
+                usize::from(presented(&placement, "").is_some())
             )));
         }
     };
@@ -823,6 +797,79 @@ pub(crate) fn config_for(
         request = request.with_target(target);
     }
     Ok(request)
+}
+
+/// Every distinct `credsd://` environment the telemetry targets sign with, in declaration order.
+/// The startup preflight checks these with the egress ones.
+pub(crate) fn credsd_environments(targets: &BTreeMap<String, TelemetryEntry>) -> Vec<&str> {
+    let mut environments: Vec<&str> = Vec::new();
+    for entry in targets.values() {
+        if let Some(environment) = entry
+            .secret
+            .as_ref()
+            .and_then(|secret| secret.reference.trim().strip_prefix(CREDSD_REFERENCE))
+            && !environment.is_empty()
+            && !environments.contains(&environment)
+        {
+            environments.push(environment);
+        }
+    }
+    environments
+}
+
+/// Sign one request for each `aws://` target, and send none, so a profile that cannot sign stops
+/// the run before the workload starts. A signed credential resolves on each request, so without
+/// this check every batch fails after the workload starts.
+pub(crate) fn preflight_aws(targets: &BTreeMap<String, TelemetryEntry>) -> Result<(), BoxError> {
+    for (name, entry) in targets {
+        let Some(secret) = entry
+            .secret
+            .as_ref()
+            .filter(|secret| secret.reference.trim().starts_with(AWS_REFERENCE))
+        else {
+            continue;
+        };
+        let refused = |reason: String| -> BoxError { refuse(name, reason).into() };
+        let destination = entry.destination.trim();
+        let (vault, _) = resolved_secret(name, destination, secret)?;
+        let url = url::Url::parse(&dialed(destination))
+            .map_err(|_| refused("the destination is not a URL".to_string()))?;
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| refused("the destination names no port".to_string()))?;
+        vault
+            .attach_for(credentials::Outbound {
+                destination: credentials::Destination {
+                    host: url.host_str().unwrap_or_default(),
+                    port,
+                    path: url.path(),
+                },
+                method: "POST",
+                url: url.as_str(),
+                query: "",
+                headers: &[],
+                body: &[],
+            })
+            .map_err(|error| refused(format!("the `aws://` credential cannot sign: {error}")))?;
+    }
+    Ok(())
+}
+
+/// Whether a stored target holds a setting an earlier build cannot read: a payload list, fixed
+/// headers, a secret prefix or placement, or a secret that is not read from the environment
+/// (`env://` or its `secret://` alias).
+pub(crate) fn needs_export_record(targets: &BTreeMap<String, TelemetryEntry>) -> bool {
+    targets.values().any(|entry| {
+        entry.accepts.is_some()
+            || entry.headers.is_some()
+            || entry.secret.as_ref().is_some_and(|secret| {
+                let reference = secret.reference.trim();
+                secret.prefix.is_some()
+                    || secret.placement.is_some()
+                    || !(reference.starts_with(ENV_SCHEME)
+                        || reference.starts_with(TELEMETRY_ALIAS_SCHEME))
+            })
+    })
 }
 
 /// The declared telemetry targets, refusing every spelling the collector cannot honour.
@@ -879,21 +926,22 @@ pub(crate) fn checked(
                     }
                 }
             }
-            let shape = match &entry.secret {
+            let placement = match &entry.secret {
                 Some(secret) => {
                     telemetry_secret_uri(&secret.reference)
                         .map_err(|reason| refuse(name, reason))?;
-                    let shape =
-                        CredentialShape::of(secret).map_err(|reason| refuse(name, reason))?;
-                    shape.inject_mode().map_err(|reason| refuse(name, reason))?;
+                    let placement = placement_of(secret).map_err(|reason| refuse(name, reason))?;
+                    placement
+                        .inject_mode(entry.destination.trim())
+                        .map_err(|error| refuse(name, error.to_string()))?;
                     credential_destination(entry.destination.trim())
                         .map_err(|reason| refuse(name, reason))?;
-                    Some(shape)
+                    Some(placement)
                 }
                 None => None,
             };
             if let Some(headers) = &entry.headers {
-                refuse_a_credential_header(headers, shape.as_ref())
+                refuse_a_credential_header(headers, placement.as_ref())
                     .map_err(|reason| refuse(name, reason))?;
             }
 
@@ -1227,26 +1275,23 @@ secret.ref = "credsd://default"
         );
     }
 
-    /// **A `file://` or `op://` secret is an opaque credential**, so it takes a placement like
-    /// `env://`.
+    /// **A telemetry secret is never read from a file or from 1Password.** A file the workload can
+    /// reach could be swapped for another, and `op` would run from the trusted process's `PATH`.
     #[test]
-    fn a_file_or_op_secret_is_accepted_with_a_placement() {
-        let entries = parsed(
-            r#"
-[telemetry.langfuse]
-kind = "otlp"
-destination = "https://us.cloud.langfuse.com/api/public/otel"
-accepts = ["traces"]
-secret = { ref = "op://telemetry/langfuse/credential", placement = "basic_auth" }
-
-[telemetry.langsmith]
-kind = "otlp"
-destination = "https://api.smith.langchain.com/otel"
-secret = { ref = "file:///run/keys/langsmith", header = "x-api-key" }
-"#,
-        );
-        let checked = checked(&entries, Path::new("/var/lib/boxes/codex")).expect("accepted");
-        assert_eq!(checked.len(), 2);
+    fn a_file_or_op_secret_is_refused() {
+        for reference in [
+            "file:///run/keys/langsmith",
+            "op://telemetry/langfuse/credential",
+        ] {
+            let refused = refusal(&format!(
+                "[telemetry.x]\nkind = \"otlp\"\ndestination = \"https://api.smith.langchain.com/otel\"\n\
+                 secret = {{ ref = \"{reference}\", header = \"x-api-key\" }}\n"
+            ));
+            assert!(
+                refused.contains("names no scheme this box reads"),
+                "{reference}: {refused}"
+            );
+        }
     }
 
     /// **A vendor kind is stored as the plain OTLP target it stands for**: the endpoint, the
@@ -1464,28 +1509,92 @@ secret.ref = "aws://runtime"
         assert!(refused.contains("no accepts"), "{refused}");
     }
 
-    /// **A credential destination is a host name or an IPv4 address with a port.**
+    /// **The preflight judges the URL the exporter dials**, so a destination written without a
+    /// scheme fails for the reason the export would, and not for a port it does name.
+    #[test]
+    fn the_aws_preflight_reads_a_schemeless_destination_as_the_exporter_dials_it() {
+        let targets = BTreeMap::from([(
+            "local".to_string(),
+            TelemetryEntry {
+                kind: TelemetryKind::Otlp,
+                destination: "localhost:4318".to_string(),
+                include: None,
+                secret: Some(TelemetrySecret {
+                    reference: "aws://box-preflight-unused".to_string(),
+                    header: None,
+                    prefix: None,
+                    placement: None,
+                }),
+                accepts: None,
+                headers: None,
+                log_group: None,
+                log_stream: None,
+                project: None,
+                region: None,
+            },
+        )]);
+        let refused = preflight_aws(&targets)
+            .expect_err("localhost names no AWS service")
+            .to_string();
+        assert!(!refused.contains("names no port"), "{refused}");
+        assert!(refused.contains("cannot sign"), "{refused}");
+    }
+
+    /// **The preflight sees each distinct `credsd://` environment a telemetry target signs with.**
+    #[test]
+    fn the_credsd_environments_are_the_distinct_signing_ones() {
+        let target = |reference: &str| TelemetryEntry {
+            kind: TelemetryKind::Otlp,
+            destination: "https://xray.us-west-2.amazonaws.com".to_string(),
+            include: None,
+            secret: Some(TelemetrySecret {
+                reference: reference.to_string(),
+                header: None,
+                prefix: None,
+                placement: None,
+            }),
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        };
+        let targets = BTreeMap::from([
+            ("a".to_string(), target("credsd://prod")),
+            ("b".to_string(), target("credsd://prod")),
+            ("c".to_string(), target("credsd://dev")),
+            ("d".to_string(), target("aws://default")),
+            ("e".to_string(), target("env://KEY")),
+        ]);
+        assert_eq!(credsd_environments(&targets), ["prod", "dev"]);
+    }
+
+    /// **A credential destination is a host with a port**: a name, an IPv4 address, or an IPv6
+    /// address.
     #[test]
     fn a_credential_destination_carries_its_port() {
+        let bound = |destination| credential_destination(destination).map(|p| p.as_written());
         assert_eq!(
-            credential_destination("https://cloud.langfuse.com/api/public/otel").as_deref(),
+            bound("https://cloud.langfuse.com/api/public/otel").as_deref(),
             Ok("cloud.langfuse.com:443")
         );
+        assert_eq!(bound("127.0.0.1:4318").as_deref(), Ok("127.0.0.1:4318"));
+        assert_eq!(bound("http://[::1]:4318").as_deref(), Ok("[::1]:4318"));
         assert_eq!(
-            credential_destination("127.0.0.1:4318").as_deref(),
-            Ok("127.0.0.1:4318")
+            bound("https://[2001:db8::1]/otel").as_deref(),
+            Ok("[2001:db8::1]:443")
         );
-        assert!(credential_destination("http://[::1]:4318").is_err());
     }
 
     /// **The vault holds the secret and the target holds only the phantom**, presented where the
     /// vault looks for it.
     #[test]
     fn the_target_presents_a_phantom_and_never_the_secret() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("key");
-        std::fs::write(&path, "pk-lf-1:sk-lf-2").expect("write");
-        let reference = format!("file://{}", path.display());
+        // SAFETY: the variable is namespaced to this test, so no other test reads or writes it,
+        // and it is removed before the test returns.
+        unsafe { std::env::set_var("STRANDS_BOX_TELEMETRY_KEY_FOR_TESTS", "pk-lf-1:sk-lf-2") };
+        let reference = format!("{ENV_SCHEME}STRANDS_BOX_TELEMETRY_KEY_FOR_TESTS");
 
         let secret = |placement: Option<&str>, header: Option<&str>| TelemetrySecret {
             reference: reference.clone(),
@@ -1547,6 +1656,8 @@ secret.ref = "aws://runtime"
             presented.is_none(),
             "a signed credential presents no phantom"
         );
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("STRANDS_BOX_TELEMETRY_KEY_FOR_TESTS") };
     }
 
     /// **An empty declaration is unrepresentable**, now that a name holds one target rather than an

@@ -481,6 +481,7 @@ impl RunContract {
         if let Some(source) = policy_source {
             sources.push(source);
         }
+        let telemetry = telemetry::checked(&self.file.telemetry, root.root())?;
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
@@ -500,6 +501,7 @@ impl RunContract {
                         .is_some_and(|agent| !agent.ingress.is_empty()),
                     has_backend(&egress, &remote_mcp),
                     &self.file.gateway,
+                    &telemetry,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -515,7 +517,7 @@ impl RunContract {
                 remote_mcp,
                 mcp: mcp_servers,
                 contained_mcp,
-                telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                telemetry,
             },
             policy,
             grammars: self.grammars,
@@ -623,7 +625,8 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) contained_mcp: BTreeMap<String, ContainedMcp>,
 
-    /// The telemetry targets this box declares, verbatim.
+    /// The telemetry targets this box declares, each vendor kind stored as the `otlp` target it
+    /// stands for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
 }
@@ -671,6 +674,10 @@ const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
 /// The record version of a record whose box identity a caller supplied, so an older build refuses
 /// the box by its version rather than by its identity.
 pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
+/// The record version of a record whose telemetry target uses `accepts`, `headers`,
+/// `secret.prefix`, `secret.placement`, or a secret that is not read from the environment. A vendor
+/// kind stores these, so an earlier build refuses the record instead of sending without them.
+const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 35;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,8 +731,11 @@ fn record_version<'a>(
     ingress: bool,
     has_backend: bool,
     gateway: &Gateway,
+    targets: &BTreeMap<String, telemetry::TelemetryEntry>,
 ) -> u32 {
-    if !generated_box_identity(box_id) {
+    if telemetry::needs_export_record(targets) {
+        TELEMETRY_EXPORT_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
     } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
@@ -1017,6 +1027,7 @@ impl Record {
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
+            TELEMETRY_EXPORT_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1052,6 +1063,7 @@ impl Record {
                 .is_some_and(|agent| !agent.ingress.is_empty()),
             has_backend(&record.egress, &record.remote_mcp),
             &record.gateway,
+            &record.telemetry,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1539,6 +1551,7 @@ mod tests {
                             false,
                             false,
                             &Gateway::default(),
+                            &stored.telemetry,
                         ),
                         expected_version
                     );
@@ -1592,6 +1605,7 @@ mod tests {
                 false,
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
+                &stored.telemetry,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1854,6 +1868,7 @@ mod tests {
                                     false,
                                     false,
                                     &Gateway::default(),
+                                    &BTreeMap::new(),
                                 ),
                                 27
                             );
@@ -2907,7 +2922,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SUPPLIED_IDENTITY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, TELEMETRY_EXPORT_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -4000,6 +4015,89 @@ command = ["mcp-server-fetch"]
                 expected: RECORD_VERSION
             })
         ));
+    }
+
+    /// A bearer telemetry target, the only shape an earlier build sends.
+    const BEARER_TELEMETRY: &str = "[telemetry.honeycomb]\nkind = \"otlp\"\n\
+         destination = \"https://api.honeycomb.io\"\nsecret.ref = \"env://HONEYCOMB_KEY\"\n";
+
+    /// A vendor target, which stores fixed headers and a payload list.
+    const VENDOR_TELEMETRY: &str = "[telemetry.langsmith]\nkind = \"langsmith\"\n\
+         project = \"box\"\nsecret.ref = \"env://LANGSMITH_API_KEY\"\n";
+
+    /// **A bearer telemetry target keeps the ordinary record version**, so an earlier build still
+    /// resumes the box. `secret://` is the `env://` alias, so it keeps the version too.
+    #[test]
+    fn a_bearer_telemetry_target_keeps_the_ordinary_version() {
+        assert_eq!(pinned_record(BEARER_TELEMETRY).version, RECORD_VERSION);
+        assert_eq!(
+            pinned_record(&BEARER_TELEMETRY.replace("env://", "secret://")).version,
+            RECORD_VERSION
+        );
+    }
+
+    /// **A record an earlier build wrote with a `secret://` telemetry secret still parses**, at the
+    /// version that build stamped.
+    #[test]
+    fn an_earlier_record_with_a_secret_alias_still_parses() {
+        let mut earlier = pinned_record(BEARER_TELEMETRY);
+        earlier
+            .telemetry
+            .get_mut("honeycomb")
+            .and_then(|entry| entry.secret.as_mut())
+            .expect("the bearer target has a secret")
+            .reference = "secret://HONEYCOMB_KEY".to_string();
+        let text = earlier.to_toml().unwrap();
+        assert!(
+            text.starts_with(&format!("version = {RECORD_VERSION}\n")),
+            "{text}"
+        );
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).expect("this build reads it"),
+            earlier
+        );
+    }
+
+    /// **A target that uses an export setting stores a version no earlier build reads**, so an
+    /// earlier build refuses the record instead of sending without the vendor's headers.
+    #[test]
+    fn a_vendor_telemetry_target_stores_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(VENDOR_TELEMETRY);
+        assert_eq!(stored.version, TELEMETRY_EXPORT_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+
+        let mut hidden = stored;
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
+            MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
+        ] {
+            hidden.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&hidden.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: TELEMETRY_EXPORT_RECORD_VERSION })
+                        if found == version
+                ),
+                "an export setting may not hide under version {version}"
+            );
+        }
     }
 
     /// A name shared between `[egress.foo]` and `[mcp.foo] type = "http"` is not a collision: the two
