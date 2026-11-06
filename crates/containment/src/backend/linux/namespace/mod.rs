@@ -129,7 +129,6 @@ impl ContainmentBackend for NamespaceBackend {
         }
 
         require_no_configured_devices(config)?;
-        require_nonroot_directory_writes(config)?;
 
         crate::grants::require_read_for_writes(
             &config
@@ -160,7 +159,6 @@ impl ContainmentBackend for NamespaceBackend {
         // `ContainmentBackend` contract.
         config.require_live_path_identities()?;
         require_no_configured_devices(config)?;
-        require_nonroot_directory_writes(config)?;
 
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
@@ -244,28 +242,6 @@ impl ContainmentBackend for NamespaceBackend {
             details: details.to_string(),
         }
     }
-}
-
-/// Refuse writable host directories when the launcher has a root identity.
-fn require_nonroot_directory_writes(config: &ContainmentConfig) -> Result<(), ContainmentError> {
-    // SAFETY: these calls only read the launcher's identities before namespace entry.
-    let (uid, effective_uid) = unsafe { (libc::getuid(), libc::geteuid()) };
-    if uid != 0 && effective_uid != 0 {
-        return Ok(());
-    }
-    for granted in config.authorizations() {
-        if granted.operation == Operation::Write && granted.scope == Scope::Root {
-            return Err(ContainmentError::UnsupportedCapability {
-                capability: format!(
-                    "root launch cannot grant writes to host directory '{}'; \
-                     run as a non-root account for directory writes, or grant writes to existing files",
-                    granted.original.display()
-                ),
-                backend: MECHANISM.to_string(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn require_no_configured_devices(config: &ContainmentConfig) -> Result<(), ContainmentError> {

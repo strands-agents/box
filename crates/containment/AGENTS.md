@@ -1056,9 +1056,9 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
   `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.
-- **macOS retains root creation inside granted directories.** The Linux startup restriction does
-  not apply to Seatbelt. Path denials do not change the owner of permitted new files or establish
-  protection against later privileged consumers. This Linux work did not test that macOS consumer path.
+- **macOS retains root creation inside granted directories.** Path denials govern the sandboxed
+  process's own access and do not change the owner of permitted new files. The Linux ownership
+  comparison did not test later privileged consumers on macOS.
 - **macOS continues to support root launches. A Seatbelt `deny` binds root**,
   measured 2026-08-31 with a control for each row, so the setuid bits, device nodes, both flag
   classes, the write root's own identity, and every ungranted path are all refused at `euid` 0.
@@ -1115,23 +1115,24 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     (`FIXTURE_HOME_PARENT_TEXT` is `/var/tmp`). The source-reading guard beside it is deleted, and it
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
-  - **Linux root launches refuse sandbox directory write grants.** Kevin selected existing-file-only root
-    sandbox writes with private temporary storage on 2026-11-04 and then directed completion of the startup check.
-    `require_nonroot_directory_writes` checks every composed authorization during validation and
-    application, before namespace entry. Either real or effective user ID zero triggers the refusal.
-    Root reads and exact-file writes remain available. `/tmp` is private writable storage, while a
-    granted `/var/tmp` is a host directory and meets the same refusal as other directory writes.
-    The check uses the current user namespace. It can refuse a rootless container's namespace root
-    and does not resolve arbitrary mappings into ancestor namespaces.
-    This restriction covers sandbox grants only. Policy-mediated Shell and Python file creation
-    runs in the trusted process and retains its file identity. That route remains open for review
-    in the box crate's [open findings](../box/AGENTS.md#open-findings--divergences-no-decision-covers).
-    `root_directory_grants_are_refused_before_workload_execution` pins the startup refusal.
-    `root_file_grants_preserve_private_access_and_temporary_storage` pins permitted root behavior.
-    `nonroot_directory_grants_preserve_creation` retains ordinary directory creation.
-    The identity map remains `0 <uid> 1`, and startup still clears every capability set.
-    A nested user namespace can restore privileges within that namespace. Seccomp still refuses
-    `mount` and `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
+  - **Linux root launches support sandbox directory write grants.** The identity map remains
+    `0 <uid> 1`, so permitted new files can belong to root in the surrounding OS.
+    The original comparison under root refused the workload's direct write outside its grants.
+    An unsandboxed root helper later wrote through a workload-created link to a file outside those grants.
+    It also wrote synthetic secret data into a readable file that the workload created.
+    Both operations used the helper's authority.
+    Root-owned output alone does not identify a failed Box control. See
+    [direct grants](../../docs/design/decisions.md#a-direct-grant-replaces-the-policy-decision).
+    `root_directory_grants_preserve_creation` covers root creation, cleared capabilities, refused
+    special permission bits, and refused outside access through direct paths and symbolic links.
+    `root_file_grants_preserve_private_access_and_temporary_storage` covers existing-file writes
+    and private temporary storage. `nonroot_directory_grants_preserve_creation` covers non-root creation.
+    Policy-mediated Shell and Python file creation retains the trusted process's file identity.
+    Its separate checks remain described in the box crate's
+    [open findings](../box/AGENTS.md#open-findings--divergences-no-decision-covers).
+    Startup still clears every capability set. A nested user namespace can restore privileges
+    within that namespace. Seccomp still refuses `mount` and `fsopen`, as
+    `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux

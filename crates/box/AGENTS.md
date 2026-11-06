@@ -847,13 +847,13 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
-- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
-  refuses directory write grants, but Shell and Python requests execute in the trusted process.
-  They pass policy and `Reach` checks without becoming containment authorizations.
-  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
-  identity. A root launch therefore retains root ownership on permitted new files.
-  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
-  does not establish closure of the broader ownership finding.
+- **Root ownership remains on policy-mediated file creation.** Shell and Python requests execute
+  in the box's trusted process, outside the sandbox. They pass policy and `Reach` checks without
+  becoming containment authorizations. `VfsKernel::open_host_file` and Python's `write` through
+  `HeldPath` can create files with that process's identity. A root launch therefore retains root
+  ownership on permitted new files. Whether a separate privileged program later acts on these files
+  remains unmeasured for this route. Root ownership alone does not identify a failed policy or reach
+  check, and this observation does not establish closure of the broader ownership finding.
   The Shell's symlink path still requires source read/write and destination write permission.
   `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
   A project-only policy cannot plant the review's `/etc/shadow` example through this path.
