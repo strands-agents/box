@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 const RESULT: &str = "ROOT_FILE_RESULT=";
 
 fn launch(directory: &Path, directory_write: bool) -> Output {
-    let outside = tempfile::NamedTempFile::new().unwrap();
+    let outside = tempfile::NamedTempFile::new_in("/var/tmp").unwrap();
     std::fs::write(outside.path(), b"OUTSIDE").unwrap();
     std::os::unix::fs::symlink(outside.path(), directory.join("outside-link")).unwrap();
     assert_eq!(std::fs::read(outside.path()).unwrap(), b"OUTSIDE");
