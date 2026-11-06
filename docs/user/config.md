@@ -444,6 +444,8 @@ paths:`. Getting started shows the example's disclosure. A credential store, suc
 `~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
 a tool granted the operator's SSH directory.
 
+When the workload uses a terminal, later Core messages appear after it exits.
+
 On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
 
 ```text
