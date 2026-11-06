@@ -584,13 +584,14 @@ Keep those launch paths and their containing directories outside workload write 
 Box accepts hard links only when it finds every name in the installation directory or its immediate
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
-Linux also checks the files through existing mounts. On macOS, Box checks verified Data-volume spellings.
+Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
 | Box cannot account for every hard-link name. | `has hard links outside the installation inventory. Install an independent copy` | Install independent copies of the Box programs. |
-| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table and mapped files, then retry after mount changes finish. |
+| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table, resolve other inspection errors, then retry after mount changes finish. |
 | A recorded file name points to another file, or the hard-link count changes during the run. | `changed after this run loaded it. Stop Box before updating its installation` | End the run before installation updates. |
 
 Strands Shell and Monty also refuse changes to these files and their enclosing paths, even when
