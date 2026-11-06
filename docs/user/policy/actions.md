@@ -152,11 +152,12 @@ a program. Each nested command, such as the one `find -exec` or `xargs` runs, is
 | `arg_count` | Long | How many arguments follow the program. |
 | `cwd` | String | The working directory. |
 
-**`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and two
+**`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and three
 more:
 
 | Field | Type | Meaning |
 |---|---|---|
+| `server?` | String | The admitted MCP server name on a server start. Absent on an ordinary shell command. |
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
 
@@ -190,6 +191,18 @@ A policy with no matching permit refuses the server at startup. For an enabled [
 command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
 spaces. Its argument fields contain the same values, including the caller's values in wildcard
 positions.
+To permit only one server on a shared launcher, match its name:
+
+```text
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when { context.input has server && context.input.server == "time" };
+```
+
+The `has server` guard is required because ordinary shell commands have no server name.
+The name comes from the admitted configuration entry, not from the command's arguments.
+A tool grammar action keeps its own input schema; the server field above belongs to
+`shell:spawn`.
+
 A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:

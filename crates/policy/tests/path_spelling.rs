@@ -127,6 +127,7 @@ fn spawns(engine: &PolicyEngine, program: &str) -> bool {
             &GovernedBox::assigned("spelling"),
             &Principal::agent(),
             &Request::ShellSpawn {
+                server: None,
                 command: "curl https://example.com",
                 program,
                 program_path: "/usr/bin/curl",
@@ -494,6 +495,7 @@ fn a_multi_word_program_literal_loads_without_a_finding_and_never_matches() {
             &GovernedBox::assigned("spelling"),
             &Principal::agent(),
             &Request::ShellSpawn {
+                server: None,
                 command: "git status",
                 program: "git",
                 program_path: "/usr/bin/git",

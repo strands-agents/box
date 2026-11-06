@@ -243,6 +243,11 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 
 ## Errors and exit codes
 
+When a stdio server fails, read its stderr in the run's telemetry file. The default path is
+`<box_dir>/private/telemetry/records.jsonl`. Each captured line is a log record under
+`strands-box.mcp.stderr`, with `strands.box.mcp.server` set to the declared server name.
+See [MCP server stderr](./telemetry.md#mcp-server-stderr) for masking and capture limits.
+
 `box run` exits with an error before the agent starts when a table breaks a rule on this page.
 
 | Message | Cause |

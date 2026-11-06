@@ -88,6 +88,16 @@ pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
     ))
 }
 
+/// Check MCP server names against Box's reserved namespace and namespace collision rules.
+pub fn check_mcp_names(names: &[&str]) -> Result<(), McpNamesRefused> {
+    policy::validate_mcp_names(names).map_err(McpNamesRefused)
+}
+
+/// MCP server names that Box cannot compose into one policy schema.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct McpNamesRefused(policy::McpSchemaError);
+
 /// A policy check that could not run: the configuration or its policy file cannot be read.
 #[derive(Debug)]
 pub struct CheckFailed(error::BoxError);

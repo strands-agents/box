@@ -9,6 +9,7 @@ mod config;
 mod correlation;
 mod error;
 mod export;
+mod mcp_stderr;
 mod receive;
 mod record;
 
@@ -16,6 +17,7 @@ pub use collector::Collector;
 pub use config::{Target, TargetKind, TargetSecret, TelemetryConfig};
 pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
+pub use mcp_stderr::McpStderr;
 pub use record::{
     ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy, Signal,
     Subject,

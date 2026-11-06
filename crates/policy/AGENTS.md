@@ -38,12 +38,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
   `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
   `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
-  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
+  `validate_mcp_names`, `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
   `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
   `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
   `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
-  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 58 names with `--all-features`
-  and 52 by default; recompute it when you touch the façade.
+  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 59 names with `--all-features`
+  and 53 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over

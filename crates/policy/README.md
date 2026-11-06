@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **58 names with `--all-features`, and 52 by default.** The adapter features add
+The façade exports **59 names with `--all-features`, and 53 by default.** The adapter features add
 the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
@@ -39,7 +39,7 @@ the six names in the last row.
 | `PolicyError` | Startup and history-recording errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
-| `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
+| `generate_mcp_schema`, `validate_mcp_names`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
@@ -541,3 +541,10 @@ the reply as `output.status`, which only a `when temporal { … }` rule reads.
 Each exact pinned socket attempt has its own connect decision and permit. An HTTP
 request decision includes the destination port and the body length. There is no
 response decision.
+
+`validate_mcp_names(&[&str])` checks reserved and colliding server namespaces without tool
+schemas. `validate_mcp_schema_composition` applies the same check to its named schemas.
+
+`Request::ShellSpawn::server` is `Some(name)` for an admitted MCP start and `None` for an ordinary
+shell command. `ShellPolicyInterceptor::into_server_start_handle` takes the admitted server name
+as its final argument. The adapter carries that name into the policy request and request history.

@@ -658,6 +658,16 @@ impl DecisionRecorder {
         })
     }
 
+    pub(crate) fn mcp_stderr(
+        &self,
+        server: &str,
+        environment: &[String],
+    ) -> Option<telemetry::McpStderr> {
+        self.collector
+            .as_ref()
+            .map(|collector| collector.mcp_stderr(server, environment))
+    }
+
     pub(crate) fn request_context(&self) -> telemetry::Correlation {
         self.correlation
             .clone()

@@ -327,6 +327,23 @@ fn validate_generated_shape(
     Ok(())
 }
 
+/// Check that server names have distinct namespaces outside the reserved Box namespace.
+pub fn validate_mcp_names(names: &[&str]) -> Result<(), McpSchemaError> {
+    let mut namespaces = BTreeMap::new();
+    for server in names {
+        refuse_reserved_namespace(server)?;
+        let namespace = mcp_action_namespace(server);
+        if let Some(first) = namespaces.insert(namespace.clone(), (*server).to_string()) {
+            return Err(McpSchemaError::NamespaceCollision {
+                first,
+                second: (*server).to_string(),
+                namespace,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Validate that named generated schemas compose with the canonical policy schema.
 pub fn validate_mcp_schema_composition(generated: &[(&str, &str)]) -> Result<(), McpSchemaError> {
     let mut fragments = Vec::with_capacity(generated.len() + 1);
@@ -338,16 +355,8 @@ pub fn validate_mcp_schema_composition(generated: &[(&str, &str)]) -> Result<(),
     warnings += canonical_warnings.count();
     fragments.push(canonical);
 
-    let mut namespaces = BTreeMap::new();
+    validate_mcp_names(&generated.iter().map(|(name, _)| *name).collect::<Vec<_>>())?;
     for (server, source) in generated {
-        let namespace = mcp_action_namespace(server);
-        if let Some(first) = namespaces.insert(namespace.clone(), (*server).to_string()) {
-            return Err(McpSchemaError::NamespaceCollision {
-                first,
-                second: (*server).to_string(),
-                namespace,
-            });
-        }
         validate_bound_mcp_schema(server, source)?;
         let (fragment, fragment_warnings) =
             SchemaFragment::from_cedarschema_str(source).map_err(|source| {

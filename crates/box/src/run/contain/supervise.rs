@@ -633,7 +633,7 @@ impl LeafBox {
     /// Build the trampoline, spawn the contained child in its own process group, and — on Linux —
     /// start the netns relays held for the child's lifetime. `stdin`/`stdout`/`stderr` are the
     /// child's stdio: the buffered run pipes stdout/stderr and nulls stdin; the streaming spawn
-    /// pipes stdin/stdout for the JSON-RPC session and nulls stderr.
+    /// pipes stdin/stdout for the JSON-RPC session and stderr for the broker's capture.
     async fn launch_contained(
         boundary: &Boundary,
         layout: &BoxRoot,
@@ -767,9 +767,7 @@ impl LeafBox {
     ) -> Result<StreamingLeaf, BoxError> {
         // stderr is piped, not nulled: a containment setup failure must carry the trampoline's own
         // message as `detail`, the same reason the buffered `run` path reports. On success the
-        // workload owns stderr for its whole life, so a drain task below discards it — an undrained
-        // pipe would block the server once full. stdin and stdout are the JSON-RPC session's, kept
-        // live for the server's lifetime.
+        // broker drains the workload's stderr after it adopts the child.
         let LaunchedLeaf {
             mut group,
             trampoline,
@@ -817,12 +815,7 @@ impl LeafBox {
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 
-        // Drain stderr so a running server cannot block on a full pipe.
-        if let Some(mut stderr) = stderr {
-            tokio::spawn(async move {
-                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-            });
-        }
+        group.child_mut().stderr = stderr;
 
         Ok(StreamingLeaf {
             stdin,

@@ -361,9 +361,13 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Fifteen names — `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Sixteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal` — reached through `telemetry::open`, then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpStderr`, reached through `telemetry::open`, then:
+
+`Collector::mcp_stderr` creates a capture with a budget shared by the server's starts in one run.
+Its untrusted body uses separate SDK queues and cannot become a policy or control record.
+`Drop` and `drained` shut down both providers; the latter waits for them concurrently.
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request

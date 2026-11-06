@@ -230,6 +230,7 @@ type ShellExecInput = {
 // will run. Deliberately not `path`: that name already means a filesystem path on
 // `fs:*` and a URL path on `http:request`.
 type ShellSpawnInput = {
+  server?: String,
   command: String,
   program: String,
   program_path: String,

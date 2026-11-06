@@ -1692,6 +1692,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             fields
         }
         Request::ShellSpawn {
+            server,
             command,
             program,
             program_path,
@@ -1708,6 +1709,9 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
                 ),
                 (attr::CWD, Value::String((*cwd).to_string())),
             ];
+            if let Some(server) = server {
+                fields.push((attr::SERVER, Value::String((*server).to_string())));
+            }
             fields.extend(credential_read_fields(credential_reads));
             fields.extend(argument_fields(args));
             fields

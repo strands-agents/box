@@ -84,12 +84,38 @@ records.
 **The workload's log records and metrics are on by default.** They reach every target, and no value of
 `include` keeps them out, so the list never needs the words `logs` and `metrics`. The file
 `include = ["deny"]` writes therefore holds the denials, plus whatever log records and metrics the
-workload itself exported.
+workload itself exported. Captured MCP server stderr also reaches every target.
 
 `trace` names two things at once. A target that omits `trace` receives no control-plane record, so this
 box's `box_started`, `policy_installed`, and `box_stopped` records are absent from it.
 
 An empty list is refused, and so is a repeated word.
+
+## MCP server stderr
+
+Box captures each stdio MCP server's stderr during a run. Each line becomes one log record with
+scope `strands-box.mcp.stderr` and event name `strands.box.mcp.stderr`. The final line is kept even
+when it has no newline. The body is text from the server. It is untrusted and does not represent a
+policy decision.
+
+| Attribute | Meaning |
+|---|---|
+| `strands.box.mcp.server` | The server name from the admitted configuration. |
+| `strands.box.mcp.stderr.truncated` | `true` on the single notice that capture reached its limit; `false` on server lines. |
+
+Box replaces nonempty values from that server's `[mcp.<name>.env]` table with `[redacted]` before
+recording a line. It also masks each nonempty line of a multiline value. Values split across pipe
+reads remain masked. This matches literal values; encoded or transformed secrets and secrets
+obtained elsewhere are not covered.
+
+Each server has a run-wide limit of 64 KiB of input, 64 KiB of recorded body text, and 256 lines,
+whichever stops capture first. A restart does not reset the limit. One additional notice states
+that the remaining output is discarded. Box continues draining stderr after capture stops, so a
+full capture does not block the server. Invalid UTF-8 is replaced with the replacement character.
+
+These records use separate queues from policy and control records. Delivery has the same
+best-effort limits as other telemetry. They reach every configured target, including a target
+with `include = ["deny"]`. With no target configured, they reach the default `records.jsonl`.
 
 ## The workload's own signals
 
@@ -143,6 +169,7 @@ log record's `event_name` field is `strands.box.policy.decision`, and the scope 
 | Group | Keys |
 |---|---|
 | The decision | `strands.box.policy.action`, `.resource`, `.verdict`, `.cause`, `.reason` on a denial, and `.principal` |
+| The MCP server on a start decision | `strands.box.mcp.server`, from the admitted configuration entry, on both permits and refusals |
 | The governing rule | `strands.box.policy.rule`, `.description`, `.category`, and `.determining.ids`, which lists every policy that determined the decision |
 | Correlation | `strands.box.request.id` on an egress decision, `jsonrpc.request.id` on an MCP request, and `strands.box.trace.parent_span_id` on the log record |
 | What it was about | `server.address` and `server.port` on a network decision, `http.request.method` on a request, `file.path` on an `fs:*` decision, and `process.command`, `process.command_args`, and `process.working_directory` on a shell decision |

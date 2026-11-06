@@ -38,6 +38,7 @@ pub struct ShellPolicyInterceptor {
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
     starter: Starter,
+    server: Option<String>,
 }
 
 impl ShellPolicyInterceptor {
@@ -54,6 +55,7 @@ impl ShellPolicyInterceptor {
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
             starter: Starter::Agent,
+            server: None,
         })
     }
 
@@ -75,6 +77,7 @@ impl ShellPolicyInterceptor {
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
             starter: Starter::Agent,
+            server: None,
         })
     }
 
@@ -92,6 +95,7 @@ impl ShellPolicyInterceptor {
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
             starter: Starter::Agent,
+            server: None,
         })
     }
 
@@ -110,6 +114,7 @@ impl ShellPolicyInterceptor {
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
             starter: Starter::Agent,
+            server: None,
         })
     }
 
@@ -121,6 +126,7 @@ impl ShellPolicyInterceptor {
         governed: GovernedBox,
         home: Option<std::path::PathBuf>,
         spawn_credentials: BTreeMap<String, Vec<String>>,
+        server: &str,
     ) -> Arc<dyn EffectInterceptor> {
         Arc::new(Self {
             policy,
@@ -129,6 +135,7 @@ impl ShellPolicyInterceptor {
             home,
             spawn_credentials: Arc::new(spawn_credentials),
             starter: Starter::Server,
+            server: Some(server.to_string()),
         })
     }
 
@@ -296,6 +303,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                         &self.governed,
                         &self.principal,
                         &Request::ShellSpawn {
+                            server: self.server.as_deref(),
                             command,
                             program,
                             program_path: reported_program_path.as_deref().unwrap_or(program_path),
@@ -361,6 +369,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 &self.governed,
                 &self.principal,
                 &Request::ShellSpawn {
+                    server: self.server.as_deref(),
                     command,
                     program,
                     program_path: reported_program_path.as_deref().unwrap_or(program_path),
@@ -1974,6 +1983,7 @@ mod tests {
                 &GovernedBox::assigned("test-box"),
                 &Principal::agent(),
                 &Request::ShellSpawn {
+                    server: None,
                     command: program,
                     program,
                     program_path,
