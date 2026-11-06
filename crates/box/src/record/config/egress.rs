@@ -935,6 +935,21 @@ impl EgressEntry {
                          box's own, and the workload presents no placeholder to check or seed",
                     );
                 }
+                // An `aws://` auth signs over the backend host, so that host must yield an AWS
+                // service and region. Refusing here, at load, is the fail-closed alternative to
+                // loading and then refusing every request when the signer cannot derive a scope.
+                // `credsd://` was refused above, so `signs_in_boundary` here means `aws://`.
+                if Self::signs_in_boundary(auth)
+                    && !credentials::aws_scope_is_derivable(&target.host)
+                {
+                    return refuse(&format!(
+                        "a backend auth of aws:// signs over the backend host, but no AWS \
+                         service/region can be derived from {host:?}; name an AWS backend host (such \
+                         as a *.gateway.bedrock-agentcore.<region>.amazonaws.com gateway) or use an \
+                         env:// token",
+                        host = target.host,
+                    ));
+                }
             }
         }
 
@@ -2653,10 +2668,11 @@ mod tests {
     /// backend auth stays refused (out of scope).
     #[test]
     fn a_credsd_backend_auth_is_refused() {
-        // aws:// now loads: the gateway signs the re-routed request over the backend host.
+        // aws:// now loads on an AWS-signable backend host: the gateway signs over the backend host.
         load(
             "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
-             [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+             [[egress.github.backends]]\n\
+             url = \"https://gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com\"\n\
              auth.ref = \"aws://default\"\n",
         )
         .expect("an aws:// backend auth loads and signs over the backend host");
@@ -2671,6 +2687,24 @@ mod tests {
         assert!(
             error.to_string().contains("credsd"),
             "the refusal names credsd://: {error}"
+        );
+    }
+
+    /// An `aws://` backend auth whose backend host yields no AWS service/region is refused at load,
+    /// rather than loading and refusing every request when the signer cannot derive a scope.
+    #[test]
+    fn a_non_aws_backend_host_with_aws_auth_is_refused() {
+        let error = load(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+             auth.ref = \"aws://default\"\n",
+        )
+        .expect_err("an aws:// auth on a non-AWS backend host is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("no AWS service/region can be derived"),
+            "the refusal names the underivable backend host: {error}"
         );
     }
 

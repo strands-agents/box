@@ -16,8 +16,10 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 
 ## Public Contract
 
-- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 20 public
-  names, including `PhantomCheck` and the opaque `ResponseRedactor`, plus eleven
+- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 21 public
+  names — including `PhantomCheck`, the opaque `ResponseRedactor`, and `aws_scope_is_derivable`, the
+  predicate the box's config validation calls to refuse an `aws://` backend auth whose host cannot be
+  signed — plus eleven
   `pub(crate) use` re-exports (`Emitter`, `RequestId`, `audit_resolve`,
   `CredentialDiagnostic`, `redact_credential_ref`, `AwsSessionCredentials`, `PhantomToken`,
   `Secret`, `DEFAULT_PHANTOM_PREFIX`, `check_phantom_prefix`, `sign_request`).
