@@ -656,7 +656,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, or `aws://PROFILE` for SigV4 signing. Required. A literal value is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` for SigV4 signing with a named profile's static keys, or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -673,7 +673,10 @@ MCP server`. `protocol` on this table takes `http` alone; declare a remote MCP s
 `[mcp.<name>]` with `type = "http"`, which the next section describes.
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
-`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads.
+`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
+(no profile) signs with the host's ambient identity and prints a warning on every signed request;
+[Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
+not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
 
 ## `[mcp.<name>]`
 

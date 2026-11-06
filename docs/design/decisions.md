@@ -833,9 +833,11 @@ pins Python.
 There is no credential action in the schema. An operator declares a binding in `box.toml`, and that
 binding says only which secret is attached to a request the policy already permits. Reachability
 stays the policy's decision alone, so a binding never opens a destination, and the two must name the
-same host. There is no spelling for ambient credentials: an empty `aws://` body does not parse,
-because Box must not silently use credentials from the environment. A secret travels over TLS only.
-See [credentials require TLS](#a-secret-rides-only-tls).
+same host. A bare `aws://` body parses and names the AWS default credential provider chain, so a
+binding can sign with the host's ambient identity; this is not silent, because the box warns on every
+such request and records a distinct default-chain acquisition. See
+[a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
+A secret travels over TLS only. See [credentials require TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 <a id="a-temporal-rule-rides-the-same-closed-context-as-an-ordinary-rule"></a>
@@ -2075,14 +2077,30 @@ input. Deleting a box-side check moves its refusal one phase later, so the opera
 broken config after the box starts. Do not delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
-### A credential provider refuses an identity it cannot honour, instead of substituting one
+<a id="a-bare-aws-resolves-the-default-credential-chain"></a>
+### An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain
 
-The environment-backed AWS provider reads the ambient `AWS_*` variables, so it cannot resolve a
-named profile. It never falls back to the ambient identity, because a credential that is not the one
-the operator named is a silent authority change. A named profile resolves through the AWS profile
-chain, with one exception refused by name: `credential_process`. Honouring it would make the box's
-trusted process run a program that `~/.aws/config` names, and no floor defends that file, so it
-would violate the rule against running workload-named programs in the trusted process.
+`aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
+`credential_process` (which runs a subprocess), SSO, or assume-role (each an STS or SSO call),
+because a credential that is not the one the operator named is a silent authority change. A bare
+`aws://` resolves the AWS SDK default credential provider chain: the environment, the profile files
+(including `credential_process`), web identity, the container endpoint, then instance metadata.
+
+The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
+a dedicated worker thread), because the crate that already resolves `aws://PROFILE` owns every AWS
+credential path; the box crate injecting a resolver across a seam was rejected for splitting that
+ownership. The reserved tokens `aws://@instance-role` and `aws://@container-role`, and
+`aws://default`, were rejected, the last because `default` is a real profile and the overlap would
+be a silent identity substitution. The SDK's `sso` and `credentials-login` providers are compiled
+out (`default-features = false`), so a bare `aws://` does not resolve an AWS SSO or `aws login`
+default profile; such a profile is refused, and the refusal names the missing provider.
+
+The cost: the SDK, a runtime, and a TLS stack link into the one process that holds every resolved
+plaintext; and a workload with write access to `~/.aws` can name a `credential_process` program the
+trusted process runs outside the sandbox, which is remote code execution
+([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). The
+shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
+keeping `~/.aws` unwritable.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

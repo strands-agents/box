@@ -97,10 +97,11 @@ A placeholder starts with the route's `phantom_prefix`, or `strands_box_`, follo
 characters. `box.toml` calls it a phantom. The workload can read it and learn that a credential
 exists, but cannot use it to authenticate outside Box.
 
-An `aws://` route uses only the named AWS profile. It never falls back to ambient `AWS_*` variables
-and it refuses a profile that uses `credential_process`, because that would make the box's trusted
-process run a program a configuration file names. See [a provider refuses an identity it can't
-honour](./decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
+**An `aws://` route has two forms.** `aws://PROFILE` reads one named profile's static keys; a bare
+`aws://` resolves the AWS SDK default credential provider chain, the host's ambient identity, which
+the box warns about on every request. The decision
+[An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain](./decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+states both forms, the SDK placement, and the writable-`~/.aws` cost.
 
 ## On each request
 
@@ -214,8 +215,17 @@ the host, which must end in `.amazonaws.com` or `.api.aws`, and refuses a host i
 The process gets placeholder AWS keys so that an AWS SDK builds and signs its own request. The
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
-`aws://` uses static keys. The vault resolves the profile's access key and secret key on each
-request.
+**`aws://PROFILE` signs with static keys.** The vault resolves the profile's access key and secret
+key on each request.
+
+**A bare `aws://` signs with the default chain.** The vault resolves the AWS SDK default credential
+provider chain on a dedicated worker thread, because the chain is async and the signing path is
+synchronous. The worker owns a current-thread runtime and a refresh cache: it serves cached
+credentials while valid, resolves again near expiry, and on a failed refresh serves still-valid
+cached credentials rather than dropping them. The identity it signs with, the SSO exclusion, and the
+writable-`~/.aws` cost are stated in
+[the decision](./decisions.md#a-bare-aws-resolves-the-default-credential-chain); the operator view is
+in [the egress guide](../user/egress.md#credential-sources).
 
 <a id="credentials-in-a-leaf-box"></a>
 
