@@ -547,8 +547,10 @@ policy fails schema validation: temporal window `48h` exceeds the maximum allowe
 
 ### A literal that nothing can match
 
-A path under the operator's home is reported `~/…`, and a directory is reported without a trailing
-slash. The refusal names the spelling to write:
+A path under the operator's home is reported `~/…`, and the home itself is reported `~`. A directory
+is reported without a trailing slash. The check also covers `context.input.cwd` on `shell:exec` and
+`shell:spawn`. A directory outside the operator's home keeps its absolute path. The refusal names the
+spelling to write:
 
 ```text
 @id("project_read")
@@ -689,7 +691,16 @@ address it does match, so the load cannot prove it inert. Check an `ip6` pattern
 above.
 
 A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
-with, so a temporal clause can still need an older one.
+with, so a temporal clause can still need an older one. Earlier shell events can carry an absolute
+`cwd` below the operator's home. A predicate on `~/project` does not match those events, and Box does
+not translate their stored values.
+
+An absolute `cwd` predicate below the operator home can match older events but misses new
+`shell:exec` and `shell:spawn` events. A `forbid` that depends on those matches can stop denying
+commands. The loader accepts these temporal predicates without a warning.
+
+Editing a history rule starts it with empty state, including edits that match both spellings.
+Plan how to preserve active budgets before upgrading a box with these predicates.
 
 **A box can hold address events that this vocabulary cannot read.** An event recorded by an earlier
 build carries one address field, and a predicate on `ip4` or `ip6` does not match it. There is no

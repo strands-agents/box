@@ -162,12 +162,9 @@ fn refused_spawn(program_path: &str, refusal: &CoverageRefusal) -> io::Error {
     )
 }
 
-/// The spelling a rule reads as `context.input.program_path`: home-relative under the operator's
-/// home, like `context.input.path`, and canonical otherwise.
-fn reported_program_path(program_path: &str, home: Option<&Path>) -> String {
-    ApprovedPath::under_home(program_path, home)
-        .reported()
-        .into_owned()
+/// The policy spelling of a resolved shell path.
+fn reported_path(path: &str, home: Option<&Path>) -> String {
+    ApprovedPath::under_home(path, home).reported().into_owned()
 }
 
 /// The credential spellings recorded for the program a decision names, by that exact identity.
@@ -273,7 +270,13 @@ impl EffectInterceptor for ShellPolicyInterceptor {
         };
         let reported_program_path = match effect {
             EffectAttempt::ShellSpawn { program_path, .. } => {
-                Some(reported_program_path(program_path, self.home.as_deref()))
+                Some(reported_path(program_path, self.home.as_deref()))
+            }
+            _ => None,
+        };
+        let reported_cwd = match effect {
+            EffectAttempt::ShellRun { cwd, .. } | EffectAttempt::ShellSpawn { cwd, .. } => {
+                Some(reported_path(cwd, self.home.as_deref()))
             }
             _ => None,
         };
@@ -301,7 +304,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                             program_path: reported_program_path.as_deref().unwrap_or(program_path),
                             credential_reads,
                             args,
-                            cwd,
+                            cwd: reported_cwd.as_deref().unwrap_or(cwd),
                         },
                     );
                     return Err(refused_spawn(program_path, &refusal));
@@ -346,7 +349,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                     command,
                     program,
                     args,
-                    cwd,
+                    cwd: reported_cwd.as_deref().unwrap_or(cwd),
                 },
             ),
             // A host binary, raised through the passthrough path and judged as `shell:spawn`.
@@ -366,7 +369,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                     program_path: reported_program_path.as_deref().unwrap_or(program_path),
                     credential_reads,
                     args,
-                    cwd,
+                    cwd: reported_cwd.as_deref().unwrap_or(cwd),
                 },
             ),
             // The Shell's VFS resolved this path already, so the adapter carries its
@@ -482,6 +485,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             effect,
             credential_reads,
             reported_program_path.as_deref(),
+            reported_cwd.as_deref(),
             request_id,
         )))
     }
@@ -537,6 +541,7 @@ impl Admitted {
         effect: &EffectAttempt<'_>,
         credential_reads: &[String],
         reported_program_path: Option<&str>,
+        reported_cwd: Option<&str>,
         request_id: RequestId,
     ) -> Self {
         match effect {
@@ -551,7 +556,7 @@ impl Admitted {
                 command: (*command).to_string(),
                 program: (*program).to_string(),
                 args: args.to_vec(),
-                cwd: (*cwd).to_string(),
+                cwd: reported_cwd.unwrap_or(cwd).to_string(),
             },
             EffectAttempt::ShellSpawn {
                 command,
@@ -567,7 +572,7 @@ impl Admitted {
                 program_path: reported_program_path.unwrap_or(program_path).to_string(),
                 credential_reads: credential_reads.to_vec(),
                 args: args.to_vec(),
-                cwd: (*cwd).to_string(),
+                cwd: reported_cwd.unwrap_or(cwd).to_string(),
             },
             EffectAttempt::Filesystem { path, operation } => Self::Filesystem {
                 request_id,
@@ -576,23 +581,6 @@ impl Admitted {
             },
             _ => Self::Unmapped,
         }
-    }
-}
-
-/// A host path as a rule reads it: `~/<relative>` when it is under `home`.
-///
-/// Mirrors `ApprovedPath::reported`, and the two must agree. They are separate functions because the
-/// request event is built from an `ApprovedPath` and the response event from an `Outcome`, which
-/// carries a plain path — so there is no single value to derive both from without widening the
-/// public `Outcome` type.
-fn reported_path(path: &str, home: Option<&Path>) -> String {
-    let Some(home) = home else {
-        return path.to_string();
-    };
-    match Path::new(path).strip_prefix(home) {
-        Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
-        Ok(relative) => format!("~/{}", relative.display()),
-        Err(_) => path.to_string(),
     }
 }
 
@@ -1241,15 +1229,15 @@ mod tests {
         let canonical_home = home.path().canonicalize().expect("canonical");
         let program = canonical_home.join(".cargo/bin/rustup");
         assert_eq!(
-            reported_program_path(&program.to_string_lossy(), Some(&canonical_home)),
+            reported_path(&program.to_string_lossy(), Some(&canonical_home)),
             "~/.cargo/bin/rustup"
         );
         assert_eq!(
-            reported_program_path("/usr/bin/git", Some(&canonical_home)),
+            reported_path("/usr/bin/git", Some(&canonical_home)),
             "/usr/bin/git"
         );
         assert_eq!(
-            reported_program_path(&program.to_string_lossy(), None),
+            reported_path(&program.to_string_lossy(), None),
             program.to_string_lossy()
         );
     }
@@ -1492,16 +1480,17 @@ mod tests {
                @id("after_a_refused_spawn")
                forbid (principal, action == Box::Action::"shell:exec", resource)
                when temporal {
-                   formerly within 1h Box::Action::"shell:spawn"::request{ input.program: "python" }
+                   formerly within 1h Box::Action::"shell:spawn"::request{ requestId: _, input.program: "python", input.cwd: "~/work" }
                };"#,
         );
         let mut bindings = policy.grammar_bindings();
         bindings.declare(&programs.file("mise"), "git");
         let interceptor = InterceptorFixture {
-            interceptor: ShellPolicyInterceptor::into_handle(
+            interceptor: ShellPolicyInterceptor::into_handle_reporting_under(
                 Arc::new(policy.bound_by(bindings).expect("the engine issued them")),
                 Principal::agent(),
                 GovernedBox::assigned("test-box"),
+                "/",
             ),
             _history: history,
         };
