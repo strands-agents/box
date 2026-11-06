@@ -110,7 +110,7 @@ auth.ref = "env://BOX_GW_TOKEN"
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. A path prefix is allowed; a query or fragment is not. |
-| `backends.auth.ref` | string | none | `env://NAME` for the backend's own token. The box attaches it to the backend connection (it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). |
+| `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host. |
 
 The box dials the backend's host and port, presents the backend host for TLS and in the `Host`
 header, and validates the backend's certificate against the backend host. If the `url` has a path
@@ -120,9 +120,11 @@ with a backend `url` of `https://gateway-1.example.com/github` leaves as
 and in the audit record. The box checks the backend's address against policy before it connects, so
 a `forbid` on a metadata or private address refuses a backend that resolves there.
 
-A backend's `auth` must be an `env://` credential on an `https` backend. A signed (`aws://` or
-`credsd://`) auth is refused, because the box rewrites the `Host` to the backend, which breaks a
-SigV4 signature.
+A backend's `auth` rides an `https` backend. An `env://` token is attached as-is; an `aws://` profile
+is SigV4-signed over the **backend** host — the box signs the request after it rewrites the `Host` to
+the backend, so the signature covers the bytes the backend receives, and it derives the service and
+region from the backend host (for example a Bedrock AgentCore Gateway signs as `bedrock-agentcore`).
+A `credsd://` auth is refused.
 
 An entry may keep its own `secret` beside a backend, and it must be `env://`. It is phantom-only: the
 box provisions the placeholder to the workload (so the agent's credential-shaped code works) and
@@ -166,7 +168,7 @@ names is refused.
 | A `backends.url` has a query, fragment, no host, or a scheme other than `http`/`https` | Name the backend as `scheme://host[:port][/prefix]`. A path prefix is allowed; a query or fragment is not. |
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | An entry has a backend and a signed (`aws://`/`credsd://`) `secret` | A re-routed destination secret is phantom-only, so it must be `env://`. |
-| A `backends.auth` uses `aws://` or `credsd://`, or sits on an `http` backend | Use an `env://` credential on an `https` backend. |
+| A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |

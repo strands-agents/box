@@ -382,6 +382,12 @@ pub(crate) fn derive_service_region(host: &str) -> Option<(String, String)> {
         [_, service, region] if *service == "execute-api" => {
             Some(("execute-api".to_string(), (*region).to_string()))
         }
+        // {id}.gateway.bedrock-agentcore.{region}.amazonaws.com — a Bedrock AgentCore Gateway, which
+        // signs as `bedrock-agentcore`. A re-route's backend `auth` signs over this host after the
+        // Host rewrite, so the gateway endpoint must derive its own scope.
+        [_, "gateway", "bedrock-agentcore", region] => {
+            Some(("bedrock-agentcore".to_string(), (*region).to_string()))
+        }
         // Any other multi-label form is non-standard → fail closed.
         _ => None,
     }
@@ -452,6 +458,28 @@ mod tests {
         // A host carrying neither suffix is still refused, so this is not "any host signs".
         assert_eq!(derive_service_region("s3.us-east-2.api.example"), None);
         assert_eq!(derive_service_region("evil.com"), None);
+    }
+
+    /// A Bedrock AgentCore Gateway host signs as `bedrock-agentcore`. This is the host a re-route's
+    /// backend `auth` of `aws://` signs over, after the `Host` rewrite.
+    #[test]
+    fn derive_service_region_reads_the_agentcore_gateway_host() {
+        assert_eq!(
+            derive_service_region(
+                "passthrough-tr144gw4id.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
+            ),
+            Some(("bedrock-agentcore".to_string(), "us-east-1".to_string()))
+        );
+        // A different region still derives.
+        assert_eq!(
+            derive_service_region("my-gw.gateway.bedrock-agentcore.eu-west-1.amazonaws.com"),
+            Some(("bedrock-agentcore".to_string(), "eu-west-1".to_string()))
+        );
+        // A look-alike that is not the bedrock-agentcore gateway shape fails closed.
+        assert_eq!(
+            derive_service_region("x.gateway.something-else.us-east-1.amazonaws.com"),
+            None
+        );
     }
 
     /// **A Mantle host signs as `bedrock-mantle`, which is the prefix unchanged.**

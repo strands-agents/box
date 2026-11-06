@@ -1038,13 +1038,23 @@ impl Record {
     /// The credential routes for each backend entry, grouped per entry so each opens in one vault
     /// (one credential authority on one destination): the entry's strip-phantom destination secret
     /// and its box-owned backend token together. An entry with no credentials contributes no group.
-    pub(crate) fn backend_credentials(&self) -> Result<Vec<Vec<EgressRoute>>, BoxError> {
+    pub(crate) fn backend_credentials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
         let mut groups = Vec::new();
         for entry in self.egress.values() {
             let routes = entry.backend_credential_routes()?;
-            if !routes.is_empty() {
-                groups.push(routes);
+            if routes.is_empty() {
+                continue;
             }
+            // The vault registers under the ORIGINAL destination, so the gateway finds it both for
+            // the pre-rewrite strip (keyed on the original) and the post-rewrite backend signature
+            // (whose signed route is keyed on the backend host). A backend entry has exactly one
+            // destination, so `primary_destination` is `Some`.
+            let Some(original) = entry.primary_destination()? else {
+                continue;
+            };
+            groups.push((original, routes));
         }
         Ok(groups)
     }

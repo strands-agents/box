@@ -484,6 +484,17 @@ impl BackendTarget {
     }
 }
 
+/// The destination string a backend's signed route matches on: its host, with the port appended only
+/// when it is not the scheme's default, so the gateway's post-rewrite backend `Outbound` (host and
+/// port) matches the same pattern the box built.
+fn backend_destination(target: &BackendTarget) -> String {
+    if target.port == target.scheme.default_port() {
+        target.host.clone()
+    } else {
+        format!("{}:{}", target.host, target.port)
+    }
+}
+
 /// What an egress destination speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -583,6 +594,16 @@ impl EgressEntry {
         })
     }
 
+    /// The original destination pattern this entry governs. A backend entry has exactly one exact
+    /// host (`validate` enforces it), so this keys the entry's one credential vault for the gateway —
+    /// both the pre-rewrite strip and the post-rewrite backend signature look it up here.
+    pub(crate) fn primary_destination(&self) -> Result<Option<DestinationPattern>, BoxError> {
+        match self.destinations.first() {
+            Some(destination) => Ok(Some(self.pattern(destination)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Every credential route a backend entry opens, for its single destination, in one vault: the
     /// destination's own `secret` as a strip-phantom route (a phantom is provisioned to the workload
     /// and stripped, nothing real injected), and the backend `auth` as a box-owned route (the box
@@ -629,17 +650,40 @@ impl EgressEntry {
                     locator: auth.reference.clone(),
                     source,
                 })?;
-            for destination in &self.destinations {
+            if Self::signs_in_boundary(auth) {
+                // An `aws://` auth signs over the BACKEND host (`validate` refuses `credsd://` here).
+                // The route is keyed on the backend host, so the gateway's post-rewrite signing pass
+                // — which presents an `Outbound` for the backend — matches and signs over it. The
+                // signature covers the bytes the backend receives, not the original destination.
+                let target = backend.target().map_err(|reason| ConfigError::Credential {
+                    host: backend.url.clone(),
+                    reason,
+                })?;
                 routes.push(EgressRoute {
-                    destination: self.pattern(destination)?,
-                    host: destination.clone(),
-                    locator: locator.clone(),
+                    destination: self.pattern(&backend_destination(&target))?,
+                    host: target.host.clone(),
+                    locator,
                     provisioned_name: None,
-                    placement: Self::placement(auth),
+                    placement: Placement::SignedInBoundary,
                     phantom: PhantomCheck::Strict,
                     phantom_prefix: None,
-                    mode: RouteMode::BoxOwned,
+                    mode: RouteMode::Opaque,
                 });
+            } else {
+                // An `env://` auth is a static box-owned token, attached once at the backend
+                // connection, keyed on the original destination (Host-independent).
+                for destination in &self.destinations {
+                    routes.push(EgressRoute {
+                        destination: self.pattern(destination)?,
+                        host: destination.clone(),
+                        locator: locator.clone(),
+                        provisioned_name: None,
+                        placement: Self::placement(auth),
+                        phantom: PhantomCheck::Strict,
+                        phantom_prefix: None,
+                        mode: RouteMode::BoxOwned,
+                    });
+                }
             }
         }
         Ok(routes)
@@ -863,14 +907,15 @@ impl EgressEntry {
             })?;
             if let Some(auth) = &backend.auth {
                 validate_secret(auth, &label)?;
-                // A re-route rewrites the `Host` to the backend AFTER the credential attaches, which
-                // invalidates a SigV4 signature (the signed host is the original, the sent host is the
-                // backend). A signed credential is refused rather than shipped broken.
-                if Self::signs_in_boundary(auth) {
+                // `aws://` is allowed and SigV4-signed over the BACKEND host: the gateway signs the
+                // re-routed request after it rewrites the `Host` to the backend, so the signature
+                // covers the bytes the backend receives
+                // (docs/design/decisions.md#where-a-re-route-signs-a-backend-auth-of-aws). A
+                // `credsd://` backend auth stays refused (out of scope).
+                if matches!(auth.deliverable(), Some((SecretScheme::Credsd, _))) {
                     return refuse(
-                        "a backend auth may not sign in-boundary (aws:// or credsd://): a re-route \
-                         rewrites the Host to the backend, which invalidates a SigV4 signature; use \
-                         an env:// credential for a backend",
+                        "a backend auth may not be credsd:// (out of scope): use an env:// token or \
+                         an aws:// profile signed over the backend host",
                     );
                 }
                 // A credential rides only TLS. A plaintext backend would carry it in the clear, which
@@ -883,6 +928,7 @@ impl EgressEntry {
                 }
                 // The backend credential is the box's own, and the workload presents no placeholder
                 // for it, so there is no phantom to tune. `inject` and `phantom_prefix` are refused.
+                // (An `aws://` auth already takes no placement keys; this covers the `env://` case.)
                 if auth.inject.is_some() || auth.phantom_prefix.is_some() {
                     return refuse(
                         "a backend auth takes no inject or phantom_prefix: the credential is the \
@@ -2603,22 +2649,29 @@ mod tests {
         );
     }
 
-    /// A signed backend auth is refused: a re-route rewrites the Host after the credential attaches,
-    /// which invalidates a SigV4 signature.
+    /// An `aws://` backend auth loads — it is SigV4-signed over the backend host. A `credsd://`
+    /// backend auth stays refused (out of scope).
     #[test]
-    fn a_signed_backend_auth_is_refused() {
-        for reference in ["aws://default", "credsd://prod"] {
-            let error = load(&format!(
-                "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
-                 [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
-                 auth.ref = {reference:?}\n"
-            ))
-            .expect_err("a signed backend auth is refused");
-            assert!(
-                error.to_string().contains("sign in-boundary"),
-                "{reference}: the refusal explains signing is unavailable for a backend: {error}"
-            );
-        }
+    fn a_credsd_backend_auth_is_refused() {
+        // aws:// now loads: the gateway signs the re-routed request over the backend host.
+        load(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+             auth.ref = \"aws://default\"\n",
+        )
+        .expect("an aws:// backend auth loads and signs over the backend host");
+
+        // credsd:// stays refused.
+        let error = load(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+             auth.ref = \"credsd://prod\"\n",
+        )
+        .expect_err("a credsd:// backend auth is refused");
+        assert!(
+            error.to_string().contains("credsd"),
+            "the refusal names credsd://: {error}"
+        );
     }
 
     /// A backend auth needs an https backend, because a credential does not ride a plaintext upstream.

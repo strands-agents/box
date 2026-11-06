@@ -228,6 +228,39 @@ async fn run_l7_legs(
         }
         _ => Cow::Borrowed(&req.body),
     };
+    // A re-routed request whose backend `auth` is `aws://` is SigV4-signed here, over the backend
+    // host and the forwarded bytes — AFTER the `Host` rewrite and the phantom strip, so the signature
+    // covers exactly what the backend receives
+    // (docs/design/decisions.md#where-a-re-route-signs-a-backend-auth-of-aws). A backend with no
+    // signing auth produces no edits. The mutations only set headers, so they touch fields disjoint
+    // from the `forwarded_body` borrow of `req.body`.
+    if let Some(dial) = backend {
+        let original = credentials::Destination {
+            host: &connect.host,
+            port: connect.port,
+            path: &workload_path,
+        };
+        match state.controls.backend_signature_mutations(
+            &original,
+            &method,
+            req.headers.iter(),
+            dial,
+            &fwd_target,
+            &forwarded_body,
+        ) {
+            Ok(mutations) => {
+                for mutation in mutations {
+                    mutation.apply(&mut req.headers, &mut req.target);
+                }
+            }
+            Err(reason) => {
+                return Ok(refuse(
+                    &reason,
+                    WorkloadResponse::refusal(403, b"blocked by egress control"),
+                ));
+            }
+        }
+    }
     let prepared_request =
         http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
     let request_attempt = EffectAttempt::HttpRequest {

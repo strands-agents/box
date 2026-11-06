@@ -186,14 +186,17 @@ operator-authored, and it joins the agent's already-canonicalized path. The `htt
 and the audit record keep the agent's own path, so policy judges `/zen`, and only the bytes to the
 backend carry `/github/zen`.
 
-The backend carries its own credential as `backends.auth`, an `env://` token the box attaches to the
-backend connection with no placeholder (the agent never sees it). The entry may also keep its own
-`env://` `secret`: the box provisions that placeholder to the workload and strips it from the
+The backend carries its own credential as `backends.auth`, which the agent never sees. An `env://`
+token the box attaches to the backend connection with no placeholder. An `aws://` profile is
+SigV4-signed over the **backend** host: the box signs the request after it rewrites the `Host` to the
+backend, so the signature covers the bytes the backend receives, deriving the service and region from
+the backend host (a Bedrock AgentCore Gateway signs as `bedrock-agentcore`). The entry may also keep
+its own `env://` `secret`: the box provisions that placeholder to the workload and strips it from the
 request, never injecting the real destination credential, because the backend handles the
-destination's auth. Both credentials key on the original destination, so on the same header the box
-strips the destination placeholder first and the backend token wins, and no placeholder rides
-upstream. A signed credential is available for neither: the box rewrites the `Host`, which breaks a
-SigV4 signature.
+destination's auth. The destination secret keys on the original destination and the backend token on
+the backend host, so on the same header the box strips the destination placeholder first and the
+backend credential wins, and no placeholder rides upstream. A `credsd://` backend credential is not
+available, and a destination `secret` must be `env://`.
 
 ## How credentials are added
 

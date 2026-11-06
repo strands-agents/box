@@ -1976,21 +1976,50 @@ phantom-only: the box provisions its placeholder to the workload (so the agent's
 code works) and strips it from the request, and never injects the real destination credential,
 because the backend handles the destination's auth downstream. On the same header the strip runs
 before the backend token attaches, so the backend token wins and no placeholder rides upstream.
-A signed (`aws://` or `credsd://`) backend `auth` is refused, because the `Host` rewrite invalidates
-a SigV4 signature; an `auth` on a plaintext `http` backend is refused, because a credential must ride
-TLS; and a signed destination `secret` beside a backend is refused, because it mints no phantom to
-strip. Because the box never reads the destination secret's value, a re-routed entry launches with
+A backend `auth` of `aws://` is SigV4-signed over the **backend** host: the gateway signs the
+re-routed request AFTER it rewrites the `Host` to the backend and joins the path, so the signature
+covers exactly the bytes the backend receives, with service and region derived from the backend host
+([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). A host the
+box cannot derive a service and region for fails closed — it refuses to sign rather than ship a
+signature the backend would reject. A `credsd://` backend `auth` stays refused (out of scope); an
+`auth` on a plaintext `http` backend is refused, because a credential must ride TLS; and a signed
+destination `secret` beside a backend is refused, because it mints no phantom to strip. Because the
+box never reads the destination secret's value, a re-routed entry launches with
 its variable unset — the case a backend exists for. When one `env://` variable is named by both a
 re-routed entry and a direct entry, the workload holds one placeholder: the direct route's
 Strict-checked phantom, which the re-routed host's unconditional strip removes just the same. The
-cost: a backend authenticates with an `env://` token only, and a SigV4-fronted backend is
-not reachable yet. `backend_auth_routes_are_box_owned_and_key_by_the_original_destination`,
-`a_destination_secret_beside_a_backend_is_phantom_only`, `a_signed_backend_auth_is_refused`,
+cost: a backend authenticates with an `env://` box-owned token or an `aws://` signature over the
+backend host; `credsd://`, and a signature over the ORIGINAL host (which a future URL rewrite would
+need), are not reachable yet. `backend_auth_routes_are_box_owned_and_key_by_the_original_destination`,
+`a_destination_secret_beside_a_backend_is_phantom_only`, `a_credsd_backend_auth_is_refused`,
 `a_backend_auth_needs_an_https_backend`,
 `a_backend_strip_phantom_opens_without_the_destination_secret_set`,
 `a_shared_variable_keeps_the_ordinary_phantom_and_drops_the_backend_duplicate`, and the credentials
-crate's `box_owned_route_attaches_the_real_secret_with_no_phantom` and
-`strip_phantom_route_mints_a_placeholder_and_attaches_nothing` pin the rules.
+crate's `box_owned_route_attaches_the_real_secret_with_no_phantom`,
+`strip_phantom_route_mints_a_placeholder_and_attaches_nothing`, and
+`a_backend_aws_auth_signs_over_the_backend_host` pin the rules.
+
+<a id="where-a-re-route-signs-a-backend-auth-of-aws"></a>
+### A re-route signs an `aws://` backend auth in the gateway, after the Host rewrite, over the backend host
+
+A backend `auth` of `aws://` signs the request the backend receives, so the signature must cover the
+backend host, the joined path, the sent headers (including the rewritten `Host`), and the body hash.
+The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backend and builds the
+forwarded target, and BEFORE it serializes the request — the one point where the bytes that leave are
+final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
+backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
+in-boundary SigV4 signer covers the backend host, and `derive_service_region` reads the backend host
+(a new arm maps `<id>.gateway.bedrock-agentcore.<region>.amazonaws.com` to `bedrock-agentcore` and the
+region). Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
+stripped first, as for a destination signature. Signing before the rewrite was rejected: the `Host`
+is a signed header, so signing while the request still names the original destination and then
+rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
+the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite
+attach, because a static token does not depend on the `Host`. The limit: the signature covers the
+backend host as written in `backends.url`, so a future URL rewrite that changes the sent host must
+re-derive the service and region from the rewritten host.
+`a_backend_aws_auth_signs_over_the_backend_host` and the credentials crate's
+`derive_service_region_reads_the_agentcore_gateway_host` pin it.
 
 ## Credentials
 
