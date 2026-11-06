@@ -1,4 +1,4 @@
-//! Separate decision and MCP stderr providers, with one lane per target.
+//! One provider, one lane per target, and the count of what did not fit.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,11 +127,6 @@ impl LogProcessor for TargetLane {
 /// The live lane. Hold it for as long as the box runs.
 pub struct Collector {
     logs: SdkLoggerProvider,
-    stderr_logs: SdkLoggerProvider,
-    stderr_logger: SdkLogger,
-    stderr_budgets: std::sync::Mutex<
-        std::collections::BTreeMap<String, Arc<std::sync::Mutex<crate::mcp_stderr::Budget>>>,
-    >,
     logger: SdkLogger,
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
@@ -165,7 +160,6 @@ impl Drop for Collector {
             return;
         }
         let _ = shut_down_off_runtime(self.logs.clone());
-        let _ = shut_down_off_runtime(self.stderr_logs.clone());
     }
 }
 
@@ -182,21 +176,10 @@ impl Collector {
 
         // One exporter per target, shared by both lanes.
         let mut logs = SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id));
-        let mut stderr_logs =
-            SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id));
         let mut relays = crate::receive::Relays::default();
         let mut accepts = [false; Signal::SLOTS];
         for target in config.targets() {
             let exporter = Arc::new(TargetExporter::open(target, Arc::clone(&dropped))?);
-            stderr_logs = stderr_logs.with_log_processor(
-                BatchLogProcessor::builder(SharedTarget(Arc::clone(&exporter)), Tokio)
-                    .with_batch_config(
-                        opentelemetry_sdk::logs::BatchConfigBuilder::default()
-                            .with_max_export_timeout(EXPORT_DEADLINE)
-                            .build(),
-                    )
-                    .build(),
-            );
             let mut lane = [false; Signal::SLOTS];
             // The harness's own log records and metrics reach every target, whatever it names, so
             // no declaration has to ask for what the agent already exports.
@@ -235,8 +218,6 @@ impl Collector {
             });
         }
         let logs = logs.build();
-        let stderr_logs = stderr_logs.build();
-        let stderr_logger = stderr_logs.logger("strands-box.mcp.stderr");
         let logger = logs.logger(SCOPE);
         let control_logger = logs.logger(CONTROL_SCOPE);
 
@@ -251,9 +232,6 @@ impl Collector {
         let ids = RandomIdGenerator::default();
         Ok(Self {
             logs,
-            stderr_logs,
-            stderr_logger,
-            stderr_budgets: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             logger,
             control_logger,
             dropped,
@@ -363,35 +341,18 @@ impl Collector {
         self.control_logger.emit(emitted);
     }
 
-    /// Capture a named server's stderr, masking its configured environment values.
-    pub fn mcp_stderr(&self, server: &str, environment_values: &[String]) -> crate::McpStderr {
-        let budget = match self.stderr_budgets.lock() {
-            Ok(mut budgets) => budgets.entry(server.to_string()).or_default().clone(),
-            Err(_) => Arc::new(std::sync::Mutex::new(crate::mcp_stderr::Budget::closed())),
-        };
-        crate::McpStderr::new(
-            self.stderr_logger.clone(),
-            server,
-            environment_values,
-            budget,
-        )
-    }
-
     /// Flush every lane and shut it down, inside [`DRAIN_DEADLINE`]. Call it before teardown.
     pub async fn drained(&self) {
         if self.shut.swap(true, Ordering::SeqCst) {
             return;
         }
         let logs = self.logs.clone();
-        let stderr_logs = self.stderr_logs.clone();
         // `shutdown` exports what is queued before it stops the exporter, so no separate flush. The
         // blocking task returns at the deadline whatever the batch worker does, so the runtime's own
         // teardown never waits on it.
-        let (ended, stderr_ended) = tokio::join!(
-            tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)),
-            tokio::task::spawn_blocking(move || shut_down_bounded(stderr_logs, DRAIN_DEADLINE)),
-        );
-        if !matches!(ended, Ok(true)) || !matches!(stderr_ended, Ok(true)) {
+        let ended =
+            tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)).await;
+        if !matches!(ended, Ok(true)) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }

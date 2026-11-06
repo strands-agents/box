@@ -420,14 +420,6 @@ impl McpLeafLauncher {
         self.record.contained_mcp.contains_key(server)
     }
 
-    pub(crate) fn stderr_environment(&self, server: &str) -> Vec<String> {
-        self.record
-            .contained_mcp
-            .get(server)
-            .map(|contained| contained.spec.env.values().cloned().collect())
-            .unwrap_or_default()
-    }
-
     /// Whether `server` was granted native egress (`contain_egress = false`) — its leaf bypasses the
     /// gateway, so its outbound traffic is not mediated, credential-injected, or journaled. The
     /// broker records that downgrade explicitly when it starts such a server.

@@ -38,7 +38,6 @@ pub(crate) struct RunningMcpServer {
     stdin: Option<tokio::process::ChildStdin>,
     /// The child itself, kept so dropping this handle kills it.
     child: tokio::process::Child,
-    stderr: Option<tokio::task::JoinHandle<()>>,
     /// The process group remains addressable after the leader exits.
     #[cfg(unix)]
     process_group: libc::pid_t,
@@ -444,16 +443,7 @@ impl RunningMcpServer {
         home: &Path,
         cwd: &Path,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        Self::start_with(admitted, home, Some(cwd), None, None).await
-    }
-
-    pub(crate) async fn start_recorded(
-        admitted: &McpServer,
-        home: &Path,
-        cwd: &Path,
-        capture: Option<telemetry::McpStderr>,
-    ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        Self::start_with(admitted, home, Some(cwd), None, capture).await
+        Self::start_with(admitted, home, Some(cwd), None).await
     }
 
     /// Start an admitted server in an already-open working directory.
@@ -461,9 +451,8 @@ impl RunningMcpServer {
         admitted: &McpServer,
         home: &Path,
         cwd: &std::fs::File,
-        capture: Option<telemetry::McpStderr>,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        Self::start_with(admitted, home, None, Some(cwd), capture).await
+        Self::start_with(admitted, home, None, Some(cwd)).await
     }
 
     async fn start_with(
@@ -471,7 +460,6 @@ impl RunningMcpServer {
         home: &Path,
         cwd: Option<&Path>,
         cwd_handle: Option<&std::fs::File>,
-        capture: Option<telemetry::McpStderr>,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
         let mut command = tokio::process::Command::new(admitted.program());
         command
@@ -484,7 +472,7 @@ impl RunningMcpServer {
             )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
@@ -542,7 +530,6 @@ impl RunningMcpServer {
             Self {
                 server: admitted.name.clone(),
                 stdin: Some(stdin),
-                stderr: capture_stderr(&mut child, capture),
                 child,
                 #[cfg(unix)]
                 process_group,
@@ -567,16 +554,14 @@ impl RunningMcpServer {
     pub(crate) fn from_leaf(
         admitted: &McpServer,
         leaf: crate::run::contain::supervise::StreamingLeaf,
-        capture: Option<telemetry::McpStderr>,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        let mut parts = leaf
+        let parts = leaf
             .into_parts()
             .ok_or_else(|| io::Error::other("the contained MCP server exposed no live streams"))?;
         Ok((
             Self {
                 server: admitted.name.clone(),
                 stdin: Some(parts.stdin),
-                stderr: capture_stderr(&mut parts.child, capture),
                 child: parts.child,
                 process_group: parts.leader as libc::pid_t,
                 #[cfg(test)]
@@ -696,24 +681,12 @@ impl RunningMcpServer {
                 let _ = output.await;
             }
         }
-        self.finish_stderr().await;
         wait?;
         #[cfg(test)]
         if let Some(completion) = self.stop_and_wait_completion.take() {
             let _ = completion.send(());
         }
         Ok(())
-    }
-
-    async fn finish_stderr(&mut self) {
-        if let Some(mut task) = self.stderr.take()
-            && tokio::time::timeout(MCP_BROKER_IO_TIMEOUT, &mut task)
-                .await
-                .is_err()
-        {
-            task.abort();
-            let _ = task.await;
-        }
     }
 
     #[cfg(unix)]
@@ -759,36 +732,9 @@ impl RunningMcpServer {
             Ok(result) => result,
             Err(_) => self.stop_and_wait().await,
         };
-        self.finish_stderr().await;
         close?;
         reaped
     }
-}
-
-fn capture_stderr(
-    child: &mut tokio::process::Child,
-    capture: Option<telemetry::McpStderr>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let mut stderr = child.stderr.take()?;
-    Some(tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        if let Some(mut capture) = capture {
-            let mut buffer = [0; 8192];
-            loop {
-                match stderr.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) if !capture.write(&buffer[..count]) => {
-                        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-            }
-            capture.finish();
-        } else {
-            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-        }
-    }))
 }
 
 #[cfg(unix)]
@@ -804,55 +750,12 @@ impl Drop for RunningMcpServer {
         self.stdin.take();
         self.signal_process_group(libc::SIGKILL);
         let _ = self.child.start_kill();
-        if let Some(stderr) = self.stderr.take() {
-            stderr.abort();
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn an_uncontained_failed_server_keeps_redacted_stderr_and_its_final_line() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("records.jsonl");
-        let collector = telemetry::open(
-            telemetry::TelemetryConfig::for_box("failed-server").with_target(
-                telemetry::Target::new(telemetry::TargetKind::File, path.to_string_lossy()),
-            ),
-        )
-        .unwrap();
-        let admitted = McpServer {
-            argument_wildcards: false,
-            name: "noisy".into(),
-            command: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf 'download failed: private-token\\nlast detail' >&2; exit 3".into(),
-            ],
-        };
-        let capture = collector.mcp_stderr("noisy", &["private-token".into()]);
-        let (mut running, _) = RunningMcpServer::start_recorded(
-            &admitted,
-            directory.path(),
-            directory.path(),
-            Some(capture),
-        )
-        .await
-        .unwrap();
-        let status = running.child.wait().await.unwrap();
-        assert_eq!(status.code(), Some(3));
-        running.stop_and_wait().await.unwrap();
-        collector.drained().await;
-        let records = std::fs::read_to_string(path).unwrap();
-        assert!(records.contains("download failed: [redacted]"));
-        assert!(records.contains("last detail"));
-        assert!(records.contains("strands.box.mcp.server"));
-        assert!(records.contains("noisy"));
-        assert!(!records.contains("private-token"));
-    }
 
     #[test]
     fn approved_mcp_protocol_revisions_are_accepted_and_other_revisions_are_refused() {

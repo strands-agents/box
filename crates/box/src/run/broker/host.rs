@@ -418,12 +418,7 @@ async fn start_mcp_server(
                 ),
             );
         }
-        return crate::run::broker::mcp::RunningMcpServer::from_leaf(
-            server,
-            leaf,
-            spec.recorder
-                .mcp_stderr(&server.name, &launcher.stderr_environment(&server.name)),
-        );
+        return crate::run::broker::mcp::RunningMcpServer::from_leaf(server, leaf);
     }
     authorize_mcp_start(
         spec,
@@ -442,16 +437,14 @@ async fn start_mcp_server(
                 server,
                 Path::new(home),
                 directory,
-                spec.recorder.mcp_stderr(&server.name, &[]),
             )
             .await
         }
         None => {
-            crate::run::broker::mcp::RunningMcpServer::start_recorded(
+            crate::run::broker::mcp::RunningMcpServer::start(
                 server,
                 Path::new(home),
                 &spec.mcp_working_directory,
-                spec.recorder.mcp_stderr(&server.name, &[]),
             )
             .await
         }

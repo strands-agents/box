@@ -75,16 +75,6 @@ records and `resourceSpans` for an agent trace.
 supplies the admitted name for both permitted and refused starts, including starts covered by
 a broad policy rule.
 
-`Collector::mcp_stderr(server, environment_values)` returns a `McpStderr` capture. Pass raw pipe
-bytes to `write`; `false` means the caller must discard subsequent bytes while continuing to drain
-the pipe. `finish` records an unterminated final line, and dropping the capture also calls it.
-Captures for the same server share a run-wide budget. Masking, limits, and record fields are in
-[MCP server stderr](../../docs/user/telemetry.md#mcp-server-stderr).
-
-MCP stderr uses a separate SDK provider and queues. Each target receives it independently of its
-signal set. It cannot occupy the policy or control queues, and it produces log records only.
-`Collector::drained` drains both providers within one deadline.
-
 ## The agent's own signals
 
 The collector binds one loopback port and the box hands the agent its address in

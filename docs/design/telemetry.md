@@ -33,11 +33,10 @@ refuses access to the box directory even when a broad read permit matches. Recor
 engine's verdict would describe a permitted operation that did not happen. These checks run on Box's
 own request path. Operating system enforcement separately limits the workload's own system calls.
 
-A box writes three kinds of record. Each has a scope that readers can select:
+A box writes two kinds of record. Each has a scope that readers can select:
 
 - `strands-box.policy` contains one record for each effective decision.
 - `strands-box.control` contains records of changes to the box's authority.
-- `strands-box.mcp.stderr` contains captured text from stdio MCP servers.
 
 A decision names the action, resource, verdict, cause, and every policy that determined it. Standard
 OpenTelemetry keys describe the request, including the server address and port, request method, file
@@ -59,7 +58,7 @@ Six control-plane records describe policy installation or refusal, tool vocabula
 completed discovery, and box startup or shutdown. They show which authority was in force at a given
 moment, so they share a file with the decisions.
 
-Each policy or control record is both a span and a log record, with one shared trace identifier and span
+Each Box record is both a span and a log record, with one shared trace identifier and span
 identifier. See [every box record is
 both](decisions.md#every-box-record-is-both-a-span-and-a-log-record). The log record provides audit
 evidence. The span places the decision on a timeline beside the workload's work. Its start and end
@@ -68,17 +67,6 @@ are equal because it marks the instant of submission.
 OpenTelemetry lets a caller mark a trace as not sampled to reduce performance data volume. Box
 ignores that mark for its own decisions and always writes them. The workload supplies the trace
 context, so honoring the mark would let it suppress records of its own refusals.
-
-MCP stderr has its own SDK provider and bounded queue for each target. Server text cannot consume
-the policy or control queues. It stays in the log body; Box supplies the scope, event name, and
-admitted server name, so printing JSON cannot forge a decision. These records produce no spans.
-The providers share exporters and drain concurrently within the existing shutdown deadline.
-
-Capture masks configured environment values before export and bounds both raw input and recorded
-text per server name for the entire run. Line limits also bound record overhead. The broker keeps
-draining the pipe after the budget is exhausted. It waits for stderr after stopping the server,
-with a deadline for descendants that retain the pipe. See
-[the capture limits](../user/telemetry.md#mcp-server-stderr).
 
 ### Receiver
 
