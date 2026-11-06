@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a9099"/></marker>
+<marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8f4e"/></marker>
+<marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c27c0e"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="760" rx="18" fill="#ffffff"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1d2228">macOS startup with Ingress Relay</text>
+<text x="40" y="82" font-size="15" fill="#6b7280">Grey: Box today. Green: added by ingress. No PID 1 and no Unix socket channel on macOS.</text>
+<rect x="75" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="200" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's trusted process</text>
+<text x="200" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">(TCB)</text>
+<line x1="200" y1="168" x2="200" y2="678" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="435" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="560" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's launcher</text>
+<text x="560" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280"></text>
+<line x1="560" y1="168" x2="560" y2="678" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="885" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="1010" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Agent</text>
+<text x="1010" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">untrusted</text>
+<line x1="1010" y1="168" x2="1010" y2="678" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="860" y="92" width="300" height="600" rx="16" fill="none" stroke="#9aa3ae" stroke-width="1.5" stroke-dasharray="3 5"/>
+<text x="1010.0" y="84" text-anchor="middle" font-size="13" font-weight="600" fill="#6b7280">Seatbelt sandbox (shares the Mac's network)</text>
+<rect x="20" y="188" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="214" r="15" fill="#1f8f4e"/>
+<text x="46" y="219" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">1</text>
+<path d="M200,202 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="240" y="216" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Bind the ingress listener on listen (e.g. 127.0.0.1:18080)</text>
+<rect x="20" y="250" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="276" r="15" fill="#1f8f4e"/>
+<text x="46" y="281" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">2</text>
+<path d="M200,264 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="240" y="278" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Check that no other process listens on workload_port</text>
+<circle cx="46" cy="338" r="15" fill="#8a9099"/>
+<text x="46" y="343" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">3</text>
+<path d="M200,326 h28 v18 h-24" fill="none" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="240" y="340" text-anchor="start" font-size="15" font-weight="500" fill="#3d434b">Write the agent's Seatbelt profile (outbound to Box's ports only)</text>
+<rect x="20" y="374" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="400" r="15" fill="#1f8f4e"/>
+<text x="46" y="405" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">4</text>
+<path d="M200,388 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="240" y="402" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Add one rule: listen on workload_port, on any address, and no other port</text>
+<circle cx="46" cy="462" r="15" fill="#8a9099"/>
+<text x="46" y="467" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">5</text>
+<line x1="200" y1="468" x2="552" y2="468" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="380.0" y="458" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Start the sandbox</text>
+<circle cx="46" cy="524" r="15" fill="#8a9099"/>
+<text x="46" y="529" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">6</text>
+<line x1="560" y1="530" x2="1002" y2="530" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="785.0" y="520" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Apply the profile, start the agent</text>
+<rect x="20" y="560" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="586" r="15" fill="#1f8f4e"/>
+<text x="46" y="591" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">7</text>
+<path d="M1010,574 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="996" y="588" text-anchor="end" font-size="15" font-weight="600" fill="#0f5c31">Bind workload_port: allowed now by the new rule</text>
+<rect x="20" y="622" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="648" r="15" fill="#1f8f4e"/>
+<text x="46" y="653" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">8</text>
+<path d="M200,636 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="240" y="650" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Start the ingress accept loop</text>
+<rect x="40" y="710" width="22" height="16" rx="4" fill="#e3f5ea" stroke="#1f8f4e"/><text x="72" y="723" font-size="14" fill="#1d2228">added by ingress</text>
+<rect x="228" y="710" width="22" height="16" rx="4" fill="#ffffff" stroke="#8a9099"/><text x="260" y="723" font-size="14" fill="#1d2228">Box today</text>
+<text x="1240" y="723" text-anchor="end" font-size="13.5" fill="#6b7280">The agent reaches the egress gateway directly on the Mac's loopback; nothing is relayed for egress.</text>
+</svg>
