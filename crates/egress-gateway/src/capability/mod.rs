@@ -13,6 +13,7 @@ pub use host::{is_bindable_host, normalize_host};
 use crate::boundary::HeaderMap;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, MutationTarget, Target};
 use crate::error::{ProxyError, Result};
+use crate::intercept::mitm::BackendDial;
 
 /// What one capability produced for a request or a response: the edits to apply (empty when it
 /// does not apply), or the non-secret reason it cannot perform its edit safely, so nothing may
@@ -74,6 +75,61 @@ impl CapabilitySet {
             mutation.apply(&mut req.headers, &mut req.target);
         }
         Ok(())
+    }
+
+    /// Sign a re-routed request for its backend, AFTER the gateway has rewritten the `Host` to the
+    /// backend and built the forwarded target. Finds the capability governing `original` (the backend
+    /// vault, registered under the original destination) and applies the SigV4 edits its signed route
+    /// produces over the BACKEND host and `fwd_target`. A backend with no signing auth produces no
+    /// edits (its routes are keyed on the original destination, which the backend `Outbound` does not
+    /// match), so this is a no-op for the env:// and no-auth cases.
+    /// `req_headers` and `body` are the bytes that will leave (the `Host` already rewritten, the
+    /// phantom already stripped, the forwarded body). Returns the mutations to apply to the request —
+    /// the caller applies them, so this borrows nothing mutably and composes with a live borrow of
+    /// the body. An empty result means no backend signature applies.
+    pub fn backend_signature_mutations<'a>(
+        &self,
+        original: &credentials::Destination<'_>,
+        method: &str,
+        req_headers: impl Iterator<Item = (&'a str, &'a str)>,
+        backend: &BackendDial,
+        fwd_target: &str,
+        body: &[u8],
+    ) -> std::result::Result<Vec<Mutation>, String> {
+        let matching = self.matching(original);
+        if matching.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Sign over the headers already present (backend `Host`, phantom stripped) plus forced
+        // `identity`, the forwarded target, and the forwarded body — exactly the bytes that leave.
+        let headers = credential::headers_for_signing(req_headers);
+        let scheme = if backend.tls { "https" } else { "http" };
+        let default_port = if backend.tls { 443 } else { 80 };
+        let authority = if backend.port == default_port {
+            backend.host.clone()
+        } else {
+            format!("{host}:{port}", host = backend.host, port = backend.port)
+        };
+        let url = format!("{scheme}://{authority}{fwd_target}");
+        let (fwd_path, fwd_query) = fwd_target.split_once('?').unwrap_or((fwd_target, ""));
+        let outcomes: Vec<Outcome> = matching
+            .iter()
+            .map(|credential| {
+                credential.on_backend_request(credentials::Outbound {
+                    destination: credentials::Destination {
+                        host: &backend.host,
+                        port: backend.port,
+                        path: fwd_path,
+                    },
+                    method,
+                    url: &url,
+                    query: fwd_query,
+                    headers: &headers,
+                    body,
+                })
+            })
+            .collect();
+        fold(outcomes)
     }
 
     /// Scrub `res`, the response to a request for `target`, in place, or return why it must not

@@ -352,6 +352,115 @@ fn a_backend_reroute_presents_the_backend_and_judges_the_original() {
 }
 
 // ============================================================================================
+// POSITIVE: a backend `auth` of aws:// is SigV4-signed over the BACKEND host, after the rewrite
+// ============================================================================================
+
+/// A re-route whose backend `auth` is `aws://` signs the request the backend receives: the signature
+/// scope and `Host` are the backend's, derived from the backend host, computed after the rewrite.
+#[test]
+fn a_backend_aws_auth_signs_over_the_backend_host() {
+    let _env = harness::AwsEnvGuard::set(
+        "AKIDEXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        None,
+    );
+    // The backend is a Bedrock AgentCore Gateway host, which signs as `bedrock-agentcore`.
+    let backend_host = "gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // The signed route is keyed on the BACKEND host: the gateway's post-rewrite signing presents a
+    // backend `Outbound`, so it matches here and signs over the backend host. The capability is
+    // registered under the ORIGINAL destination, exactly as the box registers a backend vault.
+    let aws_auth = Locator::structured(
+        [("source".to_string(), "aws".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
+    let store = Arc::new(
+        Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .route(RouteSpec::signed_aws(pat(backend_host, port), aws_auth)),
+        )
+        .unwrap()
+        .into_vault(),
+    );
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(original, port), store)]);
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload names the original host and presents no credential; the box signs the backend leg.
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/zen", &[], b"");
+    let status = client.read_status();
+    let seen = upstream.last_request();
+
+    assert_eq!(status, 200, "the signed re-route succeeded end-to-end");
+    assert_eq!(
+        seen.header("host"),
+        Some(format!("{backend_host}:{port}")),
+        "the backend receives its own Host, which the signature covers"
+    );
+    assert!(
+        seen.raw.starts_with("GET /github/zen "),
+        "the backend path prefix joins the agent path: {:?}",
+        seen.raw.lines().next()
+    );
+    let authz = seen
+        .header("authorization")
+        .expect("a SigV4 signature over the backend");
+    assert!(
+        authz.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+        "signed with the vault creds: {authz}"
+    );
+    assert!(
+        authz.contains("/us-east-1/bedrock-agentcore/aws4_request"),
+        "service/region derived from the BACKEND host: {authz}"
+    );
+    assert!(
+        seen.header("x-amz-date").is_some(),
+        "a signing date reaches the backend"
+    );
+    assert!(
+        !seen.raw.contains("wJalrXUtnFEMI"),
+        "the secret key never reaches the wire"
+    );
+    // Policy judged the ORIGINAL host, never the backend.
+    assert!(
+        records().iter().any(|r| r.host == original),
+        "policy judges the original destination"
+    );
+    assert!(
+        !records().iter().any(|r| r.host == backend_host),
+        "the backend host is never what policy judges"
+    );
+}
+
+// ============================================================================================
 // NEGATIVE: a re-route does not open a Host pivot; the binding check runs before the rewrite
 // ============================================================================================
 

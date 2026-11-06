@@ -87,11 +87,11 @@ pub(crate) struct BackendProjection {
 /// strip route provisions a phantom to the workload; the box-owned token is attached at the gateway
 /// and never placed in the workload environment. An absent credential is hard here.
 pub(crate) fn backend_capabilities(
-    groups: &[Vec<EgressRoute>],
+    groups: &[(credentials::DestinationPattern, Vec<EgressRoute>)],
 ) -> Result<BackendProjection, BoxError> {
     let mut capabilities = Vec::with_capacity(groups.len());
     let mut workload_environment = Vec::new();
-    for routes in groups {
+    for (original, routes) in groups {
         let Some(first) = routes.first() else {
             continue;
         };
@@ -120,7 +120,7 @@ pub(crate) fn backend_capabilities(
                 });
             }
         }
-        capabilities.push((first.destination().clone(), Arc::new(opened.into_vault())));
+        capabilities.push((original.clone(), Arc::new(opened.into_vault())));
     }
     Ok(BackendProjection {
         capabilities,
@@ -418,7 +418,12 @@ mod tests {
             .backend_credential_routes()
             .expect("the backend credential routes build");
         assert_eq!(routes.len(), 2, "a strip route and a box-owned route");
-        let projection = backend_capabilities(&[routes]).expect("the backend vault opens");
+        let original = entry
+            .primary_destination()
+            .expect("pattern builds")
+            .expect("a backend entry has one destination");
+        let projection =
+            backend_capabilities(&[(original, routes)]).expect("the backend vault opens");
         assert_eq!(
             projection.capabilities.len(),
             1,
@@ -461,8 +466,12 @@ mod tests {
             .backend_credential_routes()
             .expect("the backend credential routes build");
         assert_eq!(routes.len(), 1, "only the strip-phantom destination secret");
-        let projection =
-            backend_capabilities(&[routes]).expect("the backend vault opens with the var unset");
+        let original = entry
+            .primary_destination()
+            .expect("pattern builds")
+            .expect("a backend entry has one destination");
+        let projection = backend_capabilities(&[(original, routes)])
+            .expect("the backend vault opens with the var unset");
         assert_eq!(projection.capabilities.len(), 1);
         assert_eq!(
             projection.workload_environment.len(),

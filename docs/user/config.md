@@ -789,13 +789,14 @@ An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `plac
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
-(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `env://` `auth` (the backend's
-own token). The backend `url`'s path prefix joins in front of the agent's request path. An entry may
-keep its own `env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and
-strips it, never injecting the real destination credential, so the named variable need not be set.
-The loader refuses more than one backend,
-a destination that is not one exact host, a `url` with a query, fragment, or a non-`http(s)` scheme, a
-signed (`aws://` or `credsd://`) `auth` or destination `secret`, and an `auth` on an `http` backend.
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
+credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host. The backend
+`url`'s path prefix joins in front of the agent's request path. An entry may keep its own `env://`
+`secret` beside a backend, phantom-only: the box provisions the placeholder and strips it, never
+injecting the real destination credential, so the named variable need not be set. The loader refuses
+more than one backend, a destination that is not one exact host, a `url` with a query, fragment, or a
+non-`http(s)` scheme, a `credsd://` `auth`, a signed (`aws://` or `credsd://`) destination `secret`,
+and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
 
