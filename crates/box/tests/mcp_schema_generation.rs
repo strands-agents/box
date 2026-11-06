@@ -470,6 +470,50 @@ fn generate_schema_uses_the_selected_config_outside_the_operator_home() {
 }
 
 #[test]
+fn generate_schema_writes_the_actions_of_each_tool_grammar() {
+    const GRAMMAR: &str = "[tool.git]\ncommand = [\"/usr/bin/git\"]\n[tool.git.grammar]\n\
+        format = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+        [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+    let home = tempfile::tempdir().expect("an operator home");
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create the workspace");
+    let config = workspace.join("box.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"grammar\"\nbox_dir = \"/nonexistent/schema-generation\"\n{GRAMMAR}\
+             [experimental-features]\ntool-grammars = true\n"
+        ),
+    )
+    .expect("write the config");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", home.path())
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions = std::fs::read_to_string(workspace.join("schemas/actions.cedarschema"))
+        .expect("read actions");
+    assert!(actions.contains("namespace Tool::git {"), "{actions}");
+    assert!(actions.contains(r#"action "push" in ["*"]"#), "{actions}");
+    assert!(
+        actions.contains(r#"action "unmodeled" appliesTo"#),
+        "{actions}"
+    );
+    let (_, warnings) = Schema::from_cedarschema_str(&actions).expect("the composed schema parses");
+    assert_eq!(warnings.count(), 0);
+}
+
+#[test]
 fn an_invalid_selected_config_keeps_existing_schema_artifacts() {
     for invalid in ["missing", "directory", "malformed"] {
         let home = tempfile::tempdir().expect("an operator home");

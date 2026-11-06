@@ -59,8 +59,16 @@ pub enum SchemaStage {
 pub struct PolicyEngine {
     authority: Authority,
     grammars: ToolGrammars,
+    issuer: u64,
+    bindings: GrammarBindings,
     effective: EffectivePolicy,
     observer: Option<Arc<dyn crate::observe::DecisionObserver>>,
+}
+
+/// A number that no other engine in this process holds.
+fn next_issuer() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl std::fmt::Debug for PolicyEngine {
@@ -89,12 +97,11 @@ impl PolicyEngine {
             policy_id: effective_policy_id(&sources),
         };
 
-        Ok(Self {
-            authority: Authority::open_complete(sources, mcp_schemas, history)?,
-            grammars: ToolGrammars::default(),
+        Ok(Self::assemble(
+            Authority::open_complete(sources, mcp_schemas, history)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Open durable history and stage policies against runtime MCP schemas.
@@ -107,12 +114,11 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_staged(operator, sources, history)?,
-            grammars: ToolGrammars::default(),
+        Ok(Self::assemble(
+            Authority::open_staged(operator, sources, history)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Open durable history through an already-open file and stage runtime MCP schemas.
@@ -145,24 +151,56 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_staged_file(
-                operator,
-                sources,
-                grammars.schemas(),
-                history,
-                label,
-            )?,
+        let authority =
+            Authority::open_staged_file(operator, sources, grammars.schemas(), history, label)?;
+        Ok(Self::assemble(authority, grammars, effective))
+    }
+
+    fn assemble(authority: Authority, grammars: ToolGrammars, effective: EffectivePolicy) -> Self {
+        let issuer = next_issuer();
+        Self {
+            authority,
+            bindings: GrammarBindings::installed(&grammars, issuer),
             grammars,
+            issuer,
             effective,
             observer: None,
-        })
+        }
     }
 
     /// The bindings of the tool grammars this engine installs, with no program declared yet.
     #[must_use]
     pub fn grammar_bindings(&self) -> GrammarBindings {
-        GrammarBindings::installed(&self.grammars)
+        GrammarBindings::installed(&self.grammars, self.issuer)
+    }
+
+    /// Decide each spawn that `bindings` covers as its grammar action, for the whole life of the
+    /// engine. Refuses bindings that another engine issued.
+    pub fn bound_by(mut self, bindings: GrammarBindings) -> Result<Self, crate::BindingRefusal> {
+        if bindings.issuer() != self.issuer {
+            return Err(crate::BindingRefusal::AnotherEngine);
+        }
+        self.bindings = bindings;
+        Ok(self)
+    }
+
+    /// How this engine's bound grammars cover a spawn spelled `spelling` of the file at
+    /// `program_path`, or `None` when `shell:spawn` decides it.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn grammar_coverage(
+        &self,
+        program_path: &str,
+        spelling: &str,
+        starter: crate::grammar::Starter,
+    ) -> Option<crate::grammar::GrammarCoverage<'_>> {
+        if self.bindings.is_empty() {
+            return None;
+        }
+        self.bindings.coverage_for(
+            crate::grammar::ProgramFile::read(program_path),
+            spelling,
+            starter,
+        )
     }
 
     /// Open durable history with the schema fragment of each tool grammar in `grammars`.
@@ -172,25 +210,43 @@ impl PolicyEngine {
         grammars: impl IntoIterator<Item = &'a crate::grammar::Grammar>,
         history: &Path,
     ) -> Result<Self, PolicyError> {
-        let effective = EffectivePolicy {
-            engine: ENGINE_ID,
-            policy_id: effective_policy_id(&sources),
-        };
         let grammar_schemas: Vec<String> = grammars
             .into_iter()
             .map(crate::grammar::Grammar::schema)
             .collect();
-        Ok(Self {
-            authority: Authority::open_complete_with_grammars(
-                sources,
-                &grammar_schemas,
-                &[],
-                history,
-            )?,
-            grammars: ToolGrammars::default(),
-            effective,
-            observer: None,
-        })
+        Self::open_complete_with_grammar_schemas(
+            sources,
+            &grammar_schemas,
+            ToolGrammars::default(),
+            history,
+        )
+    }
+
+    /// Open durable history with `grammars` installed, so the engine issues bindings for them.
+    #[cfg(all(test, feature = "shell-adapter"))]
+    pub(crate) fn open_with_tool_grammars(
+        sources: Vec<Policy>,
+        grammars: ToolGrammars,
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let schemas = grammars.schemas();
+        Self::open_complete_with_grammar_schemas(sources, &schemas, grammars, history)
+    }
+
+    #[cfg(test)]
+    fn open_complete_with_grammar_schemas(
+        sources: Vec<Policy>,
+        grammar_schemas: &[String],
+        grammars: ToolGrammars,
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let effective = EffectivePolicy {
+            engine: ENGINE_ID,
+            policy_id: effective_policy_id(&sources),
+        };
+        let authority =
+            Authority::open_complete_with_grammars(sources, grammar_schemas, &[], history)?;
+        Ok(Self::assemble(authority, grammars, effective))
     }
 
     /// Open with a fault injector on the durable log, for tests that pause the store.
@@ -204,12 +260,11 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_with_faults(sources, history, faults)?,
-            grammars: ToolGrammars::default(),
+        Ok(Self::assemble(
+            Authority::open_with_faults(sources, history, faults)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Puts the store into its terminal fault state, for fail-closed tests.
@@ -409,6 +464,20 @@ impl PolicyEngine {
             self.conclude(&request.identity(), request.resource(), decision),
             request_id,
         )
+    }
+
+    /// Enter `request` into history as an attempt that Box refused before any rule decided it, and
+    /// report no verdict for it.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn observe_refused(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) {
+        let _ = self
+            .authority
+            .decide(governed, principal, ActionRequest::Request(request));
     }
 
     /// Decide one parsed command line as its grammar action, in the box's one history
@@ -611,16 +680,15 @@ mod tests {
 
     fn policy_at(source: &str, history: &Path, now_secs: i64) -> PolicyEngine {
         let sources = self::source(source);
-        PolicyEngine {
-            authority: Authority::open_with_test_clock(sources.clone(), history, now_secs)
+        PolicyEngine::assemble(
+            Authority::open_with_test_clock(sources.clone(), history, now_secs)
                 .expect("policy opens"),
-            grammars: ToolGrammars::default(),
-            effective: EffectivePolicy {
+            ToolGrammars::default(),
+            EffectivePolicy {
                 engine: ENGINE_ID,
                 policy_id: effective_policy_id(&sources),
             },
-            observer: None,
-        }
+        )
     }
 
     #[test]

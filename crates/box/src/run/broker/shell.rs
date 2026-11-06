@@ -352,7 +352,7 @@ fn mutates(operation: FsOperation) -> bool {
 }
 
 struct DecisionSubject {
-    action: &'static str,
+    action: std::borrow::Cow<'static, str>,
     resource: String,
     /// What the decision was about, under the standard names. `None` where the resource says it all.
     reported: Option<telemetry::Subject>,
@@ -367,7 +367,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             cwd,
             ..
         } => Some(DecisionSubject {
-            action: r#"Box::Action::"shell:exec""#,
+            action: r#"Box::Action::"shell:exec""#.into(),
             resource: (*program).to_string(),
             reported: Some(telemetry::Subject::process(program, args, literal, cwd)),
         }),
@@ -378,7 +378,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             cwd,
             ..
         } => Some(DecisionSubject {
-            action: r#"Box::Action::"shell:spawn""#,
+            action: r#"Box::Action::"shell:spawn""#.into(),
             resource: reported_path(program_path, home),
             reported: Some(telemetry::Subject::process(
                 &reported_path(program_path, home),
@@ -393,7 +393,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             ..
         } => None,
         EffectAttempt::Filesystem { path, operation } => Some(DecisionSubject {
-            action: fs_action(*operation),
+            action: fs_action(*operation).into(),
             resource: reported_path(path, home),
             reported: None,
         }),
@@ -402,7 +402,8 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
                 strands_shell::FsPairOperation::Rename { .. } => r#"Box::Action::"fs:move""#,
                 strands_shell::FsPairOperation::Symlink => r#"Box::Action::"fs:write""#,
                 _ => r#"Box::Action::"fs:other""#,
-            },
+            }
+            .into(),
             resource: reported_path(to, home),
             reported: None,
         }),
@@ -457,6 +458,14 @@ impl EffectInterceptor for ReachFloor {
             let capture = ObservationCapture::begin();
             let intercepted = self.inner.intercept(effect).await;
             let determined = capture.last();
+            // A grammar action decides a bound spawn in place of `shell:spawn`
+            // (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
+            let subject = subject.map(|mut subject| {
+                if let (EffectAttempt::ShellSpawn { .. }, Some(observed)) = (effect, &determined) {
+                    subject.action = observed.action().to_string().into();
+                }
+                subject
+            });
             let permit = match intercepted {
                 Ok(permit) => permit,
                 Err(error) => {

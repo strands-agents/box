@@ -257,8 +257,12 @@ The inert-rule check sorts each rule into one of three classes:
   read of `context.input.ip` under a network action, a path literal no reported path can match, a
   host literal no destination host can equal, an address literal no pinned destination can equal or
   that belongs to the other address family, an `ip6` pattern holding a dotted quad anywhere but in
-  `::ffff:` and the quad, one `@id` on two rules, and a cap written as a `permit` beside an
-  unconditioned `permit` for the same action, which can't narrow it.
+  `::ffff:` and the quad, one `@id` on two rules, a cap written as a `permit` beside an
+  unconditioned `permit` for the same action, which can't narrow it, and a temporal predicate that
+  names an action group, such as `Tool::git::Action::"*"`, because history records each member
+  action and never the group. A rule that waits for an MCP server's schema meets the same checks
+  when that schema stages, and the staging refuses the schema rather than hold the rule, because no
+  later schema can make it fire.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and it is load-bearing
   rather than cosmetic. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has ip`
@@ -270,6 +274,11 @@ The inert-rule check sorts each rule into one of three classes:
   enum types, and a `has`-guarded read of `context.output` outside a `when temporal` clause.
 
 A refusal names the rule and says what to write instead.
+
+When a tool grammar binds a program, each spawn of it enters history as its grammar action and not as
+`shell:spawn`. A spawn that the binding refuses before any rule decides it, such as a bound file
+called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so a rule
+that counts attempts still sees it.
 
 ## Residual risk
 

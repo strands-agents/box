@@ -603,9 +603,15 @@ Start a new run to validate the updated files.
 ## `[tool.<name>.grammar]`
 
 This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
-`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
-action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
-grammars is coming later.
+`[experimental-features] tool-grammars = true`. The feature is experimental. A spawn of the
+program is decided as a grammar action in place of `shell:spawn`, as
+[`shell:spawn`](shell.md#shellspawn) states, and a user guide for tool grammars is coming later.
+`run` prints one line for each `[tool]` and stdio `[mcp.<name>]` whose program a grammar decides,
+so you can move its `shell:spawn` rules:
+
+```text
+strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
 
 Each of these is refused at startup, before any box state exists:
 
@@ -624,6 +630,13 @@ Each of these is refused at startup, before any box state exists:
   `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
 - A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
   policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+- A grammar for a program whose command file has more than one name, such as macOS
+  `/usr/bin/git`, in a `[tool]` or in a stdio `[mcp.<name>]` that runs that program. A grammar would refuse each other name of that file, such as `make`: ``configured
+  command /usr/bin/git has 78 names, and a tool grammar on it refuses each name that no `[tool]`
+  declares. Point `command` at a copy with one name``.
+- An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
+  grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
+  while `tool-grammars` is on; give the server another name``.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.
