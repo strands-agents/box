@@ -1011,16 +1011,15 @@ makes the authority ready. Every install retains unchanged policy identities and
 state, so an incremental install replays no history.
 
 <a id="a-server-whose-discovery-a-policy-denies-degrades-alone"></a>
-### A server whose discovery a policy denies degrades alone
+### A denied tool list leaves its dependent rules unloaded until recovery
 
-A policy can deny `tools/list` for a server and still carry a per-tool rule for it. The typed rule
-can only come from that server's discovered catalog, so it can never be enforced. The box still
-starts, but that server connects with zero tools and its typed rule remains inert. Box denies its
-tool calls. A hardcoded call therefore cannot use the coarse permit to bypass the argument
-constraint. A diagnostic on stderr and a telemetry record name the server and the inert rule.
-Refusing the whole policy at load was rejected, because one server's mistake would also prevent
-access to the model, the shell, and every other server. The cost is that `validate` does not report
-the contradiction, so a reader learns of it from the run's warning.
+A policy can deny `tools/list` for a server and still carry a per-tool rule that needs its discovered
+catalog. Box starts with that rule unloaded and refuses the tool calls it can identify as subject to
+it. A later permitted list can load the rule and clear those refusals only when the complete policy
+validates and commits. Until then, the rule stays inert, and a diagnostic on stderr and a telemetry
+record name the servers it still needs. Refusing the whole policy at load was rejected because one
+server's mistake would also block the model, shell, and other servers. The cost is that `validate`
+does not report the contradiction, so the operator learns of it from the startup warning.
 
 <a id="the-policy-crate-exposes-one-facade"></a>
 ### The policy crate exposes one facade

@@ -236,9 +236,7 @@ has reported. Until then a tool call for that server is denied without reaching 
 subset](decisions.md#discovery-serves-the-schema-independent-subset). A rule that names only tool
 grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
 from the start, so the rule loads at once or the box refuses it. If policy refuses a server's tool
-listing, only that server loses its per-tool rules. The box starts without those rules. See [a
-server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
+listing, only that server loses its per-tool rules. The box starts without those rules. See [recovery after a denied tool list](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 
 A library caller checks a policy without a run through `check_policy`. It reads `box.toml` and the
 policy file it names with the reader that `run` uses, and it applies the same validation: the

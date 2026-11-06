@@ -218,8 +218,9 @@ For example, in `https://notes:443/page`, the authority is `notes:443`.
 
 ### When a rule cannot load
 
-When a per-tool rule cannot load, Box starts without that rule.
-If Box identifies the calls the rule covers, it refuses them with `[default-deny]`.
+When a per-tool rule cannot load at startup, Box starts without that rule.
+A later tool list can load it if the list completes the policy.
+Until then, Box refuses the calls it identifies as subject to the rule with `[default-deny]`.
 Otherwise, those calls can still pass under the server's `mcp:call` permit.
 Check [which rules Box can refuse for](#which-rules-box-can-refuse-for) before relying on the policy.
 
@@ -230,8 +231,10 @@ The startup warning is `a per-tool rule never loaded for ["<server>"]`. Check th
 | A rule refuses `tools/list`, so Box cannot discover the server's tools. | Permit `tools/list` for that server. |
 | The server's catalog does not offer the named tool. | Correct the tool name, or update the rule if the server removed the tool. |
 | The rule reads an argument with a different name or compares it against the wrong type. | Match the argument name and type in the server's catalog. |
+| The server's first tool list timed out or Box could not read it. | Keep the per-tool rule. For an http server, request the list again. For a stdio server with no accepted catalog, restart the box. |
 
-Removing the per-tool rule also clears the warning, but removes its restriction.
+Remove a per-tool rule only when you intend to remove its restriction. Keep a valid rule after a temporary discovery failure.
+The warning describes startup. Box prints no message when the rule starts enforcing.
 
 The warning names every server the rule was waiting for, so when a rule reads one server's tool from
 history it names that server too, even when that server is answering correctly.
