@@ -865,6 +865,46 @@ the verb would report on one directory the caller already named.
   one a plain probe of the same reported path already records, and the refusal message does not
   change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
 
+- **A configured command with more than one hard link rests on the kernel's write check.**
+  `ConfiguredCommands::load` accepts such a command only when `writable_by_this_user` is false.
+  `may_change` is true when root runs Box, when the real or the effective user owns the file, when
+  a group or other write bit is set, or when the kernel's write check (`faccessat2` on the opened
+  descriptor on Linux, `faccessat` on the path elsewhere) does not refuse. Only `EACCES` is a
+  refusal by itself. On macOS, `EPERM` and `EROFS` are refusals when `may_carry_access_list` is
+  false. XNU asks its MAC policies and then the read-only mount before it checks permissions, so
+  neither answer says anything about the file's permissions. System Integrity Protection answers
+  `EPERM` for `/usr/bin`, and so does any Sandbox profile that Box inherits for a path it denies.
+  With System Integrity Protection off (as on GitHub's macOS runners), `/usr/bin` answers `EROFS`.
+  Then the root, owner, and mode checks and the absence of an access-control list decide. Every
+  other answer counts as writable, and on Linux `EPERM` and `EROFS` do too, as in
+  `inode_may_be_writable` in the Linux containment backend.
+  `ConfiguredCommand::verify` requires the startup link count, owner, group, and mode before each
+  launch, and asks the kernel again. At launch, `ContainmentConfig::require_command_identity`
+  records the link count of a command with several names in its own `command_identities` wire
+  list, and a command with one name keeps `require_file_identity`. `identity_requirements` and
+  `write_protections` keep exactly one name, also when a payload states a link count.
+  Measured on macOS 26.7.1: `/usr/bin/git` and 77 other developer tools are one `root:wheel`
+  file with 78 names on the sealed read-only volume, and `faccessat` answers `EPERM`. Under a
+  `sandbox-exec` profile that denies writes to a folder, `faccessat` answers `EPERM` for a file in
+  it that this user owns and can write. `/usr/bin/id`
+  has 3 names. Measured on Linux: `/usr/bin/perl` has 2 names on Ubuntu 24.04, Debian, and Fedora,
+  and is root-owned. A `uv tool install` on Linux hard-links an operator-owned program from uv's
+  cache, so it stays refused.
+  Rejected: no link rule at all, because a folder write grant over another name of an
+  operator-writable file can change its bytes. Rejected: a read-only-mount test alone, because it
+  misses root-owned programs on a writable Linux root.
+  A forwarding stub, such as macOS `/usr/bin/git`, starts a second program that Box does not pin.
+  With the Command Line Tools that program is `root:wheel`. With an Xcode.app that the operator
+  extracted, the operator owns it. `command[0]` is the documented scope of the protection.
+
+- **A command seen through a mount that remaps ownership is not covered.** An idmapped bind mount,
+  or a FUSE view such as bindfs, can show a file under a second path with another owner.
+  `validate_reach` compares paths for a directory grant, so a directory write grant over the
+  unmapped path of a command does not refuse, and the identity check sees no change. This is
+  true for a command with one name too, so it does not depend on hard links. Only the operator can
+  create such a mount. Closing it needs the mount analysis of `hard_link_alias_may_be_writable`
+  for every write grant against every configured command.
+
 Do not treat any of these as settled by the code existing.
 
 - **A sibling box's stored state is reachable, and this is the sharpest one.** `Reach`'s `forbidden`

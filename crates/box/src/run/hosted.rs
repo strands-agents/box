@@ -1600,7 +1600,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .expect("a resolver")
             .approve_host(&canonical.join("secret.txt"))
             .expect("inside the root");
-        let decision = authority.decide(
+        let (decision, _) = authority.decide(
             &GovernedBox::assigned(root.name()),
             &Principal::agent(),
             &Request::Fs {

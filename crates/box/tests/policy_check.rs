@@ -68,11 +68,21 @@ fn a_configuration_with_no_policy_has_no_findings() {
 }
 
 #[test]
-fn a_per_tool_rule_is_unchecked_only_when_a_local_mcp_server_is_declared() {
+fn a_per_tool_rule_is_unchecked_only_when_an_mcp_server_is_declared() {
     let directory = tempfile::tempdir().expect("a directory");
     let config = configuration(
         directory.path(),
         "policy = \"policy.dw\"\n[mcp.alpha]\ntype = \"stdio\"\ncommand = [\"fake-alpha-mcp\"]\n",
+        Some(TYPED),
+    );
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(check.errors().is_empty(), "{:?}", check.errors());
+    assert_eq!(check.unchecked()[0].id(), Some("tool"));
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        "policy = \"policy.dw\"\n[mcp.alpha]\ntype = \"http\"\ndestinations = [\"example.com\"]\n",
         Some(TYPED),
     );
     let check = strands_box::check_policy(config).expect("the check runs");

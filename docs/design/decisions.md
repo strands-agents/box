@@ -861,6 +861,16 @@ availability bound and not as a strength claim. A counting rule also evaluates a
 history and not against requests in flight, so a parallel burst can exceed a limit together while each
 request passes alone.
 
+<a id="box-carries-an-opaque-request-token-into-each-outcome"></a>
+### Box carries an opaque request token into each outcome
+
+Box owns request correlation because its callers know which admitted effect produced each outcome.
+`PolicyEngine::decide` returns an opaque `RequestId`, and `record` requires that token to reuse the request's declared identifier.
+A gateway exchange identifier cannot substitute for it because one exchange can require several policy decisions.
+The token uses the durable log offset and belongs to one opened engine; reload preserves it, but reopening requires new tokens.
+Callers must retain each token until its effect ends, and existing unlabeled events remain unchanged.
+`durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
+
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
 ### History is durable per box, and it offers no rewind and no audit record
 
@@ -1306,7 +1316,10 @@ A caller can load authority before the sandbox applies, for example a certificat
 opened regular file and its canonical path to one of two configuration methods. Both record the device
 and inode, require the file to have one filesystem name, and revalidate path and identity at each
 backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant. A backend
+writable grant; the other grants no access at all, for a file outside every writable grant. A third
+method pins a configured tool's program: it records the link count the file has, and revalidation
+requires that count, because Box accepts a program with several names only when the user that runs
+Box cannot write it through any name. A backend
 that cannot keep both the write subtraction and write-xor-execute may make the file non-executable, so
 a caller must not use write protection to preserve an execute grant.
 

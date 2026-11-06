@@ -89,7 +89,6 @@ It changes access, so it is not a neutral portability fix.
 
 ## Remaining qualification
 
-These differences describe source behavior rather than an accepted Linux package.
-A release needs installation and workload checks on each selected deployment configuration.
+A Linux package supplies the binaries. Each deployment configuration still needs installation and workload checks.
 Setup privileges and successful workloads from one environment do not qualify another.
 See [Linux startup and qualification](linux-enforcement.md#startup-failures-and-qualification) for that boundary.

@@ -13,7 +13,7 @@ from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage
 MODEL, REGION, PORT = "us.anthropic.claude-sonnet-4-6", "us-west-2", 43210
 FACTS = {"resolution": "dispatch", "order_id": 42, "confirmation_id": "dispatch-42-001", "item": "Adjustable desk lamp", "quantity": 1, "estimated_delivery": "2026-11-05", "refund_issued": False}
-SERVICE = {"requests": [{"method":"GET","path":"/orders/42","status":200}, {"method":"GET","path":"/orders/42/eligibility","status":200}, {"method":"POST","path":"/orders/42/dispatch","status":201}], "effects":[runner.EFFECT], "resolution":runner.EFFECT, "effect_counts":{"dispatch":1,"refund":0}, "order":{"item":FACTS["item"],"quantity":1,"replacement_estimated_delivery":FACTS["estimated_delivery"]}}
+SERVICE = {"requests": [{"method":"GET","path":"/orders/42","status":200}, {"method":"GET","path":"/orders/42/replacement","status":200}, {"method":"POST","path":"/orders/42/replacement","status":201}], "effects":[runner.EFFECT], "resolution":runner.EFFECT, "effect_counts":{"dispatch":1,"refund":0}, "order":{"item":FACTS["item"],"quantity":1,"replacement_estimated_delivery":FACTS["estimated_delivery"]}}
 
 class FakeClient:
     def __init__(self):
@@ -65,7 +65,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(FakeConnection.requests[1]["headers"]["Idempotency-Key"],"replacement-42")
         self.assertGreater(len(c.requests[-1]["messages"]),len(c.requests[0]["messages"]))
     def test_exact_policy_bindings(self):
-        changes={"strands.box.policy.principal":"agent:other","strands.box.policy.action":"net:connect","strands.box.policy.resource":"127.0.0.1:43210/orders/43/dispatch","strands.box.policy.verdict":"permit","strands.box.policy.rule":"other","http.request.method":"GET","server.address":"localhost","server.port":123}
+        changes={"strands.box.policy.principal":"agent:other","strands.box.policy.action":"net:connect","strands.box.policy.resource":"127.0.0.1:43210/orders/43/replacement","strands.box.policy.verdict":"permit","strands.box.policy.rule":"other","http.request.method":"GET","server.address":"localhost","server.port":123}
         for field,value in changes.items():
             with self.subTest(field=field):
                 w,s,d,_=copy.deepcopy(self.base)
@@ -90,6 +90,11 @@ class EvidenceTests(unittest.TestCase):
             self.assertFalse(all(self.checks(w,s,d).values()))
         w,s,d,_=copy.deepcopy(self.base); s["effect_counts"]["refund"]=1
         self.assertFalse(all(self.checks(w,s,d).values()))
+    def test_receiver_distinguishes_methods_on_the_replacement_path(self):
+        w,s,d,_=copy.deepcopy(self.base)
+        s["requests"][1]["method"]="POST"
+        self.assertFalse(self.checks(w,s,d)["only_allowed_requests_reached_service"])
+
     def test_malformed_and_timeout(self):
         self.assertFalse(all(self.checks({}, {}, []).values()))
         self.assertFalse(all(runner.verify(*self.base[:3],0,211,True,MODEL,REGION,PORT).values()))

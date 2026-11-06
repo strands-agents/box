@@ -264,7 +264,7 @@ fn an_empty_or_malformed_mount_table_is_refused() {
 }
 
 #[test]
-fn an_unreadable_mapped_alias_refuses_the_inventory() {
+fn an_unreadable_mapped_alias_is_protected_as_an_alias() {
     struct RestoreAccess {
         path: PathBuf,
         permissions: std::fs::Permissions,
@@ -295,13 +295,16 @@ fn an_unreadable_mapped_alias_refuses_the_inventory() {
         fixture.filesystem(),
         fixture.mount("/storage/install/launcher", &hidden),
     ];
-    let error = names_at_mounts(
+    let aliases = names_at_mounts(
         std::slice::from_ref(&fixture.installed),
         fixture.identity(),
         &mounts,
     )
-    .unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+    .expect("an uninspectable name does not refuse the inventory");
+    assert!(
+        aliases.contains(&hidden),
+        "the uninspectable name is protected as an alias: {aliases:?}"
+    );
 }
 
 #[test]
@@ -705,5 +708,94 @@ fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants()
         "ordinary output remains writable\n",
     )
     .unwrap();
+    let hidden_parent = root.join("workspace/unreadable");
+    std::fs::create_dir(&hidden_parent).unwrap();
+    let hidden_alias = hidden_parent.join("launcher");
+    std::fs::write(&hidden_alias, "plain mountpoint fixture\n").unwrap();
+    bind(&helper, &hidden_alias);
+
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let mut header = CapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut capabilities = [CapabilityData::default(); 2];
+    // SAFETY: these buffers match Linux capability ABI version 3 for this private subprocess.
+    assert_eq!(
+        unsafe { libc::syscall(libc::SYS_capget, &mut header, capabilities.as_mut_ptr()) },
+        0
+    );
+    capabilities[0].effective &= !((1 << 1) | (1 << 2));
+    // SAFETY: only this private subprocess loses its directory access override capabilities.
+    assert_eq!(
+        unsafe { libc::syscall(libc::SYS_capset, &header, capabilities.as_ptr()) },
+        0
+    );
+
+    struct RestoreDirectory(PathBuf);
+    impl Drop for RestoreDirectory {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .expect("restore the disposable directory");
+        }
+    }
+    let _restore = RestoreDirectory(hidden_parent.clone());
+    std::fs::set_permissions(
+        &hidden_parent,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&hidden_alias).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(installation.aliases().unwrap().contains(&hidden_alias));
+    for table in ["[agent]", "[tool.writer]", "[mcp.writer]"] {
+        installation
+            .validate_reach(table, &write_reach(&sibling, &root, false))
+            .unwrap();
+        for target in [&hidden_parent, &root.join("workspace")] {
+            let error = installation
+                .validate_reach(table, &write_reach(target, &root, false))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("this write grant can change trusted Box executable"),
+                "{error}"
+            );
+            assert!(installation.refuses_mutation(target));
+        }
+    }
+    assert!(!installation.refuses_mutation(&sibling));
+    std::fs::set_permissions(
+        &hidden_parent,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::record::layout::disk_identity(&hidden_alias),
+        Some(source_identity)
+    );
+    let error = installation
+        .validate_reach("[agent]", &write_reach(&hidden_alias, &root, true))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("this write grant can change trusted Box executable"),
+        "{error}"
+    );
+    assert!(installation.refuses_mutation(&hidden_alias));
+    println!("UNREADABLE_MOUNT_ALIASES_REMAIN_PROTECTED");
     println!("{COMPLETE}");
 }

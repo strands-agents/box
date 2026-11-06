@@ -159,8 +159,8 @@ for the other selected features.
 | `write` | directory or file | Write it, and everything under a directory. `write` does not grant `read`. |
 | `read_file` | file | Read the file. |
 | `write_file` | existing file | Write the file. |
-| `list` | directory | List the directory's entries. |
-| `deny` | file, directory, or absent path | Reach nothing there, even under a path another list grants. |
+| `list` | directory | List the directory's entries on macOS. Linux refuses this list. |
+| `deny` | file, directory, or absent path | Reach nothing there, even under a path another list grants. On Linux, the target must exist. |
 
 A server with no `filesystem` table reaches its own program and the runtime minimum. On macOS, a
 server that runs on an interpreter, such as Node or Python, needs `read` for that interpreter's
@@ -176,8 +176,8 @@ or `read_file` to the extension file. Grant access to any additional libraries a
 A directory grant includes its descendants, so it also permits execution of programs there.
 File permissions, explicit denials, and protected paths still apply.
 
-On Linux, each write grant also needs a covering read grant. See
-[direct access by operating system](./config.md#direct-access-by-operating-system).
+On Linux, each write grant also needs a covering read grant. Run Box as a non-root user for directory writes.
+See [direct access by operating system](./config.md#direct-access-by-operating-system).
 A server can execute code it writes within those grants. Automatic temporary directories do not
 acquire this execution permission. The agent retains its separate execution restrictions.
 A filesystem grant does not grant network access.
@@ -202,7 +202,7 @@ reachable private networks, loopback services, and instance metadata endpoints.
 `false` applies to a server whose client does not read `HTTPS_PROXY`, such as a client that signs
 in through single sign-on.
 
-Replace `<HOME>` in `env.PATH` with your absolute home directory:
+Replace `<HOME>` with your home directory's full path:
 
 ```toml
 [mcp.sso-tools]
@@ -217,6 +217,9 @@ contain_egress = false
 read  = ["~/.local/share/sso-tools", "~/.config/sso-tools"]
 write = ["~/.config/sso-tools"]
 ```
+
+In `filesystem` lists, `~` means your home directory. Box uses `env.PATH` as written, so `~` stays literal there.
+Use a full path in `env.PATH`, such as `/home/alex` on Linux or `/Users/alex` on macOS.
 
 `contain_egress` sets the server's own connections. Policy decides every request the agent sends
 to the server in both modes.

@@ -13,7 +13,7 @@ Mac. Each section below annotates it. To write the policy the file points at, re
 
 ## Example
 
-This release runs on macOS. Getting started builds the example one file at a time, and the block is
+Getting started builds this macOS example one file at a time, and the block is
 the tutorial's `my-box/box.toml`, with its one longer comment shortened to a line.
 
 ```toml
@@ -60,9 +60,9 @@ destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
 secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"
 ```
 
-`<HOME>` stands for the operator's home directory. The paths in `box_dir`, `command`, `workspace`,
-and `env` must be absolute, and a filesystem list entry may start with `~`, so getting started
-replaces `<HOME>` with `sed -i '' "s|<HOME>|$HOME|g" my-box/box.toml`.
+`<HOME>` is a placeholder for your home directory. Getting started replaces it with
+`sed -i '' "s|<HOME>|$HOME|g" my-box/box.toml`.
+Use full paths for `box_dir`, `workspace`, and `env.HOME`. Filesystem list entries can start with `~`.
 
 An unknown key at any level is a load error.
 
@@ -229,8 +229,8 @@ Both tables hold one process, in one shape:
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
-The program is an absolute path, or a bare name. A bare name resolves on `env.PATH`,
-then on the operator's own `PATH`, then on `/usr/bin:/bin`. A relative path with more than one
+The program is a full path or a bare name. A bare name uses `env.PATH` when set.
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs
@@ -241,6 +241,14 @@ script are the CLI's own.
 started from. The directory must exist, and it may not be the operator's home. The box enters it.
 The process reads nothing in it until a list in `filesystem` names it: the example's `workspace` is
 the project, and the `list` entry below is what lets the CLI see the names in it.
+
+`env.PATH` contains full directory paths separated by `:`. Box uses these entries as written, so `~` stays literal.
+For example, use `/home/alex/.local/bin:/usr/bin:/bin` instead of `~/.local/bin:/usr/bin:/bin`.
+
+When the box declares an MCP server, it also protects directories on the `PATH` of the shell that starts Box.
+Keep those directories and their parents outside filesystem write grants.
+For example, a search directory `/work/tools/bin` prevents a write grant for `/work/tools`.
+Changing `env.PATH` in `box.toml` does not change this protection.
 
 `env` is literal. Four kinds of name have their own rule:
 
@@ -476,7 +484,7 @@ happen after the box directory is created and before the workload starts.
 | Two grants of one operation that name one path, or that nest | ``<path> lies inside <path>, granted by `read`. The union is the wider grant, so the narrower one enforces nothing it appears to`` |
 | A grant wholly inside a `deny` entry or the directory that holds `box.toml` and `policy.dw` | `<path> is at or inside <path>, which no grant reaches. The grant would render and reach nothing, so it is refused rather than left enforcing nothing` |
 | A writable grant that reaches the policy file without subtracting it | ``` `write` reaches this box's policy file, <path>. A grant may enclose it only when it is subtracted, and nothing subtracts it here``` |
-| A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against. That program starts outside containment at the operator's identity, so a writable directory there is a program the workload chooses` |
+| A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
@@ -547,11 +555,13 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 |---|---|---|
 | A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
-| A command has multiple hard links, which are filesystem names for the same file. | `must be a regular file with exactly one hard link` | Use an executable regular file with one filesystem name. |
-| The command's file identity changes during the run. | `changed after this run loaded it` | Update the program between runs. |
+| A command has more than one hard link, which are filesystem names for the same file, and Box can't rule out that the user that runs Box can write it. | `has <n> hard links, and the user that runs Box may be able to write it` | Use a copy with one filesystem name, or install the command so that this user can't write it. |
+| The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
 
-Box also refuses legitimate system executables that have multiple hard links. File ownership and
-permissions do not waive the requirement for exactly one hard link.
+Box accepts a command with more than one hard link when the user that runs Box can't write it
+through any name. The file belongs to another user, such as `root`, has no group or other write
+permission, and no access-control entry lets this user write it. Most system programs are like
+this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. Reads still require the applicable policy permission.
@@ -574,13 +584,14 @@ Keep those launch paths and their containing directories outside workload write 
 Box accepts hard links only when it finds every name in the installation directory or its immediate
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
-Linux also checks the files through existing mounts. On macOS, Box checks verified Data-volume spellings.
+Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
 | Box cannot account for every hard-link name. | `has hard links outside the installation inventory. Install an independent copy` | Install independent copies of the Box programs. |
-| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table and mapped files, then retry after mount changes finish. |
+| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table, resolve other inspection errors, then retry after mount changes finish. |
 | A recorded file name points to another file, or the hard-link count changes during the run. | `changed after this run loaded it. Stop Box before updating its installation` | End the run before installation updates. |
 
 Strands Shell and Monty also refuse changes to these files and their enclosing paths, even when

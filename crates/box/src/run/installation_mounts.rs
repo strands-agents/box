@@ -82,6 +82,10 @@ fn names_at_mounts(
                             error.kind(),
                             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                         ) => {}
+                    // A name this process cannot inspect may be the installation, so it is protected as one.
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                        aliases.push(candidate)
+                    }
                     Err(error) => {
                         return Err(io::Error::new(
                             error.kind(),
