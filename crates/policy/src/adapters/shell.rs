@@ -783,6 +783,18 @@ mod tests {
         _history: tempfile::TempDir,
     }
 
+    impl InterceptorFixture {
+        /// Close the engine, and keep its history.
+        fn close(self) -> tempfile::TempDir {
+            let Self {
+                interceptor,
+                _history,
+            } = self;
+            drop(interceptor);
+            _history
+        }
+    }
+
     impl Deref for InterceptorFixture {
         type Target = dyn EffectInterceptor;
 
@@ -1288,6 +1300,16 @@ mod tests {
         bind: impl FnOnce(&mut crate::GrammarBindings),
     ) -> InterceptorFixture {
         let history = tempfile::tempdir().expect("history directory");
+        interceptor_with_grammars_over(source, grammars, history, bind)
+    }
+
+    /// An `interceptor_with_grammars` over the history in `history`.
+    fn interceptor_with_grammars_over(
+        source: &str,
+        grammars: &[&str],
+        history: tempfile::TempDir,
+        bind: impl FnOnce(&mut crate::GrammarBindings),
+    ) -> InterceptorFixture {
         let policy = PolicyEngine::open_with_tool_grammars(
             vec![Policy {
                 origin: PathBuf::from("shell-adapter-test.dw"),
@@ -1563,7 +1585,7 @@ mod tests {
         @id("push_after_a_passing_test")
         forbid (principal, action == Tool::git::Action::"push", resource)
         unless temporal {
-            formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+            formerly within 1h Tool::cargo::Action::"test"::response{ input.cwd: "/work", output.status: 0 }
         };
     "#;
 
@@ -1609,6 +1631,74 @@ mod tests {
             .await
             .expect("outcome reporting is best effort");
         assert!(pushed().await.is_ok(), "a test exited 0");
+    }
+
+    /// **A test that passed in another directory does not satisfy a rule pinned to `input.cwd`.**
+    #[tokio::test]
+    async fn a_test_that_passed_in_another_directory_does_not_allow_the_push() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let interceptor =
+            interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
+                b.declare(&programs.file("git"), "git");
+                b.declare(&programs.file("cargo"), "cargo");
+            });
+        let test = words(&["test"]);
+        interceptor
+            .intercept(&EffectAttempt::ShellSpawn {
+                command: "cargo",
+                program: "cargo",
+                program_path: &cargo,
+                args: &test,
+                literal: &[],
+                cwd: "/tmp/scratch",
+            })
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        assert!(
+            interceptor
+                .intercept(&spawn("git", &git, &words(&["push", "origin"])))
+                .await
+                .is_err(),
+            "a test in /tmp/scratch does not allow a push from /work"
+        );
+    }
+
+    /// **A grammar response is durable:** a new engine on the same history reads it.
+    #[tokio::test]
+    async fn a_new_engine_on_the_same_history_reads_an_earlier_grammar_response() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let bind = |bindings: &mut crate::GrammarBindings| {
+            bindings.declare(&programs.file("git"), "git");
+            bindings.declare(&programs.file("cargo"), "cargo");
+        };
+        let push = words(&["push", "origin", "main"]);
+        let test = words(&["test"]);
+        let first = interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], bind);
+        first
+            .intercept(&spawn("cargo", &cargo, &test))
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        let second = interceptor_with_grammars_over(
+            PUSH_AFTER_A_PASSING_TEST,
+            &["git", "cargo"],
+            first.close(),
+            bind,
+        );
+
+        assert!(
+            second.intercept(&spawn("git", &git, &push)).await.is_ok(),
+            "the test that exited 0 before the new engine opened allows the push"
+        );
     }
 
     /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
