@@ -17,11 +17,10 @@ And the valve covers prose alone: a committed artifact that must still work, suc
 `examples/`, is not prose and no change may leave it broken.
 
 **Eight places hold committed prose that a code change can make wrong, and there is no ninth.**
-Each has one reader and one test for what belongs there. Use `docs-writer` and `docs-reviewer`
-for user, design, and developer guides and crate READMEs. They apply
-[the voice guide](voice-guide.md), including each document's required register.
-Use `docs-audit` to check accuracy, `docs-planner` to plan missing pages, and `docs-sync` to find
-which of the eight a change makes wrong.
+Each has one reader and one test for what belongs there. The `docs-writer`, `docs-reviewer`,
+`docs-audit`, and `docs-planner` skills apply
+[the voice guide](voice-guide.md) to the two guides, and
+`docs-sync` finds which of the eight a change makes wrong.
 
 | Place | Reader | Answers | Belongs here when |
 |---|---|---|---|

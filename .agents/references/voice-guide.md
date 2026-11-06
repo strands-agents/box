@@ -1,9 +1,11 @@
 # Voice guide
 
-Use this guide when writing or reviewing `docs/user/`, `docs/design/`, `docs/dev/`, or a crate
-`README.md` for consumers. It owns the shared editorial rules for the documentation skills.
-Read the layers in order. User and design pages use plain, spoken English. Developer pages and
-crate READMEs also keep the Simplified Technical English required by `AGENTS.md`.
+How to write every page in `docs/user/` and `docs/design/`, and each crate `README.md` that serves
+a consumer. The `docs-writer`, `docs-reviewer`, and `docs-audit` skills apply it. Walk the layers in
+order.
+
+For a wording-only rewrite in `docs/dev/`, apply the sentence rules in Layers 4 and 5. Keep the
+page's structure, source and test references, and Simplified Technical English register.
 
 ## Contents
 
@@ -13,21 +15,19 @@ crate READMEs also keep the Simplified Technical English required by `AGENTS.md`
 - [Layer 3: Register](#layer-3-register)
 - [Layer 4: Hard constraints](#layer-4-hard-constraints)
 - [Layer 5: Authenticity](#layer-5-authenticity)
-- [Rewrite examples](#rewrite-examples)
 - [Readers that are people and readers that are agents](#readers-that-are-people-and-readers-that-are-agents)
 - [Format](#format)
 - [Self-check](#self-check)
 
 ## Placement: which guide owns the page
 
-Place the page by the reader's task.
+Ask one question of each page: does the reader need it to **use** Box, or to **trust or change**
+Box?
 
 | Guide | Directory | Reader | Content types | The "why" |
 |---|---|---|---|---|
 | User guide | `docs/user/` | An operator who runs an agent or another command under a policy. | Tutorial, how-to, reference. | Only when it changes what the operator does. |
 | Design guide | `docs/design/` | A security evaluator, a contributor, or a curious reader. All of them clone the repo. | Explanation. | The point of the page. |
-| Developer guide | `docs/dev/` | A contributor who builds, tests, releases, or debugs Box. | How-to, reference. | Explain a constraint when it changes the step or helps diagnose a failure. |
-| Crate README | `crates/*/README.md` | A consumer of the crate. | Overview, reference. | Explain what the crate provides and how to use its public interface. |
 
 Technical doesn't mean design. The `box.toml` keys, the CLI, and the policy action vocabulary are
 user-guide reference. The reasoning behind the same topics is design-guide explanation.
@@ -50,8 +50,8 @@ from the heading.
 - A page about one task or one mechanism gets sections in the order the reader needs them.
 - A summary table or diagram that compares the parts can come after the part sections, as a recap.
 
-For a new page or a change to its structure, write the outline and show it to the user before
-drafting. For a wording-only edit, keep the existing outline.
+Write the outline first for anything longer than a few paragraphs, and show it to the user. Read the
+outline for scope creep before you write prose.
 
 ### Altitude
 
@@ -128,15 +128,6 @@ link its anchor, for example
 `[one trampoline spawns every contained process](decisions.md#one-trampoline-spawns-every-contained-process)`.
 Don't copy its argument.
 
-### Developer guide and crate README
-
-For a developer task, state the prerequisites, the steps, the expected result, and how to diagnose
-a failed step. Use the how-to structure for tasks and the reference structure for contracts.
-Name source paths, tests, and workflows when the contributor needs them to do the work.
-
-A crate README states the crate's purpose and public interface before its examples and build
-steps. Keep contractions out of both developer pages and crate READMEs.
-
 ### Error documentation
 
 Document an error only when its message doesn't tell the reader what to do next. Say what the error
@@ -151,14 +142,12 @@ condition, and result. Preserve negation, obligation, defaults, counts, platform
 order, and stated uncertainty. Removing repeated wording is safe; removing a unique qualification
 changes the claim. A security refusal must remain a refusal.
 
-During a wording-only edit, keep code blocks, commands, identifiers, literal output, quotations,
-link targets, and explicit anchors unchanged. Preserve heading anchors when changing heading case,
-for example by adding an explicit anchor with the old ID.
+During a wording-only edit, keep the structure, code blocks, commands, identifiers, literal output,
+quotations, link targets, and explicit anchors unchanged. Preserve heading anchors when changing
+heading case, for example by adding an explicit anchor with the old ID.
 
-If the original contradicts the code, verify the correction through
-[`claim-verification.md`](claim-verification.md) and report it separately from the wording changes.
-Style is not evidence for a new claim. Report an unresolved claim instead of silently changing its
-meaning.
+Report a suspected factual error separately. Keep the affected meaning unchanged until a factual
+correction is in scope and verified. Style is not evidence for a new claim.
 
 ### Plain sentences
 
@@ -197,8 +186,8 @@ These come from the operator's need for a contract. They apply to every page in 
 3. **Don't explain why.** Document the behavior and the shape. Keep a reason only when it changes
    the operator's action, for example "Install the helpers beside `strands-box`, because the box
    finds them there."
-4. **Document the present.** Keep dates, status lines, and changelogs out of the page, as required
-   by [the documentation update rules](doc-updates.md).
+4. **Document the present.** One `> **Status.**` line at the top is the only sentence about the
+   future that a page may have.
 5. **Open with the subject.** The first sentence defines the thing the reader runs or configures.
    Don't open with "This guide describes".
 6. **Cut each section that doesn't help the operator act.** Trust boundaries and design history
@@ -261,10 +250,23 @@ summaries out of the document. End with a result or next step only when the read
 
 ### Terminology
 
-Use [`docs/design/terminology.md`](../../docs/design/terminology.md) for product terms. Repeat the
-same term for the same thing. A style rule about metaphors does not rename a defined Box term.
-If a new product term is needed, or the lock conflicts with the code or a decision, report the
-conflict for the user to resolve.
+[`docs/design/terminology.md`](../../docs/design/terminology.md) is the lock. Use the term in its
+first column, and never a word from its second column. The terms that drift most:
+
+- "box" for the whole boundary, and "workload" for the processes in it. "Sandbox" only for the
+  operating system boundary around one process. Not "cage" or "container".
+- "the box's trusted process" (or "the trusted process", "its trusted process"), not "Box process",
+  "trusted host", or "TCB".
+- "surrounding OS", not "the host".
+- "operator", not "user".
+- "workload", "agent", and "harness" are three things. An agent is a kind of workload, and the
+  Strands CLI is a harness.
+- "policy" and "sandbox grants" are two tiers, not two words for one thing.
+
+Don't add a synonym because it reads better in one sentence. If a page needs a term the lock doesn't
+have, ask the user. If the lock disagrees with what the code, the binaries, or `decisions.md` call
+something, ask the user which one wins. Don't silently follow the lock into a word nobody else uses.
+A style rule about metaphors does not rename a defined Box term.
 
 ### Examples
 
@@ -297,16 +299,6 @@ Read the draft as a whole after checking individual sentences.
 - Cut repeated ideas and detail outside the page's purpose. Keep every distinct condition and
   limit when rewriting. Word count is not a completion criterion.
 
-## Rewrite examples
-
-These examples illustrate edits, not new product requirements.
-
-| Before | After | What to check |
-|---|---|---|
-| The broker serves as the routing layer, checking the protocol version and directing each request to the handler it names. | The broker checks the protocol version and sends each request to the named handler. | The actor and both actions remain. |
-| Workload reaped → broker unbinds → gateway finishes → live record removed → lock released. | Box reaps the workload, unbinds the broker, and finishes the gateway. It then removes the live record and releases the lock. | Complete sentences preserve the event order. |
-| An enclosing directory grant is refused at startup, not accepted with the credential store cut out. | Box refuses a directory grant that encloses a credential store, and startup fails. | "Excludes the store" would change refusal into acceptance. Reject that rewrite. |
-
 ## Readers that are people and readers that are agents
 
 A person can land on any page from a search. A coding agent can fetch one page with no navigation.
@@ -327,7 +319,7 @@ Each page must stand alone.
 - Use relative links between pages.
 - Add an `<a id="...">` anchor above a heading that code or another page cites. Never rename an
   anchor, because code cites it.
-- For a new page, complete the navigation and publication updates in `docs-writer` Step 10.
+- A new page gets one row in the `README.md` of its guide.
 
 The page skeletons are in [`page-templates.md`](./page-templates.md).
 
@@ -335,7 +327,7 @@ The page skeletons are in [`page-templates.md`](./page-templates.md).
 
 Read every paragraph against all the rules in Layers 4 and 5, including the content-type rules.
 Every finding needs an edit or a reason to keep the text. For a rewrite, compare each assertion
-with the original and report each factual correction separately.
+with the original. Report suspected factual errors separately from wording changes.
 
 Then check placement, structure, terminology, examples, and whether the page stands alone.
 The skills run the mechanical checks separately. The prose script catches only some vocabulary

@@ -11,10 +11,8 @@ design is as it is, and where it disagrees with the code, the code is correct.
 
 | Claim | Verify against | Evidence on the page |
 |---|---|---|
-| A behavior ("the workload cannot read the box directory") | The code, and the test that pins it | Follow the voice guide's citation rules for the page's audience. |
-| A design choice ("one policy engine per box, because...") | `docs/design/decisions.md` | A link to the decision anchor |
-| A build, test, release, or debug step and its prerequisites | The script, workflow, or configuration that implements the step, and tests for its behavior claims | The command, prerequisites, and expected result. Name source paths and tests when the contributor needs them. |
-| A failure's cause or a prerequisite's reason | The code or tooling that enforces it | Explain the cause and the action it requires; a design decision link is needed only for a design choice. |
+| A behavior ("the workload cannot read the box directory") | The code, and the test that pins it | None. The test must exist, and the page does not name it. |
+| A reason ("one policy engine per box, because...") | `docs/design/decisions.md` | A link to the decision anchor |
 | A `box.toml` key, its type, or its default | The configuration parser in `crates/box/src/` | The example parses and runs |
 | A CLI verb, flag, or exit code | The argument parser in `crates/box/src/` | The command runs and gives the stated output |
 | A policy action or field | The schema that `strands-box policy generate-schema` prints | The example policy validates |
@@ -31,11 +29,9 @@ available.
 1. Verify against current `main` (`git show origin/main:<path>`), not the base of the branch the
    page came from. A pull request's base can be days behind, and its claims go stale with it.
 2. Read the code that implements the claim.
-3. Find the test that pins each behavior claim. Apply the
-   [voice guide's rules for the page's audience](voice-guide.md) when deciding which evidence
-   belongs on the page. If no test pins a new claim, reduce it to what a test pins or report it
-   as unpinned (Tier 3). Preserve an unresolved original claim during a wording-only edit.
-   These also count as pinned:
+3. Find the test that pins it. Do not name the test on the page, because a test name is an
+   implementation detail. If no test pins the claim, either reduce the claim to what a test pins,
+   or report it as unpinned (Tier 3). These also count as pinned:
    - a known defect pinned only by an `#[ignore]` test, for a residual-risk statement;
    - a test in a dependency that Box pins, such as the Dogwood crates, for that dependency's own
      behavior.
@@ -56,11 +52,9 @@ run the probe or the test on a hosted runner.
 
 ### Tier 3: stop and report
 
-If required evidence is missing, verification is incomplete. Report the gap before handoff.
+If you cannot verify a claim, do not ship it. Do not leave it as a to-do for a reviewer.
 
-- From `docs-writer`: omit unverified additions. For a wording-only rewrite, preserve and flag an
-  unresolved original claim. Missing evidence does not prove it is false. Correct or remove an
-  original assertion only with evidence or an explicit change to the requested scope. Report
-  the symbol and the tier that failed. Keep verification incomplete until the gap is resolved.
+- From `docs-writer`: leave out the claim or the example. Report each one beside the draft, with the
+  symbol it depends on and the tier that failed.
 - From `docs-audit`: list each one under `### Accuracy issues`, and add a recommended action to
   get the evidence.

@@ -1,39 +1,41 @@
 ---
 name: docs-reviewer
-description: Review Box drafts or rewrites in docs/user/, docs/design/, docs/dev/, or crate READMEs. Use after docs-writer, before a docs pull request, or for a requested doc review. Check style and preservation of meaning, then give a Ship it, Tighten, or Rethink verdict. Read-only.
+description: Review Box drafts in docs/user/ or docs/design/, and wording-only rewrites in docs/dev/. Use after docs-writer, before a docs pull request, or for a requested doc review. Check style and preservation of meaning, then give a Ship it, Tighten, or Rethink verdict. Read-only.
 ---
 
 # Documentation reviewer
 
 **Scope.** Whether a draft is in the right place, shaped around its subject, at the right altitude,
 easy to read, and consistent with the terminology lock, measured against
-[`voice-guide.md`](../../references/voice-guide.md). For a rewrite, also check that it preserves
-the original meaning. This comparison does not prove the original is correct. Verification against
-code and tests belongs to the writer and the `docs-audit` skill.
+[`voice-guide.md`](../../references/voice-guide.md). You don't check that a claim is *correct*
+against the code and its tests. That's the `docs-audit` skill.
+
+For a rewrite, obtain the original commit and path or saved text and the requested scope.
+Compare meaning as well as style. A wording-only review covers changed prose and preservation;
+report pre-existing issues separately. For `docs/dev/`, apply the sentence rules in Layers 4 and 5
+and preserve its structure, source and test references, and Simplified Technical English register.
+The user/design placement and citation rules do not apply to that developer-doc wording review.
 
 Readability and altitude come first. A page can pass every mechanical rule and still be a page
 nobody wants to read, and that's a fail.
 
 ## Procedure
 
-1. Read the voice guide and [terminology](../../../docs/design/terminology.md). Identify the
-   audience, content type, and scope. For a rewrite, obtain the original commit/path or saved
-   text and the writer's list of verified factual corrections. If the original is unavailable,
-   report that meaning could not be checked; the draft cannot receive "Ship it".
-2. Read the draft once straight through, as its reader would. Note where you had to reread.
-3. Run the mechanical check, and use its hits as input to dimension 4:
+Read the voice guide and [terminology](../../../docs/design/terminology.md) before reviewing.
+
+1. Read the draft once straight through, as its reader would. Note where you had to reread.
+2. Run the mechanical check, and use its hits as input to dimension 4:
 
    ```sh
    .agents/skills/docs-reviewer/check-prose.sh <draft>
    ```
 
-4. Apply every rule in Layers 4 and 5 to every paragraph. A clean script result is not a style
-   verdict. For a rewrite, compare each original assertion, qualification, and protected element
-   with the draft. Assess each reported factual correction against the evidence provided;
-   refer unresolved accuracy questions to `docs-audit`.
-5. Score each dimension below as pass, warning, or fail. Continue only when the whole draft and,
-   for rewrites, the whole comparison have been checked.
-6. Give one verdict and write the review in the output format.
+3. Classify the content type from the directory and the structure.
+4. Apply every applicable rule in Layers 4 and 5 to the prose under review, then score each
+   dimension below. For a rewrite, also compare each assertion and protected element with the
+   original. A clean script result does not prove readability or preservation.
+5. Give one verdict.
+6. Write the review in the output format.
 
 ## Dimensions
 
@@ -46,8 +48,6 @@ nobody wants to read, and that's a fail.
 - No section mixes content types. Conceptual background in a how-to guide is a finding.
 - No section exists only to fill a template slot.
 - The page doesn't do the job of `decisions.md`, `terminology.md`, or `tenets.md`.
-- Developer pages explain repository tasks; crate READMEs introduce their public interface.
-  Apply the corresponding register from the voice guide.
 
 ### 2. Altitude
 
@@ -67,8 +67,8 @@ nobody wants to read, and that's a fail.
 
 ### 4. Constraints and terminology
 
-- Apply the voice guide's concrete-word, punctuation, and formatting rules, with its content-type
-  constraints. Give a specific reason for any intentional exception.
+- Apply the voice guide's concrete-word, punctuation, and formatting rules. Use the content-type
+  constraints that apply to the page.
 - User guide: describe what is, and no "why" unless it changes the action.
 - Each word from the "do not use" column of
   [`docs/design/terminology.md`](../../../docs/design/terminology.md) is a finding. A term the lock
@@ -76,13 +76,11 @@ nobody wants to read, and that's a fail.
 
 ### 5. Claim scope
 
-- Each design choice links its decision anchor the first time it comes up, and the decision is
-  summarized, not copied. Task prerequisites and diagnostic explanations need evidence from the
-  code or tooling, but do not require a design decision entry.
+- Each reason links its decision anchor the first time it comes up, and the decision is
+  summarized, not copied. A reason with no link is a finding.
 - A claim stated more broadly than the mechanism it describes is a finding.
-- Apply the design guide's citation limits to design pages. Developer pages may name the source
-  paths, tests, and workflows needed for the task. Local drafts and explorations are not valid
-  link targets in any committed page.
+- No test name, no source file, no issue or pull request number, no `file.rs:LINE` citation, and
+  no link into `.agents/drafts/` or `.agents/explorations/`.
 
 ### 6. Examples, diagrams, and standing alone
 
@@ -95,16 +93,17 @@ nobody wants to read, and that's a fail.
 ### 7. Preservation of meaning
 
 - For a rewrite, check every original assertion and protected element against
-  [Preserve meaning](../../references/voice-guide.md#preserve-meaning).
-- Quote both versions for each change in meaning. Distinguish verified factual corrections from
-  accidental changes, including omissions. An unresolved change in meaning is a failure, however
-  readable the draft is.
-- For a new page, mark this dimension "not applicable". Claim scope and evidence still apply.
+  [Preserve meaning](../../references/voice-guide.md#preserve-meaning). Quote both versions for
+  each change in meaning, including omissions.
+- A wording-only rewrite must preserve meaning. Report suspected factual errors separately;
+  style does not establish that a claim is false.
+- If the original is unavailable or a meaning change remains unresolved, the rewrite cannot
+  receive "Ship it". For a new page, mark this dimension "not applicable".
 
 ## Verdicts
 
-**Ship it.** All applicable dimensions pass, with one minor warning at most. A rewrite must have
-a complete comparison and no unresolved change in meaning.
+**Ship it.** All applicable dimensions pass, with one minor warning at most. A rewrite also needs
+a complete comparison with the original and no unresolved change in meaning.
 
 **Tighten.** Two or more warnings, or one fail that an edit in place fixes. Typical causes: a few
 sentences that don't read aloud, detail that belongs on another page, terminology slips, or a draft
@@ -122,7 +121,7 @@ need to re-outline? In place is Tighten. Re-outline is Rethink.
 ```markdown
 ## Review: <page title>
 
-**Guide and type:** <user, design, developer, or crate README>, <type>
+**Guide and type:** <user, design, or developer guide>, <type>
 **Scope and baseline:** <new page, or rewrite scope and original commit/path>
 **Verdict:** Ship it | Tighten | Rethink
 
