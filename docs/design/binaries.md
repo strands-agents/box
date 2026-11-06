@@ -123,8 +123,15 @@ program share an alias, and no MCP server can take one of the five interpreter n
 `bin/` comes first on the agent's `PATH`, so a harness that runs `zsh` gets the alias. Tools and
 local MCP servers get neither the alias nor `bin/` on their `PATH`. The alias uses its invocation
 name to select an interpreter. For an MCP program name, it also sends the arguments. `strands-box`
-starts the server whose declared command matches that name and those arguments, or refuses the
-launch.
+starts the server whose declared command matches that name and those arguments after policy permits it.
+If a declared program has no matching command, the broker returns a distinct non-match response.
+The alias then replaces itself with the ordinary program inside the agent's sandbox.
+
+Fallback searches the agent's effective `PATH`, skipping the alias directory and links to its own
+image. It retains the arguments, working directory, composed environment, and standard streams.
+The alias reads no standard input before the routing response. It still closes inherited descriptors
+above standard error. Fallback adds no sandbox grants and receives no MCP server credentials.
+Protocol errors, ambiguous matches, and policy denials remain failures.
 
 The alias derives `run/box.sock` from its own location. The caller cannot select another socket. The
 broker in `strands-box` accepts the connection. See [an interpreter runs beside the

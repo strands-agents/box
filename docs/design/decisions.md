@@ -529,6 +529,21 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-nonmatches-retain-ordinary-agent-execution"></a>
+### MCP non-matches retain ordinary execution inside the agent sandbox
+
+An MCP alias selects ordinary execution only after the broker reports a valid command non-match,
+so a shared launcher remains usable without new agent authority.
+Refusing every non-match makes a server declaration hide unrelated calls to the same launcher.
+The cost is that a mistyped server command can run under the agent's grants without Box's MCP tool
+checks, so the broker records the declined route as `enforcement:mcp-unmatched`.
+Policy denials, ambiguous matches, and invalid routing responses do not select this path, as
+`only_a_valid_nonmatch_response_can_execute_fallback` and the admission tests check.
+The alias uses direct execution, requires a shebang for scripts, and stops on unexpected lookup
+errors; it does not acquire an implicit shell to make a program run.
+`ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets` pins the retained sandbox
+and the absence of server credentials.
+
 <a id="a-stdio-mcp-server-runs-contained"></a>
 ### Every stdio MCP server runs contained, in its own sandbox
 
