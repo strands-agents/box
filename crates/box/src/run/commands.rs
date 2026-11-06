@@ -157,6 +157,22 @@ impl ConfiguredCommand {
         self.loaded.links > 1
     }
 
+    /// Refuse a tool grammar on this command when its file has more than one name.
+    pub(crate) fn refuse_a_grammar_on_several_names(&self) -> Result<(), BoxError> {
+        if !self.has_several_names() {
+            return Ok(());
+        }
+        Err(refusal(
+            &self.table,
+            &self.path,
+            &format!(
+                "has {} names, and a tool grammar on it refuses each name that no `[tool]` \
+                 declares. Point `command` at a copy with one name",
+                self.loaded.links
+            ),
+        ))
+    }
+
     pub(crate) fn opened(&self) -> &File {
         &self.opened
     }
@@ -402,6 +418,33 @@ mod tests {
         commands
             .validate_reach("[agent]", &reach(&home, &output))
             .expect("unrelated build output stays writable");
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_a_command_with_several_names() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        program(&command);
+        let mut commands = ConfiguredCommands::load(&record(&command)).expect("commands");
+        let mut loaded = commands
+            .tools
+            .remove("reader")
+            .and_then(Arc::into_inner)
+            .expect("the command is not shared");
+        loaded
+            .refuse_a_grammar_on_several_names()
+            .expect("a command with one name takes a grammar");
+
+        loaded.loaded.links = 78;
+
+        let refusal = loaded
+            .refuse_a_grammar_on_several_names()
+            .expect_err("a command with several names takes no grammar")
+            .to_string();
+        assert!(
+            refusal.contains("has 78 names, and a tool grammar on it refuses each name"),
+            "{refusal}"
+        );
     }
 
     #[test]

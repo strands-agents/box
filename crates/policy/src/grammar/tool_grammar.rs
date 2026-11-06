@@ -101,6 +101,25 @@ impl ToolGrammars {
     pub(crate) fn schemas(&self) -> Vec<String> {
         self.iter().map(|tool| tool.grammar.schema()).collect()
     }
+
+    /// The canonical action schema with the actions of each grammar and of each `(server,
+    /// schema)` pair in `generated`, as [`compose_action_schema`](crate::compose_action_schema)
+    /// composes it.
+    pub fn compose_action_schema(
+        &self,
+        generated: &[(&str, &str)],
+    ) -> Result<String, crate::McpSchemaError> {
+        crate::mcp_schema::validate_mcp_schema_composition(generated)?;
+        let fragments = generated
+            .iter()
+            .map(|(_, source)| (*source).to_string())
+            .collect::<Vec<_>>();
+        crate::schema::composed_action_schema(&self.schemas(), &fragments)
+            .map(|schema| schema.source)
+            .map_err(|source| crate::McpSchemaError::Composition {
+                reason: source.to_string(),
+            })
+    }
 }
 
 #[cfg(test)]

@@ -589,16 +589,7 @@ fn lower_type(ty: &serde_json::Value) -> Option<serde_json::Value> {
 
 /// Compose the canonical action schema with ordered generated MCP schemas.
 pub fn compose_action_schema(generated: &[(&str, &str)]) -> Result<String, McpSchemaError> {
-    validate_mcp_schema_composition(generated)?;
-    let fragments = generated
-        .iter()
-        .map(|(_, source)| (*source).to_string())
-        .collect::<Vec<_>>();
-    crate::schema::action_schema(&fragments)
-        .map(|schema| schema.source)
-        .map_err(|source| McpSchemaError::Composition {
-            reason: source.to_string(),
-        })
+    crate::ToolGrammars::default().compose_action_schema(generated)
 }
 
 fn make_unsupported_schema_references_opaque(tools_list: &str) -> Cow<'_, str> {

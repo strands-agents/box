@@ -42,8 +42,8 @@ There are two verbs. The caller that created `box_dir` owns its lifecycle: it ho
 stops a box by ending the `run` process and deletes one by removing the directory.
 
 `policy generate-schema` reads the MCP servers that `--config` declares and requests each one's tool
-descriptions. It writes `actions.cedarschema`, with the Box action schema and each generated server
-schema, and `events.dwschema`, with the event kinds available to temporal policy, into
+descriptions. It writes `actions.cedarschema`, with the Box action schema, the actions of each tool
+grammar the configuration installs, and each generated server schema, and `events.dwschema`, with the event kinds available to temporal policy, into
 `--output-dir`. A configuration with zero declared servers receives both canonical files. It starts
 each `stdio` server outside containment, from the trusted process, which `run` never does. Runtime
 policy staging uses live server discovery.
@@ -105,8 +105,8 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 | `filesystem` | The direct reach of this process's own filesystem calls |
 | `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
 
-`tool_grammars.rs` pins the `tool-grammars` switch, the startup warning for each grammar, and the
-startup refusals.
+`tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
+that decides a spawn of a bound program.
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

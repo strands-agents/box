@@ -274,8 +274,10 @@ interpreters are part of the code the operator must trust.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
-   Rules on experimental tool grammar actions load but cannot take effect yet.
-   `run` prints a warning for each grammar.
+   Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
+   using the file identity opened by the run. It declares each stdio `[mcp.<name>]` program.
+   For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
+   Rules for `shell:spawn` do not apply to those programs.
 5. It resolves bound secrets and starts the gateway with its own certificate authority.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.

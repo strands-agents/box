@@ -154,7 +154,9 @@ A record whose cause is `internal_fault` also carries the key `error.type`, with
 `strands.box.policy.evaluation_error`.
 
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
-`Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it.
+`Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it. A spawn
+that a tool grammar decides reports the grammar action, so `Tool::git::Action::"push"` reads as the
+action `push` in the category `Tool::git`.
 
 Two keys are excluded: `url.full` and `process.command_line`.
 

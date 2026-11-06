@@ -269,6 +269,11 @@ The inert-rule check sorts each rule into one of three classes:
   destination or belong to the other address family, and `ip6` patterns with a dotted quad outside
   the `::ffff:` form. Two rules cannot share an `@id`. A cap written as a `permit` beside an
   unconditional `permit` for the same action is also refused, because it cannot narrow that permit.
+  Box also refuses a temporal predicate that names an action group, such as
+  `Tool::git::Action::"*"`, because history records individual member actions and never the group.
+  A rule waiting for an MCP server's schema goes through the same checks when Box stages the schema.
+  If the rule is provably inert, Box refuses the schema. Holding the rule for a later schema cannot
+  make it match.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and prevents a rule from
   loading without effect. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has
@@ -280,6 +285,11 @@ The inert-rule check sorts each rule into one of three classes:
   and a `has`-guarded read of `context.output` outside a `when temporal` clause.
 
 A refusal names the rule and says what to write instead.
+
+When a tool grammar binds a program, each spawn of it enters history as its grammar action and not as
+`shell:spawn`. A spawn that the binding refuses before any rule decides it, such as a bound file
+called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so a rule
+that counts attempts still sees it.
 
 ## Residual risk
 
