@@ -70,6 +70,21 @@ impl ConfiguredCommands {
                     return Err(refusal(&table, &path, "must be a regular file"));
                 }
                 let loaded = FileState::of(&metadata);
+                let identity = (metadata.dev(), metadata.ino());
+                if loaded.links > 1
+                    && writable_by_this_user(&opened, &path, loaded)
+                    && !every_name_beside(&path, identity, loaded.links)
+                {
+                    return Err(refusal(
+                        &table,
+                        &path,
+                        &format!(
+                            "has {} hard links, a name outside its own folder, and the user that \
+                             runs Box may be able to write it. Use a copy with one hard link",
+                            loaded.links
+                        ),
+                    ));
+                }
                 let invoked = resolved.invoked().to_path_buf();
                 let mut routes = vec![invoked.clone()];
                 let authored = Path::new(spec.program());
@@ -157,6 +172,8 @@ impl ConfiguredCommand {
                 now.links == 1
             } else {
                 now == self.loaded
+                    && (!writable_by_this_user(&self.opened, &self.path, now)
+                        || every_name_beside(&self.path, self.identity, now.links))
             }
         });
         if unchanged_names
@@ -188,8 +205,30 @@ impl ConfiguredCommand {
     }
 }
 
+/// Whether the folder of `path` holds all `links` names of the file `identity`, so no name lies elsewhere.
+fn every_name_beside(path: &Path, identity: (u64, u64), links: u64) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    let mut names = 0_u64;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if std::fs::symlink_metadata(entry.path())
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+        {
+            names += 1;
+        }
+    }
+    names == links
+}
+
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
-#[cfg_attr(not(test), expect(dead_code))]
 fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
     // SAFETY: these calls read the process credentials without changing them.
     let users = unsafe { [libc::getuid(), libc::geteuid()] };
@@ -203,7 +242,6 @@ fn writable_by_this_user(opened: &File, path: &Path, state: FileState) -> bool {
 
 /// Whether a file in `state` may change through some name, for the real and effective `users`, the
 /// kernel's answer to a write check, and whether the file may carry an access-control list.
-#[cfg_attr(not(test), expect(dead_code))]
 fn may_change(
     state: FileState,
     users: [u32; 2],
@@ -236,7 +274,6 @@ const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
 
 /// Whether `opened` may carry an access-control list, which can grant a write that its mode does not.
 #[cfg(target_os = "macos")]
-#[cfg_attr(not(test), expect(dead_code))]
 fn may_carry_access_list(opened: &File) -> bool {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the descriptor is live for the call.
@@ -250,13 +287,11 @@ fn may_carry_access_list(opened: &File) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-#[cfg_attr(not(test), expect(dead_code))]
 fn may_carry_access_list(_opened: &File) -> bool {
     true
 }
 
 #[cfg(target_os = "linux")]
-#[cfg_attr(not(test), expect(dead_code))]
 fn write_access(opened: &File, _path: &Path) -> std::io::Result<()> {
     use std::os::fd::AsRawFd as _;
     // SAFETY: the descriptor is live, and the empty path is a terminated string.
@@ -277,7 +312,6 @@ fn write_access(opened: &File, _path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[cfg_attr(not(test), expect(dead_code))]
 fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
     let spelled = std::ffi::CString::new(path.as_os_str().as_bytes())
@@ -400,14 +434,48 @@ mod tests {
     }
 
     #[test]
-    fn configured_commands_load_hard_links_this_user_can_write() {
+    fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        program(&command);
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&command, directory.path().join("elsewhere/alias")).expect("hard link");
+        let error = ConfiguredCommands::load(&record(&command))
+            .expect_err("an unseen writable alias cannot be protected")
+            .to_string();
+        assert!(
+            error.contains(
+                "has 2 hard links, a name outside its own folder, and the user that runs Box may \
+                 be able to write it"
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A writable command whose names all share its folder loads**, as rustup's proxies in
+    /// `~/.cargo/bin` and npm's `bun.exe` and `bunx.exe` do, and launch refuses a name added elsewhere.
+    #[test]
+    fn a_writable_command_whose_names_share_its_folder_loads_and_refuses_a_name_added_elsewhere() {
         let directory = tempfile::tempdir().expect("directory");
         let command = directory.path().join("reader");
         program(&command);
         std::fs::hard_link(&command, directory.path().join("alias")).expect("hard link");
         let commands = ConfiguredCommands::load(&record(&command))
-            .unwrap_or_else(|error| panic!("a writable command with two names: {error}"));
-        assert!(commands.get("reader").expect("loaded").has_several_names());
+            .unwrap_or_else(|error| panic!("two names in one folder: {error}"));
+        let loaded = commands.get("reader").expect("loaded");
+        assert!(loaded.has_several_names());
+        loaded.verify().expect("an unchanged command launches");
+        std::fs::remove_file(directory.path().join("alias")).expect("drop the second name");
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&command, directory.path().join("elsewhere/alias")).expect("hard link");
+        let error = loaded
+            .verify()
+            .expect_err("a name outside the folder")
+            .to_string();
+        assert!(
+            error.contains("changed after this run loaded it"),
+            "{error}"
+        );
     }
 
     /// A root-owned regular file in a system folder with several names and no group or other write.
@@ -721,10 +789,16 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let owned = directory.path().join("reader");
         program(&owned);
-        std::fs::hard_link(&owned, directory.path().join("alias")).expect("hard link");
-        loaded_as(&owned, None)
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&owned, directory.path().join("elsewhere/alias")).expect("hard link");
+        let error = loaded_as(&owned, None)
             .verify()
-            .expect("an unchanged file this user can write launches");
+            .expect_err("a file this user can write")
+            .to_string();
+        assert!(
+            error.contains("changed after this run loaded it"),
+            "{error}"
+        );
     }
 
     #[test]
