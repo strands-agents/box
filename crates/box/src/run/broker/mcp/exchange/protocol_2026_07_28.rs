@@ -1,6 +1,6 @@
 //! Admission and reply bookkeeping for modern MCP requests.
 
-use super::super::modern::{self, ModernReply, ModernRequest};
+use super::super::protocol_2026_07_28::{self, ModernReply, ModernRequest};
 use super::*;
 
 pub(super) async fn handle_request(
@@ -45,7 +45,7 @@ pub(super) async fn handle_request(
     if exchange.connection.in_flight.contains(&key) {
         return refuse_reused_id(exchange, Some(&id)).await;
     }
-    if exchange.connection.modern_requests.len() >= modern::MAXIMUM_PENDING {
+    if exchange.connection.modern_requests.len() >= protocol_2026_07_28::MAXIMUM_PENDING {
         return refuse(
             exchange,
             request,
@@ -171,7 +171,7 @@ pub(super) fn accept_reply(
             }
         }
         ModernReply::InputRequired(inputs) => {
-            if exchange.connection.pending_inputs.len() >= modern::MAXIMUM_PENDING {
+            if exchange.connection.pending_inputs.len() >= protocol_2026_07_28::MAXIMUM_PENDING {
                 return Err(invalid_data("too many pending MCP input requests"));
             }
             if let Some(previous) = exchange.connection.pending_inputs.get(&inputs.key)

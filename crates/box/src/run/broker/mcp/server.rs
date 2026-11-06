@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt as _;
 
-use super::modern::{self, ModernReply, ModernRequest};
+use super::protocol_2026_07_28::{self, ModernReply, ModernRequest};
 use crate::record::config::mcp::McpServer;
 
 /// The MCP protocol version the offline `tools/list` client requests.
@@ -164,7 +164,7 @@ async fn list_tools_before_deadline(
             .as_ref()
             .map_or_else(|| json!({}), |cursor| json!({ "cursor": cursor }));
         if modern {
-            params["_meta"] = modern::request_meta();
+            params["_meta"] = protocol_2026_07_28::request_meta();
         }
         let request = json!({
             "jsonrpc": "2.0", "id": request_id, "method": "tools/list", "params": params
@@ -288,7 +288,7 @@ async fn probe_modern(
 ) -> io::Result<bool> {
     let request = json!({
         "jsonrpc": "2.0", "id": 0, "method": "server/discover",
-        "params": {"_meta": modern::request_meta()}
+        "params": {"_meta": protocol_2026_07_28::request_meta()}
     });
     send_json(running, &request).await?;
     let deadline = Instant::now() + MCP_BROKER_IO_TIMEOUT;
@@ -850,7 +850,7 @@ impl Drop for RunningMcpServer {
 
 #[cfg(test)]
 mod tests {
-    mod modern_tests;
+    mod protocol_2026_07_28;
 
     use super::*;
 

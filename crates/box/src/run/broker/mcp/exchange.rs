@@ -25,7 +25,7 @@ use super::server::{
 };
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
 
-mod modern_exchange;
+mod protocol_2026_07_28;
 
 /// How long an MCP caller can wait to enter the exchange input queue.
 pub(super) const MCP_INPUT_SEND_TIMEOUT: std::time::Duration =
@@ -131,9 +131,10 @@ struct McpConnection {
     lists: BTreeMap<String, PendingList>,
     /// Server requests forwarded to the client, by id, with the method each one asked.
     server_requests: BTreeMap<String, String>,
-    modern_requests: BTreeMap<String, super::modern::ModernRequest>,
+    modern_requests: BTreeMap<String, super::protocol_2026_07_28::ModernRequest>,
     cancelled: std::collections::BTreeSet<String>,
-    pending_inputs: BTreeMap<super::modern::InputKey, super::modern::PendingInputs>,
+    pending_inputs:
+        BTreeMap<super::protocol_2026_07_28::InputKey, super::protocol_2026_07_28::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
     policy: Arc<PolicyEngine>,
@@ -623,21 +624,21 @@ async fn handle_client_frame(
             let notification = method.starts_with("notifications/") && request.get("id").is_none();
             if !notification
                 && (exchange.connection.phase == McpConnectionPhase::Modern
-                    || super::modern::carries_metadata(&request)
+                    || super::protocol_2026_07_28::carries_metadata(&request)
                     || method == "server/discover")
             {
-                return modern_exchange::handle_request(
+                return protocol_2026_07_28::handle_request(
                     &text, &request, exchange, policy, governed,
                 )
                 .await;
             }
-            if super::modern::carries_inputs(&request) {
+            if super::protocol_2026_07_28::carries_inputs(&request) {
                 return Err(invalid_data(
                     "only modern MCP requests can carry input answers",
                 ));
             }
             if notification {
-                modern_exchange::cancel_request(&request, exchange)?;
+                protocol_2026_07_28::cancel_request(&request, exchange)?;
             }
             if method == "tools/list" {
                 if exchange.connection.phase != McpConnectionPhase::Active {
@@ -1071,7 +1072,7 @@ async fn forward_server_frame(
         exchange.connection.modern_requests.remove(&key);
         return Ok(ProgramAction::Continue);
     }
-    let terminal = match modern_exchange::accept_reply(&key, &response, exchange) {
+    let terminal = match protocol_2026_07_28::accept_reply(&key, &response, exchange) {
         Ok(terminal) => terminal,
         Err(error) => {
             if exchange.connection.lists.remove(&key).is_some() {
@@ -1177,7 +1178,7 @@ async fn emit_list_failure(
 
 #[cfg(test)]
 mod tests {
-    mod modern_tests;
+    mod protocol_2026_07_28;
 
     use std::path::{Path, PathBuf};
     use std::time::Duration;
