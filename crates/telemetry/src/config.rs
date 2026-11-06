@@ -250,6 +250,7 @@ impl Target {
 pub struct TelemetryConfig {
     box_name: String,
     targets: Vec<Target>,
+    reports_failures: bool,
 }
 
 impl TelemetryConfig {
@@ -259,7 +260,16 @@ impl TelemetryConfig {
         Self {
             box_name: box_name.into(),
             targets: Vec::new(),
+            reports_failures: false,
         }
+    }
+
+    /// Print each failed batch to stderr with its full cause. Without this, a failed batch is only
+    /// counted.
+    #[must_use]
+    pub fn reporting_failures(mut self) -> Self {
+        self.reports_failures = true;
+        self
     }
 
     /// Add a declared target.
@@ -275,6 +285,10 @@ impl TelemetryConfig {
 
     pub(crate) fn targets(&self) -> &[Target] {
         &self.targets
+    }
+
+    pub(crate) fn reports_failures(&self) -> bool {
+        self.reports_failures
     }
 
     /// Refuse a config no run could honour. The one owner of every rule about a target.

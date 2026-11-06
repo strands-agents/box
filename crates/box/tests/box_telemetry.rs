@@ -14,6 +14,10 @@
 //! | The agent holds the endpoint and never the secret | `the_agent_holds_the_endpoint_and_never_the_vendor_secret` |
 //! | With `trace`, a span is kept and cannot forge a record | `at_trace_an_agent_span_is_kept_and_cannot_claim_the_boxs_namespace` |
 //! | Without `trace`, a span is answered and discarded | `below_trace_an_agent_span_is_answered_and_discarded` |
+//! | A vendor kind sends where the vendor takes it | `a_langfuse_kind_sends_spans_where_langfuse_takes_them` |
+//! | The debug variable prints a failed export and its cause | `the_debug_variable_prints_a_failed_export_and_its_cause` |
+//! | An `aws://` profile that cannot sign stops the run | `a_telemetry_profile_that_cannot_sign_stops_the_run` |
+//! | A `credsd://` environment with no daemon stops the run | `a_telemetry_credsd_environment_without_a_daemon_stops_the_run` |
 //!
 //! **A probe of the workload's own environment must not go through the `zsh` alias.** That alias
 //! reaches the hosted Shell, which has its own synthesized environment, so `zsh -c 'env'` reports
@@ -1710,5 +1714,188 @@ fn below_trace_an_agent_span_is_answered_and_discarded() {
     assert!(
         !text.contains("agent-work"),
         "a debug target must keep no agent span: {text}"
+    );
+}
+
+/// **A `langfuse` kind sends spans where Langfuse takes them**: its path, its ingestion header, and
+/// Basic auth. The operator writes only the base address and the key.
+#[test]
+fn a_langfuse_kind_sends_spans_where_langfuse_takes_them() {
+    use base64::Engine as _;
+
+    needs_a_box!("a_langfuse_kind_sends_spans_where_langfuse_takes_them");
+    let (port, receiver) = stand_in_endpoint();
+    let configured = Request::with_config(
+        "telemetry-langfuse-kind",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.langfuse]\nkind = \"langfuse\"\n\
+             destination = \"http://127.0.0.1:{port}\"\n\
+             secret.ref = \"env://LANGFUSE_AUTH\"\n"
+        ),
+    )
+    .env("LANGFUSE_AUTH", "pk-lf-kind:sk-lf-kind")
+    .expect();
+    assert!(configured.bash("zsh -c 'true'").status.success());
+
+    let received = received_until_a_verdict(&receiver);
+    assert!(
+        received
+            .iter()
+            .any(|(_, body)| String::from_utf8_lossy(body).contains("strands.box.policy.verdict")),
+        "no span carried a verdict, across {} received",
+        received.len()
+    );
+    let expected = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("pk-lf-kind:sk-lf-kind")
+    );
+    for (head, _) in &received {
+        let line = head.lines().next().unwrap_or("");
+        assert!(
+            line.starts_with("POST /api/public/otel/v1/traces "),
+            "the kind sends only spans, on Langfuse's path: {line}"
+        );
+        assert_eq!(
+            header_in(head, "authorization"),
+            Some(expected.as_str()),
+            "{head}"
+        );
+        assert_eq!(header_in(head, "x-langfuse-ingestion-version"), Some("4"));
+    }
+}
+
+/// A stand-in OTLP endpoint that refuses every request with `500` and a body that names itself.
+fn refusing_endpoint() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a stand-in endpoint");
+    let port = listener.local_addr().expect("its port").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(64) {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).ok();
+            let answer = "the stand-in refused this batch";
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: {}\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    port
+}
+
+/// **`STRANDS_BOX_TELEMETRY_DEBUG` prints each failed export and the endpoint's answer**, and
+/// without it a failed export is only counted.
+#[test]
+fn the_debug_variable_prints_a_failed_export_and_its_cause() {
+    needs_a_box!("the_debug_variable_prints_a_failed_export_and_its_cause");
+    for (name, debug) in [("telemetry-debug-on", true), ("telemetry-debug-off", false)] {
+        let port = refusing_endpoint();
+        let mut request = Request::with_config(
+            name,
+            READ_ONE_FILE,
+            &format!(
+                "[telemetry.refusing]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:{port}\"\n"
+            ),
+        );
+        if debug {
+            request = request.env("STRANDS_BOX_TELEMETRY_DEBUG", "1");
+        }
+        let (_, output) = request.attempt();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "a failed export is not the box's failure: {stderr}"
+        );
+        // The per-failure line and the endpoint's answer are the variable's own output. The drain's
+        // one summary line is not, so it prints with or without the variable.
+        let reported = stderr.contains("strands-box: telemetry export failed:")
+            && stderr.contains("the stand-in refused this batch");
+        assert_eq!(
+            reported, debug,
+            "the failure line and the answer appear only with the variable set: {stderr}"
+        );
+        assert_eq!(
+            stderr
+                .matches("strands-box: warning: telemetry records were lost:")
+                .count(),
+            1,
+            "the drain reports the loss once, with or without the variable: {stderr}"
+        );
+    }
+}
+
+/// **A telemetry `aws://` profile that cannot sign stops the run before the workload starts**,
+/// rather than dropping every batch after it does.
+#[test]
+fn a_telemetry_profile_that_cannot_sign_stops_the_run() {
+    needs_a_box!("a_telemetry_profile_that_cannot_sign_stops_the_run");
+    let missing = tempfile::tempdir().expect("tempdir");
+    let (_, output) = Request::with_config(
+        "telemetry-unsigned",
+        READ_ONE_FILE,
+        "[telemetry.cloudwatch]\nkind = \"cloudwatch_logs\"\nregion = \"us-west-2\"\n\
+         log_group = \"box\"\nlog_stream = \"e2e\"\nsecret.ref = \"aws://box-e2e-missing\"\n",
+    )
+    .env(
+        "AWS_SHARED_CREDENTIALS_FILE",
+        &missing.path().join("credentials").to_string_lossy(),
+    )
+    .env(
+        "AWS_CONFIG_FILE",
+        &missing.path().join("config").to_string_lossy(),
+    )
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the run must refuse: {stderr}");
+    assert!(
+        stderr.contains("cloudwatch") && stderr.contains("cannot sign"),
+        "the refusal names the target and the reason: {stderr}"
+    );
+    assert!(
+        !stderr.contains("starting workload"),
+        "the workload never starts: {stderr}"
+    );
+}
+
+/// **A telemetry `credsd://` environment with no daemon stops the run before the workload starts.**
+#[test]
+fn a_telemetry_credsd_environment_without_a_daemon_stops_the_run() {
+    needs_a_box!("a_telemetry_credsd_environment_without_a_daemon_stops_the_run");
+    let missing = tempfile::tempdir().expect("tempdir");
+    let (_, output) = Request::with_config(
+        "telemetry-no-daemon",
+        READ_ONE_FILE,
+        "[telemetry.xray]\nkind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\n\
+         secret.ref = \"credsd://box-e2e\"\n",
+    )
+    .env(
+        "CREDSD_SOCKET",
+        &missing.path().join("credsd.sock").to_string_lossy(),
+    )
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the run must refuse: {stderr}");
+    assert!(
+        stderr.contains("credsd"),
+        "the refusal names the daemon: {stderr}"
+    );
+    assert!(
+        !stderr.contains("starting workload"),
+        "the workload never starts: {stderr}"
     );
 }
