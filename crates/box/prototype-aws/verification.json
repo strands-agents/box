@@ -1,0 +1,118 @@
+{
+  "verified_at_utc": "2026-10-30T19:18:50.507693+00:00",
+  "platform": "Linux aarch64",
+  "base_commit": "7cf6bad7728410c6c28cd7bebd802ff2e18af7ee",
+  "parent_commit": "cd8e1291874dc8b6a8d3ccb07bc18c39228ac278",
+  "branch": "prototype/aws-credential-sources",
+  "status": "Shared SDK provider revision, checked before commit",
+  "build": "cargo build -p strands-box --all-features --bins --locked; passed",
+  "sdk": {
+    "aws-config": "1.13.0",
+    "features": [
+      "rt-tokio",
+      "credentials-process",
+      "sso"
+    ],
+    "http_tls": "aws-smithy-http-client with rustls-ring",
+    "new_dependencies_in_this_revision": false
+  },
+  "smoke": [
+    {
+      "case": "chain-env",
+      "runs": [
+        {
+          "source": "chain",
+          "exit": 0,
+          "both_sts_requests_200": true
+        }
+      ]
+    },
+    {
+      "case": "chain-profile",
+      "runs": [
+        {
+          "source": "chain",
+          "exit": 0,
+          "both_sts_requests_200": true
+        }
+      ]
+    },
+    {
+      "case": "explicit-conflicting-env",
+      "runs": [
+        {
+          "source": "profile",
+          "exit": 0,
+          "both_sts_requests_200": true
+        }
+      ]
+    },
+    {
+      "case": "container",
+      "runs": [
+        {
+          "source": "chain",
+          "exit": 0,
+          "both_sts_requests_200": true
+        }
+      ],
+      "source_detail": "SDK container provider through a loopback fixture, real STS signatures",
+      "container_provider_requests": 3
+    }
+  ],
+  "tests": [
+    {
+      "command": "cargo test -p strands-box-credentials --all-features --locked",
+      "unit_passed": 207,
+      "integration_passed": 27
+    },
+    {
+      "command": "cargo clippy -p strands-box-credentials --all-targets --all-features --locked -- -D warnings",
+      "passed": true
+    },
+    {
+      "check": "scoped rustfmt, Python syntax, git diff --check",
+      "passed": true
+    }
+  ],
+  "sdk_profile_checks": [
+    "Explicit static profile overrides AWS_PROFILE and exported keys",
+    "Missing and incomplete profiles do not fall back",
+    "Invalid role and SSO profiles do not resolve as their source or ambient identity",
+    "SDK credential_process runs on both requests",
+    "Helper failure is refused without exposing stderr",
+    "Default chain prefers exported credentials"
+  ],
+  "removed": [
+    "Custom credential_process runner",
+    "Custom profile-file parser",
+    "Custom expiration parser"
+  ],
+  "limitations": [
+    "Full workspace tests and Box clippy were not run; prototype scope",
+    "Linux only; no ECS, EKS, EC2, or SSO deployment checks",
+    "Container provider used a loopback fixture with valid temporary credentials",
+    "STS HTTP status checked; returned identity not compared",
+    "Renewal after actual credential expiry not exercised",
+    "Both paths use SDK helpers as trusted host code with inherited environment and shell execution",
+    "No Box-specific output limit, executable pin, environment filter, or process-group cleanup",
+    "No outer credential cache; retained SDK provider state only"
+  ],
+  "source_sha256": {
+    "Cargo.lock": "3cea4f1eb4c817051b79d3e0ad4e419f17dac07447a6e02e3065cd31047ef97e",
+    "crates/credentials/Cargo.toml": "e2326e3c0ed1268c0df199fe08659fdc921f23046e7ecdddfd9f0c2c645f7efd",
+    "crates/box/src/record/config/egress.rs": "fcb5886e621a1e5756baef0ec66b2aaad57537520f48578c64e6fd66c51b6d8b",
+    "crates/credentials/src/legs.rs": "18615b1c49a72e7cb94b10119b19ee70d815f75f698f72f47d29b729396a2f83",
+    "crates/credentials/src/sources/aws.rs": "80851ea40f2569e6962131506bdd3702bd88d921ba3821cc9b2ea7d01d9b640f",
+    "crates/credentials/src/sources/mod.rs": "524492be40fdc21a759ceda587bfaddaa9d3f67e414108ea8e4919eeab8ef3dd",
+    "crates/credentials/src/sources/prototype_aws_sdk.rs": "b03b7487936ab1089e34cfb93ddd2720ea404d055a1c40a2c321a97f2c4b6554",
+    "crates/credentials/src/sources/aws_sdk_tests.rs": "a82f93982ecee06a371e34726970059947ad267c5485386cb7f493a7434d3710",
+    "crates/credentials/src/vault.rs": "b210748db355015734ce0eb45b8c51206d32cef7879fc84a2d4989a0d9358fa0",
+    "crates/box/prototype-aws/run.py": "44153ae78085c4ccc1b9fb84e2ea29b23bb811053b923ee8ea255df817cb5e2f"
+  },
+  "binary_sha256": {
+    "strands-box": "c53ae33702e788cc900490c335c641cf36a783dc92295bf4a9783c4248547ba2",
+    "box-egress-probe": "a040eed90c9047b8f32071af1171ab12b0b010bd6e8d1280793a3bdea703eb64",
+    "strands-box-contain-trampoline": "d3b1584ac535179a8390de3357eddfa995dd127f6d67fbfd416051c86386e703"
+  }
+}

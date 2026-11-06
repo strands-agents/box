@@ -462,24 +462,6 @@ trait AwsCredentialProvider: Send + Sync {
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials>;
 }
 
-/// The default provider: the ambient `AWS_*` environment, or the operator's named profile.
-///
-/// **It delegates rather than replacing, so ambient behaviour is unchanged.** With no profile it is
-/// `EnvAwsProvider` exactly. With one it resolves the operator's AWS configuration, which
-/// `EnvAwsProvider` refuses to do — correctly, since it cannot honour a named identity and must not
-/// substitute another. That refusal left `aws://<profile>` with no provider at all, so every such
-/// route failed at its first request.
-struct DefaultAwsProvider;
-
-impl AwsCredentialProvider for DefaultAwsProvider {
-    fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
-        match profile {
-            None => EnvAwsProvider.provide(None),
-            Some(profile) => crate::sources::aws_profile::resolve_profile(profile),
-        }
-    }
-}
-
 /// The v1 default provider: reads the ambient `AWS_*` environment credentials **synchronously**.
 struct EnvAwsProvider;
 
@@ -525,6 +507,8 @@ impl AwsCredentialProvider for EnvAwsProvider {
 pub(crate) struct AwsSource {
     provider: Box<dyn AwsCredentialProvider>,
     ambient_policy: AmbientFallbackPolicy,
+    profiles: std::collections::BTreeMap<String, super::prototype_aws_sdk::SdkCredentials>,
+    chain: Option<super::prototype_aws_sdk::SdkCredentials>,
 }
 
 impl AwsSource {
@@ -538,8 +522,10 @@ impl AwsSource {
     /// ambient-fallback `policy`.
     pub(crate) fn with_policy(policy: AmbientFallbackPolicy) -> Self {
         Self {
-            provider: Box::new(DefaultAwsProvider),
+            provider: Box::new(EnvAwsProvider),
             ambient_policy: policy,
+            profiles: std::collections::BTreeMap::new(),
+            chain: None,
         }
     }
 
@@ -553,11 +539,42 @@ impl AwsSource {
         Self {
             provider,
             ambient_policy: policy,
+            profiles: std::collections::BTreeMap::new(),
+            chain: None,
         }
+    }
+
+    pub(crate) fn prepare(&mut self, loc: &Locator) -> Result<()> {
+        if loc.scheme() == "aws-chain" {
+            self.check_chain(loc)?;
+            if self.chain.is_none() {
+                self.chain = Some(super::prototype_aws_sdk::SdkCredentials::open(None)?);
+            }
+            return Ok(());
+        }
+        if let Some(profile) = Self::parse_profile(loc)?
+            && !self.profiles.contains_key(&profile)
+        {
+            self.profiles.insert(
+                profile.clone(),
+                super::prototype_aws_sdk::SdkCredentials::open(Some(profile))?,
+            );
+        }
+        Ok(())
     }
 
     /// Resolve an AWS credential reference to [`AwsSessionCredentials`] material.
     pub(crate) fn resolve(&self, loc: &Locator) -> Result<AwsResolution> {
+        if loc.scheme() == "aws-chain" {
+            self.check_chain(loc)?;
+            let chain = self.chain.as_ref().ok_or_else(|| {
+                CredentialError::Credential("AWS SDK credential chain was not prepared".to_string())
+            })?;
+            return Ok(AwsResolution {
+                credentials: chain.resolve()?,
+                acquisition: AwsAcquisition::AmbientFallback,
+            });
+        }
         let profile = Self::parse_profile(loc)?;
 
         let (acquisition, provider_profile) = match &profile {
@@ -573,11 +590,34 @@ impl AwsSource {
             }
         };
 
-        let credentials = self.provider.provide(provider_profile)?;
+        let credentials = match provider_profile.and_then(|profile| self.profiles.get(profile)) {
+            Some(provider) => provider.resolve()?,
+            None => Zeroizing::new(self.provider.provide(provider_profile)?),
+        };
         Ok(AwsResolution {
-            credentials: Zeroizing::new(credentials),
+            credentials,
             acquisition,
         })
+    }
+
+    fn check_chain(&self, loc: &Locator) -> Result<()> {
+        if self.ambient_policy == AmbientFallbackPolicy::Deny {
+            return Err(CredentialError::Credential(
+                "no scoped AWS profile declared and ambient fallback is disabled".to_string(),
+            ));
+        }
+        match loc {
+            Locator::Structured(fields)
+                if fields.len() == 1
+                    && fields.get("source").map(String::as_str) == Some("aws-chain") =>
+            {
+                Ok(())
+            }
+            _ => Err(CredentialError::Credential(
+                "the AWS SDK credential chain accepts only aws-chain:// with no selector"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Extract the optional scoped `profile` from either locator form.
@@ -1051,6 +1091,24 @@ mod tests {
             AwsSource::parse_profile(&structured(&[("source", "aws")])).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn the_sdk_chain_cannot_bypass_the_scoped_profile_requirement() {
+        let mut source = AwsSource::with_policy(AmbientFallbackPolicy::Deny);
+        let locator = structured(&[("source", "aws-chain")]);
+        assert!(source.prepare(&locator).is_err());
+        assert!(source.chain.is_none());
+        assert!(source.resolve(&locator).is_err());
+    }
+
+    #[test]
+    fn the_sdk_chain_refuses_selectors_before_starting_a_provider() {
+        let mut source = AwsSource::new();
+        let locator = structured(&[("source", "aws-chain"), ("profile", "prod")]);
+        assert!(source.prepare(&locator).is_err());
+        assert!(source.chain.is_none());
+        assert!(source.resolve(&locator).is_err());
     }
 
     /// `source = "aws"` with a `profile` resolves to `Aws` material, forwards the profile to
