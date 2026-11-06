@@ -242,8 +242,8 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
-tool programs that overlap with direct writable grants. On Linux, it also refuses commands with
-multiple hard links that the operator can write. On macOS, those commands require a complete scan
+tool programs that overlap with direct writable grants. On macOS and Linux, commands with multiple
+hard links that the operator can write require a complete scan
 of every process's declared writable directories. The scan includes subdirectories excluded by
 `deny` and refuses startup if it finds another name for the command.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.

@@ -3382,13 +3382,13 @@ fn a_configured_command_cannot_be_replaced_through_the_hosted_shell() {
     configured_command_mutation_is_refused("mv", false);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_linked_configured_command_cannot_be_overwritten_through_the_hosted_shell() {
     configured_command_mutation_is_refused("cp", true);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_linked_configured_command_cannot_be_replaced_through_the_hosted_shell() {
     configured_command_mutation_is_refused("mv", true);
@@ -3484,7 +3484,7 @@ fn monty_cannot_change_a_configured_command() {
     configured_command_monty_mutations_are_refused(false);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn monty_cannot_change_a_linked_configured_command_through_either_name() {
     configured_command_monty_mutations_are_refused(true);
@@ -3510,7 +3510,7 @@ fn prepare_command_integrity_tool(request: &Request) -> std::path::PathBuf {
     command
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     if !fixture::namespace_launcher_is_usable() {
@@ -3546,7 +3546,7 @@ fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     assert_eq!(std::fs::read(alias).unwrap(), original);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn prepare_linked_command_integrity_tool(
     request: &Request,
 ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
@@ -3561,7 +3561,7 @@ fn prepare_linked_command_integrity_tool(
     (command, alias, writable)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_linked_configured_command_outside_native_write_grants_keeps_its_tool_grants() {
     use std::os::unix::fs::MetadataExt as _;
@@ -3571,7 +3571,9 @@ permit(principal, action, resource);
 forbid(principal, action == Box::Action::"fs:read", resource)
 when { context.input.path like "*/tool-only-marker" };
 "#;
-    let table = format!("{COMMAND_INTEGRITY_TOOL}\nwrite = [\"{{workspace}}/writable\"]\n");
+    let table = format!(
+        "{COMMAND_INTEGRITY_TOOL}\nread = [\"{{workspace}}/writable\"]\nwrite = [\"{{workspace}}/writable\"]\n"
+    );
     let request = Request::with_config("linked-command-grants", policy, &table)
         .without_agent_home()
         .agent_list("read", &["{workspace}/writable"])
@@ -3620,10 +3622,10 @@ zsh -lc "'{command}' '{marker}'"
     assert_eq!(after.nlink(), 2);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
-    for owner in ["agent-tree", "agent-file", "tool", "server"] {
+    for owner in ["agent-tree", "agent-file", "agent-deny", "tool", "server"] {
         let extra = match owner {
             "tool" => format!(
                 "\n[tool.writer]\ncommand = [{:?}]\n[tool.writer.filesystem]\n\
@@ -3640,7 +3642,7 @@ fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
             _ => String::new(),
         };
         let request = Request::with_config(
-            &format!("linked-command-{owner}"),
+            &format!("linked-{owner}"),
             "permit(principal, action, resource);",
             &format!("{COMMAND_INTEGRITY_TOOL}{extra}"),
         )
@@ -3648,7 +3650,13 @@ fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
         let command = prepare_command_integrity_tool(&request);
         let writable = command.parent().unwrap().join("writable");
         std::fs::create_dir(&writable).expect("the writable directory");
-        let alias = writable.join("command-hard-link");
+        let alias = if owner == "agent-deny" {
+            let nested = writable.join("nested");
+            std::fs::create_dir(&nested).expect("the denied alias directory");
+            nested.join("command-hard-link")
+        } else {
+            writable.join("command-hard-link")
+        };
         std::fs::hard_link(&command, &alias).expect("the writable command alias");
         let original = std::fs::read(&command).unwrap();
         let request = match owner {
@@ -3658,6 +3666,10 @@ fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
             "agent-file" => request
                 .agent_list("read_file", &["{workspace}/writable/command-hard-link"])
                 .agent_list("write_file", &["{workspace}/writable/command-hard-link"]),
+            "agent-deny" => request
+                .agent_list("read", &["{workspace}/writable"])
+                .agent_list("write", &["{workspace}/writable"])
+                .agent_list("deny", &["{workspace}/writable/nested"]),
             _ => request,
         };
         let (box_, _) = request.attempt();
@@ -3674,7 +3686,7 @@ fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn native_operations_cannot_import_a_command_alias_but_can_link_cache_files() {
     use std::os::unix::fs::MetadataExt as _;
@@ -3701,11 +3713,20 @@ fn native_operations_cannot_import_a_command_alias_but_can_link_cache_files() {
         r#"
 use std::{fs, io, path::PathBuf};
 fn denied(name: &str, result: io::Result<()>) {
+    let expected = if cfg!(target_os = "linux") {
+        match name {
+            "HARD_LINK" | "RENAME" | "DIRECTORY_RENAME" => io::ErrorKind::CrossesDevices,
+            "SYMLINK_WRITE" => io::ErrorKind::ReadOnlyFilesystem,
+            _ => io::ErrorKind::PermissionDenied,
+        }
+    } else {
+        io::ErrorKind::PermissionDenied
+    };
     match result {
-        Err(error) if matches!(error.raw_os_error(), Some(1 | 13)) => {
+        Err(error) if error.kind() == expected => {
             println!("{name}_REFUSED");
         }
-        other => panic!("{name} must meet a permission refusal: {other:?}"),
+        other => panic!("{name} must meet {expected:?}: {other:?}"),
     }
 }
 fn main() {
@@ -3770,7 +3791,7 @@ fn main() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn hosted_links_cannot_import_a_configured_command_alias() {
     use std::os::unix::fs::MetadataExt as _;
@@ -3877,7 +3898,7 @@ zsh -lc "'{command}' '{marker}'"
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn hosted_moves_cannot_import_a_directory_containing_a_command_alias() {
     for interpreter in ["shell", "python"] {

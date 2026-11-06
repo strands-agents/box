@@ -302,7 +302,7 @@ impl ContainmentConfig {
     /// Require one opened program file to keep its path, identity, and current link count; a backend can allow metadata and existence checks.
     ///
     /// The caller must establish that the workload cannot write through any name.
-    /// `strands-box` checks macOS writable reach or Linux ownership and access before it uses this method.
+    /// `strands-box` checks ownership and access, or scans every process's write grants, before it uses this method.
     pub fn require_command_identity(
         mut self,
         path: impl AsRef<Path>,

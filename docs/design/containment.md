@@ -474,14 +474,13 @@ execution. A hard link is another name for the same file, so writing through eit
 the command's contents. Box accepts files whose ownership and access checks rule out writes by the
 operator through every name, such as a root-owned system program.
 
-On macOS, Box can also accept a command with multiple hard links that the operator can write.
+On macOS and Linux, Box can also accept a command with multiple hard links that the operator can write.
 Before the workload starts, Box scans the declared writable directories of the agent, every tool,
 and every local MCP server, including subdirectories excluded by `deny`.
 The scan must finish without finding a hard-link name for the command. An unreadable entry or
 exceeding 100,000 entries or 128 directory levels per tree prevents startup. The command's own
 path, its symbolic-link routes, and their enclosing directories must still remain outside
-writable grants. For commands with multiple hard links, Linux requires the ownership and access
-checks to rule out writes through every name.
+writable grants.
 
 Before each launch, a command with multiple hard links must retain its link count, owner, group,
 and mode. Box also repeats the write-access check for a command admitted through ownership and
@@ -491,12 +490,17 @@ An identity check detects replacement, but an in-place overwrite keeps the same 
 Direct writable-grant refusals and the broker's mutation checks protect the program's contents.
 On macOS, Seatbelt refuses a new hard link or a rename when its source lies outside the
 process's write grants. Creating a symbolic link does not grant write access to its target.
-For commands admitted through macOS scanning, the broker inspects directories before changing
+On Linux, command paths stay on read-only mounts. Separate writable grant targets use separate bind mounts,
+even when their files share one filesystem. The kernel refuses hard links and renames across those mount boundaries.
+Native programs can create hard links within one writable mount. A write through a symbolic link still meets the target mount's restrictions.
+For commands admitted through scanning, the broker inspects directories before changing
 them. It refuses the change if a directory contains one of their hard-link names or the scan
 cannot finish within the same inspection limits.
 This protection covers the program in element 0 of `[tool.<name>] command`.
 Libraries, plugins, and scripts named only in arguments still follow their own access checks.
 The file handle does not freeze bytes against changes by other processes in the surrounding OS.
+The interactive agent retains its standard input, output, and error descriptors.
+Explicitly supplying a file or directory through those descriptors can carry access outside the sandbox view.
 
 That `shell:spawn` decision is the only policy decision a tool raises for itself. After it, the tool
 makes raw system calls, and its sandbox bounds them. No `fs:*` decision fires for a file a tool opens,
@@ -609,7 +613,7 @@ policy engine decides for the whole box
 ([the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
 Each one asks policy before it touches a file, then applies the reachable paths check.
 This check also refuses changes to configured tool programs and the installed trusted binaries,
-including changes to their enclosing paths. On macOS, it also scans directory changes for hard-link
+including changes to their enclosing paths. It also scans directory changes for hard-link
 names of commands admitted through the startup scan. Reads remain subject to policy. These checks are
 separate from the agent's own grants.
 

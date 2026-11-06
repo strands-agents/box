@@ -56,7 +56,7 @@ fn inspect(
         let metadata = entry_metadata(directory, &name)?;
         match metadata.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
-                if identities.contains(&(metadata.st_dev as u64, metadata.st_ino)) {
+                if identities.contains(&entry_identity(&metadata)) {
                     return Ok(true);
                 }
             }
@@ -111,15 +111,13 @@ fn require_unchanged(before: &Metadata, after: &Metadata) -> io::Result<()> {
 
 fn require_same_entry(entry: &libc::stat, opened: &Metadata) -> io::Result<()> {
     if (
-        entry.st_dev as u64,
-        entry.st_ino,
+        entry_identity(entry),
         entry.st_mtime,
         entry.st_mtime_nsec,
         entry.st_ctime,
         entry.st_ctime_nsec,
     ) != (
-        opened.dev(),
-        opened.ino(),
+        (opened.dev(), opened.ino()),
         opened.mtime(),
         opened.mtime_nsec(),
         opened.ctime(),
@@ -130,6 +128,14 @@ fn require_same_entry(entry: &libc::stat, opened: &Metadata) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn entry_identity(entry: &libc::stat) -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    let device = entry.st_dev as u64;
+    #[cfg(target_os = "linux")]
+    let device = entry.st_dev;
+    (device, entry.st_ino)
 }
 
 fn entry_metadata(directory: &File, name: &CStr) -> io::Result<libc::stat> {
@@ -170,9 +176,16 @@ impl DirectoryStream {
 
     fn next(&self) -> io::Result<Option<CString>> {
         loop {
-            // SAFETY: __error gives this thread's errno; the directory stream is live.
+            // SAFETY: the platform accessor gives this thread's errno; the directory stream is live.
             let entry = unsafe {
-                *libc::__error() = 0;
+                #[cfg(target_os = "macos")]
+                {
+                    *libc::__error() = 0;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    *libc::__errno_location() = 0;
+                }
                 libc::readdir(self.0.as_ptr())
             };
             if entry.is_null() {
@@ -261,6 +274,9 @@ mod tests {
     fn a_changed_directory_or_an_exhausted_budget_refuses() {
         let root = tempfile::tempdir().unwrap();
         let directory = File::open(root.path()).unwrap();
+        directory
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .unwrap();
         let before = directory.metadata().unwrap();
         std::fs::write(root.path().join("new-entry"), "ordinary").unwrap();
         assert!(

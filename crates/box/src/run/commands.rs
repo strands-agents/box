@@ -12,7 +12,7 @@ use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
 use crate::record::layout::{disk_identity, lies_within, open_without_following};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
 
 #[derive(Debug, Default)]
@@ -29,7 +29,7 @@ pub(crate) struct ConfiguredCommand {
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     needs_alias_scan: bool,
 }
 
@@ -77,7 +77,7 @@ impl ConfiguredCommands {
                 let loaded = FileState::of(&metadata);
                 let writable_links =
                     loaded.links > 1 && writable_by_this_user(&opened, &path, loaded);
-                if writable_links && !cfg!(target_os = "macos") {
+                if writable_links && !cfg!(any(target_os = "macos", target_os = "linux")) {
                     return Err(refusal(
                         &table,
                         &path,
@@ -102,7 +102,7 @@ impl ConfiguredCommands {
                     opened,
                     identity: (metadata.dev(), metadata.ino()),
                     loaded,
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     needs_alias_scan: writable_links,
                 };
                 command.verify()?;
@@ -124,7 +124,7 @@ impl ConfiguredCommands {
         if self.tools.values().any(|command| command.enclosed_by(path)) {
             return true;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let identities = self.mutable_aliases();
             if !identities.is_empty() {
@@ -161,7 +161,7 @@ impl ConfiguredCommands {
                     .into());
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if grant.scope != Scope::File {
                 let identities = self.mutable_aliases();
                 if identities.is_empty() {
@@ -188,7 +188,7 @@ impl ConfiguredCommands {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn mutable_aliases(&self) -> Vec<(u64, u64)> {
         self.tools
             .values()
@@ -221,9 +221,9 @@ impl ConfiguredCommand {
             if self.loaded.links == 1 {
                 now.links == 1
             } else {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 let protected_by_reach = self.needs_alias_scan;
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 let protected_by_reach = false;
                 now == self.loaded
                     && (protected_by_reach || !writable_by_this_user(&self.opened, &self.path, now))
@@ -463,7 +463,7 @@ mod tests {
             .expect("unrelated build output stays writable");
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
         let directory = tempfile::tempdir().expect("directory");
@@ -479,7 +479,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn linked_commands_are_admitted_only_outside_every_writable_tree() {
         let directory = tempfile::tempdir().expect("directory");
@@ -509,7 +509,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn linked_commands_refuse_metadata_and_link_count_changes_before_launch() {
         let directory = tempfile::tempdir().expect("directory");
@@ -782,7 +782,7 @@ mod tests {
                 routes: vec![path.to_path_buf()],
                 identity: (metadata.dev(), metadata.ino()),
                 loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 needs_alias_scan: false,
                 opened,
             }
