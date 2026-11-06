@@ -795,8 +795,9 @@ credential, an `env://` token or an `aws://` profile SigV4-signed over the backe
 `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it, never
 injecting the real destination credential, so the named variable need not be set. The loader refuses
 more than one backend, a destination that is not one exact host, a `url` with a query, fragment, or a
-non-`http(s)` scheme, a `credsd://` `auth`, a signed (`aws://` or `credsd://`) destination `secret`,
-and an `auth` on an `http` backend.
+non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` whose backend host yields no AWS
+service/region, a signed (`aws://` or `credsd://`) destination `secret`, and an `auth` on an `http`
+backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
 

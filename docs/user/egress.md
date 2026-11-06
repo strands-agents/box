@@ -169,6 +169,7 @@ names is refused.
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | An entry has a backend and a signed (`aws://`/`credsd://`) `secret` | A re-routed destination secret is phantom-only, so it must be `env://`. |
 | A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
+| A `backends.auth` uses `aws://`, but no AWS service/region can be derived from the backend host | An `aws://` auth signs over the backend host. Name an AWS backend host (such as a `*.gateway.bedrock-agentcore.<region>.amazonaws.com` gateway), or use an `env://` token. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |

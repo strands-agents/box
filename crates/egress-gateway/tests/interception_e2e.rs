@@ -40,7 +40,7 @@ use egress_gateway::{
     EffectInterceptor, EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, StubEmitter,
 };
 
-use harness::{TlsUpstream, WorkloadClient};
+use harness::{SeenRequest, TlsUpstream, WorkloadClient};
 
 // ============================================================================================
 // The PDP stand-in: authorization arrives ONLY through the EffectInterceptor seam
@@ -175,6 +175,70 @@ fn backend_store(host: &str, port: u16, backend_secret: &'static str) -> Arc<Vau
 /// carry the exact port — the matcher's default web-port inference only covers 443/80).
 fn pat(host: &str, port: u16) -> DestinationPattern {
     DestinationPattern::parse(&format!("{host}:{port}")).unwrap()
+}
+
+/// Independently recompute the SigV4 signature over the request `seen` received — a separate
+/// implementation from the box's signer (`ring` HMAC/SHA-256) — so a test can assert the box signed
+/// exactly those bytes (the backend `Host`, the forwarded path, and the body). `credential` and
+/// `signed_headers` are the values parsed from the box's `Authorization`.
+fn recompute_sigv4(
+    seen: &SeenRequest,
+    secret: &str,
+    credential: &str,
+    signed_headers: &str,
+    body: &[u8],
+) -> String {
+    use ring::{digest, hmac};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn sha256_hex(data: &[u8]) -> String {
+        hex(digest::digest(&digest::SHA256, data).as_ref())
+    }
+    fn sign(key: &[u8], data: &[u8]) -> Vec<u8> {
+        hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), data)
+            .as_ref()
+            .to_vec()
+    }
+
+    // The request line the upstream received: "METHOD TARGET HTTP/1.1".
+    let mut line = seen.raw.lines().next().expect("a request line").split(' ');
+    let method = line.next().expect("a method");
+    let target = line.next().expect("a target");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+    // scope = date/region/service/aws4_request (everything after the access-key id).
+    let scope = credential.split_once('/').expect("a credential scope").1;
+    let mut scope_parts = scope.split('/');
+    let date = scope_parts.next().expect("a date");
+    let region = scope_parts.next().expect("a region");
+    let service = scope_parts.next().expect("a service");
+    let amz_date = seen.header("x-amz-date").expect("an x-amz-date");
+
+    // Canonical headers over the signed header names, sorted, as `name:trimmed-value\n`.
+    let mut names: Vec<&str> = signed_headers.split(';').collect();
+    names.sort_unstable();
+    let canonical_headers: String = names
+        .iter()
+        .map(|name| format!("{name}:{}\n", seen.header(name).unwrap_or_default()))
+        .collect();
+    let signed = names.join(";");
+
+    let canonical_request = format!(
+        "{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{}",
+        sha256_hex(body)
+    );
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let k_date = sign(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    let k_region = sign(&k_date, region.as_bytes());
+    let k_service = sign(&k_region, service.as_bytes());
+    let k_signing = sign(&k_service, b"aws4_request");
+    hex(&sign(&k_signing, string_to_sign.as_bytes()))
 }
 
 /// The proxy's TCP port. Every scenario in this file drives the default TCP transport, so
@@ -449,39 +513,31 @@ fn a_backend_aws_auth_signs_over_the_backend_host() {
         !seen.raw.contains("wJalrXUtnFEMI"),
         "the secret key never reaches the wire"
     );
-    // The signature is computed over the bytes the backend receives, not a fixed value: a request
-    // differing only in the forwarded path produces a different signature. (The scope above already
-    // ties it to the backend host; this ties it to the forwarded request.)
-    let signature = |authz: &str| {
+    // The main claim: the signature is a VALID SigV4 over exactly the bytes the backend received —
+    // the backend `Host`, the prefixed `/github/zen` path, and the body. Independently recompute it
+    // (a separate SigV4 implementation using `ring`) over the received request with the known test
+    // secret, and assert it equals the signature the box produced. This fails if the box signed a
+    // different path (e.g. the unprefixed `/zen`), a different host, or a different body than it sent.
+    let field = |key: &str| {
         authz
-            .rsplit("Signature=")
-            .next()
-            .expect("a signature field")
-            .to_string()
+            .split(',')
+            .find_map(|part| {
+                part.find(key)
+                    .map(|i| part[i + key.len()..].trim().to_string())
+            })
+            .unwrap_or_else(|| panic!("the Authorization names {key}: {authz}"))
     };
-    let sig_zen = signature(&authz);
-    let mut other = WorkloadClient::connect(proxy_port(&handle), original, port);
-    other.send_request("GET", "/octocat", &[], b"");
+    let recomputed = recompute_sigv4(
+        &seen,
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        &field("Credential="),
+        &field("SignedHeaders="),
+        b"",
+    );
     assert_eq!(
-        other.read_status(),
-        200,
-        "the second signed re-route succeeded"
-    );
-    let seen_other = upstream.last_request();
-    assert!(
-        seen_other.raw.starts_with("GET /github/octocat "),
-        "the second request forwarded its own joined path: {:?}",
-        seen_other.raw.lines().next()
-    );
-    let sig_octocat = signature(
-        seen_other
-            .header("authorization")
-            .expect("a SigV4 signature over the backend")
-            .as_str(),
-    );
-    assert_ne!(
-        sig_zen, sig_octocat,
-        "a different forwarded path changes the signature, so it covers the sent bytes"
+        field("Signature="),
+        recomputed,
+        "the box's signature must be a valid SigV4 over the bytes the backend received"
     );
     // Policy judged the ORIGINAL host, never the backend.
     assert!(

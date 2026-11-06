@@ -211,13 +211,20 @@ impl CredentialCapability {
     }
 }
 
-/// The request headers to sign over: every header except `accept-encoding`, then `identity` forced,
-/// so the signer covers exactly the headers that leave (the scrub needs an unencoded response).
+/// The request headers to sign over: every header except `accept-encoding` and `content-length`,
+/// then `identity` forced. The signer must cover exactly the headers that leave. `accept-encoding`
+/// is re-added as `identity` (the scrub needs an unencoded response). `content-length` is dropped
+/// because the forwarding layer owns it — `write_request` refreshes it, and omits it entirely on a
+/// bodyless request — so signing the workload's value would attest a header the request may not
+/// send, which a strict SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
 pub(super) fn headers_for_signing<'a>(
     headers: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = headers
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"))
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("accept-encoding")
+                && !name.eq_ignore_ascii_case("content-length")
+        })
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
     out.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));

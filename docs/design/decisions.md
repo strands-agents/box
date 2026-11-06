@@ -2161,7 +2161,10 @@ backend vault; the gateway applies it with an `Outbound` whose host is the backe
 in-boundary SigV4 signer covers the backend host, and `derive_service_region` reads the backend host
 (a new arm maps `<id>.gateway.bedrock-agentcore.<region>.amazonaws.com` to `bedrock-agentcore` and the
 region). Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
-stripped first, as for a destination signature. Signing before the rewrite was rejected: the `Host`
+stripped first, as for a destination signature. The signer covers only the headers that leave:
+`content-length` is left unsigned because the forwarding layer owns it — it refreshes the value and
+omits the header entirely on a bodyless request — so signing the workload's value would attest a
+header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
 is a signed header, so signing while the request still names the original destination and then
 rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
 the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite
