@@ -3,7 +3,7 @@
 use http_body_util::BodyExt;
 use zeroize::Zeroizing;
 
-use crate::boundary::{HeaderMap, InterceptedResponse};
+use crate::boundary::HeaderMap;
 use crate::error::{ProxyError, Result};
 
 /// A parsed HTTP/1.1 request read off the wire.
@@ -19,11 +19,11 @@ pub(crate) struct ParsedRequest {
     pub(super) body: Vec<u8>,
 }
 
-/// A parsed HTTP/1.1 response read off the wire.
+/// The checked status and headers of an upstream response.
 #[derive(Debug)]
-pub(crate) struct ParsedResponse {
-    /// The status, headers, and body (materialized, bounded by the read limit).
-    pub(crate) response: InterceptedResponse,
+pub(crate) struct ResponseHead {
+    pub(crate) status: u16,
+    pub(crate) headers: HeaderMap,
     /// The header case the upstream sent, which hyper writes back to the workload.
     pub(super) header_case: hyper::http::Extensions,
 }
@@ -188,7 +188,7 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap) -> Result<()> {
 }
 
 /// Collect a body up to `max`, and refuse a trailer section, which hyper would drop.
-async fn collect<B>(body: B, max: usize) -> Result<Vec<u8>>
+pub(crate) async fn collect<B>(body: B, max: usize) -> Result<Vec<u8>>
 where
     B: hyper::body::Body<Data = hyper::body::Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -274,19 +274,7 @@ where
     })
 }
 
-/// A final response head from the upstream, checked as [`read_response`] checks it.
-pub(crate) struct ResponseHead {
-    pub(crate) status: u16,
-    /// The headers, with the hop-by-hop fields removed.
-    pub(crate) headers: HeaderMap,
-    /// The body length the upstream declared in `Content-Length`, if it declared one.
-    pub(crate) declared_len: Option<usize>,
-    /// The header case the upstream sent, which hyper writes back to the workload.
-    pub(crate) header_case: hyper::http::Extensions,
-}
-
-/// Check the upstream's final response head, refusing an upgrade and an ambiguous framing, and
-/// return the body unread.
+/// Check the upstream's final response head and return its body without collecting it.
 pub(crate) fn read_response_head<B>(response: hyper::Response<B>) -> Result<(ResponseHead, B)> {
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
@@ -302,10 +290,6 @@ pub(crate) fn read_response_head<B>(response: hyper::Response<B>) -> Result<(Res
         )
     }));
     let framing = explicit_body_framing(&headers)?;
-    let declared_len = match &framing {
-        Some(BodyFraming::ContentLength(len)) => Some(*len),
-        _ => None,
-    };
     validate_transfer_coding_version(
         Some(u8::from(head.version == hyper::Version::HTTP_11)),
         framing,
@@ -313,26 +297,14 @@ pub(crate) fn read_response_head<B>(response: hyper::Response<B>) -> Result<(Res
     strip_hop_by_hop_headers(&mut headers)?;
     // Pass on the header case, not the upstream's reason phrase.
     head.extensions.remove::<hyper::ext::ReasonPhrase>();
-    let head = ResponseHead {
-        status,
-        headers,
-        declared_len,
-        header_case: head.extensions,
-    };
-    Ok((head, body))
-}
-
-/// Read the upstream's final response up to `max_body`, and refuse an ambiguous framing first.
-pub(crate) async fn read_response(
-    response: hyper::Response<hyper::body::Incoming>,
-    max_body: usize,
-) -> Result<ParsedResponse> {
-    let (head, body) = read_response_head(response)?;
-    let body = collect(body, max_body).await?;
-    Ok(ParsedResponse {
-        response: InterceptedResponse::http(head.status, head.headers, body),
-        header_case: head.header_case,
-    })
+    Ok((
+        ResponseHead {
+            status,
+            headers,
+            header_case: head.extensions,
+        },
+        body,
+    ))
 }
 
 /// Build a [`HeaderMap`] from parsed httparse headers (preserving order + casing).

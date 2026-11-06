@@ -584,13 +584,14 @@ Keep those launch paths and their containing directories outside workload write 
 Box accepts hard links only when it finds every name in the installation directory or its immediate
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
-Linux also checks the files through existing mounts. On macOS, Box checks verified Data-volume spellings.
+Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
 | Box cannot account for every hard-link name. | `has hard links outside the installation inventory. Install an independent copy` | Install independent copies of the Box programs. |
-| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table and mapped files, then retry after mount changes finish. |
+| Linux cannot read or finish a stable inventory of mounted aliases. | `cannot inventory mounted executable aliases: <reason>` | Restore access to the process mount table, resolve other inspection errors, then retry after mount changes finish. |
 | A recorded file name points to another file, or the hard-link count changes during the run. | `changed after this run loaded it. Stop Box before updating its installation` | End the run before installation updates. |
 
 Strands Shell and Monty also refuse changes to these files and their enclosing paths, even when
@@ -602,9 +603,15 @@ Start a new run to validate the updated files.
 ## `[tool.<name>.grammar]`
 
 This table holds the tool grammar for the program its `[tool]` runs, and it loads only when
-`[experimental-features] tool-grammars = true`. The feature is experimental, and a rule on a grammar
-action doesn't take effect yet, so `run` warns at startup for each grammar; a user guide for tool
-grammars is coming later.
+`[experimental-features] tool-grammars = true`. The feature is experimental. A spawn of the
+program is decided as a grammar action in place of `shell:spawn`, as
+[`shell:spawn`](shell.md#shellspawn) states, and a user guide for tool grammars is coming later.
+`run` prints one line for each `[tool]` and stdio `[mcp.<name>]` whose program a grammar decides,
+so you can move its `shell:spawn` rules:
+
+```text
+strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
 
 Each of these is refused at startup, before any box state exists:
 
@@ -623,6 +630,13 @@ Each of these is refused at startup, before any box state exists:
   `box.toml`: ``tool grammar refused: `tool.git.grammar.shell.push.usage` has a `[` with no `]` ``.
 - A policy that names a `Tool::` action that no grammar declares: ``policy file ... will not load:
   policy references unknown action: ... unrecognized action `Tool::git::Action::"push"` ...``.
+- A grammar for a program whose command file has more than one name, such as macOS
+  `/usr/bin/git`, in a `[tool]` or in a stdio `[mcp.<name>]` that runs that program. A grammar would refuse each other name of that file, such as `make`: ``configured
+  command /usr/bin/git has 78 names, and a tool grammar on it refuses each name that no `[tool]`
+  declares. Point `command` at a copy with one name``.
+- An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
+  grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
+  while `tool-grammars` is on; give the server another name``.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.

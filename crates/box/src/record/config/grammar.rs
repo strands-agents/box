@@ -10,6 +10,10 @@ use crate::error::ConfigError;
 
 use super::process::ProcessSpec;
 
+/// The policy namespace of every tool grammar action, which no `[mcp.<name>]` takes while
+/// `tool-grammars` is on.
+pub(crate) const TOOL_GRAMMAR_NAMESPACE: &str = "Tool";
+
 /// One `[tool.<name>.grammar]` table, as the operator wrote it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]

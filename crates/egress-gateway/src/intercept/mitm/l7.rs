@@ -4,16 +4,18 @@ use std::borrow::Cow;
 use std::io;
 use std::net::TcpStream;
 
-use hyper::body::Body as _;
+use http_body_util::BodyExt;
+use zeroize::Zeroizing;
 
 use crate::audit::RequestId;
 
+use super::body::ResponseBody;
 use super::connect::{ConnectRequest, parse_authority, same_host};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
-use crate::client::http::{StreamedResponse, Upstream, UpstreamBody};
+use crate::client::http::{ResponseProgress, Upstream};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
@@ -229,45 +231,57 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
-    // A response streams when nothing on the response leg reads its body: no credential applies
-    // to this target, so there is no leak-back scrub, and the host is no MCP server, so there is no
-    // catalog to stage (strands-agents/box#171). A HEAD response has no body to stream. The request
-    // bytes are copied out unwiped only on this path, because no credential was attached to them.
-    let streams = method != "HEAD"
-        && state.mcp_server_for(&connect.host).is_none()
-        && !state.controls.matches_any(&target.as_destination());
-    if streams {
-        let head = prepared_request.as_bytes().to_vec();
-        let (outcome, response) = upstream
-            .send_streamed(state, &method, head, forwarded_body.to_vec())
-            .await;
-        request_permit.record_outcome(outcome).map_err(|error| {
-            ProxyError::Io(format!("recording upstream request outcome: {error}"))
-        })?;
-        return release_streamed(state, connect, &method, &workload_path, response?);
-    }
     // The request permit is consumed at reply time, or when no reply comes.
+    let cursor = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/list")
+        .and_then(|_| list_cursor(&req.body));
+    let forwarded_body = match forwarded_body {
+        Cow::Owned(body) => body,
+        Cow::Borrowed(_) => std::mem::take(&mut req.body),
+    };
     let (outcome, response) = upstream
-        .send(state, &method, prepared_request.as_bytes(), &forwarded_body)
+        .send(
+            state,
+            &method,
+            prepared_request,
+            Zeroizing::new(forwarded_body),
+        )
         .await;
     request_permit
         .record_outcome(outcome)
         .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
 
-    // --- Response leg: read, scrub, return ---
-    let parsed = response?;
-    let mut res = parsed.response;
+    let response = response?;
+    let mut head = response.head;
+    let mut body = response.body;
     // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
     // that set it would otherwise make a permitted answer read as a denial, with its own first body
     // line as the reason.
-    res.headers.remove(crate::PROXY_ORIGIN_HEADER);
+    head.headers.remove(crate::PROXY_ORIGIN_HEADER);
 
-    if state.controls.apply_to_response(&mut res, &target).is_err() {
-        return Ok(WorkloadResponse::refusal(
-            403,
-            b"response blocked by egress control",
-        ));
+    let controls = match state.controls.response_controls(&mut head.headers, &target) {
+        Ok(controls) => controls,
+        Err(_) => {
+            return Ok(WorkloadResponse::refusal(
+                403,
+                b"response blocked by egress control",
+            ));
+        }
+    };
+    if controls.requires_empty_body {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| ProxyError::Io(format!("upstream body: {error}")))?;
+            if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+                return Ok(WorkloadResponse::refusal(
+                    403,
+                    b"response blocked by egress control",
+                ));
+            }
+        }
     }
+    let mut progress = Some(body.progress.clone());
+    let mut body = ResponseBody::streaming(body, controls.redactors);
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
@@ -275,81 +289,45 @@ async fn run_l7_legs(
     // Best-effort: a staging failure warns and the catalog still returns.
     if let Some((server, target)) = &mcp_target
         && target.method() == "tools/list"
-        && let Err(error) = state.effect_interceptor.stage_mcp_catalog(
+    {
+        let captured = http1::collect(body, state.config.response_limits.max_body_bytes).await?;
+        if let Err(error) = state.effect_interceptor.stage_mcp_catalog(
             server,
             McpListReply {
                 session: req.headers.get("mcp-session-id"),
-                cursor: list_cursor(&req.body).as_deref(),
-                body: &res.body,
+                cursor: cursor.as_deref(),
+                body: &captured,
             },
-        )
-    {
-        eprintln!(
-            "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
-        );
+        ) {
+            eprintln!(
+                "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
+            );
+        }
+        body = captured.into();
+        progress = None;
     }
 
-    // Wait until response controls and leakback scrubbing have finished, then claim the
-    // release immediately before the governed bytes are delivered to the workload.
+    // Claim release before the workload can receive any processed upstream bytes.
     let response_attempt = EffectAttempt::ResponseRelease {
         host: &connect.host,
         port: connect.port,
         method: &method,
         path: &workload_path,
-        status: res.status,
-        body_bytes: Some(res.body.len()),
-    };
-    let response_permit = match claim_effect(state, &response_attempt) {
-        Ok(permit) => permit,
-        Err(error) => return Ok(interceptor_error(&error, None)),
-    };
-
-    Ok(WorkloadResponse {
-        status: res.status,
-        reason: None,
-        headers: res.headers,
-        body: res.body,
-        streamed: None,
-        release: Some(response_permit),
-        header_case: parsed.header_case,
-    })
-}
-
-/// Release a streamed response: claim the release before its first body byte, with the length
-/// the upstream declared, and hand the workload the body as it arrives.
-fn release_streamed(
-    state: &SharedState,
-    connect: &ConnectRequest,
-    method: &str,
-    workload_path: &str,
-    streamed: StreamedResponse,
-) -> Result<WorkloadResponse> {
-    let StreamedResponse { mut head, body } = streamed;
-    // As on the buffered path: only the gateway claims a refusal.
-    head.headers.remove(crate::PROXY_ORIGIN_HEADER);
-    let response_attempt = EffectAttempt::ResponseRelease {
-        host: &connect.host,
-        port: connect.port,
-        method,
-        path: workload_path,
         status: head.status,
-        body_bytes: head.declared_len,
     };
     let response_permit = match claim_effect(state, &response_attempt) {
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
-    // A response with no body (a 204, a 304, an empty body) goes out as the buffered path sends
-    // it, so its framing headers stay as they are.
-    let streamed = (!body.is_end_stream()).then(|| Box::new(body));
+
     Ok(WorkloadResponse {
         status: head.status,
         reason: None,
         headers: head.headers,
-        body: Vec::new(),
-        streamed,
+        body,
         release: Some(response_permit),
         header_case: head.header_case,
+        progress,
     })
 }
 
@@ -419,14 +397,12 @@ pub(crate) struct WorkloadResponse {
     /// A reason phrase in place of the standard one.
     pub(crate) reason: Option<&'static str>,
     pub(crate) headers: HeaderMap,
-    pub(crate) body: Vec<u8>,
-    /// The body of a streamed response, read from the upstream as hyper writes it. When set,
-    /// `body` is empty. Boxed, so a refusal stays small.
-    pub(crate) streamed: Option<Box<UpstreamBody>>,
+    pub(crate) body: ResponseBody,
     /// The claimed release of a governed response, recorded once hyper has written it.
     pub(crate) release: Option<ClaimedEffectPermit>,
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
+    pub(crate) progress: Option<ResponseProgress>,
 }
 
 impl WorkloadResponse {
@@ -435,7 +411,7 @@ impl WorkloadResponse {
         Self {
             reason: None,
             headers: proxy_originated_headers(),
-            body: body.to_vec(),
+            body: body.to_vec().into(),
             ..Self::bare(status)
         }
     }
@@ -452,10 +428,10 @@ impl WorkloadResponse {
             status,
             reason,
             headers: HeaderMap::new(),
-            body: Vec::new(),
-            streamed: None,
+            body: Vec::new().into(),
             release: None,
             header_case: hyper::http::Extensions::new(),
+            progress: None,
         }
     }
 
@@ -658,7 +634,10 @@ mod tests {
             );
             let response = interceptor_error(&error, request);
             assert_eq!(response.status, 403);
-            let body = std::str::from_utf8(&response.body).unwrap();
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            let body = std::str::from_utf8(&bytes).unwrap();
             let decoded: serde_json::Value;
             let message = if request.is_some() {
                 decoded = serde_json::from_str(body).unwrap();
@@ -674,7 +653,10 @@ mod tests {
 
             let response = interceptor_error(&io::Error::other("private backend failure"), request);
             assert_eq!(response.status, 502);
-            assert_eq!(response.body, b"effect interceptor unavailable");
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, b"effect interceptor unavailable");
         }
     }
 

@@ -139,11 +139,6 @@ pub enum EffectAttempt<'a> {
         path: &'a str,
         /// The governed response status.
         status: u16,
-        /// The governed response body length, without exposing body content: the bytes in hand
-        /// for a buffered response, the declared `Content-Length` for a streamed one, and `None`
-        /// for a streamed one that declares no length. The permit's outcome reports the bytes the
-        /// workload took.
-        body_bytes: Option<usize>,
     },
 }
 

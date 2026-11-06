@@ -160,6 +160,11 @@ more:
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
 
+When a tool grammar binds the program, the grammar action decides the spawn, and the spawn enters
+history as that action and not as `shell:spawn`. A spawn that the grammar binding refuses before
+any rule decides it enters history as a `shell:spawn` request.
+[`shell:spawn`](../shell.md#shellspawn) states when Box refuses one.
+
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
 the shell's own programs, and a `shell:spawn` permit covers a program of the surrounding OS. A
@@ -180,10 +185,11 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 | `uri?` | String | The resource URI, on `resources/read`. |
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
-`[mcp.<name>]` table names. A policy with no matching `shell:spawn` permit refuses the server at
-startup. For an enabled [MCP wildcard command](../mcp.md#argument-wildcards), `command` contains
-the effective launch command, joined by spaces. Its argument fields contain the same values,
-including the caller's values in wildcard positions.
+`[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
+A policy with no matching permit refuses the server at startup. For an enabled [MCP wildcard
+command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
+spaces. Its argument fields contain the same values, including the caller's values in wildcard
+positions.
 A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
@@ -201,8 +207,8 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ./box-core/box policy generate-schema --config my-box/box.toml --output-dir ./schema
 ```
 
-It writes `actions.cedarschema`, with every action and its fields, and `events.dwschema`, with what
-a `when temporal` clause observes. The namespace is the server name with every character other
+It writes `actions.cedarschema`, with every action and its fields, including the actions of each
+tool grammar, and `events.dwschema`, with what a `when temporal` clause observes. The namespace is the server name with every character other
 than a letter, a digit, or `_` changed to `_`. A leading digit gets a `_` prefix. Server `demo-mcp`
 and tool `lookup` give `demo_mcp::Action::"lookup"`.
 
@@ -247,9 +253,9 @@ What each caller records as a response:
 |---|---|---|
 | `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | When upstream response headers arrive, once per exchange | `status`: the upstream's reply status |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
-| `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
+| `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes over stdio, or when upstream response headers arrive over HTTP | none |
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

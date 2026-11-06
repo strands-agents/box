@@ -54,7 +54,6 @@ enum AttemptSnapshot {
         method: String,
         path: String,
         status: u16,
-        body_bytes: Option<usize>,
     },
 }
 
@@ -97,14 +96,12 @@ impl AttemptSnapshot {
                 method,
                 path,
                 status,
-                body_bytes,
             } => Self::ResponseRelease {
                 host: (*host).to_string(),
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
                 status: *status,
-                body_bytes: *body_bytes,
             },
             _ => panic!("unexpected future effect attempt"),
         }
@@ -242,6 +239,25 @@ fn proxy_port(handle: &egress_gateway::MitmHandle) -> u16 {
 /// A capability set that injects nothing — the transport-only composition.
 fn no_injection() -> CapabilitySet {
     CapabilitySet::new(vec![])
+}
+
+fn credential_route(host: &str, port: u16, secret: &str) -> (CapabilitySet, String) {
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(host, port),
+            env_locator(secret),
+            InjectMode::header("Bearer {}".to_string(), None).unwrap(),
+        ),
+    ))
+    .unwrap();
+    let authorization = format!("Bearer {}", opened.phantoms()[0].token());
+    (
+        CapabilitySet::new(vec![CredentialCapability::new(
+            destination(host, port),
+            Arc::new(opened.into_vault()),
+        )]),
+        authorization,
+    )
 }
 
 fn event_names(events: &[Event]) -> Vec<&'static str> {
@@ -385,11 +401,7 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
     ));
     assert!(matches!(
         &events[5],
-        Event::Attempt(AttemptSnapshot::ResponseRelease {
-            status: 200,
-            body_bytes: Some(2),
-            ..
-        })
+        Event::Attempt(AttemptSnapshot::ResponseRelease { status: 200, .. })
     ));
 
     let rendered = format!("{events:?}");
@@ -516,11 +528,7 @@ fn scrubbed_cross_host_redirect_crosses_response_release() {
     assert!(response.ends_with("[REDACTED]"));
     assert!(events.lock().unwrap().iter().any(|event| matches!(
         event,
-        Event::Attempt(AttemptSnapshot::ResponseRelease {
-            status: 302,
-            body_bytes: Some(10),
-            ..
-        })
+        Event::Attempt(AttemptSnapshot::ResponseRelease { status: 302, .. })
     )));
 }
 
@@ -611,135 +619,737 @@ fn a_request_with_no_reply_records_its_delivery_without_a_status() {
     );
 }
 
-/// A streamed reply whose body is cut short after its head: the request outcome keeps the status
-/// the head carried, so a rule counting 500 replies still sees it. The head and the bytes before
-/// the cut reach the workload, the release is claimed at the head with the declared length, and
-/// its outcome is partial.
+/// A reply that fails after a flushed prefix keeps its request status and records partial release.
 #[test]
 fn a_reply_cut_short_after_its_head_records_its_status() {
-    const RESPONSE: &[u8] =
-        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort";
-    let host = "short-reply.test";
-    // The upstream sends the head and 5 of the 100 bytes, pauses, then closes.
-    let pieces = vec![RESPONSE.to_vec(), Vec::new()];
-    let upstream = TlsUpstream::start_in_pieces(host, pieces, Duration::from_millis(200));
-    let port = upstream.port();
+    use std::io::Read;
+
+    for (framing, first, invalid_tail) in [
+        ("Content-Length: 100", "short", ""),
+        (
+            "Transfer-Encoding: chunked",
+            "5\r\nshort\r\n",
+            "invalid-size\r\n",
+        ),
+        (
+            "Transfer-Encoding: chunked",
+            "5\r\nshort\r\n",
+            "0\r\nX-Untrusted: forbidden-trailer\r\n\r\n",
+        ),
+    ] {
+        let host = "short-reply.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let port = upstream.port();
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            config_for(host, &upstream),
+            no_injection(),
+            Arc::new(RecordingInterceptor::allowing(shared.clone())),
+        )
+        .unwrap();
+
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("GET", "/short", &[], b"");
+        sender
+            .send(
+                format!("HTTP/1.1 500 Internal Server Error\r\n{framing}\r\n\r\n{first}")
+                    .into_bytes(),
+            )
+            .unwrap();
+        let head = client.read_head();
+        assert!(head.starts_with("HTTP/1.1 500"));
+        let mut body = client.response_body(&head);
+        let mut prefix = [0; 5];
+        body.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"short");
+        if !invalid_tail.is_empty() {
+            sender.send(invalid_tail.as_bytes().to_vec()).unwrap();
+        }
+        drop(sender);
+        let mut tail = Vec::new();
+        assert!(body.read_to_end(&mut tail).is_err(), "{invalid_tail:?}");
+        assert!(
+            tail.is_empty(),
+            "invalid body or trailer bytes were released"
+        );
+
+        let events = wait_for_event_count(&shared, 7);
+        assert!(matches!(
+            events[4],
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Replied { status: 500, .. }
+            )
+        ));
+        assert!(matches!(
+            events[6],
+            Event::Outcome(
+                EffectKind::ResponseRelease,
+                EffectOutcome::Partial { accepted_bytes, .. }
+            ) if accepted_bytes >= head.len() + prefix.len()
+        ));
+    }
+}
+
+#[test]
+fn large_sized_and_credentialed_chunked_responses_stream_past_the_capture_limit() {
+    use std::io::Read;
+
+    const SIZE: usize = (17 << 20) + 1;
+    for credentialed in [false, true] {
+        let host = "large-response.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let (controls, authorization) = if credentialed {
+            credential_route(host, upstream.port(), "large-response-credential")
+        } else {
+            (no_injection(), String::new())
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            config_for(host, &upstream),
+            controls,
+            Arc::new(RecordingInterceptor::allowing(events.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(5));
+        client.send_request("GET", "/package", &[("Authorization", &authorization)], b"");
+        let producer = std::thread::spawn(move || {
+            let framing = if credentialed {
+                "Transfer-Encoding: chunked".to_string()
+            } else {
+                format!("Content-Length: {SIZE}")
+            };
+            sender
+                .send(format!("HTTP/1.1 200 OK\r\n{framing}\r\n\r\n").into_bytes())
+                .unwrap();
+            let mut remaining = SIZE;
+            while remaining > 0 {
+                let count = remaining.min(32 << 10);
+                let mut fragment = Vec::new();
+                if credentialed {
+                    fragment.extend_from_slice(format!("{count:X}\r\n").as_bytes());
+                }
+                fragment.extend(std::iter::repeat_n(b'x', count));
+                if credentialed {
+                    fragment.extend_from_slice(b"\r\n");
+                }
+                sender.send(fragment).unwrap();
+                remaining -= count;
+            }
+            if credentialed {
+                sender.send(b"0\r\n\r\n".to_vec()).unwrap();
+            }
+        });
+        let head = client.read_head();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        let mut body = client.response_body(&head);
+        let mut buffer = [0; 32 << 10];
+        let mut received = 0;
+        loop {
+            let count = body.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            assert!(buffer[..count].iter().all(|byte| *byte == b'x'));
+            received += count;
+        }
+        assert_eq!(received, SIZE);
+        producer.join().unwrap();
+        let events = wait_for_event_count(&events, 7);
+        assert!(matches!(
+            events[6],
+            Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Completed(_))
+        ));
+    }
+}
+
+#[test]
+fn a_plain_http_response_streams_before_upstream_completion() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::mpsc::sync_channel;
+
+    let host = "plain-stream.test";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (finish, proceed) = sync_channel(0);
+    let upstream = std::thread::spawn(move || {
+        let (mut tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = harness::read_http_head(&mut tcp);
+        assert!(request.starts_with("GET /stream HTTP/1.1\r\n"), "{request}");
+        tcp.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nearly")
+            .unwrap();
+        tcp.flush().unwrap();
+        proceed.recv_timeout(Duration::from_secs(3)).unwrap();
+        tcp.write_all(b"-later").unwrap();
+        tcp.flush().unwrap();
+    });
     let shared = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
-        config_for(host, &upstream),
+        MitmConfig {
+            dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
+            ..MitmConfig::default()
+        },
         no_injection(),
         Arc::new(RecordingInterceptor::allowing(shared.clone())),
     )
     .unwrap();
-
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
-    client.send_request("GET", "/short", &[], b"");
-    let head = client.read_head();
-    assert!(
-        head.starts_with("HTTP/1.1 500"),
-        "the head streams: {head:?}"
-    );
+    let mut client = TcpStream::connect(("127.0.0.1", proxy_port(&handle))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        client,
+        "GET http://{host}:{port}/stream HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let head = harness::read_http_head(&mut client);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let mut body = harness::ResponseBody::new(&mut client, &head);
+    let mut early = [0; 5];
+    body.read_exact(&mut early).unwrap();
+    assert_eq!(&early, b"early");
     assert_eq!(
-        client.read_to_close(),
-        b"short",
-        "the body ends where the upstream cut it"
+        event_names(&shared.lock().unwrap()),
+        vec![
+            "attempt:resolve",
+            "attempt:connect",
+            "outcome:connect",
+            "attempt:request",
+            "outcome:request",
+            "attempt:response",
+        ]
     );
 
+    finish.send(()).unwrap();
+    let mut remainder = Vec::new();
+    body.read_to_end(&mut remainder).unwrap();
+    assert_eq!(remainder, b"-later");
+    upstream.join().unwrap();
     let events = wait_for_event_count(&shared, 7);
-    assert!(
-        matches!(
-            &events[4],
-            Event::Outcome(
-                EffectKind::HttpRequest,
-                EffectOutcome::Replied { status: 500, .. }
-            )
-        ),
-        "{:?}",
-        event_names(&events)
-    );
-    assert!(
-        matches!(
-            &events[5],
-            Event::Attempt(AttemptSnapshot::ResponseRelease {
-                status: 500,
-                body_bytes: Some(100),
-                ..
-            })
-        ),
-        "{:?}",
-        event_names(&events)
-    );
-    assert!(
-        matches!(
-            &events[6],
-            Event::Outcome(
-                EffectKind::ResponseRelease,
-                EffectOutcome::Partial { accepted_bytes, .. }
-            ) if *accepted_bytes == head.len() + 5
-        ),
-        "a cut-short release is partial, with the bytes the workload took: {:?}",
-        &events[6..]
-    );
+    assert_eq!(events.len(), 7);
+    assert!(matches!(
+        events[6],
+        Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Completed(bytes))
+            if bytes >= head.len() + early.len() + remainder.len()
+    ));
 }
 
-/// The same reply from a host with a bound credential is buffered for the leak-back scrub, so a
-/// body cut short is never released: the workload gets nothing, and no release follows.
 #[test]
-fn a_reply_cut_short_from_a_credentialed_host_is_not_released() {
-    const RESPONSE: &[u8] =
-        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort";
-    const SECRET: &str = "sk_live_cut_short_secret";
-    let host = "short-credentialed.test";
-    let upstream = TlsUpstream::start_with_response(host, RESPONSE);
-    let port = upstream.port();
-    let shared = Arc::new(Mutex::new(Vec::new()));
-    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
-        RouteSpec::opaque(
-            destination(host, port),
-            env_locator(SECRET),
-            InjectMode::header("Bearer {}".to_string(), None).expect("a valid header placement"),
-        ),
-    ))
-    .unwrap();
-    let phantom = opened.phantoms()[0].token().to_string();
-    let controls = CapabilitySet::new(vec![CredentialCapability::new(
-        destination(host, port),
-        Arc::new(opened.into_vault()),
-    )]);
+fn credentialed_text_arrives_early_with_split_secrets_redacted() {
+    use std::io::Read;
+
+    const SECRET: &str = "sk_streaming_secret_123";
+    let host = "credential-stream.test";
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let (controls, authorization) = credential_route(host, upstream.port(), SECRET);
+    let events = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
         config_for(host, &upstream),
         controls,
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request("GET", "/events", &[("Authorization", &authorization)], b"");
+
+    let prefix = "data: visible progress\n\n";
+    let suffix = "\n\n";
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nX-Echo: {SECRET}\r\n\r\n",
+        prefix.len() + "data: ".len() + SECRET.len() + suffix.len()
+    );
+    sender
+        .send(format!("{head}{prefix}data: {}", &SECRET[..7]).into_bytes())
+        .unwrap();
+    let head = client.read_head();
+    assert_eq!(harness::header_value(&head, "x-echo"), Some("[REDACTED]"));
+    assert_eq!(harness::header_value(&head, "content-length"), None);
+    let mut body = client.response_body(&head);
+    let mut early = vec![0; prefix.len()];
+    body.read_exact(&mut early).unwrap();
+    assert_eq!(early, prefix.as_bytes());
+    let before_completion = events.lock().unwrap().clone();
+    assert!(matches!(
+        before_completion[4],
+        Event::Outcome(
+            EffectKind::HttpRequest,
+            EffectOutcome::Replied { status: 200, .. }
+        )
+    ));
+    assert!(matches!(
+        before_completion[5],
+        Event::Attempt(AttemptSnapshot::ResponseRelease { status: 200, .. })
+    ));
+
+    sender
+        .send(format!("{}{suffix}", &SECRET[7..]).into_bytes())
+        .unwrap();
+    drop(sender);
+    let mut received = early;
+    body.read_to_end(&mut received).unwrap();
+    assert_eq!(
+        received,
+        format!("{prefix}data: [REDACTED]{suffix}").as_bytes()
+    );
+    assert!(!String::from_utf8(received).unwrap().contains(SECRET));
+}
+
+#[test]
+fn a_body_that_goes_silent_after_its_head_reaches_the_absolute_deadline() {
+    use std::io::Read;
+
+    let host = "silent-body.test";
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            upstream_read_deadline: Duration::from_millis(700),
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
         Arc::new(RecordingInterceptor::allowing(shared.clone())),
     )
     .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    let started = Instant::now();
+    client.send_request("GET", "/silent-body", &[], b"");
+    sender
+        .send(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx".to_vec())
+        .unwrap();
+    let head = client.read_head();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let mut body = client.response_body(&head);
+    let mut prefix = [0];
+    body.read_exact(&mut prefix).unwrap();
+    assert_eq!(&prefix, b"x");
+    let mut remainder = Vec::new();
+    assert!(body.read_to_end(&mut remainder).is_err());
+    assert!(remainder.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let events = wait_for_event_count(&shared, 7);
+    assert_eq!(events.len(), 7);
+    assert!(matches!(
+        events[6],
+        Event::Outcome(
+            EffectKind::ResponseRelease,
+            EffectOutcome::Partial {
+                error_kind: io::ErrorKind::TimedOut,
+                accepted_bytes,
+            }
+        ) if accepted_bytes >= head.len() + prefix.len()
+    ));
+    drop(sender);
+}
 
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
-    client.send_request(
-        "GET",
-        "/short",
-        &[("Authorization", &format!("Bearer {phantom}"))],
-        b"",
-    );
-    assert_eq!(client.read_response(), "", "a torn reply is not released");
+#[test]
+fn dripped_body_does_not_reset_the_absolute_read_deadline() {
+    use std::io::Read;
 
-    let events = wait_for_event_count(&shared, 5);
+    let host = "dripped-body.test";
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            upstream_read_deadline: Duration::from_millis(700),
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(shared.clone())),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request("GET", "/drip", &[], b"");
+    sender
+        .send(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx".to_vec())
+        .unwrap();
+    let head = client.read_head();
+    let mut body = client.response_body(&head);
+    let mut first = [0];
+    body.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"x");
+    let producer = std::thread::spawn(move || {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if sender.send(b"x".to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let started = Instant::now();
+    let mut remainder = Vec::new();
+    assert!(body.read_to_end(&mut remainder).is_err());
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert!(
-        matches!(
-            &events[4],
-            Event::Outcome(
-                EffectKind::HttpRequest,
-                EffectOutcome::Replied { status: 500, .. }
+        !remainder.is_empty(),
+        "the body progressed before timing out"
+    );
+    let events = wait_for_event_count(&shared, 7);
+    assert!(matches!(
+        events[6],
+        Event::Outcome(
+            EffectKind::ResponseRelease,
+            EffectOutcome::Partial {
+                error_kind: io::ErrorKind::TimedOut,
+                ..
+            }
+        )
+    ));
+    producer.join().unwrap();
+}
+
+#[test]
+fn stalled_or_disconnected_workloads_end_a_stream_with_a_partial_outcome() {
+    use std::io::Read;
+
+    for disconnect in [false, true] {
+        let host = "backpressure.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            MitmConfig {
+                upstream_read_deadline: Duration::from_millis(900),
+                ..config_for(host, &upstream)
+            },
+            no_injection(),
+            Arc::new(RecordingInterceptor::allowing(shared.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("GET", "/unread", &[], b"");
+        sender
+            .send(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\nx", 64 << 20).into_bytes())
+            .unwrap();
+        let head = client.read_head();
+        let mut prefix = [0];
+        client.response_body(&head).read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"x");
+        let client = if disconnect {
+            client.abort();
+            None
+        } else {
+            Some(client)
+        };
+        let producer = std::thread::spawn(move || {
+            for index in 0..1024 {
+                let count = (64 << 10) - usize::from(index == 1023);
+                if sender.send(vec![b'x'; count]).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // With no more workload reads, the body cannot finish and the downstream write eventually
+        // fills its buffers. The exchange deadline must still run when Hyper stops polling it.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let outcome = loop {
+            let outcome = shared.lock().unwrap().iter().find_map(|event| match event {
+                Event::Outcome(EffectKind::ResponseRelease, outcome) => Some(*outcome),
+                _ => None,
+            });
+            if let Some(outcome) = outcome {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "an unread response kept its exchange alive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            matches!(outcome, EffectOutcome::Partial { accepted_bytes, .. } if accepted_bytes > head.len()),
+            "{outcome:?}"
+        );
+        if !disconnect {
+            assert!(matches!(
+                outcome,
+                EffectOutcome::Partial {
+                    error_kind: io::ErrorKind::TimedOut,
+                    ..
+                }
+            ));
+        }
+        if let Some(client) = client {
+            client.abort();
+        }
+        producer.join().unwrap();
+    }
+}
+
+#[test]
+fn response_release_denial_sends_no_upstream_head_or_body() {
+    let host = "release-denied.test";
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        config_for(host, &upstream),
+        no_injection(),
+        Arc::new(RecordingInterceptor::denying(
+            shared.clone(),
+            EffectKind::ResponseRelease,
+        )),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request("GET", "/denied", &[], b"");
+    sender
+        .send(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Origin: forbidden\r\n\r\nprivate"
+                .to_vec(),
+        )
+        .unwrap();
+    let response = client.read_response();
+    assert!(!response.contains("200 OK"));
+    assert!(!response.contains("forbidden"));
+    assert!(!response.contains("private"));
+    let events = wait_for_event_count(&shared, 6);
+    assert!(matches!(
+        events[4],
+        Event::Outcome(
+            EffectKind::HttpRequest,
+            EffectOutcome::Replied { status: 200, .. }
+        )
+    ));
+    assert_eq!(events.len(), 6, "a denied release has no release outcome");
+}
+
+#[test]
+fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
+    use std::io::Read;
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+    struct CatalogInterceptor {
+        effects: RecordingInterceptor,
+        staged: SyncSender<Vec<u8>>,
+        proceed: Mutex<Receiver<()>>,
+    }
+
+    impl EffectInterceptor for CatalogInterceptor {
+        fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            self.effects.intercept(attempt)
+        }
+
+        fn stage_mcp_catalog(
+            &self,
+            server: &str,
+            reply: egress_gateway::McpListReply<'_>,
+        ) -> io::Result<()> {
+            assert_eq!(server, "test-server");
+            assert_eq!(reply.session, Some("test-session"));
+            assert_eq!(reply.cursor, Some("page-one"));
+            self.staged.send(reply.body.to_vec()).unwrap();
+            self.proceed
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    for list in [false, true] {
+        let host = "mcp-stream.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let (staged_tx, staged_rx) = sync_channel(0);
+        let (proceed_tx, proceed_rx) = sync_channel(0);
+        let handle = MitmInterceptor::start(
+            MitmConfig {
+                mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+                ..config_for(host, &upstream)
+            },
+            no_injection(),
+            Arc::new(CatalogInterceptor {
+                effects: RecordingInterceptor::allowing(shared.clone()),
+                staged: staged_tx,
+                proceed: Mutex::new(proceed_rx),
+            }),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        let request = if list {
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":"page-one"}}"#
+        } else {
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#
+        };
+        client.send_request(
+            "POST",
+            "/mcp",
+            &[
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", "test-session"),
+            ],
+            request.as_bytes(),
+        );
+        let response = if list {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}"#
+        } else {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello"}]}}"#
+        };
+        let split = response.len() / 2;
+        sender
+            .send(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    response.len(),
+                    &response[..split],
+                )
+                .into_bytes(),
             )
-        ),
-        "{:?}",
-        event_names(&events)
-    );
-    std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(
-        shared.lock().unwrap().len(),
-        5,
-        "no release follows a torn reply"
-    );
+            .unwrap();
+        if list {
+            sender.send(response.as_bytes()[split..].to_vec()).unwrap();
+            drop(sender);
+            let staged = staged_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(staged, response.as_bytes());
+            assert!(
+                !shared.lock().unwrap().iter().any(|event| matches!(
+                    event,
+                    Event::Attempt(AttemptSnapshot::ResponseRelease { .. })
+                )),
+                "catalog staging finishes before release admission"
+            );
+            proceed_tx.send(()).unwrap();
+            assert!(client.read_response().ends_with(response));
+        } else {
+            let head = client.read_head();
+            assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+            let mut body = client.response_body(&head);
+            let mut early = [0; 16];
+            body.read_exact(&mut early).unwrap();
+            assert_eq!(&early, &response.as_bytes()[..early.len()]);
+            sender.send(response.as_bytes()[split..].to_vec()).unwrap();
+            drop(sender);
+            let mut received = early.to_vec();
+            body.read_to_end(&mut received).unwrap();
+            assert_eq!(received, response.as_bytes());
+            assert!(staged_rx.try_recv().is_err());
+        }
+        let events = wait_for_event_count(&shared, 7);
+        assert!(matches!(
+            events[6],
+            Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Completed(_))
+        ));
+    }
+}
+
+#[test]
+fn credentialed_encoded_bodies_are_refused_but_empty_encoded_replies_are_allowed() {
+    for nonempty in [false, true] {
+        let host = "encoded-stream.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let (controls, authorization) = credential_route(host, upstream.port(), "encoded-secret");
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            config_for(host, &upstream),
+            controls,
+            Arc::new(RecordingInterceptor::allowing(shared.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("GET", "/encoded", &[("Authorization", &authorization)], b"");
+        let body = if nonempty {
+            "3\r\nzip\r\n0\r\n\r\n"
+        } else {
+            "0\r\n\r\n"
+        };
+        sender
+            .send(
+                format!(
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\nX-Origin: upstream\r\n\r\n{body}"
+                )
+                .into_bytes(),
+            )
+            .unwrap();
+        drop(sender);
+        let response = client.read_response();
+        if nonempty {
+            assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+            assert!(!response.contains("X-Origin"));
+            assert!(!response.contains("zip"));
+            assert!(!shared.lock().unwrap().iter().any(|event| matches!(
+                event,
+                Event::Attempt(AttemptSnapshot::ResponseRelease { .. })
+            )));
+        } else {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(response.ends_with("\r\n\r\n"));
+            assert_eq!(
+                harness::header_value(&response, "content-encoding"),
+                Some("gzip")
+            );
+        }
+    }
+}
+
+#[test]
+fn bodyless_responses_keep_http_framing_without_waiting_for_body_bytes() {
+    use std::io::Read;
+
+    for (method, status, length, wire_length) in [
+        ("HEAD", "200 OK", Some("123"), Some("123")),
+        ("GET", "204 No Content", None, None),
+        // Hyper omits the optional representation length on a 304, as before streaming.
+        ("GET", "304 Not Modified", Some("123"), None),
+    ] {
+        let host = "bodyless-stream.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let (controls, authorization) = credential_route(host, upstream.port(), "bodyless-secret");
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            config_for(host, &upstream),
+            controls,
+            Arc::new(RecordingInterceptor::allowing(shared.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request(
+            method,
+            "/metadata",
+            &[("Authorization", &authorization)],
+            b"",
+        );
+        let length_header = length
+            .map(|n| format!("Content-Length: {n}\r\n"))
+            .unwrap_or_default();
+        sender
+            .send(
+                format!("HTTP/1.1 {status}\r\n{length_header}Content-Encoding: gzip\r\n\r\n")
+                    .into_bytes(),
+            )
+            .unwrap();
+        let head = client.read_head();
+        assert!(head.starts_with(&format!("HTTP/1.1 {status}")), "{head}");
+        assert_eq!(
+            harness::header_value(&head, "content-length"),
+            wire_length,
+            "{method} {status}: {head}"
+        );
+        assert_eq!(harness::header_value(&head, "transfer-encoding"), None);
+        let mut extra = Vec::new();
+        let _ = client.read_to_end(&mut extra);
+        assert!(
+            extra.is_empty(),
+            "no payload or chunk terminator for {method} {status}"
+        );
+        let events = wait_for_event_count(&shared, 7);
+        assert!(matches!(
+            events[6],
+            Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Completed(_))
+        ));
+    }
 }
 
 /// An upstream that never replies: the read deadline ends the exchange, the request outcome

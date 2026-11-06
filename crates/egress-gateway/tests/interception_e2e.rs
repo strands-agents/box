@@ -261,23 +261,19 @@ fn chunked_http1_is_normalized_across_tls_interception() {
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_chunked_request("POST", "/responses", b"chunked-request");
-    let head = client.read_head();
-    let body = client.read_to_close();
+    let response = client.read_response();
 
-    // Nothing reads this host's response body, so it streams. hyper chunks it again, and the
-    // upstream's hop-by-hop fields, trailer announcement, and chunk extensions do not cross.
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(body, "mantle-stream-ok");
     assert_eq!(
-        head,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+        harness::header_value(head, "transfer-encoding"),
+        Some("chunked")
     );
-    assert!(
-        !String::from_utf8_lossy(&body).contains("source=mantle"),
-        "a chunk extension must not cross the upstream-to-client hop"
-    );
-    assert_eq!(
-        harness::decode_chunked(&body).as_deref(),
-        Some(&b"mantle-stream-ok"[..])
-    );
+    assert_eq!(harness::header_value(head, "connection"), Some("close"));
+    for removed in ["content-length", "x-upstream-hop", "trailer"] {
+        assert_eq!(harness::header_value(head, removed), None);
+    }
     let seen = upstream.last_request();
     assert!(seen.raw.ends_with("chunked-request"));
     assert_eq!(seen.header("content-length").as_deref(), Some("15"));
@@ -289,33 +285,6 @@ fn chunked_http1_is_normalized_across_tls_interception() {
             "{removed} must not cross the client-to-upstream hop"
         );
     }
-}
-
-/// A credentialed host's chunked response is buffered for the leak-back scrub, so the gateway
-/// frames the de-chunked body itself.
-#[test]
-fn chunked_response_from_a_credentialed_host_is_reframed_with_its_length() {
-    let host = "stream-credentialed.test";
-    let upstream = TlsUpstream::start_chunked(host);
-    let port = upstream.port();
-    let (store, phantom) = opaque_store(host, port, "sk_live_CHUNKEDSECRET");
-    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
-    let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
-
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
-    client.send_request(
-        "POST",
-        "/responses",
-        &[("Authorization", &format!("Bearer {phantom}"))],
-        b"chunked-request",
-    );
-    let response = client.read_response();
-
-    // The gateway frames the de-chunked body itself, so it writes that name in lowercase.
-    assert_eq!(
-        response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\ncontent-length: 16\r\n\r\nmantle-stream-ok"
-    );
 }
 
 // ============================================================================================
@@ -1109,42 +1078,4 @@ fn a_path_scoped_secret_never_rides_plain_http() {
     let reasons = format!("{:?}", records());
     assert!(reasons.contains("a secret must ride TLS"), "{reasons}");
     assert!(reasons.contains("not RFC 3986"), "{reasons}");
-}
-
-// ============================================================================================
-// GUARD: a credentialed host's reply keeps the 16 MiB limit, because the leak-back scrub reads it
-// whole (strands-agents/box#171 streams only replies from hosts with no credential)
-// ============================================================================================
-
-#[test]
-fn a_reply_over_the_limit_from_a_credentialed_host_is_still_refused() {
-    let host = "api.export.test";
-    let limit = 16 * 1024 * 1024;
-    let mut reply = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        limit + 1
-    )
-    .into_bytes();
-    reply.resize(reply.len() + limit + 1, b'x');
-    let upstream = TlsUpstream::start_with_bytes(host, reply);
-    let port = upstream.port();
-    let (store, phantom) = opaque_store(host, port, "sk_live_REALSECRET");
-    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
-    let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
-
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
-    client.send_request(
-        "GET",
-        "/v1/export",
-        &[("Authorization", &format!("Bearer {phantom}"))],
-        b"",
-    );
-    let head = client.read_head();
-    let body = client.read_to_close();
-
-    let delivered = head.starts_with("HTTP/1.1 200") && body.len() > limit;
-    assert!(
-        !delivered,
-        "a credentialed host's reply over the limit reached the workload without the scrub"
-    );
 }

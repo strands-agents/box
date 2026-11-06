@@ -1,12 +1,11 @@
 //! The upstream side: TLS to the pinned upstream, and hyper's client.
 
-use std::borrow::Cow;
 use std::cell::Cell;
 use std::io;
 use std::net::TcpStream;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker, ready};
-use std::time::Duration;
 
 use http_body_util::Empty;
 use hyper::Request;
@@ -17,11 +16,12 @@ use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Instant, Sleep, timeout_at};
 use tokio_rustls::TlsConnector;
+use zeroize::Zeroizing;
 
 use crate::effect::EffectOutcome;
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::SharedState;
-use crate::intercept::mitm::http1::{self, ParsedResponse, ResponseHead};
+use crate::intercept::mitm::http1::{self, ResponseHead};
 use crate::transport::socket::{self, Counted, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// The pinned upstream socket, and the deadline of the one exchange on it.
@@ -54,14 +54,14 @@ impl Upstream {
         self.tls.is_some()
     }
 
-    /// Send the serialized request, and read the whole response before the deadline.
+    /// Send the serialized request and receive the response head under the exchange deadline.
     pub(crate) async fn send(
         self,
         state: &SharedState,
         method: &str,
-        head: &[u8],
-        body: &[u8],
-    ) -> (EffectOutcome, Result<ParsedResponse>) {
+        head: Zeroizing<String>,
+        body: Zeroizing<Vec<u8>>,
+    ) -> (EffectOutcome, Result<UpstreamResponse>) {
         let Self {
             socket,
             tls,
@@ -69,7 +69,6 @@ impl Upstream {
         } = self;
         let writes = WriteCount::default();
         let status = Cell::new(None);
-        let max_body = state.config.response_limits.max_body_bytes;
         let exchange = async {
             let lost = |what: &str, error: io::Error| {
                 (error.kind(), ProxyError::Io(format!("{what}: {error}")))
@@ -79,92 +78,85 @@ impl Upstream {
                 .map_err(|e| lost("upstream socket", e))?;
             let request = (method, head, body);
             match tls {
-                None => round_trip(tcp, &writes, request, &status, max_body).await,
+                None => round_trip(tcp, &writes, request, &status, deadline).await,
                 Some(name) => {
                     let tls = TlsConnector::from(state.upstream_config.clone())
                         .connect(name, tcp)
                         .await
                         .map_err(|e| lost("upstream TLS handshake", e))?;
-                    round_trip(tls, &writes, request, &status, max_body).await
+                    round_trip(tls, &writes, request, &status, deadline).await
                 }
             }
         };
-        within(deadline, &writes, &status, exchange).await
-    }
-
-    /// Send the serialized request and read the response head before the deadline, and leave the
-    /// body to stream. The body waits at most `upstream_read_deadline` for each piece.
-    ///
-    /// The request bytes are owned, because the connection outlives this call, and they are not
-    /// wiped on drop, so the caller passes only a request that carries no credential.
-    pub(crate) async fn send_streamed(
-        self,
-        state: &SharedState,
-        method: &str,
-        head: Vec<u8>,
-        body: Vec<u8>,
-    ) -> (EffectOutcome, Result<StreamedResponse>) {
-        let Self {
-            socket,
-            tls,
-            deadline,
-        } = self;
-        let writes = WriteCount::default();
-        let status = Cell::new(None);
-        let gap = state.config.upstream_read_deadline;
-        let exchange = async {
-            let lost = |what: &str, error: io::Error| {
-                (error.kind(), ProxyError::Io(format!("{what}: {error}")))
-            };
-            let tcp = socket
-                .into_async()
-                .map_err(|e| lost("upstream socket", e))?;
-            let request = (method, head, body);
-            match tls {
-                None => open_stream(tcp, &writes, request, &status, gap).await,
-                Some(name) => {
-                    let tls = TlsConnector::from(state.upstream_config.clone())
-                        .connect(name, tcp)
-                        .await
-                        .map_err(|e| lost("upstream TLS handshake", e))?;
-                    open_stream(tls, &writes, request, &status, gap).await
-                }
-            }
+        let (kind, response) = match timeout_at(deadline, exchange).await {
+            Ok(Ok(response)) => (None, Ok(response)),
+            Ok(Err((kind, error))) => (Some(kind), Err(error)),
+            Err(_) => (
+                Some(io::ErrorKind::TimedOut),
+                Err(ProxyError::Io("upstream deadline passed".to_string())),
+            ),
         };
-        within(deadline, &writes, &status, exchange).await
+        let outcome = match status.get() {
+            Some(status) => EffectOutcome::Replied {
+                accepted_bytes: writes.get().accepted,
+                status,
+            },
+            None => writes.get().outcome(0, kind),
+        };
+        (outcome, response)
     }
 }
 
-/// A response whose head has arrived and whose body streams from the upstream.
-pub(crate) struct StreamedResponse {
+/// An upstream response whose body retains the connection and its absolute deadline.
+pub(crate) struct UpstreamResponse {
     pub(crate) head: ResponseHead,
     pub(crate) body: UpstreamBody,
 }
 
-/// Run `exchange` until it ends or the deadline passes, and return the request's outcome with
-/// the exchange's result.
-async fn within<T>(
-    deadline: Instant,
-    writes: &WriteCount,
-    status: &Cell<Option<u16>>,
-    exchange: impl Future<Output = std::result::Result<T, NoResponse>>,
-) -> (EffectOutcome, Result<T>) {
-    let (kind, response) = match timeout_at(deadline, exchange).await {
-        Ok(Ok(response)) => (None, Ok(response)),
-        Ok(Err((kind, error))) => (Some(kind), Err(error)),
-        Err(_) => (
-            Some(io::ErrorKind::TimedOut),
-            Err(ProxyError::Io("upstream deadline passed".to_string())),
-        ),
-    };
-    let outcome = match status.get() {
-        Some(status) => EffectOutcome::Replied {
-            accepted_bytes: writes.get().accepted,
-            status,
-        },
-        None => writes.get().outcome(0, kind),
-    };
-    (outcome, response)
+/// Whether the upstream body finished or failed independently of downstream writes.
+#[derive(Clone, Copy)]
+pub(crate) enum ResponseState {
+    Receiving,
+    Received,
+    Failed(io::ErrorKind),
+}
+
+/// The upstream receipt state shared by its body and the workload connection.
+#[derive(Clone)]
+pub(crate) struct ResponseProgress {
+    pub(crate) deadline: Instant,
+    state: Arc<Mutex<ResponseState>>,
+}
+
+impl ResponseProgress {
+    fn new(deadline: Instant, received: bool) -> Self {
+        Self {
+            deadline,
+            state: Arc::new(Mutex::new(if received {
+                ResponseState::Received
+            } else {
+                ResponseState::Receiving
+            })),
+        }
+    }
+
+    pub(crate) fn state(&self) -> ResponseState {
+        *self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn received(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if matches!(*state, ResponseState::Receiving) {
+            *state = ResponseState::Received;
+        }
+    }
+
+    pub(crate) fn fail(&self, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(*state, ResponseState::Failed(_)) {
+            *state = ResponseState::Failed(kind);
+        }
+    }
 }
 
 /// Send `request` through hyper. hyper never wipes its buffers, so it gets a stand-in, and
@@ -172,72 +164,10 @@ async fn within<T>(
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body): (&str, &[u8], &[u8]),
+    (method, head, body): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>),
     status: &Cell<Option<u16>>,
-    max_body: usize,
-) -> std::result::Result<ParsedResponse, NoResponse>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let lost = |error: hyper::Error| {
-        let kind = socket::error_kind(&error);
-        (kind, ProxyError::Io(format!("upstream exchange: {error}")))
-    };
-    let stand_in = stand_in_request(method)?;
-    let upstream = Prepared::new(Counted::new(upstream, writes.clone(), None), head, body);
-    let (mut sender, connection) = client_builder()
-        .handshake(TokioIo::new(upstream))
-        .await
-        .map_err(lost)?;
-    let exchange = async move {
-        let response = sender.send_request(stand_in).await.map_err(lost)?;
-        status.set(Some(response.status().as_u16()));
-        http1::read_response(response, max_body)
-            .await
-            .map_err(|error| (io::ErrorKind::Other, error))
-    };
-    // Drive the connection until the response is read; dropping it closes the upstream.
-    let connection = async {
-        let _ = connection.await;
-        std::future::pending::<()>().await
-    };
-    tokio::select! {
-        response = exchange => response,
-        () = connection => unreachable!("the connection future never completes"),
-    }
-}
-
-/// hyper's stand-in for the box's request. [`Prepared`] writes the real bytes in its place.
-fn stand_in_request(method: &str) -> std::result::Result<Request<Empty<Bytes>>, NoResponse> {
-    Request::builder()
-        .method(method)
-        .uri("/")
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| {
-            let error = ProxyError::Intercept(format!("upstream request: {e}"));
-            (io::ErrorKind::InvalidInput, error)
-        })
-}
-
-/// hyper's client, set up as the gateway reads every upstream.
-fn client_builder() -> hyper::client::conn::http1::Builder {
-    let mut builder = hyper::client::conn::http1::Builder::new();
-    builder
-        .preserve_header_case(true)
-        .max_headers(64)
-        .max_buf_size(MAX_HEAD_BYTES);
-    builder
-}
-
-/// Send `request` through hyper and read the response head, and return the body unread, with
-/// the connection that delivers it.
-async fn open_stream<S>(
-    upstream: S,
-    writes: &WriteCount,
-    (method, head, body): (&str, Vec<u8>, Vec<u8>),
-    status: &Cell<Option<u16>>,
-    gap: Duration,
-) -> std::result::Result<StreamedResponse, NoResponse>
+    deadline: Instant,
+) -> std::result::Result<UpstreamResponse, NoResponse>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -245,54 +175,145 @@ where
         let kind = socket::error_kind(&error);
         (kind, ProxyError::Io(format!("upstream exchange: {error}")))
     };
-    let stand_in = stand_in_request(method)?;
+    let stand_in = Request::builder()
+        .method(method)
+        .uri("/")
+        .body(Empty::<Bytes>::new())
+        .map_err(|e| {
+            let error = ProxyError::Intercept(format!("upstream request: {e}"));
+            (io::ErrorKind::InvalidInput, error)
+        })?;
     let upstream = Prepared::new(Counted::new(upstream, writes.clone(), None), head, body);
-    let (mut sender, connection) = client_builder()
+    let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+        .preserve_header_case(true)
+        .max_headers(64)
+        .max_buf_size(MAX_HEAD_BYTES)
         .handshake(TokioIo::new(upstream))
         .await
         .map_err(lost)?;
-    let mut connection = Driver::new(connection);
+    let mut driver = ConnectionDriver(Some(Box::pin(async move {
+        let _ = connection.await;
+    })));
     let response = {
-        let mut send = std::pin::pin!(sender.send_request(stand_in));
+        let mut response = std::pin::pin!(sender.send_request(stand_in));
         std::future::poll_fn(|cx| {
-            connection.poll(cx);
-            send.as_mut().poll(cx)
+            driver.poll(cx);
+            response.as_mut().poll(cx)
         })
         .await
         .map_err(lost)?
     };
     status.set(Some(response.status().as_u16()));
     let (head, body) =
-        http1::read_response_head(response).map_err(|error| (io::ErrorKind::Other, error))?;
-    let body = UpstreamBody {
-        body,
-        connection,
-        _sender: sender,
-        gap,
-        idle: Box::pin(tokio::time::sleep(gap)),
-    };
-    Ok(StreamedResponse { head, body })
+        http1::read_response_head(response).map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    let progress = ResponseProgress::new(deadline, body.is_end_stream());
+    Ok(UpstreamResponse {
+        head,
+        body: UpstreamBody {
+            body,
+            driver,
+            _sender: sender,
+            progress,
+            deadline: Box::pin(tokio::time::sleep_until(deadline)),
+        },
+    })
 }
 
-/// Writes the box's request bytes in place of hyper's stand-in, and holds reads until they are
-/// flushed, because hyper treats early bytes on an idle connection as an error.
-struct Prepared<'a, S> {
+/// The upstream connection future, polled only when its response is requested.
+struct ConnectionDriver(Option<Pin<Box<dyn Future<Output = ()> + Send>>>);
+
+impl ConnectionDriver {
+    fn poll(&mut self, cx: &mut Context<'_>) {
+        if let Some(driver) = &mut self.0
+            && driver.as_mut().poll(cx).is_ready()
+        {
+            self.0 = None;
+        }
+    }
+}
+
+/// A body that advances its upstream connection as its consumer requests bytes.
+pub(crate) struct UpstreamBody {
+    body: Incoming,
+    driver: ConnectionDriver,
+    _sender: SendRequest<Empty<Bytes>>,
+    pub(crate) progress: ResponseProgress,
+    deadline: Pin<Box<Sleep>>,
+}
+
+impl Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        let this = self.get_mut();
+        if let ResponseState::Failed(kind) = this.progress.state() {
+            return Poll::Ready(Some(Err(io::Error::from(kind))));
+        }
+        if matches!(this.progress.state(), ResponseState::Receiving)
+            && this.deadline.as_mut().poll(cx).is_ready()
+        {
+            this.progress.fail(io::ErrorKind::TimedOut);
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "upstream deadline passed",
+            ))));
+        }
+        this.driver.poll(cx);
+        let frame = ready!(Pin::new(&mut this.body).poll_frame(cx));
+        match frame {
+            Some(Err(error)) => {
+                this.progress.fail(socket::error_kind(&error));
+                Poll::Ready(Some(Err(io::Error::other(error))))
+            }
+            Some(Ok(frame))
+                if frame
+                    .trailers_ref()
+                    .is_some_and(|trailers| !trailers.is_empty()) =>
+            {
+                this.progress.fail(io::ErrorKind::InvalidData);
+                Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "chunked trailers are not supported",
+                ))))
+            }
+            frame => {
+                if frame.is_none() || this.body.is_end_stream() {
+                    this.progress.received();
+                }
+                Poll::Ready(frame.map(|frame| frame.map_err(io::Error::other)))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// The owned request bytes written in place of hyper's stand-in and wiped after flushing.
+struct Prepared<S> {
     inner: S,
-    head: Cow<'a, [u8]>,
-    body: Cow<'a, [u8]>,
+    head: Zeroizing<String>,
+    body: Zeroizing<Vec<u8>>,
     sent: usize,
     flushed: bool,
     reader: Option<Waker>,
 }
 
-impl<'a, S> Prepared<'a, S> {
-    /// `head` and `body` are borrowed for an exchange that ends before its caller returns, and
-    /// owned for a streamed one, whose connection outlives its caller.
-    fn new(inner: S, head: impl Into<Cow<'a, [u8]>>, body: impl Into<Cow<'a, [u8]>>) -> Self {
+impl<S> Prepared<S> {
+    fn new(inner: S, head: Zeroizing<String>, body: Zeroizing<Vec<u8>>) -> Self {
         Self {
             inner,
-            head: head.into(),
-            body: body.into(),
+            head,
+            body,
             sent: 0,
             flushed: false,
             reader: None,
@@ -300,7 +321,7 @@ impl<'a, S> Prepared<'a, S> {
     }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
+impl<S: AsyncRead + Unpin> AsyncRead for Prepared<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -315,7 +336,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -324,12 +345,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
         let this = self.get_mut();
         while !this.flushed {
             let rest = match this.sent.checked_sub(this.head.len()) {
-                None => &this.head[this.sent..],
+                None => &this.head.as_bytes()[this.sent..],
                 Some(at) => &this.body[at..],
             };
             if rest.is_empty() {
                 ready!(Pin::new(&mut this.inner).poll_flush(cx))?;
                 this.flushed = true;
+                this.head = Zeroizing::default();
+                this.body = Zeroizing::default();
                 if let Some(reader) = this.reader.take() {
                     reader.wake();
                 }
@@ -353,94 +376,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
     }
 }
 
-/// The upstream connection, driven by whoever waits on its exchange, until it ends.
-struct Driver(Option<Pin<Box<dyn Future<Output = ()> + Send>>>);
-
-impl Driver {
-    fn new<F: Future + Send + 'static>(connection: F) -> Self {
-        Self(Some(Box::pin(async move {
-            let _ = connection.await;
-        })))
-    }
-
-    fn poll(&mut self, cx: &mut Context<'_>) {
-        if let Some(connection) = self.0.as_mut()
-            && connection.as_mut().poll(cx).is_ready()
-        {
-            self.0 = None;
-        }
-    }
-}
-
-/// A response body read from the upstream as the workload takes it.
-///
-/// It drives the upstream connection itself, so the upstream is read only while the workload
-/// reads, and it fails when the upstream sends nothing for `gap`.
-pub(crate) struct UpstreamBody {
-    body: Incoming,
-    connection: Driver,
-    /// Held so the connection keeps serving this exchange until its body ends.
-    _sender: SendRequest<Empty<Bytes>>,
-    gap: Duration,
-    idle: Pin<Box<Sleep>>,
-}
-
-impl Body for UpstreamBody {
-    type Data = Bytes;
-    type Error = io::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
-        let this = self.get_mut();
-        this.connection.poll(cx);
-        loop {
-            match Pin::new(&mut this.body).poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => {
-                    this.idle.as_mut().reset(Instant::now() + this.gap);
-                    match frame.into_data() {
-                        Ok(data) => return Poll::Ready(Some(Ok(Frame::data(data)))),
-                        // Refused as the buffered read refuses them: hyper would drop them.
-                        Err(frame)
-                            if frame
-                                .trailers_ref()
-                                .is_some_and(|trailers| !trailers.is_empty()) =>
-                        {
-                            return Poll::Ready(Some(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "chunked trailers are not supported",
-                            ))));
-                        }
-                        Err(_) => {}
-                    }
-                }
-                Poll::Ready(Some(Err(error))) => {
-                    return Poll::Ready(Some(Err(io::Error::other(error))));
-                }
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => {
-                    if this.idle.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(Some(Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "the upstream sent nothing within the gap limit",
-                        ))));
-                    }
-                    return Poll::Pending;
-                }
-            }
-        }
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,7 +389,7 @@ mod tests {
         response: &[u8],
     ) -> (
         Vec<u8>,
-        std::result::Result<ParsedResponse, NoResponse>,
+        std::result::Result<Vec<u8>, NoResponse>,
         Option<u16>,
         usize,
     ) {
@@ -472,7 +407,23 @@ mod tests {
                 seen.extend(rest);
                 seen
             };
-            let client = round_trip(gateway, &writes, ("POST", HEAD, b"ok"), &status, 1024);
+            let client = async {
+                let response = round_trip(
+                    gateway,
+                    &writes,
+                    (
+                        "POST",
+                        Zeroizing::new(std::str::from_utf8(HEAD).unwrap().to_string()),
+                        Zeroizing::new(b"ok".to_vec()),
+                    ),
+                    &status,
+                    Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await?;
+                http1::collect(response.body, 1024)
+                    .await
+                    .map_err(|error| (io::ErrorKind::InvalidData, error))
+            };
             let (result, seen) = tokio::join!(client, server);
             (seen, result, status.get(), writes.get().accepted)
         })
@@ -487,7 +438,7 @@ mod tests {
         assert_eq!(seen, [HEAD, b"ok"].concat(), "exactly the box's bytes");
         assert_eq!(accepted, HEAD.len() + 2);
         assert_eq!(status, Some(200));
-        assert_eq!(result.unwrap().response.body, b"yes");
+        assert_eq!(result.unwrap(), b"yes");
     }
 
     #[test]

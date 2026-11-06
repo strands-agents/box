@@ -1,22 +1,26 @@
 //! The workload side: hyper reads each request and writes each response.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
+use std::io;
 use std::net::TcpStream;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
-use http_body_util::{Either, Full};
-use hyper::body::{Bytes, Incoming};
+use hyper::body::{Body, Incoming};
 use hyper::header::{HeaderName, HeaderValue, PROXY_AUTHORIZATION};
 use hyper::upgrade::OnUpgrade;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::Sleep;
 use tokio_rustls::TlsAcceptor;
 
 use crate::audit::RequestId;
-use crate::client::http::UpstreamBody;
+use crate::client::http::{ResponseProgress, ResponseState};
 use crate::error::{ProxyError, Result};
+use crate::intercept::mitm::body::ResponseBody;
 use crate::intercept::mitm::connect::{self, ConnectRequest};
 use crate::intercept::mitm::l7::{self, WorkloadResponse};
 use crate::intercept::mitm::listener::open_governed_upstream;
@@ -80,7 +84,7 @@ async fn first_request(
         // Open the upstream before the CONNECT ack, so a denial opens no socket.
         let upstream = match admit(state, &connect, token.as_deref(), &correlation) {
             Ok(upstream) => upstream,
-            Err(refusal) => return Ok(refusal),
+            Err(refusal) => return Ok(*refusal),
         };
 
         // Every tunnel is terminated and inspected. A TLS failure drops it, never a downgrade.
@@ -110,7 +114,7 @@ async fn first_request(
     let correlation = RequestId::unique().with_headers(&parsed.headers);
     let upstream = match admit(state, &connect, token.as_deref(), &correlation) {
         Ok(upstream) => upstream,
-        Err(refusal) => return Ok(refusal),
+        Err(refusal) => return Ok(*refusal),
     };
     l7::forward_plain(
         upstream,
@@ -129,11 +133,11 @@ fn admit(
     connect: &ConnectRequest,
     token: Option<&str>,
     correlation: &RequestId,
-) -> std::result::Result<TcpStream, WorkloadResponse> {
+) -> std::result::Result<TcpStream, Box<WorkloadResponse>> {
     if !connect::token_ok(state.config.expected_token.as_deref(), token) {
-        return Err(WorkloadResponse::bare(407));
+        return Err(Box::new(WorkloadResponse::bare(407)));
     }
-    open_governed_upstream(state, connect, correlation).map_err(|error| error.response())
+    open_governed_upstream(state, connect, correlation).map_err(|error| Box::new(error.response()))
 }
 
 /// Terminate the workload's TLS in the tunnel, and serve its request.
@@ -173,6 +177,8 @@ where
     let stream = Counted::new(client, writes.clone(), Some(head.clone()));
     let handle = Cell::new(Some(handle));
     let release = Cell::new(None);
+    let progress = RefCell::new(None::<(ResponseProgress, Pin<Box<Sleep>>)>);
+    let progress = &progress;
     let (handle, release, writes, head) = (&handle, &release, &writes, &head);
     let service = hyper::service::service_fn(move |request| async move {
         let handle = handle
@@ -185,44 +191,71 @@ where
         if let Some(permit) = response.release.take() {
             release.set(Some((permit, writes.get().accepted)));
         }
+        if let Some(receipt) = response.progress.take() {
+            let deadline = Box::pin(tokio::time::sleep_until(receipt.deadline));
+            *progress.borrow_mut() = Some((receipt, deadline));
+        }
         Ok::<_, ProxyError>(hyper_response(response))
     });
-    let served = hyper::server::conn::http1::Builder::new()
-        .keep_alive(false)
-        .half_close(true)
-        .auto_date_header(false)
-        .max_headers(64)
-        .max_buf_size(MAX_HEAD_BYTES)
-        .serve_connection(TokioIo::new(stream), service)
-        .with_upgrades()
-        .await;
+    let mut served = Box::pin(
+        hyper::server::conn::http1::Builder::new()
+            .keep_alive(false)
+            .half_close(true)
+            .auto_date_header(false)
+            .max_headers(64)
+            .max_buf_size(MAX_HEAD_BYTES)
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades(),
+    );
+    let mut shutdown_failed = false;
+    let served = std::future::poll_fn(|cx| {
+        if let Poll::Ready(result) = served.as_mut().poll(cx) {
+            shutdown_failed = result.as_ref().is_err_and(hyper::Error::is_shutdown);
+            return Poll::Ready(
+                result.map_err(|error| io::Error::new(socket::error_kind(&error), error)),
+            );
+        }
+        if let Some((receipt, deadline)) = progress.borrow_mut().as_mut()
+            && matches!(receipt.state(), ResponseState::Receiving)
+            && deadline.as_mut().poll(cx).is_ready()
+        {
+            receipt.fail(io::ErrorKind::TimedOut);
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "upstream deadline passed",
+            )));
+        }
+        Poll::Pending
+    })
+    .await;
     if let Some((permit, start)) = release.take() {
-        let written = writes.get();
-        let outcome = match served.as_ref().err() {
-            // The response body failed after its head, as a streamed body does when its upstream
-            // stops early: hyper reports the body's error as a user error.
-            Some(error) if error.is_user() => written.cut_short(start, socket::error_kind(error)),
-            error => written.outcome(start, error.map(|error| socket::error_kind(error))),
-        };
-        permit.record_outcome(outcome).map_err(|error| {
-            ProxyError::Io(format!(
-                "recording governed response outcome after I/O: {error}"
-            ))
-        })?;
+        let mut error = served.as_ref().err().map(io::Error::kind);
+        let mut complete = served.is_ok() || shutdown_failed;
+        if let Some((receipt, _)) = progress.borrow().as_ref() {
+            match receipt.state() {
+                ResponseState::Received => {}
+                ResponseState::Receiving => complete = false,
+                ResponseState::Failed(kind) => {
+                    complete = false;
+                    error = Some(kind);
+                }
+            }
+        }
+        permit
+            .record_outcome(writes.get().response_outcome(start, error, complete))
+            .map_err(|error| {
+                ProxyError::Io(format!(
+                    "recording governed response outcome after I/O: {error}"
+                ))
+            })?;
     }
     served.map_err(|error| ProxyError::Io(format!("serving the workload: {error}")))
 }
 
-/// The response as hyper writes it. hyper frames a body itself, so a stale length is dropped. A
-/// streamed body goes out as it arrives, framed by the length the upstream declared, or chunked.
-fn hyper_response(response: WorkloadResponse) -> Response<Either<Full<Bytes>, UpstreamBody>> {
-    let keep_length =
-        response.streamed.is_none() && response.body.is_empty() && response.status != 204;
-    let body = match response.streamed {
-        Some(streamed) => Either::Right(*streamed),
-        None => Either::Left(Full::new(Bytes::from(response.body))),
-    };
-    let mut out = Response::new(body);
+/// The response as hyper writes it. hyper frames a body itself, so a stale length is dropped.
+fn hyper_response(response: WorkloadResponse) -> Response<ResponseBody> {
+    let keep_length = response.body.is_end_stream() && response.status != 204;
+    let mut out = Response::new(response.body);
     *out.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     *out.extensions_mut() = response.header_case;
     if let Some(reason) = response.reason {
@@ -245,8 +278,14 @@ fn hyper_response(response: WorkloadResponse) -> Response<Either<Full<Bytes>, Up
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::task::Context;
+
+    use tokio::io::ReadBuf;
+
     use super::*;
     use crate::boundary::HeaderMap;
+    use crate::effect::{ClaimedEffectPermit, EffectOutcome, EffectPermit};
 
     fn response(status: u16, body: &[u8]) -> WorkloadResponse {
         let mut headers = HeaderMap::new();
@@ -255,10 +294,10 @@ mod tests {
             status,
             reason: None,
             headers,
-            body: body.to_vec(),
-            streamed: None,
+            body: body.to_vec().into(),
             release: None,
             header_case: Default::default(),
+            progress: None,
         }
     }
 
@@ -274,5 +313,93 @@ mod tests {
         assert_eq!(length(200, b"").as_deref(), Some("42"));
         assert_eq!(length(200, b"abc"), None);
         assert_eq!(length(204, b""), None);
+    }
+
+    #[test]
+    fn a_shutdown_error_after_a_full_flush_keeps_the_release_completed() {
+        struct ShutdownFails {
+            request: &'static [u8],
+            written: Arc<Mutex<Vec<u8>>>,
+            flushed: bool,
+        }
+
+        impl AsyncRead for ShutdownFails {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let length = self.request.len().min(buffer.remaining());
+                buffer.put_slice(&self.request[..length]);
+                self.request = &self.request[length..];
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl AsyncWrite for ShutdownFails {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                self.written.lock().unwrap().extend_from_slice(bytes);
+                self.flushed = false;
+                Poll::Ready(Ok(bytes.len()))
+            }
+
+            fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.flushed = true;
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                assert!(self.flushed, "HTTP delivery must flush before shutdown");
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            }
+        }
+
+        struct RecordingPermit(Arc<Mutex<Vec<EffectOutcome>>>);
+
+        impl EffectPermit for RecordingPermit {
+            fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
+                self.0.lock().unwrap().push(outcome);
+                Ok(())
+            }
+
+            fn mark_indeterminate(self: Box<Self>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(EffectOutcome::Indeterminate { accepted_bytes: 0 });
+            }
+        }
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let permit = ClaimedEffectPermit::new(Box::new(RecordingPermit(outcomes.clone())));
+        let transport = ShutdownFails {
+            request: b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+            written: written.clone(),
+            flushed: false,
+        };
+        let error = socket::block_on(serve(transport, |_, _| async move {
+            let mut reply = response(200, b"complete body");
+            reply.release = Some(permit);
+            Ok(reply)
+        }))
+        .unwrap()
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ProxyError::Io(ref message) if message.contains("shutting down")),
+            "the shutdown failure must still reach the caller: {error}"
+        );
+        let written = written.lock().unwrap();
+        assert!(written.starts_with(b"HTTP/1.1 200 "));
+        assert!(written.ends_with(b"\r\n\r\ncomplete body"));
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![EffectOutcome::Completed(written.len())]
+        );
     }
 }

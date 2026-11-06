@@ -1,11 +1,11 @@
 # Fuzz the tool grammar shell parser
 
-The tool grammar shell parser reads an argv as one action of a grammar. Its fuzz tests are in
-`crates/policy/src/grammar/fuzz.rs`. They build each argv from the vocabulary of each valid grammar
-under `crates/policy/tests/grammars/`, and from the argvs of the golden corpus. Then they check these
+The tool grammar shell parser reads an argument vector, or argv, as one action of a grammar. Its fuzz tests are in
+`crates/policy/src/grammar/fuzz.rs`. They build argument vectors from each valid grammar under `crates/policy/tests/grammars/`
+and from the golden corpus. Then they check these
 invariants:
 
-- The parser does not panic, and one parse that returns took less than one second. This check
+- The parser does not panic, and each completed parse takes less than one second. This check
   cannot stop a parse that does not return. Only the `-timeout` of the long run finds a hang.
 - Two parses of one argv give the same result.
 - An action, its fields, and its effects are ones that the grammar declares.
@@ -18,8 +18,7 @@ invariants:
 
 ## The bounded run
 
-`cargo test` runs the bounded run on the stable toolchain. It uses a random engine with a new
-seed on each run, and takes a few seconds:
+`cargo test` runs the bounded run on the stable toolchain. It generates random inputs with a new seed on each run and takes a few seconds:
 
 ```sh
 cargo test -p strands-box-policy --all-features --lib grammar::fuzz
@@ -37,7 +36,7 @@ Do not use `cargo bolero test` for this crate. That command has no `--lib` optio
 each integration test of `strands-box-policy` with the coverage flags. Those test binaries do not
 link the fuzzer runtime, and the link fails. Build only the library test binary, and then start
 it with the variables that `cargo bolero test` sets. Run these commands from the repository root.
-`FUZZ_FLAGS` reaches only the one build, so the next `cargo` command in your shell is not changed:
+`FUZZ_FLAGS` applies only to this build. It does not affect the next `cargo` command in your shell:
 
 ```sh
 FUZZ_FLAGS="--cfg fuzzing --cfg fuzzing_libfuzzer -Cpasses=sancov-module \

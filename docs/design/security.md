@@ -1,20 +1,19 @@
 # Security model and shared responsibility
 
-Strands Box restricts a workload: the processes that run in a box. Its security depends on
-Box's enforcement, the operator's access choices, and the surrounding operating system (OS).
+Strands Box restricts the processes that run in a box, called the workload. Its security depends on
+Box's enforcement, the operator's access choices, and the surrounding operating system, or OS.
 The operator is the person who configures and runs Box.
 This page explains what Box enforces, where its protection ends, and who owns each part.
 
-Box treats the workload as hostile, including when it runs an agent that follows malicious
-instructions ([the workload is hostile by assumption](decisions.md#the-agent-is-hostile)).
+Box assumes [the workload is hostile](decisions.md#the-agent-is-hostile), including when it runs
+an agent that follows malicious instructions.
 Box aims to protect the operator's files, credentials, and connected systems by restricting
-that workload's access. The protection runs outward.
-It does not protect the workload's contents from that OS
-([the direction of protection](decisions.md#box-protects-the-machine-not-the-box)).
+that workload's access. It does not protect the workload's contents from the surrounding OS.
+The decision on [the direction of protection](decisions.md#box-protects-the-machine-not-the-box) explains this limit.
 
 ## What Box enforces and where protection ends
 
-Box builds and applies a set of sandbox grants: the restrictions on a process's direct access.
+Box builds and applies sandbox grants that restrict a process's direct access.
 Its trusted process, which runs outside every sandbox, handles requests on the workload's
 behalf. Policy is the operator's rules for access on those request paths.
 
@@ -26,48 +25,42 @@ The [editable diagram](images/security-enforcement.drawio) preserves the shapes 
 
 ### Processes and files
 
-On macOS, Box applies the sandbox before the configured program starts. If that step fails,
-the program does not start under weaker restrictions
-([failed setup refuses the workload](decisions.md#every-failed-or-unsupported-apply-refuses-the-workload)).
-Processes that the contained program starts inherit its restrictions
-([children inherit the boundary](decisions.md#children-inherit-the-boundary)).
+On macOS, Box applies the sandbox before the configured program starts.
+[Failed setup prevents startup](decisions.md#every-failed-or-unsupported-apply-refuses-the-workload),
+so the program cannot start under weaker restrictions. Child processes
+[inherit the restrictions](decisions.md#children-inherit-the-boundary).
 The [containment guide](containment.md#what-a-box-guarantees) scopes these guarantees and explains
 the platform dependencies.
 
-A direct filesystem grant is standing access. Policy does not decide each use, and a policy
-refusal cannot revoke that grant
-([a direct grant replaces the policy decision](decisions.md#a-direct-grant-replaces-the-policy-decision)).
-Requests through the box's trusted process take a separate path: policy can permit access beyond the
-workload's direct grants. The
-[two enforcement paths](containment.md#two-kinds-of-enforcement) show this difference.
+A [direct filesystem grant replaces individual policy decisions](decisions.md#a-direct-grant-replaces-the-policy-decision).
+Policy does not decide each use, and a policy refusal cannot revoke the grant.
+For requests through the box's trusted process, policy can permit access beyond the workload's
+direct grants. The [two enforcement paths](containment.md#two-kinds-of-enforcement) show this difference.
 
 ### Outbound network access
 
 The egress gateway checks policy before it forwards connections and web requests.
-An allowed destination can receive data the workload can read. Permission to contact a service
-does not establish that the data sent to it is safe to disclose
-([allowed actions can still cause harm](limitations.md#allowed-actions-can-still-cause-harm)).
+An allowed destination can receive data the workload can read. Such
+[allowed actions can still cause harm](limitations.md#allowed-actions-can-still-cause-harm).
+Permission to contact a service does not establish that the data is safe to disclose.
 
-A tool or local server with a declared network exception can connect without gateway checks,
-credential injection, or gateway traffic records
-([native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape)).
-Cloud metadata protection also depends on the operator's policy. The egress gateway has no built-in metadata
-block ([metadata protection is policy](decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
+A tool or local server with a declared [native egress exception](decisions.md#native-egress-is-an-operator-declared-leaf-escape)
+can connect without gateway checks, credential injection, or gateway traffic records.
+[Cloud metadata protection depends on policy](decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy).
+The egress gateway has no built-in metadata block.
 The [egress guide](egress.md#cloud-instance-metadata) describes the required restrictions.
 
 ### Credential values and credential use
 
-For credentials sourced from environment variables, Box gives contained processes a placeholder
-and keeps the real value in its trusted process. The gateway inserts the value into permitted
-requests ([placeholder credentials](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret)).
+For credentials sourced from environment variables, Box gives contained processes
+[placeholder credentials](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret)
+and keeps the real values in its trusted process. The gateway inserts them into permitted requests.
 The agent, each tool, and each local MCP server share credential routes. A tool's or local MCP
 server's sandbox contains a program that Box starts. These processes can use the same credentials
-through permitted requests
-([the box is the credential boundary](decisions.md#the-box-is-the-credential-boundary)).
+through permitted requests because [the box is the credential boundary](decisions.md#the-box-is-the-credential-boundary).
 
 Hiding the value does not prevent credential use. It also does not protect credential files that
-the operator exposes through direct grants or policy
-([broad interpreter access](policy.md#where-policy-sits)).
+the operator exposes through direct grants or policy. See [broad interpreter access](policy.md#where-policy-sits).
 The [egress guide](egress.md#how-credentials-are-added) explains the route and injection rules.
 
 ### Policy history and audit coverage
@@ -75,25 +68,23 @@ The [egress guide](egress.md#how-credentials-are-added) explains the route and i
 Policy history covers requests that reach the policy engine. A direct file operation raises no
 policy decision, so a later rule cannot use that history to detect the read.
 Policy history is not a complete audit record. It provides no evidence of tampering.
-An operation can finish without a recorded outcome if Box stops before recording it
-([history limits](policy.md#durable-history)).
+An operation can finish without a recorded outcome if Box stops before recording it. See [history limits](policy.md#durable-history).
 The operator must assess whether the available records meet the deployment's audit needs.
 
 ### Remote services and code executed elsewhere
 
 Box can control a request to a remote service, but it cannot contain that service or control
 its actions after an allowed request. The operator decides whether to trust it with the data
-sent ([remote servers](containment.md#remote-mcp-servers)).
-The sandbox also does not govern code the workload writes and someone later executes outside
-Box ([authored code](decisions.md#containment-does-not-govern-authored-code)).
+sent to [remote servers](containment.md#remote-mcp-servers).
+The sandbox also does not govern [code the workload writes for later execution outside Box](decisions.md#containment-does-not-govern-authored-code).
 
 ## Box owns enforcement
 
 Box owns correct enforcement of direct restrictions and policy on requests through its trusted process.
 
-The box's trusted process also depends on correct implementation. Its position outside every sandbox
-lets it perform permitted operations, but leaves its own defects outside that protection
-([the box's trusted process can itself be wrong](decisions.md#some-channels-never-reach-enforcement)).
+The [box's trusted process can itself be wrong](decisions.md#some-channels-never-reach-enforcement).
+Its position outside every sandbox lets it perform permitted operations, but leaves its own defects
+outside that protection.
 Disclosing this dependency does not exclude a bypass in that process from security reporting.
 
 ## The operator owns access choices
@@ -112,13 +103,11 @@ of broad grants and other access choices. The
 
 Box relies on the surrounding OS to enforce process restrictions. The operator owns the
 security of a local system, including its accounts, installation, configuration, and updates.
-A compromised OS can defeat those restrictions
-([kernel exploits are outside Box's scope](tenets.md#non-goals)).
+A compromised OS can defeat those restrictions. [Kernel exploits are outside Box's scope](tenets.md#non-goals).
 
 For a hosted deployment, responsibility for the surrounding environment follows the guarantees
-that the selected platform documents. Box supplies no isolation guarantee between tenants
-([tenant isolation is the platform's responsibility](tenets.md#non-goals)).
-Its sandboxes cannot establish that guarantee for a platform.
+that the selected platform documents. [Tenant isolation is the platform's responsibility](tenets.md#non-goals).
+Box's sandboxes cannot establish that guarantee for a platform.
 
 ![In an illustrative hosted deployment, the platform separates tenant environments. Each environment contains trusted Box code outside the agent's sandbox and the sandboxes for tools and local MCP servers.](images/security-platform.svg)
 
@@ -136,7 +125,7 @@ Suppose the workload reads a file. If its direct grant allows that read, the res
 operator's access choice. If Box permits a read outside that grant without another authorized
 path, the result indicates an enforcement defect.
 
-The same distinction applies to requests through the box's trusted process. A broad policy permit
+For requests through the box's trusted process, distinguish the policy from its enforcement. A broad policy permit
 can authorize an unwanted operation. An implementation that bypasses the applicable policy is
 a Box defect.
 
