@@ -308,7 +308,9 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.ref` | required unless a backend is declared | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
+| `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
@@ -394,6 +396,12 @@ Refused, each at startup with the destination named:
 | `secret.header = "X-Bad: injected"` | An HTTP field name is a token (RFC 7230 §3.2.6). |
 | `heder = "x-api-key"` | An unknown key is a load error, not a silent drop. |
 | Two entries whose destinations overlap | Such a request has no unambiguous credential. Checked by overlap, not string equality. |
+| A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
+| Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
+| A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
+| A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
+| A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |
 
 `destinations = ["*.example.com"]` and `destinations = ["api.example.com/v1"]` are
 **accepted**. Both narrow which requests carry the credential, and neither makes a

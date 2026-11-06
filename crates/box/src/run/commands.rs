@@ -1323,6 +1323,7 @@ mod tests {
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            ingress: Vec::new(),
             grammar: program.map(|program| {
                 toml::Value::Table(toml::Table::from_iter([(
                     "program".to_string(),

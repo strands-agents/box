@@ -11,7 +11,7 @@ use crate::sources::{
     AwsAcquisition, AwsResolution, AwsSource, CREDSD_SCHEME, CredsdClient,
     credsd_session_credentials,
 };
-use crate::vault::OpaqueBinding;
+use crate::vault::{BoxOwnedBinding, OpaqueBinding, StripBinding};
 use crate::{
     CredentialError, InjectMode, Locator, PhantomCheck, RequestId, Result, Vault, sign_request,
 };
@@ -82,7 +82,8 @@ impl Vault {
             }
         }
 
-        let mut attachment = attach_secret(binding);
+        let mut attachment = Attachment::new();
+        attach_secret(binding.inject(), binding.secret(), &mut attachment);
         if let Some(against) = advisory {
             // Journalled on the gateway's allow decision (with the destination and requester
             // correlation the vault does not hold), so an advisory injection is reconstructable.
@@ -92,26 +93,7 @@ impl Vault {
         // The harness may have placed the phantom at a *different* location than the one the secret
         // attaches to. `attach_secret` clears the attach location; when the harness location differs,
         // clear that one too so the phantom never rides upstream.
-        match binding.harness() {
-            InjectMode::Header { header_name, .. } => {
-                attachment.strip_header(header_name.as_deref().unwrap_or(DEFAULT_CRED_HEADER));
-            }
-            InjectMode::BasicAuth => attachment.strip_header(DEFAULT_CRED_HEADER),
-            InjectMode::QueryParam { name, .. } => attachment.strip_query_param(name.clone()),
-            // A `UrlPath` harness location has no standalone strip: clearing a phantom spliced into the
-            // path means rewriting the whole path, which only a `UrlPath` *attach* does. When the attach
-            // rewrites the path the phantom is overwritten and there is nothing to do; when it does not,
-            // the phantom would ride upstream beside the real secret, so refuse the exchange.
-            InjectMode::UrlPath { .. } if !attachment.rewrites_path() => {
-                return Err(CredentialError::UnsupportedInjectType(
-                    "the phantom is spliced into the request path but the credential attaches \
-                     elsewhere, so the path phantom cannot be cleared; pair a url_path harness \
-                     location with a url_path inject mode"
-                        .to_string(),
-                ));
-            }
-            InjectMode::UrlPath { .. } => {}
-        }
+        strip_location(binding.harness(), &mut attachment)?;
 
         Ok(attachment)
     }
@@ -254,12 +236,51 @@ fn credsd_environment(config: &Locator) -> Result<&str> {
     }
 }
 
-/// Build the strip-phantom + attach-real edits for a validated binding, honoring its inject mode.
-fn attach_secret(binding: &OpaqueBinding) -> Attachment {
-    let secret = binding.secret();
-    let mut attachment = Attachment::new();
+/// Attach the box's own credential unconditionally at its inject location, with no phantom check and
+/// no warning. For a re-route's backend token, which the workload never presents a placeholder for.
+/// Writes into `attachment` so it can compose with a strip in one `attach_for`.
+pub(crate) fn attach_box_owned(binding: &BoxOwnedBinding, attachment: &mut Attachment) {
+    attach_secret(binding.inject(), binding.secret(), attachment);
+}
 
-    match binding.inject() {
+/// Strip the workload's placeholder at the binding's harness location, attaching nothing. For a
+/// re-routed destination's own secret: the real credential is never injected, and no placeholder
+/// rides upstream. A `url_path` harness is refused, as it is on the opaque path. Writes into
+/// `attachment` so it can compose with a box-owned attach in one `attach_for`.
+pub(crate) fn strip_phantom(binding: &StripBinding, attachment: &mut Attachment) -> Result<()> {
+    strip_location(binding.harness(), attachment)
+}
+
+/// Strip the placeholder at `location` from `attachment`, so it does not ride upstream. Shared by
+/// `swap_phantom` and `strip_phantom`.
+fn strip_location(location: &InjectMode, attachment: &mut Attachment) -> Result<()> {
+    match location {
+        InjectMode::Header { header_name, .. } => {
+            attachment.strip_header(header_name.as_deref().unwrap_or(DEFAULT_CRED_HEADER));
+        }
+        InjectMode::BasicAuth => attachment.strip_header(DEFAULT_CRED_HEADER),
+        InjectMode::QueryParam { name, .. } => attachment.strip_query_param(name.clone()),
+        // A `UrlPath` harness location has no standalone strip: clearing a phantom spliced into the
+        // path means rewriting the whole path, which only a `UrlPath` *attach* does. When the attach
+        // rewrites the path the phantom is overwritten and there is nothing to do; when it does not,
+        // the phantom would ride upstream beside the real secret, so refuse the exchange.
+        InjectMode::UrlPath { .. } if !attachment.rewrites_path() => {
+            return Err(CredentialError::UnsupportedInjectType(
+                "the phantom is spliced into the request path but the credential attaches \
+                 elsewhere, so the path phantom cannot be cleared; pair a url_path harness \
+                 location with a url_path inject mode"
+                    .to_string(),
+            ));
+        }
+        InjectMode::UrlPath { .. } => {}
+    }
+    Ok(())
+}
+
+/// Write the strip-attach-location + attach-real edits for `inject` into `attachment`, honoring its
+/// mode.
+fn attach_secret(inject: &InjectMode, secret: &str, attachment: &mut Attachment) {
+    match inject {
         InjectMode::Header {
             format,
             header_name,
@@ -294,7 +315,6 @@ fn attach_secret(binding: &OpaqueBinding) -> Attachment {
             attachment.set_query_param(name.clone(), Zeroizing::new(secret.to_string()));
         }
     }
-    attachment
 }
 
 /// Read the phantom the harness placed at `location`.
