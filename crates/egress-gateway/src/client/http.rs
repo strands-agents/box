@@ -18,7 +18,7 @@ use tokio::time::{Instant, Sleep, timeout_at};
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use crate::effect::EffectOutcome;
+use crate::effect::{ClaimedEffectPermit, EffectOutcome};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::SharedState;
 use crate::intercept::mitm::http1::{self, ResponseHead};
@@ -215,6 +215,7 @@ where
             _sender: sender,
             progress,
             deadline: Box::pin(tokio::time::sleep_until(deadline)),
+            request: None,
         },
     })
 }
@@ -239,6 +240,38 @@ pub(crate) struct UpstreamBody {
     _sender: SendRequest<Empty<Bytes>>,
     pub(crate) progress: ResponseProgress,
     deadline: Pin<Box<Sleep>>,
+    request: Option<(ClaimedEffectPermit, EffectOutcome)>,
+}
+
+impl UpstreamBody {
+    pub(crate) fn track_request(
+        &mut self,
+        permit: ClaimedEffectPermit,
+        outcome: EffectOutcome,
+    ) -> io::Result<()> {
+        self.request = Some((permit, outcome));
+        if matches!(self.progress.state(), ResponseState::Received) {
+            self.record_request_outcome()?;
+        }
+        Ok(())
+    }
+
+    fn record_request_outcome(&mut self) -> io::Result<()> {
+        if let Some((permit, outcome)) = self.request.take() {
+            permit.record_outcome(outcome).map_err(|error| {
+                io::Error::other(format!("recording upstream request outcome: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UpstreamBody {
+    fn drop(&mut self) {
+        if self.record_request_outcome().is_err() {
+            eprintln!("strands-box: warning: recording upstream request outcome failed");
+        }
+    }
 }
 
 impl Body for UpstreamBody {
@@ -250,43 +283,49 @@ impl Body for UpstreamBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
         let this = self.get_mut();
-        if let ResponseState::Failed(kind) = this.progress.state() {
-            return Poll::Ready(Some(Err(io::Error::from(kind))));
-        }
-        if matches!(this.progress.state(), ResponseState::Receiving)
+        let frame = if let ResponseState::Failed(kind) = this.progress.state() {
+            Some(Err(io::Error::from(kind)))
+        } else if matches!(this.progress.state(), ResponseState::Receiving)
             && this.deadline.as_mut().poll(cx).is_ready()
         {
             this.progress.fail(io::ErrorKind::TimedOut);
-            return Poll::Ready(Some(Err(io::Error::new(
+            Some(Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "upstream deadline passed",
-            ))));
-        }
-        this.driver.poll(cx);
-        let frame = ready!(Pin::new(&mut this.body).poll_frame(cx));
-        match frame {
-            Some(Err(error)) => {
-                this.progress.fail(socket::error_kind(&error));
-                Poll::Ready(Some(Err(io::Error::other(error))))
-            }
-            Some(Ok(frame))
-                if frame
-                    .trailers_ref()
-                    .is_some_and(|trailers| !trailers.is_empty()) =>
-            {
-                this.progress.fail(io::ErrorKind::InvalidData);
-                Poll::Ready(Some(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "chunked trailers are not supported",
-                ))))
-            }
-            frame => {
-                if frame.is_none() || this.body.is_end_stream() {
-                    this.progress.received();
+            )))
+        } else {
+            this.driver.poll(cx);
+            match ready!(Pin::new(&mut this.body).poll_frame(cx)) {
+                Some(Err(error)) => {
+                    this.progress.fail(socket::error_kind(&error));
+                    Some(Err(io::Error::other(error)))
                 }
-                Poll::Ready(frame.map(|frame| frame.map_err(io::Error::other)))
+                Some(Ok(frame))
+                    if frame
+                        .trailers_ref()
+                        .is_some_and(|trailers| !trailers.is_empty()) =>
+                {
+                    this.progress.fail(io::ErrorKind::InvalidData);
+                    Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chunked trailers are not supported",
+                    )))
+                }
+                frame => {
+                    if frame.is_none() || this.body.is_end_stream() {
+                        this.progress.received();
+                    }
+                    frame.map(|frame| frame.map_err(io::Error::other))
+                }
             }
+        };
+        if !matches!(this.progress.state(), ResponseState::Receiving)
+            && let Err(error) = this.record_request_outcome()
+        {
+            this.progress.fail(error.kind());
+            return Poll::Ready(Some(Err(error)));
         }
+        Poll::Ready(frame)
     }
 
     fn is_end_stream(&self) -> bool {

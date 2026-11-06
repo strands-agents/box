@@ -133,8 +133,8 @@ flowchart TD
    request goes out only if policy permits it.
 5. The gateway refuses a compressed response to a credentialed request, because it can't scan one.
    For an `env://` route, it replaces each copy of the real secret in the headers and the body with
-   `[REDACTED]`. It scans body chunks before delivery, retaining a possible secret prefix across
-   chunks.
+   `[REDACTED]`. It scans body chunks before delivery, retaining a trailing window bounded by the
+   credential length across chunks.
 
 A refusal is an HTTP 403 with the header `x-strands-box-egress: refused`, and a body that says why.
 See [the error table](../user/egress.md#errors-and-exit-codes).

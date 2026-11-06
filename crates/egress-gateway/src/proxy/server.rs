@@ -197,7 +197,7 @@ where
         }
         Ok::<_, ProxyError>(hyper_response(response))
     });
-    let mut served = Box::pin(
+    let mut connection = Box::pin(
         hyper::server::conn::http1::Builder::new()
             .keep_alive(false)
             .half_close(true)
@@ -209,7 +209,7 @@ where
     );
     let mut shutdown_failed = false;
     let served = std::future::poll_fn(|cx| {
-        if let Poll::Ready(result) = served.as_mut().poll(cx) {
+        if let Poll::Ready(result) = connection.as_mut().poll(cx) {
             shutdown_failed = result.as_ref().is_err_and(hyper::Error::is_shutdown);
             return Poll::Ready(
                 result.map_err(|error| io::Error::new(socket::error_kind(&error), error)),
@@ -228,6 +228,7 @@ where
         Poll::Pending
     })
     .await;
+    drop(connection);
     if let Some((permit, start)) = release.take() {
         let mut error = served.as_ref().err().map(io::Error::kind);
         let mut complete = served.is_ok() || shutdown_failed;

@@ -70,10 +70,11 @@ signed route the call is accepted and changes nothing, because there is no injec
 
 `ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
 `[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
-`push()` returns bytes ready for delivery and retains only a possible secret prefix. At clean
-completion, call `finish()` to release an unmatched prefix; on failure, drop the scrubber.
-Matches can cross chunk boundaries. Retained state depends on the credential size, not the total
-response size.
+`push()` returns bytes ready for delivery and retains a trailing window of up to one less than the
+credential's byte length, including any possible secret prefix. At clean completion, call `finish()`
+to release the tail; on failure, drop the scrubber. Matches can cross chunk boundaries. A small event
+can wait for more bytes or clean completion. Retained state depends on the credential size, not the
+total response size.
 
 `attach_for` performs binding dispatch, phantom location, phantom **validation**,
 and SigV4 signing internally, so the phantom check is not a step a caller can skip.

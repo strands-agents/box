@@ -229,9 +229,10 @@ matches across chunk boundaries. A nonempty encoded response to a credentialed r
 `ResponseLimits::max_body_bytes` bounds collected requests and HTTP MCP `tools/list` responses;
 its default remains 16 MiB. Catalog pages retain the existing capture and schema-staging order.
 
-The request outcome is recorded when upstream headers arrive, before response release. A framing
-error or unsupported trailer found later closes the response, which may already have delivered a
-processed prefix.
+The request outcome is recorded when the upstream response completes, fails, or is abandoned.
+A received status is retained even if the body fails. HTTP MCP calls use this same timing; their
+recorded outcome does not prove tool success. A framing error or unsupported trailer closes the
+response, which may already have delivered a processed prefix.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, and `shutdown()`.

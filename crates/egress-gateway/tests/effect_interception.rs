@@ -355,8 +355,8 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
             "attempt:connect",
             "outcome:connect",
             "attempt:request",
-            "outcome:request",
             "attempt:response",
+            "outcome:request",
             "outcome:response",
         ]
     );
@@ -388,9 +388,9 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
             ..
         }) if method == "POST" && path == "/v1/items" && *body_bytes == 11
     ));
-    // The request outcome is recorded at reply time and carries the reply's status.
+    // The request outcome follows body receipt and carries the reply's status.
     assert!(matches!(
-        &events[4],
+        &events[5],
         Event::Outcome(
             EffectKind::HttpRequest,
             EffectOutcome::Replied {
@@ -400,7 +400,7 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
         ) if *accepted_bytes > 0
     ));
     assert!(matches!(
-        &events[5],
+        &events[4],
         Event::Attempt(AttemptSnapshot::ResponseRelease { status: 200, .. })
     ));
 
@@ -533,9 +533,11 @@ fn scrubbed_cross_host_redirect_crosses_response_release() {
 }
 
 #[test]
-fn request_outcome_sink_failure_stops_after_the_request_effect() {
+fn request_outcome_sink_failure_terminates_an_open_response() {
+    use std::io::Read;
+
     let host = "request-outcome-failure.test";
-    let upstream = TlsUpstream::start(host);
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
     let port = upstream.port();
     let events = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
@@ -549,27 +551,34 @@ fn request_outcome_sink_failure_stops_after_the_request_effect() {
     .unwrap();
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.set_read_timeout(Duration::from_secs(3));
     client.send_request("POST", "/committed", &[], b"effect");
-    assert_eq!(
-        client.read_response(),
-        "",
-        "a failed record at reply time refuses the workload the reply"
-    );
+    sender
+        .send(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nbefore\r\n".to_vec())
+        .unwrap();
+    let head = client.read_head();
+    let mut body = client.response_body(&head);
+    let mut prefix = [0; 6];
+    body.read_exact(&mut prefix).unwrap();
+    assert_eq!(&prefix, b"before");
+    sender.send(b"0\r\n\r\n".to_vec()).unwrap();
+    drop(sender);
+    assert!(body.read_to_end(&mut Vec::new()).is_err());
 
     assert!(upstream.last_request().raw.contains("POST /committed"));
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let events = events.lock().unwrap().clone();
-    assert!(events.iter().any(|event| matches!(
-        event,
+    let events = wait_for_event_count(&events, 7);
+    assert_eq!(events.len(), 7);
+    assert!(matches!(
+        events[5],
         Event::Outcome(
             EffectKind::HttpRequest,
             EffectOutcome::Replied { accepted_bytes, status: 200 }
-        ) if *accepted_bytes > 0
-    )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        Event::Attempt(AttemptSnapshot::ResponseRelease { .. })
-    )));
+        ) if accepted_bytes > 0
+    ));
+    assert!(matches!(
+        events[6],
+        Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Partial { .. })
+    ));
     assert!(
         !events
             .iter()
@@ -676,7 +685,7 @@ fn a_reply_cut_short_after_its_head_records_its_status() {
 
         let events = wait_for_event_count(&shared, 7);
         assert!(matches!(
-            events[4],
+            events[5],
             Event::Outcome(
                 EffectKind::HttpRequest,
                 EffectOutcome::Replied { status: 500, .. }
@@ -820,7 +829,6 @@ fn a_plain_http_response_streams_before_upstream_completion() {
             "attempt:connect",
             "outcome:connect",
             "attempt:request",
-            "outcome:request",
             "attempt:response",
         ]
     );
@@ -871,19 +879,13 @@ fn credentialed_text_arrives_early_with_split_secrets_redacted() {
     assert_eq!(harness::header_value(&head, "x-echo"), Some("[REDACTED]"));
     assert_eq!(harness::header_value(&head, "content-length"), None);
     let mut body = client.response_body(&head);
-    let mut early = vec![0; prefix.len()];
+    let mut early = vec![0; prefix.len() + "data: ".len() + 7 - (SECRET.len() - 1)];
     body.read_exact(&mut early).unwrap();
-    assert_eq!(early, prefix.as_bytes());
+    assert_eq!(early, prefix.as_bytes()[..early.len()]);
     let before_completion = events.lock().unwrap().clone();
+    assert_eq!(before_completion.len(), 5);
     assert!(matches!(
         before_completion[4],
-        Event::Outcome(
-            EffectKind::HttpRequest,
-            EffectOutcome::Replied { status: 200, .. }
-        )
-    ));
-    assert!(matches!(
-        before_completion[5],
         Event::Attempt(AttemptSnapshot::ResponseRelease { status: 200, .. })
     ));
 
@@ -898,6 +900,14 @@ fn credentialed_text_arrives_early_with_split_secrets_redacted() {
         format!("{prefix}data: [REDACTED]{suffix}").as_bytes()
     );
     assert!(!String::from_utf8(received).unwrap().contains(SECRET));
+    let events = wait_for_event_count(&events, 7);
+    assert!(matches!(
+        events[5],
+        Event::Outcome(
+            EffectKind::HttpRequest,
+            EffectOutcome::Replied { status: 200, .. }
+        )
+    ));
 }
 
 #[test]
@@ -1113,7 +1123,7 @@ fn response_release_denial_sends_no_upstream_head_or_body() {
     assert!(!response.contains("private"));
     let events = wait_for_event_count(&shared, 6);
     assert!(matches!(
-        events[4],
+        events[5],
         Event::Outcome(
             EffectKind::HttpRequest,
             EffectOutcome::Replied { status: 200, .. }

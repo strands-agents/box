@@ -174,9 +174,10 @@ test before it permits a commit. A connect that definitely failed is a `::error`
 have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
 still counts the uncertain ones.
 
-For an HTTP request, the gateway records accepted request bytes and upstream status when response
-headers arrive. Response delivery adds no second policy event; a later body failure does not erase
-the upstream response.
+For an HTTP request, the gateway records accepted request bytes and any received status when the
+upstream response completes, fails, or is abandoned. HTTP MCP calls record their outcome at the same
+point. Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
+Response delivery adds no second policy event.
 
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead. See [temporal rules are enforced

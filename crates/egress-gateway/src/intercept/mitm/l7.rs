@@ -231,7 +231,7 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
-    // The request permit is consumed at reply time, or when no reply comes.
+    // The request permit follows the upstream exchange through its terminal response.
     let cursor = mcp_target
         .as_ref()
         .filter(|(_, target)| target.method() == "tools/list")
@@ -248,13 +248,19 @@ async fn run_l7_legs(
             Zeroizing::new(forwarded_body),
         )
         .await;
-    request_permit
-        .record_outcome(outcome)
-        .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
-
-    let response = response?;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            request_permit.record_outcome(outcome).map_err(|error| {
+                ProxyError::Io(format!("recording upstream request outcome: {error}"))
+            })?;
+            return Err(error);
+        }
+    };
     let mut head = response.head;
     let mut body = response.body;
+    body.track_request(request_permit, outcome)
+        .map_err(|error| ProxyError::Io(error.to_string()))?;
     // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
     // that set it would otherwise make a permitted answer read as a denial, with its own first body
     // line as the reason.

@@ -47,8 +47,10 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Keep `Backend::resolve` the single plaintext exit, and digest the value at once.
 - Store every secret-bearing value in `Zeroizing`, and print no plaintext in `Debug` or `Display`,
   including `{:?}` of a `Vault` or `Attachment`.
-- Keep `ResponseRedactor` opaque. Its output must match whole-body greedy redaction across every
-  chunk split. Retain only credential-sized state, and release an unmatched prefix only at clean EOF.
+- Keep `ResponseRedactor` opaque. Its complete output must match whole-body greedy redaction across
+  every chunk split. Retain at most `credential.len() - 1` bytes across pending output and a possible
+  secret prefix, so partial matches do not change release boundaries. Release the tail only at clean
+  EOF; drop it on failure. Keep retained state bounded by credential size.
 - Wrap every value holding key material: the `AWS4`-prefixed secret access key, `k_date`,
   `k_region`, `k_service`, `k_signing`, `canonical_headers`, and `canonical_request`. The last two
   embed the session token. `signed_headers` holds names only and `string_to_sign` a SHA-256, so both

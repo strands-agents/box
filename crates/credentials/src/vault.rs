@@ -801,8 +801,9 @@ mod tests {
             "[REDACTED]"
         );
         assert!(redactor.push(b"private-").is_empty());
-        assert_eq!(redactor.push(b"value"), b"[REDACTED]");
-        assert!(redactor.finish().is_empty());
+        let mut redacted = redactor.push(b"value");
+        redacted.extend(redactor.finish());
+        assert_eq!(redacted, b"[REDACTED]");
     }
 
     #[test]

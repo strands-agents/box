@@ -75,7 +75,7 @@ impl Body for ResponseBody {
     }
 }
 
-/// One transform that retains at most one source frame and a possible credential prefix.
+/// One transform that retains at most one source frame and a credential-sized tail.
 struct RedactedBody {
     source: Stream,
     redactor: Option<ResponseRedactor>,
