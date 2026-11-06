@@ -4066,6 +4066,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -4151,6 +4152,7 @@ name = "strands-box-telemetry"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "libc",
  "opentelemetry",
  "opentelemetry-proto",
@@ -4159,6 +4161,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strands-box-credentials",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

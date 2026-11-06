@@ -38,6 +38,56 @@ impl TargetKind {
     const EVERY: [Self; 2] = [Self::File, Self::Otlp];
 }
 
+/// One OTLP payload a destination accepts, named after its route.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Payload {
+    /// `/v1/traces`.
+    Traces,
+    /// `/v1/logs`.
+    Logs,
+    /// `/v1/metrics`.
+    Metrics,
+}
+
+impl Payload {
+    /// The `box.toml` spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Traces => "traces",
+            Self::Logs => "logs",
+            Self::Metrics => "metrics",
+        }
+    }
+
+    /// Every payload, in route order.
+    #[must_use]
+    pub fn every() -> Vec<Self> {
+        vec![Self::Traces, Self::Logs, Self::Metrics]
+    }
+
+    /// The OTLP/HTTP route this payload posts to.
+    pub(crate) fn route(self) -> &'static str {
+        match self {
+            Self::Traces => "/v1/traces",
+            Self::Logs => "/v1/logs",
+            Self::Metrics => "/v1/metrics",
+        }
+    }
+}
+
+/// Header names the exporter writes itself, so a target may not set one.
+const TRANSPORT_HEADERS: [&str; 5] = [
+    "content-type",
+    "content-length",
+    "host",
+    "transfer-encoding",
+    "connection",
+];
+
 /// The header a target's credential is sent in, and its resolved value.
 #[derive(Clone)]
 pub struct TargetSecret {
@@ -87,6 +137,9 @@ pub struct Target {
     signals: Vec<Signal>,
     secret: Option<TargetSecret>,
     file: Option<std::sync::Arc<std::fs::File>>,
+    accepts: Option<Vec<Payload>>,
+    headers: Vec<(String, String)>,
+    vault: Option<std::sync::Arc<credentials::Vault>>,
 }
 
 impl Target {
@@ -99,6 +152,9 @@ impl Target {
             signals: Signal::default_signals(),
             secret: None,
             file: None,
+            accepts: None,
+            headers: Vec::new(),
+            vault: None,
         }
     }
 
@@ -111,6 +167,9 @@ impl Target {
             signals: Signal::default_signals(),
             secret: None,
             file: Some(std::sync::Arc::new(file)),
+            accepts: None,
+            headers: Vec::new(),
+            vault: None,
         }
     }
 
@@ -125,6 +184,28 @@ impl Target {
     #[must_use]
     pub fn with_secret(mut self, secret: TargetSecret) -> Self {
         self.secret = Some(secret);
+        self
+    }
+
+    /// State which OTLP payloads this destination takes. An empty or repeated set is refused by
+    /// `validate`.
+    #[must_use]
+    pub fn accepting(mut self, payloads: Vec<Payload>) -> Self {
+        self.accepts = Some(payloads);
+        self
+    }
+
+    /// Send one fixed, non-secret header on every request.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Attach this destination's credential through `vault` on every request.
+    #[must_use]
+    pub fn with_vault(mut self, vault: std::sync::Arc<credentials::Vault>) -> Self {
+        self.vault = Some(vault);
         self
     }
 
@@ -149,6 +230,19 @@ impl Target {
     pub(crate) fn file(&self) -> Option<&std::fs::File> {
         self.file.as_deref()
     }
+
+    /// The payloads this destination takes; every one when the caller stated none.
+    pub(crate) fn accepts(&self) -> Vec<Payload> {
+        self.accepts.clone().unwrap_or_else(Payload::every)
+    }
+
+    pub(crate) fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    pub(crate) fn vault(&self) -> Option<&std::sync::Arc<credentials::Vault>> {
+        self.vault.as_ref()
+    }
 }
 
 /// Every target one box declares.
@@ -156,6 +250,7 @@ impl Target {
 pub struct TelemetryConfig {
     box_name: String,
     targets: Vec<Target>,
+    reports_failures: bool,
 }
 
 impl TelemetryConfig {
@@ -165,7 +260,16 @@ impl TelemetryConfig {
         Self {
             box_name: box_name.into(),
             targets: Vec::new(),
+            reports_failures: false,
         }
+    }
+
+    /// Print each failed batch to stderr with its full cause. Without this, a failed batch is only
+    /// counted.
+    #[must_use]
+    pub fn reporting_failures(mut self) -> Self {
+        self.reports_failures = true;
+        self
     }
 
     /// Add a declared target.
@@ -181,6 +285,10 @@ impl TelemetryConfig {
 
     pub(crate) fn targets(&self) -> &[Target] {
         &self.targets
+    }
+
+    pub(crate) fn reports_failures(&self) -> bool {
+        self.reports_failures
     }
 
     /// Refuse a config no run could honour. The one owner of every rule about a target.
@@ -247,9 +355,80 @@ impl TelemetryConfig {
                     ),
                 });
             }
+            Self::validate_otlp_shape(target)?;
         }
         Ok(())
     }
+
+    /// Refuse an `accepts`, a header, or a vault the target's kind cannot honour.
+    fn validate_otlp_shape(target: &Target) -> Result<()> {
+        let refuse = |reason: String| Err(TelemetryError::Config { reason });
+        if target.kind == TargetKind::File {
+            if target.accepts.is_some() || !target.headers.is_empty() || target.vault.is_some() {
+                return refuse(
+                    "a file target writes every payload to one file, so it takes no accepts, no \
+                     header and no credential"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        if let Some(accepts) = &target.accepts {
+            if accepts.is_empty() {
+                return refuse(format!(
+                    "the {} target accepts no payload, so nothing would reach it; write one or \
+                     more of: traces, logs, metrics",
+                    target.kind.as_str()
+                ));
+            }
+            for (index, payload) in accepts.iter().enumerate() {
+                if accepts[..index].contains(payload) {
+                    return refuse(format!(
+                        "the {} target accepts {} twice",
+                        target.kind.as_str(),
+                        payload.as_str()
+                    ));
+                }
+            }
+        }
+        for (name, value) in &target.headers {
+            if name.is_empty() || !name.bytes().all(is_header_name_byte) {
+                return refuse(format!("the header name {name:?} is not an RFC 7230 token"));
+            }
+            if TRANSPORT_HEADERS
+                .iter()
+                .any(|owned| owned.eq_ignore_ascii_case(name))
+            {
+                return refuse(format!(
+                    "the exporter writes the {name} header itself, so a target may not set it"
+                ));
+            }
+            if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+                return refuse(format!(
+                    "the {name} header value carries a control character"
+                ));
+            }
+        }
+        if target.vault.is_some() && !TargetSecret::may_cross_to(&target.destination) {
+            return refuse(format!(
+                "the {} target carries a credential and its destination is neither https nor \
+                 loopback",
+                target.kind.as_str()
+            ));
+        }
+        if target.vault.is_some() && target.secret.is_some() {
+            return refuse(
+                "a target attaches one credential, through its vault or as a secret, not both"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether `byte` is legal in an RFC 7230 token.
+fn is_header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// A destination as `reqwest` will dial it, with a scheme supplied when the operator wrote none.
@@ -430,6 +609,87 @@ mod tests {
                 "{authored}: the judged URL must be the dialed one"
             );
         }
+    }
+
+    /// **`accepts`, a header and a credential each belong to an endpoint**, so a file target
+    /// refuses all three, and an endpoint refuses an empty or repeated `accepts`.
+    #[test]
+    fn the_otlp_shape_is_refused_where_it_cannot_apply() {
+        let file = |target: Target| {
+            TelemetryConfig::for_box("b")
+                .with_target(target)
+                .validate()
+                .expect_err("a file target takes none of these")
+                .to_string()
+        };
+        let base = || Target::new(TargetKind::File, "/tmp/records.jsonl");
+        assert!(file(base().accepting(vec![Payload::Traces])).contains("no accepts"));
+        assert!(file(base().with_header("x-a", "1")).contains("no header"));
+
+        let otlp = |target: Target| {
+            TelemetryConfig::for_box("b")
+                .with_target(target)
+                .validate()
+                .map_err(|error| error.to_string())
+        };
+        let endpoint = || Target::new(TargetKind::Otlp, "https://vendor.example");
+        assert!(
+            otlp(endpoint().accepting(vec![]))
+                .expect_err("empty")
+                .contains("accepts no payload")
+        );
+        assert!(
+            otlp(endpoint().accepting(vec![Payload::Logs, Payload::Logs]))
+                .expect_err("repeated")
+                .contains("logs twice")
+        );
+        otlp(endpoint().accepting(vec![Payload::Traces])).expect("one payload is accepted");
+    }
+
+    /// **The exporter owns the transport headers**, so a target cannot replace the body's type or
+    /// forge a second header line.
+    #[test]
+    fn a_header_the_exporter_owns_or_a_forged_line_is_refused() {
+        let refusal = |name: &str, value: &str| {
+            TelemetryConfig::for_box("b")
+                .with_target(
+                    Target::new(TargetKind::Otlp, "https://vendor.example")
+                        .with_header(name, value),
+                )
+                .validate()
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(refusal("Content-Type", "application/json").contains("itself"));
+        assert!(refusal("x-project", "a\r\nx-injected: 1").contains("control character"));
+        assert!(refusal("bad header", "1").contains("RFC 7230"));
+    }
+
+    /// **A credential needs TLS or loopback**, the same rule a secret meets.
+    #[test]
+    fn a_vault_without_tls_is_refused() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("key");
+        std::fs::write(&path, "real").expect("write");
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "t").route(
+                credentials::RouteSpec::opaque(
+                    credentials::DestinationPattern::parse("vendor.example").expect("pattern"),
+                    credentials::Locator::parse_uri(&format!("file://{}", path.display()))
+                        .expect("locator"),
+                    credentials::InjectMode::header("Bearer {}", None).expect("mode"),
+                ),
+            ),
+        )
+        .expect("open");
+        let refusal = TelemetryConfig::for_box("b")
+            .with_target(
+                Target::new(TargetKind::Otlp, "http://vendor.example")
+                    .with_vault(std::sync::Arc::new(opened.into_vault())),
+            )
+            .validate()
+            .expect_err("a credential over plaintext is refused");
+        assert!(refusal.to_string().contains("https"), "{refusal}");
     }
 
     /// No rendering of a secret carries its value.

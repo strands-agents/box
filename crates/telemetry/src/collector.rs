@@ -179,7 +179,10 @@ impl Collector {
         let mut relays = crate::receive::Relays::default();
         let mut accepts = [false; Signal::SLOTS];
         for target in config.targets() {
-            let exporter = Arc::new(TargetExporter::open(target, Arc::clone(&dropped))?);
+            let exporter = Arc::new(
+                TargetExporter::open(target, Arc::clone(&dropped))?
+                    .reporting_failures(config.reports_failures()),
+            );
             let mut lane = [false; Signal::SLOTS];
             // The harness's own log records and metrics reach every target, whatever it names, so
             // no declaration has to ask for what the agent already exports.

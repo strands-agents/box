@@ -338,7 +338,7 @@ impl EgressRoute {
 impl Placement {
     /// The inject mode this placement describes, or `None` when the credential
     /// is signed across several headers and so has no single location.
-    fn inject_mode(&self, host: &str) -> Result<Option<InjectMode>, ConfigError> {
+    pub(super) fn inject_mode(&self, host: &str) -> Result<Option<InjectMode>, ConfigError> {
         let mode = match self {
             Self::Header { name, prefix } => InjectMode::header(
                 format!("{prefix}{{}}"),
