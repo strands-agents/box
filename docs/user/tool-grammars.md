@@ -284,8 +284,9 @@ Links, other names, and copies are decided as follows:
 
 So a broad `shell:spawn` permit lets another name or a copy of `git` past a `Tool::git` forbid. A
 link such as `g` resolves to the bound file, so a permit that matches only the bound file's
-`context.input.program_path` admits every other name of it. Keep each `shell:spawn` permit narrow,
-and match `context.input.program` as well as `context.input.program_path`.
+`context.input.program_path` admits every other name of it. So pin each `shell:spawn` permit on
+both `context.input.program` and `context.input.program_path`, such as `program == "make"` with
+`program_path == "/usr/bin/make"`.
 
 ## What a grammar governs
 
