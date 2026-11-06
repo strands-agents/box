@@ -1789,34 +1789,30 @@ refusal one phase later, so the operator learns about a broken config after the 
 delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
-### A named AWS profile resolves static keys, and a bare aws:// resolves the full chain
+<a id="a-bare-aws-resolves-the-default-credential-chain"></a>
+### An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain
 
 `aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
-`credential_process`, SSO, or assume-role, because each needs an STS call the static-key path does
-not make, and a credential that is not the one the operator named is a silent authority change. A
-bare `aws://` instead resolves the AWS SDK default credential provider chain, which does honour
-`credential_process` and the host's ambient identity; see
-[a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
-The cost of that path is stated there.
+`credential_process` (which runs a subprocess), SSO, or assume-role (each an STS or SSO call),
+because a credential that is not the one the operator named is a silent authority change. A bare
+`aws://` resolves the AWS SDK default credential provider chain: the environment, the profile files
+(including `credential_process`), web identity, the container endpoint, then instance metadata.
 
-<a id="a-bare-aws-resolves-the-default-credential-chain"></a>
-### A bare aws:// resolves the AWS SDK default credential provider chain
+The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
+a dedicated worker thread), because the crate that already resolves `aws://PROFILE` owns every AWS
+credential path; the box crate injecting a resolver across a seam was rejected for splitting that
+ownership. The reserved tokens `aws://@instance-role` and `aws://@container-role`, and
+`aws://default`, were rejected, the last because `default` is a real profile and the overlap would
+be a silent identity substitution. The SDK's `sso` and `credentials-login` providers are compiled
+out (`default-features = false`), so a bare `aws://` does not resolve an AWS SSO or `aws login`
+default profile; such a profile is refused, and the refusal names the missing provider.
 
-A bare `aws://` reference, with no profile, resolves the AWS SDK default credential provider chain:
-environment, profile files (including `credential_process`), web identity, the container endpoint,
-then instance metadata. The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a
-current-thread runtime on a dedicated worker thread), because the crate that already resolves
-`aws://PROFILE` owns every AWS credential path; the box crate injecting a resolver across a seam was
-rejected for splitting that ownership. The reserved tokens `aws://@instance-role` and
-`aws://@container-role`, and `aws://default`, were rejected, the last because `default` is a real
-profile and the overlap would be a silent identity substitution. The SDK's `sso` and
-`credentials-login` providers are compiled out (`default-features = false`) to keep the dependency
-surface small, so a bare `aws://` does not resolve an AWS SSO or `aws login` default profile; such a
-profile is refused, and the refusal names the missing provider. The cost: the SDK, a runtime, and a
-TLS stack link into the one process that holds every resolved plaintext; and a workload with write
-access to `~/.aws` can name a `credential_process` program the trusted process runs outside the
-sandbox, which is remote code execution. The shipped box exposes no setting that refuses a bare
-`aws://`, so the mitigation is a named profile or keeping `~/.aws` unwritable.
+The cost: the SDK, a runtime, and a TLS stack link into the one process that holds every resolved
+plaintext; and a workload with write access to `~/.aws` can name a `credential_process` program the
+trusted process runs outside the sandbox, which is remote code execution
+([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). The
+shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
+keeping `~/.aws` unwritable.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

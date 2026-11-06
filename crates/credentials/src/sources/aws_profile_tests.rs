@@ -1,8 +1,7 @@
 //! Tests for named-profile resolution.
 //!
 //! Every case drives the parsing and the choice directly, with no filesystem: `choose` takes a
-//! `Settings` map so the decision is testable without a `tempfile` dev-dependency. This crate's
-//! dependency list is deliberately six crates wide.
+//! `Settings` map so the decision is testable without a `tempfile` dev-dependency.
 //!
 //! There is no `credential_process` execution to test. It is refused by shape, and two cases below
 //! pin that refusal — one for a profile declaring it alone, one for a profile declaring it beside

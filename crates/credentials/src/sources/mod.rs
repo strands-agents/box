@@ -15,8 +15,8 @@ mod file;
 mod op;
 
 pub(crate) use aws::{
-    AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
-    sign_request,
+    AWS_SCHEME, AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource,
+    credsd_session_credentials, sign_request,
 };
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
 pub(crate) use env::EnvSource;

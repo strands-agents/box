@@ -392,8 +392,9 @@ fn to_hex(bytes: &[u8]) -> String {
 // AWS source
 // ===================================================================================================
 
-/// The structured-config `source` tag the AWS source claims.
-const AWS_SOURCE_TAG: &str = "aws";
+/// The `aws` URI scheme and structured-config `source` tag. Shared across the crate so one spelling
+/// is not written three times.
+pub(crate) const AWS_SCHEME: &str = "aws";
 
 /// How the ambient AWS credential chain may be used when no scoped `profile` is declared.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -458,7 +459,7 @@ impl std::fmt::Debug for AwsResolution {
 }
 
 /// Materializes AWS session credentials — the seam a real SDK-backed provider chain plugs into.
-pub(in crate::sources) trait AwsCredentialProvider: Send + Sync {
+trait AwsCredentialProvider: Send + Sync {
     /// Resolve credentials for `profile` (or the default chain when `None`).
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials>;
 }
@@ -476,7 +477,7 @@ struct DefaultAwsProvider;
 impl AwsCredentialProvider for DefaultAwsProvider {
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
         match profile {
-            None => super::aws_chain::SdkChainProvider::shared().provide(None),
+            None => super::aws_chain::SdkChainProvider::shared().provide(),
             Some(profile) => crate::sources::aws_profile::resolve_profile(profile),
         }
     }
@@ -557,7 +558,7 @@ impl AwsSource {
                         "malformed aws credential reference {uri:?} (expected `aws://<profile>`)"
                     ))
                 })?;
-                if scheme != AWS_SOURCE_TAG {
+                if scheme != AWS_SCHEME {
                     // The scheme is a non-secret source *kind*, so it may appear; the body may not.
                     return Err(CredentialError::Credential(format!(
                         "an aws route needs an aws:// reference, not {scheme:?}"
@@ -567,7 +568,7 @@ impl AwsSource {
             }
             Locator::Structured(fields) => {
                 match fields.get("source").map(String::as_str) {
-                    Some(AWS_SOURCE_TAG) => {}
+                    Some(AWS_SCHEME) => {}
                     _ => {
                         return Err(CredentialError::Credential(
                             "the aws source config must set source = \"aws\"".to_string(),
@@ -995,7 +996,7 @@ mod tests {
                 "locator={locator:?}"
             );
             // Both dispatch to this source by the same routing key.
-            assert_eq!(locator.scheme(), AWS_SOURCE_TAG);
+            assert_eq!(locator.scheme(), AWS_SCHEME);
         }
     }
 

@@ -327,7 +327,8 @@ fn absolute_form_metadata_target_is_rejected_before_upstream_request_bytes() {
 
 #[test]
 fn aws_sigv4_signs_and_reaches_upstream() {
-    // AWS creds live in the ambient env for the v1 provider (serialized via the harness guard).
+    // AWS creds live in the ambient env for the default chain's environment provider (serialized
+    // via the harness guard).
     let _env = harness::AwsEnvGuard::set(
         "AKIDEXAMPLE",
         "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",

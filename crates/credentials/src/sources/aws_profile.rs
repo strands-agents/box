@@ -23,8 +23,7 @@ pub(crate) fn resolve_profile(profile: &str) -> Result<AwsSessionCredentials> {
 /// Decide what a profile's settings mean, separately from finding them.
 ///
 /// **Split out so the decision is testable without a filesystem.** This crate carries no `tempfile`
-/// dev-dependency and its dependency list is deliberately six crates wide, so a test that needed one
-/// would be a dependency added for a test's convenience.
+/// dev-dependency, so a test that needed one would be a dependency added for a test's convenience.
 fn choose(profile: &str, settings: Settings) -> Result<AwsSessionCredentials> {
     // **`credential_process` is refused, and that refusal is the security boundary.** Honouring it
     // means the daemon executes a program named by `~/.aws/config` — a file no floor defends and, when

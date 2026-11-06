@@ -317,16 +317,12 @@ refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_B
 that instead.
 
 **A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
-ambient identity across the environment, the profile files (including `credential_process`), web
-identity, the container endpoint, and instance metadata. The credentials crate now links the SDK and
-an HTTP/TLS stack to drive it. The bare form signs with whatever identity the host carries, so the
-box warns on every signed request. Because the chain reads `credential_process` — a program the
-trusted `run` process executes outside containment — a bare `aws://` is a remote-code-execution path
-when a filesystem list grants the workload write access to `~/.aws`. The shipped box has no setting
-that refuses a bare `aws://`, so the only mitigation is to grant write to `~/.aws` to trusted writers
-only, or to write `aws://profile` instead (a named profile does not read `credential_process`). The
-credentials crate's `require_scoped_aws_profile` vault switch refuses the bare form, but no `box.toml`
-key exposes it yet.
+ambient identity — and the box warns on every signed request. Because that chain reads
+`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
+remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
+refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+`~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.

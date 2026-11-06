@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::sources::AWS_SCHEME;
 use crate::{CredentialError, Result, redact_credential_ref};
 
 /// A parsed credential reference in either config surface form.
@@ -58,9 +59,6 @@ impl Locator {
 
 /// The reserved structured-form key naming the owning source (the routing tag), e.g. `"aws"`.
 const SOURCE_TAG: &str = "source";
-
-/// The one scheme whose URI form accepts an empty body: `aws://` names the default chain.
-const AWS_SCHEME: &str = "aws";
 
 impl std::fmt::Debug for Locator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

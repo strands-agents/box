@@ -400,7 +400,8 @@ impl WorkloadClient {
     }
 }
 
-/// A serialized guard that sets the ambient `AWS_*` env for the v1 provider and restores it on drop.
+/// A serialized guard that sets the ambient `AWS_*` env for the default chain's environment provider
+/// and restores it on drop.
 pub struct AwsEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }

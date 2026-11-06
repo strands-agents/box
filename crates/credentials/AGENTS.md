@@ -160,14 +160,37 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 
 ### Identity substitution
 
-- `AwsSource::parse_profile` must check the scheme equals `AWS_SOURCE_TAG` (`"aws"`), not merely
+- `AwsSource::parse_profile` must check the scheme equals `AWS_SCHEME` (`"aws"`), not merely
   `split_once("://")`. A bare `split_once` signs with the ambient identity, makes
   `AmbientFallbackPolicy::Deny` unreachable, and emits a lying `AwsAcquisition::Profile(..)`. The
-  `Structured` arm carries the mirror check on `source`.
-- The no-profile branch resolves the SDK default chain (`SdkChainProvider`), not a named profile;
-  `provide(Some(_))` on that provider is a hard error. `AwsAcquisition::DefaultChain` carries the
-  ambient warning, and `Profile(_)` carries none, so the bare form is never silent. `EnvAwsProvider`
-  is gone — the SDK chain reads the environment first, so it subsumes the old ambient-env provider.
+  `Structured` arm carries the mirror check on `source`. `AWS_SCHEME` is one `pub(crate)` constant in
+  `sources/aws.rs`, re-exported through `sources/mod.rs`; do not reintroduce a second `"aws"` literal.
+- The no-profile branch resolves the SDK default chain (`SdkChainProvider`), not a named profile.
+  `DefaultAwsProvider` calls the concrete `SdkChainProvider::shared().provide()`; the type carries no
+  profile, so it cannot substitute one. `AwsAcquisition::DefaultChain` carries the ambient warning,
+  and `Profile(_)` carries none, so the bare form is never silent. `EnvAwsProvider` is gone — the SDK
+  chain reads the environment first, so it subsumes the old ambient-env provider.
+
+### The default-chain provider (`sources/aws_chain.rs`)
+
+- **The chain runs on a dedicated worker thread with a current-thread runtime**, because the chain is
+  async and `Vault::sign_aws` is synchronous. `provide()` sends a request and waits on a channel with
+  a bounded `CALLER_DEADLINE`, so no caller on a runtime thread calls `block_on`. The worker skips a
+  request whose deadline already passed, so a slow chain does not run work for callers that left.
+- **The chain is rebuilt on each resolve, not once.** A `ProviderConfig` parses the profile files
+  once (a `OnceCell`), so a chain held for the run returns the first credential forever, even after a
+  tool rewrites `~/.aws/credentials`. The `RefreshCache` serves an expiring credential within its
+  buffer and re-resolves a non-expiring one (`expiry == None`) on every call, so a rotated file or
+  environment credential is picked up.
+- **The region is resolved once, from the environment then the profile, never instance metadata**,
+  and pinned on each rebuild with `.region(..)`. Letting the rebuild run the SDK region chain would
+  reach IMDS on every request on a host with no configured region. The signing region still comes
+  from the route host, so the chain region only selects the STS endpoint for an assume-role or
+  web-identity profile; dropping the profile's `region =` breaks GovCloud, China, and VPC-endpoint
+  subnets.
+- **SSO and `aws login` are compiled out** (`default-features = false`, no `sso`), so a bare `aws://`
+  does not resolve an SSO default profile. `resolve_once` walks the error source chain so the refusal
+  names the missing `sso` feature rather than a bare "not properly configured".
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_policy`, never `AwsSource::new()`, or `require_scoped_aws_profile` is unreachable.
 - Derive the signing name with `derive_service_region`. `bedrock-runtime` and
