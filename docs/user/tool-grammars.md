@@ -263,20 +263,24 @@ each. A second grammar with the same `program` is refused.
 
 Links, other names, and copies are decided as follows:
 
-- **A link called by the bound name is that file.** A hard link or a symbolic link to the bound `git`, called
-  as `git`, is decided by the grammar.
+- **A link called by the bound name is that file.** A hard link or a symbolic link to the bound
+  `git`, called as `git`, is decided by the grammar.
 - **Another name of a bound file is a `shell:spawn`.** One file can have several names. On macOS,
   `/usr/bin/git` is one launcher file that is also `make`, `clang`, and many other developer tools.
-  A grammar for `git` decides only the name `git`, so a spawn of `make`, or of a link to the bound
-  file under another name such as `g`, is decided as `shell:spawn`.
+  A grammar for `git` decides only the name `git`, so a spawn of `make` is decided as `shell:spawn`.
+  So is a link that the workload makes to the bound file under another name, such as `g`. This holds
+  whether or not a `[tool]` or `[mcp.<name>]` declares the other name.
 - **A replaced file is refused.** If the file at a bound path changes while the box runs, for
-  example after an update, Box refuses every spawn of that path until the box restarts.
+  example after an update, Box refuses every spawn of that path until the box restarts. Box also
+  refuses a bare name, such as `git`, when the file bound under that name is gone or replaced. The
+  denial has `[tool-grammar]` where a rule `@id` would be, and ends with `No policy can permit it.`
 - **A copy at another path is a different file.** When no `[tool]` runs a copy of `git` at another
   path, Box decides that copy as `shell:spawn`, and the grammar doesn't decide it.
 
-So a broad `shell:spawn` permit lets another name or a copy of `git` past a `Tool::git` forbid. Keep
-each `shell:spawn` permit narrow, for example to one `context.input.program_path` and one
-`context.input.program`.
+So a broad `shell:spawn` permit lets another name or a copy of `git` past a `Tool::git` forbid. A
+link such as `g` resolves to the bound file, so a permit that matches only the bound file's
+`context.input.program_path` admits every other name of it. Keep each `shell:spawn` permit narrow,
+and match `context.input.program` as well as `context.input.program_path`.
 
 ## What a grammar governs
 
