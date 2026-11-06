@@ -651,11 +651,20 @@ impl HostedBox {
         if !record.experimental_features.tool_grammars {
             return Ok(policy);
         }
+        let programs: BTreeSet<&str> = record
+            .tool
+            .values()
+            .filter(|spec| spec.grammar.is_some())
+            .map(crate::record::config::grammar::called_name)
+            .collect();
         for (label, spec) in &record.tool {
             let command = commands.get(label).ok_or_else(|| ConfigError::Process {
                 table: format!("[tool.{label}]"),
                 reason: "has no configured command for this run".to_string(),
             })?;
+            if programs.contains(crate::record::config::grammar::called_name(spec)) {
+                command.refuse_a_grammar_on_several_names()?;
+            }
             bindings.declare_tool(
                 command.opened(),
                 command.path(),
@@ -1269,6 +1278,30 @@ mod tests {
                 .as_ref()
                 .is_err_and(|refused| refused.contains("[tool-grammar]")),
             "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_grammar_on_apples_git_is_refused_because_its_file_has_several_names() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-several");
+        let record = grammar_record(&root, Path::new("/usr/bin/git"));
+        let commands = ConfiguredCommands::load(&record).expect("/usr/bin/git loads");
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine =
+            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
+                .expect("the policy opens");
+
+        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
+            .err()
+            .expect("a grammar on a file with several names is refused")
+            .to_string();
+
+        assert!(
+            refusal.contains("names, and a tool grammar on it refuses"),
+            "{refusal}"
         );
     }
 
