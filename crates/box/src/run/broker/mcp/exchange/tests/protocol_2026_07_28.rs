@@ -442,7 +442,7 @@ fn modern_cancellation_ignores_late_replies_and_reserves_the_id() {
 fn modern_pending_request_and_continuation_limits_are_enforced() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        for continuations in [false, true] {
+        for (continuations, identical) in [(false, false), (true, false), (true, true)] {
             let fixture = fixture(PERMIT_ALL_MCP);
             let log = tempfile::NamedTempFile::new().expect("frame log");
             let mut command = input_server(log.path());
@@ -457,7 +457,9 @@ fn modern_pending_request_and_continuation_limits_are_enforced() {
             assert!(next_output(&mut output).await["result"]["tools"].is_array());
             for id in 2..=66 {
                 let mut call = input_call(id);
-                call["params"]["arguments"]["value"] = json!(id.to_string());
+                if !identical {
+                    call["params"]["arguments"]["value"] = json!(id.to_string());
+                }
                 send(&program, call).await;
                 if continuations || id == 66 {
                     let response = next_output(&mut output).await;
@@ -518,5 +520,103 @@ fn modern_input_requests_require_capabilities_and_unambiguous_methods() {
             assert!(response["error"]["message"].as_str().unwrap().contains(if conflict { "ambiguous" } else { "capabilities" }), "{response}");
             let _ = program.stop_and_wait().await;
         }
+    }));
+}
+
+#[test]
+fn refused_outer_retry_does_not_decide_its_input_answers() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let policy = format!(r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::request{{input.method: "prompts/list"}}) }};"#);
+        let fixture = fixture(&policy);
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut command = input_server(log.path());
+        command[2] = command[2].replace("case \"$frame\" in", r#"case "$frame" in
+  *'"method":"prompts/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","prompts":[],"ttlMs":0,"cacheScope":"private"}}\n' "$id"; continue ;;"#);
+        let (mut program, mut output, recorder) =
+            recorded_exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        send(&program, input_call(2)).await;
+        assert_eq!(next_output(&mut output).await["result"]["resultType"], "input_required");
+        send(&program, modern_request(10, "prompts/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["prompts"].is_array());
+        let mut retry = input_call(3);
+        retry["params"]["requestState"] = json!("opaque");
+        retry["params"]["inputResponses"] = json!({"root": {"roots": []}});
+        send(&program, retry).await;
+        assert_eq!(next_output(&mut output).await["error"]["code"], -32001);
+        assert!(!recorder.recorded().iter().any(|decision| decision.parts().1.ends_with("/roots/list")),
+            "a refused outer retry must not consume an input-answer decision");
+        program.stop_and_wait().await.unwrap();
+        assert!(!read_log(log.path()).iter().any(|frame| frame["params"].get("inputResponses").is_some()));
+    }));
+}
+
+#[test]
+fn identical_continuations_each_keep_one_retry() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        for state in [true, false] {
+            let fixture = fixture(PERMIT_ALL_MCP);
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let mut command = input_server(log.path());
+            if !state {
+                command[2] = command[2].replace(",\"requestState\":\"opaque\"", "");
+            }
+            let (mut program, mut output) = exchange(command, &fixture).await;
+            send(&program, modern_request(1, "tools/list", json!({}))).await;
+            assert!(next_output(&mut output).await["result"]["tools"].is_array());
+            for id in [2, 3] {
+                send(&program, input_call(id)).await;
+                assert_eq!(
+                    next_output(&mut output).await["result"]["resultType"],
+                    "input_required"
+                );
+            }
+            for id in [4, 5, 6] {
+                let mut retry = input_call(id);
+                if state {
+                    retry["params"]["requestState"] = json!("opaque");
+                }
+                retry["params"]["inputResponses"] = json!({"root": {"roots": []}});
+                send(&program, retry).await;
+                let response = next_output(&mut output).await;
+                if id < 6 {
+                    assert_eq!(response["result"]["resultType"], "complete", "{response}");
+                } else {
+                    assert_eq!(response["error"]["code"], -32602, "{response}");
+                }
+            }
+            program.stop_and_wait().await.unwrap();
+            assert_eq!(
+                read_log(log.path())
+                    .iter()
+                    .filter(|frame| frame["params"].get("inputResponses").is_some())
+                    .count(),
+                2
+            );
+        }
+    }));
+}
+
+#[test]
+fn legacy_parameter_names_and_cancellation_keep_their_existing_behavior() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let (mut program, mut output) = exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+        initialize(&program, &mut output).await;
+        send(&program, json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{}})).await;
+        send(&program, json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"requestState":"custom","inputResponses":{}}})).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        program.stop_and_wait().await.unwrap();
+        let frames = read_log(log.path());
+        assert!(frames.iter().any(|frame| frame["method"] == "notifications/cancelled"));
+        assert!(frames.iter().any(|frame| frame["params"]["requestState"] == "custom"));
     }));
 }

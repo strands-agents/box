@@ -464,16 +464,19 @@ Modern servers return requests for client input inside an `input_required` resul
 accepts the core roots, sampling, and elicitation methods only when the original client request
 advertised the corresponding capability. It hashes the original method and canonical parameters
 with the opaque server-supplied request state. This identity binds a retry to its original
-operation without retaining its argument text. The broker remembers the input IDs and methods
+parameters without retaining their text. It cannot distinguish identical parallel operations
+with the same state. Distinct server-supplied states distinguish those operations. The broker remembers the input IDs and methods
 under that identity.
 
 Before forwarding a retry, the broker matches that identity and rejects unknown input IDs.
-Each answer then meets a separate `mcp:call` decision on its requested method. The outer call
-still meets its catalog and policy checks. A successful forward consumes the continuation;
-a denial sends none of the answers to the server. Conflicting input methods under the same
-identity fail the connection.
+The outer call first meets its catalog and policy checks. Each answer then meets a separate
+`mcp:call` decision on its requested method. An outer refusal creates no input-answer decisions.
+A successful forward consumes one continuation allowance; a denial sends none of the answers
+to the server. Identical input IDs and methods under the same identity accumulate separate
+allowances. Conflicting input IDs or methods under that identity fail the connection.
 
-The broker bounds both pending modern requests and continuations at 64 per connection.
+The broker bounds both pending modern requests and continuation allowances at 64 per connection.
+Identical continuations each count toward this limit.
 Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
 survive a connection closing. A client that reconnects must repeat the initial operation.
 A cancellation retains the request ID until its late reply arrives or the connection closes.

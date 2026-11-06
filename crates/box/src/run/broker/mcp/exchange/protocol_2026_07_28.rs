@@ -12,7 +12,7 @@ pub(super) async fn handle_request(
 ) -> io::Result<ProgramAction> {
     if !matches!(
         exchange.connection.phase,
-        McpConnectionPhase::AwaitingInitialize | McpConnectionPhase::Modern
+        McpConnectionPhase::AwaitingInitialize | McpConnectionPhase::PerRequestMetadata
     ) || exchange.connection.initialize_id.is_some()
         || request["method"] == "initialize"
     {
@@ -55,6 +55,7 @@ pub(super) async fn handle_request(
         .await;
     }
     let retry = modern.retry_key(request);
+    let mut methods = Vec::new();
     if let Some(retry) = &retry {
         let Some(pending) = exchange.connection.pending_inputs.get(retry) else {
             return refuse(
@@ -65,7 +66,6 @@ pub(super) async fn handle_request(
             )
             .await;
         };
-        let mut methods = Vec::new();
         if let Some(inputs) = request["params"]["inputResponses"].as_object() {
             for (key, answer) in inputs {
                 let Some(method) = pending.methods.get(key).filter(|_| answer.is_object()) else {
@@ -80,50 +80,75 @@ pub(super) async fn handle_request(
                 methods.push(method.clone());
             }
         }
-        for method in methods {
-            let (decision, token) = policy.decide(
-                governed,
-                &Principal::agent(),
-                &Request::McpCall {
-                    server: exchange.running.server(),
-                    method: &method,
-                    tool: None,
-                    prompt: None,
-                    uri: None,
-                    arguments: None,
-                },
-            );
-            exchange
-                .connection
-                .recorder
-                .record(EffectiveDecision::from_policy(
-                    r#"Box::Action::"mcp:call""#,
-                    format!("{}/{method}", exchange.running.server()),
-                    &decision,
-                ));
-            if !decision.is_allow() {
-                return refuse(exchange, request, -32001, &decision.to_string()).await;
-            }
-            token.ok_or_else(|| {
-                io::Error::other("permitted MCP input answer has no committed request token")
-            })?;
-        }
     }
     let outcome = if modern.method == "tools/list" {
         handle_tools_list(frame, request, exchange, policy, governed).await?
     } else {
-        super::handle_request(frame, request, &modern.method, exchange, policy, governed).await?
+        super::handle_request(
+            frame,
+            request,
+            &modern.method,
+            exchange,
+            policy,
+            governed,
+            &methods,
+        )
+        .await?
     };
     if exchange.connection.in_flight.contains(&key) {
         if modern.method != "server/discover" {
-            exchange.connection.phase = McpConnectionPhase::Modern;
+            exchange.connection.phase = McpConnectionPhase::PerRequestMetadata;
         }
         exchange.connection.modern_requests.insert(key, modern);
-        if let Some(retry) = retry {
-            exchange.connection.pending_inputs.remove(&retry);
+        if let Some(retry) = retry
+            && let Some(pending) = exchange.connection.pending_inputs.get_mut(&retry)
+        {
+            pending.remaining -= 1;
+            if pending.remaining == 0 {
+                exchange.connection.pending_inputs.remove(&retry);
+            }
         }
     }
     Ok(outcome)
+}
+
+pub(super) async fn admit_input_answers(
+    methods: &[String],
+    request: &Value,
+    exchange: &Exchange<'_>,
+    policy: &PolicyEngine,
+    governed: &GovernedBox,
+) -> io::Result<bool> {
+    for method in methods {
+        let (decision, token) = policy.decide(
+            governed,
+            &Principal::agent(),
+            &Request::McpCall {
+                server: exchange.running.server(),
+                method,
+                tool: None,
+                prompt: None,
+                uri: None,
+                arguments: None,
+            },
+        );
+        exchange
+            .connection
+            .recorder
+            .record(EffectiveDecision::from_policy(
+                r#"Box::Action::"mcp:call""#,
+                format!("{}/{method}", exchange.running.server()),
+                &decision,
+            ));
+        if !decision.is_allow() {
+            refuse(exchange, request, -32001, &decision.to_string()).await?;
+            return Ok(false);
+        }
+        token.ok_or_else(|| {
+            io::Error::other("permitted MCP input answer has no committed request token")
+        })?;
+    }
+    Ok(true)
 }
 
 async fn refuse(
@@ -167,22 +192,31 @@ pub(super) fn accept_reply(
             if exchange.connection.phase == McpConnectionPhase::AwaitingInitialize
                 && exchange.connection.initialize_id.is_none()
             {
-                exchange.connection.phase = McpConnectionPhase::Modern;
+                exchange.connection.phase = McpConnectionPhase::PerRequestMetadata;
             }
         }
         ModernReply::InputRequired(inputs) => {
-            if exchange.connection.pending_inputs.len() >= protocol_2026_07_28::MAXIMUM_PENDING {
-                return Err(invalid_data("too many pending MCP input requests"));
-            }
-            if let Some(previous) = exchange.connection.pending_inputs.get(&inputs.key)
-                && previous.methods != inputs.methods
-            {
-                return Err(invalid_data("MCP server returned ambiguous input requests"));
-            }
-            exchange
+            if exchange
                 .connection
                 .pending_inputs
-                .insert(inputs.key, inputs);
+                .values()
+                .map(|inputs| inputs.remaining)
+                .sum::<usize>()
+                >= protocol_2026_07_28::MAXIMUM_PENDING
+            {
+                return Err(invalid_data("too many pending MCP input requests"));
+            }
+            if let Some(previous) = exchange.connection.pending_inputs.get_mut(&inputs.key) {
+                if previous.methods != inputs.methods {
+                    return Err(invalid_data("MCP server returned ambiguous input requests"));
+                }
+                previous.remaining += 1;
+            } else {
+                exchange
+                    .connection
+                    .pending_inputs
+                    .insert(inputs.key, inputs);
+            }
             return Ok(false);
         }
     }
@@ -190,7 +224,12 @@ pub(super) fn accept_reply(
 }
 
 pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io::Result<()> {
-    if request["method"] != "notifications/cancelled" {
+    if request["method"] != "notifications/cancelled"
+        || (exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
+            && (exchange.connection.phase != McpConnectionPhase::AwaitingInitialize
+                || exchange.connection.initialize_id.is_some()
+                || exchange.connection.modern_requests.is_empty()))
+    {
         return Ok(());
     }
     let Some(id) = request["params"].get("requestId") else {

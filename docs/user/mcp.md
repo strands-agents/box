@@ -33,19 +33,26 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 
 The stdio broker accepts MCP `2026-07-28` and the legacy versions `2024-11-05`,
 `2025-03-26`, `2025-06-18`, and `2025-11-25`. No configuration change is needed.
+Server frames with duplicate JSON object keys are refused for both protocol paths.
 
 A modern client sends its protocol version and capabilities with each request. It can list
 tools without an initialization handshake or a discovery request. A legacy client must complete
 its handshake before listing tools. Both paths use the same tool catalog and policy checks.
 `policy generate-schema` also discovers modern stdio servers and falls back to a legacy handshake
-when its discovery probe receives a legacy error or no reply within two seconds.
+when its discovery probe receives an error other than a recognized error from the new protocol,
+or no reply within two seconds. A server that closes stdout without replying gets one fresh
+start with the legacy handshake. Partial or malformed replies fail discovery.
 
 Some modern calls ask the client for more input, such as a list of roots or an elicitation answer.
-Box checks each answer under the requested method's `mcp:call` policy, then checks the retried call.
+Box first checks the retried call against the catalog and its policy, then checks each answer
+under the requested method's `mcp:call` policy.
 The client must retry on the same connection with the original parameters and the server's exact
 request state. If that connection closes, start the operation again. Box retains up to 64 pending
 requests and 64 pending continuations per connection, with up to 64 input requests per continuation.
-Unknown result types from protocol extensions are refused.
+Identical pending calls retain separate retry allowances. A server must return distinct request
+states when parallel calls need distinct identities. Conflicting input IDs or methods for the
+same parameters and state close the connection. Unknown result types from protocol extensions
+are refused.
 
 ## `[mcp.<name>]`, `type = "stdio"`
 

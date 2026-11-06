@@ -93,7 +93,7 @@ enum McpConnectionPhase {
     AwaitingInitialize,
     AwaitingInitialized,
     Active,
-    Modern,
+    PerRequestMetadata,
 }
 
 /// A decided client request awaiting its reply, so the reply can record `mcp:call::response`.
@@ -613,7 +613,7 @@ async fn handle_client_frame(
                 });
             let request = parse_client_frame(&text)?;
             let Some(method) = request.get("method").and_then(Value::as_str) else {
-                if exchange.connection.phase == McpConnectionPhase::Modern {
+                if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
                     return Err(invalid_data(
                         "modern MCP clients cannot send JSON-RPC responses",
                     ));
@@ -623,7 +623,7 @@ async fn handle_client_frame(
             let method = method.to_string();
             let notification = method.starts_with("notifications/") && request.get("id").is_none();
             if !notification
-                && (exchange.connection.phase == McpConnectionPhase::Modern
+                && (exchange.connection.phase == McpConnectionPhase::PerRequestMetadata
                     || super::protocol_2026_07_28::carries_metadata(&request)
                     || method == "server/discover")
             {
@@ -631,11 +631,6 @@ async fn handle_client_frame(
                     &text, &request, exchange, policy, governed,
                 )
                 .await;
-            }
-            if super::protocol_2026_07_28::carries_inputs(&request) {
-                return Err(invalid_data(
-                    "only modern MCP requests can carry input answers",
-                ));
             }
             if notification {
                 protocol_2026_07_28::cancel_request(&request, exchange)?;
@@ -655,7 +650,7 @@ async fn handle_client_frame(
                 }
                 return handle_tools_list(&text, &request, exchange, policy, governed).await;
             }
-            handle_request(&text, &request, &method, exchange, policy, governed).await
+            handle_request(&text, &request, &method, exchange, policy, governed, &[]).await
         })
         .await
 }
@@ -863,6 +858,7 @@ async fn handle_request(
     exchange: &mut Exchange<'_>,
     policy: &PolicyEngine,
     governed: &GovernedBox,
+    input_methods: &[String],
 ) -> io::Result<ProgramAction> {
     if method == "initialize" {
         if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize
@@ -982,6 +978,11 @@ async fn handle_request(
             }
             ClientRequestAdmission::Refused => return Ok(ProgramAction::Continue),
         };
+    if !protocol_2026_07_28::admit_input_answers(input_methods, request, exchange, policy, governed)
+        .await?
+    {
+        return Ok(ProgramAction::Continue);
+    }
     if let Some((key, _)) = request_id {
         // Only a call that names an item records `mcp:call::response`, so listing does not count
         // toward a temporal cap.
@@ -1024,7 +1025,7 @@ async fn forward_server_frame(
     }
     if let Some(method) = object.get("method") {
         if let Some(id) = object.get("id") {
-            if exchange.connection.phase == McpConnectionPhase::Modern {
+            if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
                 return Err(invalid_data(
                     "modern MCP servers cannot send JSON-RPC requests",
                 ));

@@ -105,3 +105,59 @@ while IFS= read -r frame; do printf '%s\n' "$frame" >> "$1"; done"#,
         1
     );
 }
+
+#[tokio::test]
+async fn offline_discovery_restarts_a_legacy_server_that_exits_on_the_probe() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let tools = discover_script(
+        r#"while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"server/discover"'*) exit 1 ;;
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"legacy","version":"1"}}}' ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}' ;;
+esac
+done"#,
+        log.path(),
+    ).await.expect("fresh legacy handshake");
+    assert_eq!(tools["result"]["tools"], json!([]));
+    let frames: Vec<Value> = std::fs::read_to_string(log.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "server/discover",
+            "initialize",
+            "notifications/initialized",
+            "tools/list"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn offline_discovery_does_not_restart_a_partial_probe_response() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let error = discover_script(
+        r#"IFS= read -r frame
+printf '%s\n' "$frame" >> "$1"
+printf '{"jsonrpc":"2.0",'
+exit 1"#,
+        log.path(),
+    )
+    .await
+    .expect_err("partial response must fail");
+    assert!(
+        error.to_string().contains("within a response frame"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log.path()).unwrap().lines().count(),
+        1
+    );
+}

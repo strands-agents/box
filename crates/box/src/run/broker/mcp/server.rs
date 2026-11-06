@@ -106,6 +106,7 @@ async fn list_tools_until_cancelled(
         cancellation,
         maximum_response_bytes,
         MCP_DISCOVERY_RESPONSE_TIMEOUT,
+        Some((admitted, home, cwd)),
     )
     .await
 }
@@ -116,6 +117,7 @@ async fn list_tools_from_running_server_until_cancelled(
     cancellation: impl std::future::Future<Output = ()>,
     maximum_response_bytes: usize,
     response_timeout: Duration,
+    restart: Option<(&McpServer, &Path, &Path)>,
 ) -> Result<Value, McpToolDiscoveryError> {
     let result = {
         let mut stdout = tokio::io::BufReader::new(stdout);
@@ -124,7 +126,7 @@ async fn list_tools_from_running_server_until_cancelled(
             () = cancellation => Err(McpToolDiscoveryError::Cancelled),
             result = tokio::time::timeout(
                 response_timeout,
-                list_tools_before_deadline(&mut running, &mut stdout, maximum_response_bytes),
+                list_tools_before_deadline(&mut running, &mut stdout, maximum_response_bytes, restart),
             ) => result.map_err(|_| McpToolDiscoveryError::Discovery(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -146,8 +148,22 @@ async fn list_tools_before_deadline(
     running: &mut RunningMcpServer,
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
     maximum_response_bytes: usize,
+    restart: Option<(&McpServer, &Path, &Path)>,
 ) -> io::Result<Value> {
-    let modern = probe_modern(running, stdout).await?;
+    let modern = match probe_modern(running, stdout).await {
+        Ok(modern) => modern,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            let Some((admitted, home, cwd)) = restart else {
+                return Err(error);
+            };
+            running.stop_and_wait().await?;
+            let (replacement, output) = RunningMcpServer::start(admitted, home, cwd).await?;
+            *running = replacement;
+            *stdout = tokio::io::BufReader::new(output);
+            false
+        }
+        Err(error) => return Err(error),
+    };
     if !modern {
         initialize_legacy(running, stdout).await?;
     }
@@ -300,6 +316,11 @@ async fn probe_modern(
         )
         .await
         {
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof && !frame.is_empty() => {
+                return Err(invalid_data(
+                    "MCP discovery probe ended within a response frame",
+                ));
+            }
             Ok(result) => result?,
             Err(_) if frame.is_empty() => return Ok(false),
             Err(_) => {
@@ -937,6 +958,7 @@ mod tests {
             std::future::pending(),
             MAXIMUM_DISCOVERY_RESPONSE_BYTES,
             Duration::from_millis(10),
+            None,
         )
         .await
         .expect_err("silent discovery must time out");
