@@ -730,11 +730,67 @@ started reads with `jq`.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `kind` | string | `file` or `otlp`. |
-| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
+| `kind` | string | `file`, `otlp`, or a vendor: `langfuse`, `langsmith`, `cloudwatch_logs`, or `cloudwatch_traces`. Required. |
+| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. For `langfuse` and `langsmith`, the base address, which defaults to the vendor's cloud. A CloudWatch kind takes `region` instead, and refuses `destination`. |
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans **and** the box's own records together. **Absent means every one of them**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
-| `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
-| `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
+| `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
+| `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, or `credsd://ENVIRONMENT`. `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. |
+| `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
+| `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
+| `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
+| `project` | string | For `langsmith`: the project the spans go to. |
+| `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+
+A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
+only what is yours:
+
+```toml
+[telemetry.langfuse]
+kind = "langfuse"
+destination = "https://us.cloud.langfuse.com"
+secret.ref = "env://LANGFUSE_AUTH"            # public-key:secret-key
+
+[telemetry.langsmith]
+kind = "langsmith"
+project = "my-project"
+secret.ref = "env://LANGSMITH_API_KEY"
+
+[telemetry.cloudwatch_logs]
+kind = "cloudwatch_logs"
+region = "us-west-2"
+log_group = "my-group"
+log_stream = "my-stream"
+secret.ref = "aws://my-profile"
+
+[telemetry.cloudwatch_traces]
+kind = "cloudwatch_traces"
+region = "us-west-2"
+secret.ref = "aws://my-profile"
+```
+
+| Kind | Sends | Credential |
+|---|---|---|
+| `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
+| `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
+| `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+
+A vendor kind refuses each key it sets itself: `headers`, `accepts`, `secret.header`,
+`secret.prefix`, and `secret.placement`. The message is ``a `<kind>` target sets `<key>` itself, so
+leave it out``. A key that belongs to another kind is refused with
+`` `<key>` does not apply to a `<kind>` target ``. Box stores each vendor target as the `otlp`
+target it stands for. For a vendor Box does not know, write `kind = "otlp"` with `accepts`,
+`headers`, and `secret` yourself.
+
+A secret needs an `https://` destination unless the destination is loopback. Box checks each
+`aws://` and `credsd://` telemetry credential before the workload starts, so a profile that cannot
+sign or a daemon that does not answer stops the run.
+
+Set `STRANDS_BOX_TELEMETRY_DEBUG` to any non-empty value in the environment of `strands-box run` to print each
+failed export on stderr, with its full cause and the start of the endpoint's answer. Without it, a
+failed export is counted and not printed.
 
 A file destination inside the box directory and outside `private/` is refused: `"<path>" is inside
 the box directory <path> but outside its private tree, where a process could truncate it; name a
@@ -746,7 +802,8 @@ more of: deny, permit, trace, logs, metrics`, and a repeated word with `the targ
 
 `logs` and `metrics` are accepted in `include` and change nothing: every target receives the agent's
 log records and metrics. `include = ["deny"]` delivers the refusals, the log records, and the
-metrics.
+metrics. `accepts` is the exception: an endpoint that takes only `traces`, such as a `langfuse`
+target, is sent no log or metric batch.
 
 `include` narrows `deny`, `permit`, and `trace`, where `trace` covers the agent's spans and the
 box's own records.

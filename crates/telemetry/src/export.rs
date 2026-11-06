@@ -63,7 +63,7 @@ pub(crate) struct TargetExporter {
     resource: std::sync::OnceLock<ResourceAttributesWithSchema>,
     /// Bumped for every batch a target refused, so a failing endpoint is not silent.
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Whether a failed batch is also printed to stderr, set by `STRANDS_BOX_TELEMETRY_DEBUG`.
+    /// Whether a failed batch is also printed to stderr, as the config asks.
     reports_failures: bool,
 }
 
@@ -94,7 +94,7 @@ impl TargetExporter {
                         accepts,
                         resource: std::sync::OnceLock::new(),
                         dropped,
-                        reports_failures: reports_failures(),
+                        reports_failures: false,
                     });
                 }
                 // Only the parent chain; `O_NOFOLLOW` still guards the final component.
@@ -142,8 +142,14 @@ impl TargetExporter {
             accepts,
             resource: std::sync::OnceLock::new(),
             dropped,
-            reports_failures: reports_failures(),
+            reports_failures: false,
         })
+    }
+
+    /// Print each failed batch to stderr, with its full cause, when `on` is set.
+    pub(crate) fn reporting_failures(mut self, on: bool) -> Self {
+        self.reports_failures = on;
+        self
     }
 
     /// Take the provider's resource. Later calls are ignored.
@@ -306,15 +312,8 @@ impl TargetExporter {
     }
 }
 
-/// The variable that turns on a stderr line for each failed batch.
-const FAILURE_REPORT_VARIABLE: &str = "STRANDS_BOX_TELEMETRY_DEBUG";
-
 /// How much of a refusing endpoint's answer a failure report quotes.
 const FAILURE_DETAIL_CHARS: usize = 300;
-
-fn reports_failures() -> bool {
-    std::env::var_os(FAILURE_REPORT_VARIABLE).is_some_and(|value| !value.is_empty())
-}
 
 /// An error and each cause beneath it, on one line.
 fn with_causes(error: &dyn std::error::Error) -> String {
@@ -654,9 +653,19 @@ mod tests {
         std::net::SocketAddr,
         tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) {
+        stand_in_at("127.0.0.1:0").await
+    }
+
+    /// A stand-in endpoint listening on `bind`.
+    async fn stand_in_at(
+        bind: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    ) {
         use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = tokio::net::TcpListener::bind(bind)
             .await
             .expect("bind a stand-in endpoint");
         let address = listener.local_addr().expect("its address");
@@ -747,9 +756,13 @@ mod tests {
         locator: credentials::Locator,
         mode: credentials::InjectMode,
     ) -> (std::sync::Arc<credentials::Vault>, String) {
-        let pattern =
-            credentials::DestinationPattern::parse(&format!("127.0.0.1:{}", address.port()))
-                .expect("a pattern");
+        let pattern = match address.ip() {
+            std::net::IpAddr::V6(ip) => credentials::DestinationPattern::ipv6(ip, address.port()),
+            std::net::IpAddr::V4(ip) => {
+                credentials::DestinationPattern::parse(&format!("{ip}:{}", address.port()))
+                    .expect("a pattern")
+            }
+        };
         let opened = credentials::Vault::open(
             credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
                 .route(credentials::RouteSpec::opaque(pattern, locator, mode))
@@ -862,6 +875,28 @@ mod tests {
             !head.contains(&phantom),
             "the phantom never rides upstream: {head}"
         );
+    }
+
+    /// **A target on an IPv6 address gets its credential**, bound to the bracketed host a URL
+    /// writes.
+    #[tokio::test]
+    async fn the_vault_attaches_a_credential_on_an_ipv6_address() {
+        let (address, mut received) = stand_in_at("[::1]:0").await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, phantom) = opaque_vault(address, secret_file(&directory, "real_key"), mode);
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}"))
+            .with_header("x-api-key", phantom)
+            .with_vault(vault);
+        let exporter = opened(&target);
+
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert_eq!(header(&head, "x-api-key"), Some("real_key"), "{head}");
     }
 
     /// **Basic auth carries the `public:secret` pair, encoded by the vault.** This is the Langfuse

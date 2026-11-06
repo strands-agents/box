@@ -109,7 +109,8 @@ in a directory the workload can write, the workload can truncate it.
 A target can select Box denials, Box permits, or the value that selects relayed workload spans. See
 [a target names a set](decisions.md#a-target-names-a-set-of-signals). The span selector also
 includes control-plane records. Omitting it loses Box's record of authority changes. Relayed
-workload log records and metrics arrive regardless of this selection.
+workload log records and metrics arrive regardless of this selection, unless the target's `accepts`
+leaves that payload out.
 
 ## What the workload cannot do
 
@@ -140,12 +141,16 @@ two-byte JSON body. A dropped payload still gets `200`.
 
 ## Limits
 
-- Delivery is best effort. A failed target write loses the record without a retry, a report of the
-  loss, or a disk copy for later delivery. See [a record can be
+- Delivery is best effort. A failed target write loses the record without a retry or a disk copy
+  for later delivery. Box counts the loss, and prints it on stderr only when
+  `STRANDS_BOX_TELEMETRY_DEBUG` is set. See [a record can be
   lost](decisions.md#delivery-is-best-effort). The shutdown drain runs on every exit path, even when
   startup fails before the workload starts, so Box still records that it stopped. Relayed payloads
   do not join that drain and can be lost in flight. A decision cannot be lost through that shutdown
   race.
+- A send to an endpoint takes no policy decision. Box sends each batch itself, not through the
+  egress gateway, so policy cannot refuse one. The agent's relayed spans and log records reach every
+  endpoint the operator declares, and the operator's `box.toml` is the only gate.
 - Every process running as the operator can reach the loopback port. The listener cannot identify
   which process connected. Such a process cannot forge a Box record, but it can inject noise
   attributed to the agent.

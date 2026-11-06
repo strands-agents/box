@@ -2130,11 +2130,18 @@ crate because it requires a newer major version of an HTTP client that two other
 That dependency would put two TLS stacks in the process holding the CA key.
 
 <a id="a-target-is-a-file-or-an-otlp-endpoint"></a>
-### A target is a file or an OTLP endpoint, and no other type parses
+### A target is a file or an OTLP endpoint, and a vendor kind expands to an OTLP endpoint
 
-`box.toml` accepts `file` and `otlp`. Any other exporter name is refused when the config loads, and
-the refusal names the two that exist. For a vendor this build does not support directly, run a
-separate OTLP collector with that vendor's exporter. Point an `otlp` target at the collector's port.
+`box.toml` accepts six kinds: `file`, `otlp`, `langfuse`, `langsmith`, `cloudwatch_logs`, and
+`cloudwatch_traces`. It refuses any other kind when the config loads. The collector has two exporters
+only, a file and OTLP over HTTP. When the config loads, the box expands each vendor kind into the `otlp`
+target that it stands for, with the vendor's path, headers, payloads, and credential placement, and
+stores that target, which `a_vendor_kind_expands_to_its_otlp_target` pins. A vendor kind refuses each
+key that it sets itself, so an operator cannot override half of a vendor's settings
+(`a_vendor_kind_refuses_what_it_sets_or_lacks`). A `vendor` key beside `kind = "otlp"` was rejected,
+because it states the type of the target two times. Each vendor's path and headers are box code, so a
+change at the vendor needs a new build, and any other vendor is reached with `kind = "otlp"` and its
+settings written out.
 
 <a id="every-box-records-by-default"></a>
 ### Every box records by default, to a file the workload cannot reach
@@ -2147,15 +2154,19 @@ tree, which a deny-only floor refuses to the workload whatever a permit says. A 
 replaces the default instead of adding to it. The file has no size bound or rotation.
 
 <a id="a-target-names-a-set-of-signals"></a>
-### A target names a set of signals, and an absent list takes every signal
+### A target names a set of signals, an absent list takes every signal, and `accepts` narrows by payload
 
 `[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
 `trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
-`metrics` name the agent's relayed log and metric records. A target names a set, with no ordering,
-and no signal contains another. A target that names no `include` receives every signal, which
-`an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
-are each refused before the box exists. The box relays harness signals without producing them. The
-harness's exporter settings determine whether those records exist.
+`metrics` name the agent's relayed log and metric records. A target that names no `include` receives
+every signal, which `an_absent_include_takes_every_signal` pins, and an empty list, a repeated word, and
+a misspelled word are each refused before the box exists. The agent's log records and metrics reach
+every target whatever `include` names. `accepts` on an `otlp` target is a second filter, by OTLP payload
+and not by signal: the exporter sends no `traces`, `logs`, or `metrics` batch that the list leaves out,
+which `a_traces_only_target_is_sent_no_other_payload` pins. Each vendor kind stores one payload, so a
+Langfuse target receives no log or metric batch, because Langfuse answers `404` on those routes and each
+batch would count as a loss. The cost is that an operator who reads only `include` can expect a log
+record that an `accepts` list keeps out.
 
 <a id="the-strands-box-namespace-is-reserved"></a>
 ### `strands.box.` is reserved, and the collector strips it from an agent's payload at every level
@@ -2192,10 +2203,12 @@ on that port.
 <a id="delivery-is-best-effort"></a>
 ### Delivery is best effort, and a record can be lost
 
-When delivery to a target fails, the collector prints to stderr and loses the record. A relayed
-agent span does not take part in the shutdown drain, so a shutdown can lose one in flight; a refusal
-cannot be lost that way. A record that the SDK's own queue refuses is not counted. Every exit runs
-the same drain. A box that fails before its workload starts therefore still records its stop.
+When delivery to a target fails, the collector loses the record and counts the loss. It prints the
+loss to stderr only when `STRANDS_BOX_TELEMETRY_DEBUG` is set, because a vendor that is down would
+print a line on each export interval. A relayed agent span does not take part in the shutdown drain,
+so a shutdown can lose one in flight; a refusal cannot be lost that way. A record that the SDK's own
+queue refuses is not counted. Every exit runs the same drain. A box that fails before its workload
+starts therefore still records its stop.
 
 <a id="the-effective-decision-is-the-canonical-record"></a>
 ### The effective decision from the enforcement point is the canonical record

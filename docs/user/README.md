@@ -10,7 +10,7 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 - [`monty.md`](./monty.md): the Python that a box runs, its file operations, `fetch()`, and the rules to write.
 - [`shell.md`](./shell.md): Strands Shell, the agent's shell, with what runs where, the fields a rule reads, and the exit statuses.
 - [`shell-policy.md`](./shell-policy.md): write policy for the agent's shell commands, the programs it runs, and the files they touch.
-- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, what each record carries, and how to read a records file.
+- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, the endpoint and vendor kinds, what each record carries, and how to read a records file.
 - [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
