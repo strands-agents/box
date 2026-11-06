@@ -1138,49 +1138,57 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 ```
 
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
-### A tool grammar binds by its program name, on the program file's identity and the name it was called by
+### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
 A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
 A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command.
+which grammar reads a command. A stdio `[mcp.<name>]` whose command calls that program name binds
+the same way, so its start is decided as the grammar's action.
 
 For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
 name the program was called by. The identity is the file's device and inode on the surrounding OS. A
-hard link or symbolic link to a bound file therefore refers to the same identity and cannot bypass
-the binding. A command is parsed with a tool grammar only when both halves match one binding. The
-file identity alone isn't enough, because several programs can share one binary. mise runs every
-tool it manages through one shim binary, so `cargo`, `node`, and `npm` all resolve to the same file,
-and `cargo` and `rustc` can be links to one binary. The name alone isn't enough, because the caller
-picks the name, so any file called `git` would claim the git grammar. We rejected binding on file
-identity alone. It needs one lookup but would parse `npm install` through the mise shim binary as a
-cargo command.
+hard link or symbolic link to a bound file therefore refers to the same identity. A command is
+parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
+enough, because several programs can share one binary. mise runs every tool it manages through one
+shim binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can
+be links to one binary. The name alone isn't enough, because the caller picks the name, so any file
+called `git` would claim the git grammar. We rejected binding on file identity alone. It needs one
+lookup but would parse `npm install` through the mise shim binary as a cargo command.
 
 Several grammars can bind one file, each under its own program name. So a cargo grammar binds the
 mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. One grammar per file
-was rejected, because then only one tool that mise manages could have a grammar. A name that a
-`[tool]` declares, but that no grammar's `program` matches, binds no grammar and stays a
-`shell:spawn`.
+was rejected, because then only one tool that mise manages could have a grammar.
 
-Box refuses a spawn of a bound file before the policy decision in two cases. No rule can permit
-either case. The first is a name that no `[tool]` declares, such as `python` through the mise shim
-binary, or a link `g` to a bound `git`. The second is a replaced file. The bound path or link now
-leads to another file, for example after an update while the box runs. A new name, link, or file
-therefore cannot fall back to a more permissive `shell:spawn` rule. Reading an undeclared name as
-the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
-grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator
-never named. A declared name with no grammar stays a `shell:spawn` also after its file is replaced,
-because the operator named it and chose no grammar for it.
+A spawn of a bound file by a name that no grammar binds is decided as `shell:spawn`, whether or not a
+`[tool]` or an `[mcp.<name>]` declares that name. macOS `/usr/bin/git` is one developer-tool launcher
+file with about 78 names, such as `make` and `clang`, and it runs the tool its called name selects.
+A git grammar on it decides `git`, and the `shell:spawn` rules decide `make`. We rejected refusing an
+undeclared name outright, before any rule decides it. On a file with several names, such as that
+launcher, every other name would become a spawn that no policy can permit, so a git grammar on
+`/usr/bin/git` would refuse `make` and `clang`. Reading an undeclared name as the grammar's
+`unmodeled` action was also rejected. When several grammars bind one file, no single grammar owns
+the name, and a rule that permits `unmodeled` would admit a program that the operator never named.
+
+Box refuses a spawn of a bound name before the policy decision in two cases, and no rule can permit
+either. The first is a replaced file: the bound path or link now leads to another file, for example
+after an update while the box runs. The second is a bare name whose bound file is gone or replaced,
+so `PATH` would find another file. A new file therefore cannot claim a grammar's permits under a
+bound name. Box also refuses bindings that another policy engine issued, so the bindings that decide
+a spawn are always those of the engine that decides it.
 
 The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
-and `/opt/homebrew/bin/git` both read with the one git grammar. An operator must declare each name
-that runs a bound file, or Box refuses that name. An update that replaces a bound binary while the
-box runs refuses that program until the box restarts. A grammar also covers only the files that a
-`[tool]` runs. A file that no grammar binds remains a `shell:spawn` under every name, including
-names no `[tool]` declares. So a copy of a bound binary at another path, or the same program reached
-through an unbound shim binary, is decided by the `shell:spawn` rules and not by its grammar.
+and `/opt/homebrew/bin/git` both read with the one git grammar. A bound file called by a name that no
+grammar binds is governed only by `shell:spawn`. That includes `make` through the macOS launcher,
+`python` through the mise shim binary, and a link `g` to a bound `git` that the workload can create
+where it can write. A `shell:spawn` permit that matches the bound file's `program_path` therefore
+admits each other name of it, so pin each `shell:spawn` permit on both `program` and `program_path`.
+An update that replaces a bound binary while the box runs refuses its bound names until the box
+restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. A copy
+of a bound binary at another path, or the same program reached through an unbound shim binary, is
+decided by the `shell:spawn` rules and not by its grammar.
 
 ## Containment
 
