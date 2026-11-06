@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker, ready};
 
-use http_body_util::Empty;
+use http_body_util::{BodyExt, Empty};
 use hyper::Request;
 use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::client::conn::http1::SendRequest;
@@ -25,27 +25,30 @@ use crate::intercept::mitm::http1::{self, ResponseHead};
 use crate::transport::socket::{self, Counted, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// The pinned upstream socket, and the deadline of the one exchange on it.
-pub(crate) struct Upstream {
+pub(crate) struct Upstream<'a> {
     socket: TcpStream,
     /// The name to verify, when the exchange runs inside TLS.
     tls: Option<ServerName<'static>>,
     deadline: Instant,
+    completion: &'a ResponseCompletion,
 }
 
 /// Why an exchange got no response head, and the I/O kind to record.
 type NoResponse = (io::ErrorKind, ProxyError);
 
-impl Upstream {
+impl<'a> Upstream<'a> {
     /// `socket` is the pinned socket the listener opened. A TLS failure drops the exchange.
     pub(crate) fn new(
         socket: TcpStream,
         tls: Option<ServerName<'static>>,
         state: &SharedState,
+        completion: &'a ResponseCompletion,
     ) -> Self {
         Self {
             socket,
             tls,
             deadline: Instant::now() + state.config.upstream_read_deadline,
+            completion,
         }
     }
 
@@ -66,6 +69,7 @@ impl Upstream {
             socket,
             tls,
             deadline,
+            completion,
         } = self;
         let writes = WriteCount::default();
         let status = Cell::new(None);
@@ -103,6 +107,9 @@ impl Upstream {
             },
             None => writes.get().outcome(0, kind),
         };
+        if let Ok(response) = &response {
+            completion.body.set(Some(response.body.clone()));
+        }
         (outcome, response)
     }
 }
@@ -111,6 +118,23 @@ impl Upstream {
 pub(crate) struct UpstreamResponse {
     pub(crate) head: ResponseHead,
     pub(crate) body: UpstreamBody,
+}
+
+/// The connection's upstream response, retained until receipt ends even if delivery stops.
+#[derive(Default)]
+pub(crate) struct ResponseCompletion {
+    body: Cell<Option<UpstreamBody>>,
+}
+
+impl ResponseCompletion {
+    pub(crate) async fn finish(&self) -> io::Result<()> {
+        if let Some(mut body) = self.body.take() {
+            while let Some(frame) = body.frame().await {
+                frame?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether the upstream body finished or failed independently of downstream writes.
@@ -209,14 +233,14 @@ where
     let progress = ResponseProgress::new(deadline, body.is_end_stream());
     Ok(UpstreamResponse {
         head,
-        body: UpstreamBody {
+        body: UpstreamBody(Arc::new(Mutex::new(ResponseReader {
             body,
             driver,
             _sender: sender,
             progress,
             deadline: Box::pin(tokio::time::sleep_until(deadline)),
             request: None,
-        },
+        }))),
     })
 }
 
@@ -233,8 +257,56 @@ impl ConnectionDriver {
     }
 }
 
-/// A body that advances its upstream connection as its consumer requests bytes.
-pub(crate) struct UpstreamBody {
+/// A response reader shared with the connection that must finish it.
+#[derive(Clone)]
+pub(crate) struct UpstreamBody(Arc<Mutex<ResponseReader>>);
+
+impl UpstreamBody {
+    pub(crate) fn progress(&self) -> ResponseProgress {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .progress
+            .clone()
+    }
+
+    pub(crate) fn track_request(
+        &mut self,
+        permit: ClaimedEffectPermit,
+        outcome: EffectOutcome,
+    ) -> io::Result<()> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .track_request(permit, outcome)
+    }
+}
+
+impl Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        Pin::new(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).size_hint()
+    }
+}
+
+/// The upstream connection and the permit whose outcome follows response receipt.
+struct ResponseReader {
     body: Incoming,
     driver: ConnectionDriver,
     _sender: SendRequest<Empty<Bytes>>,
@@ -243,8 +315,8 @@ pub(crate) struct UpstreamBody {
     request: Option<(ClaimedEffectPermit, EffectOutcome)>,
 }
 
-impl UpstreamBody {
-    pub(crate) fn track_request(
+impl ResponseReader {
+    fn track_request(
         &mut self,
         permit: ClaimedEffectPermit,
         outcome: EffectOutcome,
@@ -266,7 +338,7 @@ impl UpstreamBody {
     }
 }
 
-impl Drop for UpstreamBody {
+impl Drop for ResponseReader {
     fn drop(&mut self) {
         if self.record_request_outcome().is_err() {
             eprintln!("strands-box: warning: recording upstream request outcome failed");
@@ -274,7 +346,7 @@ impl Drop for UpstreamBody {
     }
 }
 
-impl Body for UpstreamBody {
+impl Body for ResponseReader {
     type Data = Bytes;
     type Error = io::Error;
 

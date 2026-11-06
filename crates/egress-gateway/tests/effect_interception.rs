@@ -287,7 +287,7 @@ fn event_names(events: &[Event]) -> Vec<&'static str> {
 }
 
 fn wait_for_event_count(events: &Arc<Mutex<Vec<Event>>>, expected: usize) -> Vec<Event> {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let snapshot = events.lock().unwrap().clone();
         if snapshot.len() >= expected {
@@ -1095,6 +1095,63 @@ fn stalled_or_disconnected_workloads_end_a_stream_with_a_partial_outcome() {
 }
 
 #[test]
+fn a_disconnected_workload_cannot_complete_an_open_upstream_response() {
+    for end in ["complete", "truncated", "deadline"] {
+        let host = "disconnect-history.test";
+        let (upstream, sender) = TlsUpstream::start_controlled(host);
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        let handle = MitmInterceptor::start(
+            MitmConfig {
+                upstream_read_deadline: Duration::from_secs(2),
+                ..config_for(host, &upstream)
+            },
+            no_injection(),
+            Arc::new(RecordingInterceptor::allowing(shared.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("POST", "/running", &[], b"effect");
+        sender
+            .send(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n".to_vec())
+            .unwrap();
+        assert!(client.read_head().starts_with("HTTP/1.1 200"));
+        client.abort();
+        // Further writes expose the closed workload socket while the upstream stays open.
+        for _ in 0..2 {
+            let _ = sender.send(b"1\r\nx\r\n".to_vec());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            shared.lock().unwrap().iter().all(|event| !matches!(
+                event,
+                Event::Outcome(EffectKind::HttpRequest, _)
+                    | Event::MarkedIndeterminate(EffectKind::HttpRequest)
+            )),
+            "{end}: disconnect advanced the request outcome"
+        );
+        if end == "complete" {
+            sender.send(b"0\r\n\r\n".to_vec()).unwrap();
+        }
+        let held_sender = (end == "deadline").then_some(sender);
+        let events = wait_for_event_count(&shared, 7);
+        assert_eq!(events.len(), 7, "{end}: {events:?}");
+        assert!(matches!(
+            events[5],
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Replied { status: 200, .. }
+            )
+        ));
+        assert!(matches!(
+            events[6],
+            Event::Outcome(EffectKind::ResponseRelease, EffectOutcome::Partial { .. })
+        ));
+        drop(held_sender);
+    }
+}
+
+#[test]
 fn response_release_denial_sends_no_upstream_head_or_body() {
     let host = "release-denied.test";
     let (upstream, sender) = TlsUpstream::start_controlled(host);
@@ -1121,6 +1178,15 @@ fn response_release_denial_sends_no_upstream_head_or_body() {
     assert!(!response.contains("200 OK"));
     assert!(!response.contains("forbidden"));
     assert!(!response.contains("private"));
+    assert!(
+        shared.lock().unwrap().iter().all(|event| !matches!(
+            event,
+            Event::Outcome(EffectKind::HttpRequest, _)
+                | Event::MarkedIndeterminate(EffectKind::HttpRequest)
+        )),
+        "a refused release must not complete an open upstream request"
+    );
+    drop(sender);
     let events = wait_for_event_count(&shared, 6);
     assert!(matches!(
         events[5],

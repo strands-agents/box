@@ -15,7 +15,7 @@ use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
-use crate::client::http::{ResponseProgress, Upstream};
+use crate::client::http::{ResponseCompletion, ResponseProgress, Upstream};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
@@ -29,13 +29,14 @@ pub(crate) async fn forward_tls(
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
+    completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
     // Check the upstream's TLS name before any request effect.
     let server_name =
         rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
             ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
         })?;
-    let upstream = Upstream::new(upstream, Some(server_name), state);
+    let upstream = Upstream::new(upstream, Some(server_name), state, completion);
     let correlation = correlation.with_headers(&parsed.headers);
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
@@ -67,7 +68,7 @@ pub(crate) async fn forward_tls(
 async fn run_l7_legs(
     connect: &ConnectRequest,
     mut req: InterceptedRequest,
-    upstream: Upstream,
+    upstream: Upstream<'_>,
     state: &SharedState,
     correlation: RequestId,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
@@ -286,7 +287,7 @@ async fn run_l7_legs(
             }
         }
     }
-    let mut progress = Some(body.progress.clone());
+    let mut progress = Some(body.progress());
     let mut body = ResponseBody::streaming(body, controls.redactors);
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
@@ -345,8 +346,9 @@ pub(crate) async fn forward_plain(
     origin_target: String,
     state: &SharedState,
     correlation: RequestId,
+    completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
-    let upstream = Upstream::new(upstream, None, state);
+    let upstream = Upstream::new(upstream, None, state, completion);
     let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its

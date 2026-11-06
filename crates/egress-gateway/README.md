@@ -229,7 +229,9 @@ matches across chunk boundaries. A nonempty encoded response to a credentialed r
 `ResponseLimits::max_body_bytes` bounds collected requests and HTTP MCP `tools/list` responses;
 its default remains 16 MiB. Catalog pages retain the existing capture and schema-staging order.
 
-The request outcome is recorded when the upstream response completes, fails, or is abandoned.
+The request outcome is recorded when the upstream response completes, fails, or reaches its deadline.
+After a workload disconnect or a response refusal, the connection discards the remaining upstream
+body under the same deadline and connection limit before recording the request outcome.
 A received status is retained even if the body fails. HTTP MCP calls use this same timing; their
 recorded outcome does not prove tool success. A framing error or unsupported trailer closes the
 response, which may already have delivered a processed prefix.

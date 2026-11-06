@@ -175,8 +175,10 @@ have opened a socket is a `::response`, so a rule can count failed connects, and
 still counts the uncertain ones.
 
 For an HTTP request, the gateway records accepted request bytes and any received status when the
-upstream response completes, fails, or is abandoned. HTTP MCP calls record their outcome at the same
-point. Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
+upstream response completes, fails, or reaches its deadline. HTTP MCP calls record their outcome at
+the same point. If the workload disconnects or the gateway refuses delivery, the gateway discards
+the remaining body under the same deadline before recording the outcome.
+Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
 Response delivery adds no second policy event.
 
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition

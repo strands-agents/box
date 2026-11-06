@@ -201,9 +201,15 @@ fn a_stateless_policy_allows_every_request_through_the_same_proxy() {
 #[test]
 fn streamed_http_and_mcp_history_waits_for_upstream_termination() {
     use std::io::Read;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    for clean_end in [true, false] {
+    for (end, disconnect) in [
+        ("complete", false),
+        ("truncated", false),
+        ("complete", true),
+        ("truncated", true),
+        ("deadline", true),
+    ] {
         let host = "mcp-history.test";
         let (upstream, sender) = TlsUpstream::start_controlled(host);
         let schema = generate_mcp_schema(
@@ -248,6 +254,7 @@ fn streamed_http_and_mcp_history_waits_for_upstream_termination() {
                 upstream_ca_pems: vec![upstream.ca_pem()],
                 dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
                 mcp_servers: vec![(host.to_string(), "demo".to_string())],
+                upstream_read_deadline: Duration::from_secs(2),
                 ..MitmConfig::default()
             },
             CapabilitySet::default(),
@@ -281,25 +288,56 @@ fn streamed_http_and_mcp_history_waits_for_upstream_termination() {
             .unwrap();
         let head = client.read_head();
         assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-        let mut body = client.response_body(&head);
         let mut prefix = [0; 6];
-        body.read_exact(&mut prefix).unwrap();
+        client.response_body(&head).read_exact(&mut prefix).unwrap();
         assert_eq!(&prefix, b"data:\n");
+        let mut client = if disconnect {
+            client.abort();
+            for _ in 0..2 {
+                let _ = sender.send(b"6\r\ndata:\n\r\n".to_vec());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            None
+        } else {
+            Some(client)
+        };
         for path in ["/after-http", "/after-mcp"] {
             assert!(
                 probe(path).is_err(),
-                "{path} became available during the response"
+                "{end}, disconnect={disconnect}: {path} became available during the response"
             );
         }
-        if clean_end {
+        if end == "complete" {
             sender.send(b"0\r\n\r\n".to_vec()).unwrap();
         }
-        drop(sender);
-        assert_eq!(body.read_to_end(&mut Vec::new()).is_ok(), clean_end);
-        for path in ["/after-http", "/after-mcp"] {
-            probe(path)
-                .unwrap_or_else(|error| panic!("{path} missing after termination: {error}"))
-                .mark_indeterminate();
+        let held_sender = (end == "deadline").then_some(sender);
+        if let Some(client) = &mut client {
+            assert_eq!(
+                client
+                    .response_body(&head)
+                    .read_to_end(&mut Vec::new())
+                    .is_ok(),
+                end == "complete"
+            );
         }
+        for path in ["/after-http", "/after-mcp"] {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match probe(path) {
+                    Ok(permit) => {
+                        permit.mark_indeterminate();
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "{end}, disconnect={disconnect}: {path} missing after termination: {error}"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        drop(held_sender);
     }
 }

@@ -18,7 +18,7 @@ use tokio::time::Sleep;
 use tokio_rustls::TlsAcceptor;
 
 use crate::audit::RequestId;
-use crate::client::http::{ResponseProgress, ResponseState};
+use crate::client::http::{ResponseCompletion, ResponseProgress, ResponseState};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::body::ResponseBody;
 use crate::intercept::mitm::connect::{self, ConnectRequest};
@@ -38,8 +38,9 @@ pub(crate) fn serve_connection<C: Socket>(
             .into_async()
             .map_err(|e| ProxyError::Io(format!("client socket: {e}")))?;
         let tunnel = Cell::new(None);
-        serve(client, |request, head| {
-            first_request(request, head, state, connect_only, &tunnel)
+        let completion = ResponseCompletion::default();
+        serve(client, &completion, |request, head| {
+            first_request(request, head, state, connect_only, &tunnel, &completion)
         })
         .await?;
         match tunnel.take() {
@@ -64,6 +65,7 @@ async fn first_request(
     state: &SharedState,
     connect_only: bool,
     tunnel: &Cell<Option<Tunnel>>,
+    completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
     // Read before `read_request` strips this hop-by-hop header.
     let token = request
@@ -123,6 +125,7 @@ async fn first_request(
         origin_target,
         state,
         correlation,
+        completion,
     )
     .await
 }
@@ -157,16 +160,18 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         correlation,
         ..
     } = tunnel;
-    serve(client, |request, head| async move {
+    let completion = ResponseCompletion::default();
+    let completion = &completion;
+    serve(client, completion, |request, head| async move {
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        l7::forward_tls(parsed, upstream, &connect, state, correlation).await
+        l7::forward_tls(parsed, upstream, &connect, state, correlation, completion).await
     })
     .await
 }
 
 /// Serve one request with hyper, and record the release outcome once the response is written.
-async fn serve<S, H, F>(client: S, handle: H) -> Result<()>
+async fn serve<S, H, F>(client: S, completion: &ResponseCompletion, handle: H) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     H: FnOnce(Request<Incoming>, Vec<u8>) -> F,
@@ -229,7 +234,7 @@ where
     })
     .await;
     drop(connection);
-    if let Some((permit, start)) = release.take() {
+    let release = release.take().map(|(permit, start)| {
         let mut error = served.as_ref().err().map(io::Error::kind);
         let mut complete = served.is_ok() || shutdown_failed;
         if let Some((receipt, _)) = progress.borrow().as_ref() {
@@ -242,15 +247,22 @@ where
                 }
             }
         }
-        permit
-            .record_outcome(writes.get().response_outcome(start, error, complete))
-            .map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording governed response outcome after I/O: {error}"
-                ))
-            })?;
+        (
+            permit,
+            writes.get().response_outcome(start, error, complete),
+        )
+    });
+    let drained = completion.finish().await;
+    if let Some((permit, outcome)) = release {
+        permit.record_outcome(outcome).map_err(|error| {
+            ProxyError::Io(format!(
+                "recording governed response outcome after I/O: {error}"
+            ))
+        })?;
     }
-    served.map_err(|error| ProxyError::Io(format!("serving the workload: {error}")))
+    served
+        .and(drained)
+        .map_err(|error| ProxyError::Io(format!("serving the workload: {error}")))
 }
 
 /// The response as hyper writes it. hyper frames a body itself, so a stale length is dropped.
@@ -383,7 +395,8 @@ mod tests {
             written: written.clone(),
             flushed: false,
         };
-        let error = socket::block_on(serve(transport, |_, _| async move {
+        let completion = ResponseCompletion::default();
+        let error = socket::block_on(serve(transport, &completion, |_, _| async move {
             let mut reply = response(200, b"complete body");
             reply.release = Some(permit);
             Ok(reply)
