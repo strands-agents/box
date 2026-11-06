@@ -47,22 +47,6 @@ const _: () = assert!(
      reported as a broker failure"
 );
 
-// When Monty is reached through the Shell's `python` command, it runs under the transport's hard
-// `SERVE_REQUEST_TIMEOUT` rather than `run_python`'s outer wrap — the seam calls `drive_monty`
-// directly (docs/design/decisions.md#python-in-the-shell-is-monty). So each bound below must fire
-// *before* the transport's hard kill, or a wedged script reports the transport's generic "call
-// exceeded its deadline" instead of its own message.
-const _: () = assert!(
-    SCRIPT_TIMEOUT.as_nanos() < super::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "Monty's in-VM script timeout must be shorter than the transport's request timeout, so a \
-     Shell `python` reports Monty's own deadline rather than the transport's generic kill"
-);
-
-const _: () = assert!(
-    SLEEP_TOTAL_LIMIT.as_nanos() < super::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "the sleep bound must fire before the transport's request timeout"
-);
-
 /// Compile and run one script, servicing every suspension through policy.
 pub(super) async fn run_python(
     source: String,
@@ -111,13 +95,7 @@ pub(super) struct PythonOutcome {
 /// The origin a traceback names for source that arrived over the wire.
 pub(super) const PYTHON_ORIGIN: &str = "<box>";
 
-/// Drive Monty over one script to completion, servicing every suspension through policy.
-///
-/// This is the un-wrapped inner run: it applies Monty's own `SCRIPT_TIMEOUT` through
-/// `ResourceTracker`, but **not** the outer `REQUEST_TIMEOUT`. The direct program path reaches it
-/// through [`run_python`], which adds that wrap; the Shell `python` command calls this
-/// directly, so on that path the transport's `SERVE_REQUEST_TIMEOUT` is the hard backstop and
-/// Monty's in-VM deadline is what a wedged script reports.
+/// Drive Monty through policy; synchronous VM execution can delay the enclosing Shell deadline.
 pub(super) async fn drive_monty(
     source: String,
     origin: String,

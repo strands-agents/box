@@ -22,7 +22,8 @@ jobs:
     name: Check access
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 5
     outputs:
       approval-env: ${{ steps.auth.outputs.approval-env }}
     steps:
@@ -43,7 +44,8 @@ jobs:
     permissions:
       actions: write
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 30
     steps:
       - name: Trigger Strands Command Workflow
         uses: actions/github-script@v9

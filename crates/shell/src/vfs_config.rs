@@ -35,9 +35,8 @@ pub struct LimitsConfig {
     pub max_bg_jobs: Option<usize>,
     pub max_pipeline: Option<usize>,
     pub max_input: Option<usize>,
-    /// Per-command wall-clock timeout, in whole seconds. Omit for no timeout;
-    /// a value of `0` is rejected at build time (it would expire every command
-    /// immediately — there is no "unlimited" sentinel).
+    /// Per-command wall-clock timeout in whole seconds; omission preserves the builder's
+    /// setting, and zero is rejected at build time.
     #[serde(deserialize_with = "deserialize_opt_timeout")]
     pub timeout: Option<Duration>,
     // VFS-level caps.

@@ -14,12 +14,13 @@
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
 
 pub(crate) mod broker;
+pub(crate) mod commands;
 pub(crate) mod configure;
 pub(crate) mod contain;
 pub(crate) mod credential;
 pub(crate) mod hardening;
 pub(crate) mod hosted;
-mod installation;
+pub(crate) mod installation;
 pub(crate) mod lock;
 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
 pub(crate) mod macos_enforcement;

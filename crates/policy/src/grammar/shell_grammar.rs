@@ -172,7 +172,7 @@ impl ActionGrammar {
         let place = Place::Action(name.as_str().to_string());
         let usage =
             Usage::read(&action.usage, program).map_err(|fault| GrammarRefusal::BadUsage {
-                place: place.clone(),
+                place: Place::ActionUsage(name.as_str().to_string()),
                 fault,
             })?;
         if let Some(other) = spellings.insert(usage.words.clone(), name.as_str().to_string()) {

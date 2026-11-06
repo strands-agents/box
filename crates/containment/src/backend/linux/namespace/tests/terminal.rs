@@ -358,21 +358,62 @@ fn terminal_modes_size_input_output_and_restoration_remain_available() {
     assert_eq!(restored.c_cflag, original.c_cflag);
     assert_eq!(restored.c_lflag, original.c_lflag);
     assert_eq!(restored.c_cc, original.c_cc);
-    let mut buffer = [0u8; 128];
+    let fd = master.as_raw_fd();
+    // SAFETY: this descriptor belongs only to the disposable terminal.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    // SAFETY: nonblocking reads keep the output deadline effective.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 3];
     let mut poll = libc::pollfd {
-        fd: master.as_raw_fd(),
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: bounded poll and read on the private master.
-    assert_eq!(unsafe { libc::poll(&mut poll, 1, 1000) }, 1);
-    let n = unsafe { libc::read(master.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
-    assert!(n > 0);
-    assert!(
-        buffer[..n as usize]
-            .windows(6)
-            .any(|part| part == b"output")
-    );
+    while !output.windows(6).any(|part| part == b"output") {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "terminal output timed out: {output:?}"
+        );
+        let timeout = i32::try_from(remaining.as_millis().max(1)).unwrap();
+        // SAFETY: poll names one live descriptor and uses the remaining deadline.
+        let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+        if ready < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+            continue;
+        }
+        if ready == 0 {
+            continue;
+        }
+        // SAFETY: buffer has the advertised size and fd remains open and nonblocking.
+        let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ),
+                "terminal read failed: {error}; received {output:?}"
+            );
+            continue;
+        }
+        assert!(n > 0, "terminal output ended: {output:?}");
+        output.extend_from_slice(&buffer[..n as usize]);
+        assert!(
+            output.len() <= 128,
+            "unexpected terminal output: {output:?}"
+        );
+    }
 }
 
 #[test]

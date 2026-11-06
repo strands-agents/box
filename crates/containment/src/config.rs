@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ContainmentError;
 use crate::model::{
-    BackendOverride, IpcMode, Network, Operation, PathGrant, PreparedFilesystemPath,
-    ProcessInfoMode, Scope, SignalMode, WriteProtection,
+    BackendOverride, CommandIdentity, IpcMode, Network, Operation, PathGrant,
+    PreparedFilesystemPath, ProcessInfoMode, Scope, SignalMode, WriteProtection,
 };
 
 type Result<T> = std::result::Result<T, ContainmentError>;
@@ -25,6 +25,9 @@ pub struct ContainmentConfig {
     paths: Vec<PathGrant>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
+    /// Program files that keep the link count they had when opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_identities: Vec<CommandIdentity>,
     #[serde(deserialize_with = "deserialize_validated_network")]
     network: Network,
     process: Process,
@@ -47,6 +50,9 @@ pub struct ContainmentConfig {
     /// Whether a leaf executes code from its readable and writable grants.
     #[serde(default)]
     broad_exec: bool,
+    /// Whether write roots may also set file times, set-ID bits, the group, and ACLs on macOS.
+    #[serde(default)]
+    file_attributes: bool,
     /// Whether the process may reach the host services a bundled JS/Node runtime touches at startup:
     /// `getifaddrs` (the `net.*` sysctls it reads and the routing socket it opens) and `getpwuid`
     /// (identity resolution via `opendirectoryd`). Leaf-only; the agent box never sets it. It grants
@@ -83,6 +89,7 @@ impl ContainmentConfig {
             paths: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
+            command_identities: Vec::new(),
             network: Network::Blocked,
             process: Process::default(),
             backend_override: BackendOverride::None,
@@ -91,6 +98,7 @@ impl ContainmentConfig {
             discovery_roots: Vec::new(),
             discovery_denies: Vec::new(),
             broad_exec: false,
+            file_attributes: false,
             runtime_services: false,
         }
     }
@@ -135,6 +143,13 @@ impl ContainmentConfig {
     #[must_use]
     pub fn allow_broad_exec(mut self) -> Self {
         self.broad_exec = true;
+        self
+    }
+
+    /// Let write roots set file times, set-ID bits, the group, and ACLs. macOS renders it; Linux defers.
+    #[must_use]
+    pub fn allow_file_attributes(mut self) -> Self {
+        self.file_attributes = true;
         self
     }
 
@@ -284,6 +299,33 @@ impl ContainmentConfig {
         Ok(self)
     }
 
+    /// Require one opened program file to keep its path, identity, and current link count; a backend can allow metadata and existence checks.
+    ///
+    /// This method does not check who can write the file. A caller passes a file with more than one
+    /// name only after it has established that the user that runs the box cannot write it through
+    /// any name, as `strands-box` does when it loads a configured command.
+    pub fn require_command_identity(
+        mut self,
+        path: impl AsRef<Path>,
+        opened: &std::fs::File,
+    ) -> Result<Self> {
+        let requirement = CommandIdentity::new(path, opened)?;
+        if self
+            .command_identities
+            .iter()
+            .any(|existing| existing.file().path() == requirement.file().path())
+        {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!(
+                    "{} has two command identity requirements",
+                    requirement.file().path().display()
+                ),
+            });
+        }
+        self.command_identities.push(requirement);
+        Ok(self)
+    }
+
     /// Set the network mode after validating every concrete port.
     pub fn set_network(mut self, network: Network) -> Result<Self> {
         validate_network(&network)?;
@@ -428,6 +470,10 @@ impl ContainmentConfig {
         &self.identity_requirements
     }
 
+    pub(crate) fn command_identities(&self) -> impl Iterator<Item = &WriteProtection> {
+        self.command_identities.iter().map(CommandIdentity::file)
+    }
+
     /// The home this caller stated it resolved its `~/`-relative grants against.
     pub(crate) fn operator_home(&self) -> Option<&Path> {
         self.operator_home.as_deref()
@@ -446,6 +492,11 @@ impl ContainmentConfig {
     /// Whether the leaf renders broad `process-exec*` and a `file-map-executable` allow over its writable grants.
     pub(crate) fn broad_exec(&self) -> bool {
         self.broad_exec
+    }
+
+    /// Whether write roots render the `file-write*` wildcard with the attribute denies.
+    pub(crate) fn file_attributes(&self) -> bool {
+        self.file_attributes
     }
 
     /// Whether this exact grant lies at or under its credential-store floor exception.
@@ -496,6 +547,9 @@ impl ContainmentConfig {
 
     pub(crate) fn require_live_file_identities(&self) -> Result<()> {
         for required in &self.identity_requirements {
+            required.validate_live_identity()?;
+        }
+        for required in self.command_identities() {
             required.validate_live_identity()?;
         }
         for protected in &self.write_protections {

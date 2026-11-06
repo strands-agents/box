@@ -1,9 +1,8 @@
 //! Which environment variable names a process may set, and which Core owns.
-//!
-//! Two independent concerns ask the same question: a `ProcessSpec`'s `env` asks it of an operator's
-//! own variable, and a credential's `env://` locator asks it of a phantom the box mints. Both must
-//! refuse a name that makes a runtime load code, and both must refuse a name Core sets itself.
 
+use std::path::Path;
+
+use crate::EnvRefusal;
 use crate::error::{BoxError, Internal};
 
 /// Prefixes whose whole family loads code. See [`reserved_workload_environment`].
@@ -58,21 +57,29 @@ fn composed_over(name: &str) -> bool {
     matches!(name, "HOME" | "PATH")
 }
 
-/// Whether Core sets `name` itself, so neither a credential nor a `ProcessSpec` may claim it.
+/// Whether a credential phantom may not claim `name`: a loader hook, or a name Core sets itself.
 ///
 /// `HOME`, `PATH`, and `TMPDIR` are the operator's: Core supplies a default for the first two and
 /// prepends the alias directory to `PATH`, and it reserves none of them.
 pub(crate) fn reserved_workload_environment(name: &str) -> bool {
-    // Loader hooks first, because they are a different kind of refusal: the names below are
-    // box-owned routing, while these make a runtime load code before the workload's first line.
-    if LOADER_HOOK_PREFIXES
+    loader_hook(name) || box_owned_environment(name)
+}
+
+/// Whether `name` makes a runtime load code before the workload's first line.
+fn loader_hook(name: &str) -> bool {
+    LOADER_HOOK_PREFIXES
         .iter()
         .any(|prefix| name.starts_with(prefix))
         || LOADER_HOOKS.contains(&name)
-    {
-        return true;
-    }
+}
 
+/// Whether the dynamic loader reads `name`.
+fn dynamic_loader_environment(name: &str) -> bool {
+    name.starts_with("LD_") || name.starts_with("DYLD_")
+}
+
+/// Whether Core sets `name` itself, so neither a credential nor a `ProcessSpec` may claim it.
+fn box_owned_environment(name: &str) -> bool {
     if name.starts_with(OTLP_EXPORTER_PREFIX) {
         return true;
     }
@@ -98,6 +105,40 @@ pub(crate) fn reserved_workload_environment(name: &str) -> bool {
             | "PWD"
             | "USER"
     )
+}
+
+/// Why a process table's `env` refuses the name `name`, whatever its value.
+pub(crate) fn refused_name(name: &str) -> Option<EnvRefusal> {
+    if !valid_environment_name(name) {
+        return Some(EnvRefusal::InvalidName);
+    }
+    if box_owned_environment(name) {
+        return Some(EnvRefusal::SetByBox);
+    }
+    dynamic_loader_environment(name).then_some(EnvRefusal::LoadsCode)
+}
+
+/// Why a process table's `env` refuses `value` for the name `name`.
+pub(crate) fn refused_value(name: &str, value: &str) -> Option<EnvRefusal> {
+    (matches!(name, "HOME" | "TMPDIR") && !Path::new(value).is_absolute())
+        .then_some(EnvRefusal::NotAbsolute)
+}
+
+/// The reason a process table states for a refused `env` entry.
+pub(crate) fn refusal_reason(kind: EnvRefusal, name: &str, value: &str) -> String {
+    match kind {
+        EnvRefusal::InvalidName => {
+            format!("`env` name {name:?} is not a valid environment-variable name")
+        }
+        EnvRefusal::SetByBox => {
+            format!("`env` name {name:?} is set by the box itself, so a table cannot claim it")
+        }
+        EnvRefusal::LoadsCode => format!(
+            "`env` name {name:?} is read by the dynamic loader of every program in the box, Box's \
+             own aliases included, so a table cannot set it"
+        ),
+        EnvRefusal::NotAbsolute => format!("`env.{name}` must be an absolute path: {value:?}"),
+    }
 }
 
 pub(crate) fn valid_environment_name(name: &str) -> bool {

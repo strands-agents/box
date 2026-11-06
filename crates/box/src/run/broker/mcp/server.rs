@@ -820,6 +820,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_timeout_stops_and_reaps_the_server_before_returning() {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "silent-server".to_string(),
             command: vec![
                 "/bin/sh".to_string(),
@@ -908,6 +909,7 @@ done
                 .map(|page| serde_json::to_string(page).expect("the page serializes")),
         );
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "fake".to_string(),
             command,
         };
@@ -941,6 +943,7 @@ done
 
     async fn non_reading_server() -> (RunningMcpServer, tokio::process::ChildStdout) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "non-reading-server".to_string(),
             command: vec![
                 "/bin/sh".to_string(),
@@ -979,6 +982,7 @@ done
     /// A running server over `cat`, which echoes and so needs no MCP implementation.
     async fn running_over_cat() -> RunningMcpServer {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "echo-server".to_string(),
             command: vec!["cat".to_string()],
         };
@@ -996,6 +1000,7 @@ done
             (crate::run::broker::protocol::MAX_FRAME_BYTES, false),
         ] {
             let admitted = McpServer {
+                argument_wildcards: false,
                 name: "frame-boundary".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -1030,6 +1035,7 @@ done
         use tokio::io::AsyncReadExt as _;
 
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "buffered-server".to_string(),
             command: vec![
                 "/bin/sh".to_string(),

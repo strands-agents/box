@@ -4,12 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
-};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dogwood_language::{
@@ -26,7 +23,7 @@ use dogwood_local_engine::{
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
-use crate::request::{ActionRequest, Principal, Request};
+use crate::request::{ActionRequest, Principal, Request, RequestId};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
     UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema, mcp_tool_action,
@@ -76,6 +73,7 @@ const SNAPSHOT_INTERVAL: u64 = 10_000;
 /// One loaded Dogwood policy authority over a single temporal history.
 pub(crate) struct DogwoodEngine {
     engine: Mutex<DurableTemporalEngine>,
+    request_scope: Arc<()>,
     rule_ids: HashMap<PolicyToken, RuleId>,
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
@@ -212,6 +210,7 @@ impl DogwoodEngine {
             Self {
                 rule_ids: rule_ids(&engine),
                 engine: Mutex::new(engine),
+                request_scope: Arc::new(()),
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
                 #[cfg(test)]
@@ -280,6 +279,7 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema,
             tool_actions,
             #[cfg(test)]
@@ -343,6 +343,7 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             fixed_clock: None,
@@ -373,6 +374,7 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             fixed_clock: Some(now),
@@ -402,7 +404,7 @@ impl DogwoodEngine {
         governed: &GovernedBox,
         principal: &Principal,
         request: ActionRequest<'_>,
-    ) -> Decision {
+    ) -> (Decision, Option<RequestId>) {
         let identity = request.identity();
         // Validate the (principal, action, context) tuple against the shipped schema
         // BEFORE deciding.
@@ -434,24 +436,35 @@ impl DogwoodEngine {
         };
         if let Err(error) = gate {
             eprintln!("policy: warn: {error}; denying");
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         }
-        let event = || match request {
-            ActionRequest::Request(request) => {
-                request_event(governed, principal, request, &identity)
-            }
-            ActionRequest::Grammar(request) => with_input(
-                identity.event_builder(KIND_REQUEST),
-                entity_json_value(request.input()),
-            ),
+        let event = |offset| {
+            with_request_id(
+                match request {
+                    ActionRequest::Request(request) => {
+                        request_event(governed, principal, request, &identity)
+                    }
+                    ActionRequest::Grammar(request) => with_input(
+                        identity.event_builder(KIND_REQUEST),
+                        entity_json_value(request.input()),
+                    ),
+                },
+                &RequestId::new(&self.request_scope, offset),
+            )
         };
         match self.submit(event) {
-            Ok(Some(decision)) => decision,
-            // A decision-kind event that produced no response is not a permit.
-            Ok(None) => Decision::internal_fault(),
+            Ok((Some(decision), offset)) => {
+                (decision, Some(RequestId::new(&self.request_scope, offset)))
+            }
+            // A decision-kind event that produced no response is not a permit,
+            // but the confirmed append still identifies the recorded request.
+            Ok((None, offset)) => (
+                Decision::internal_fault(),
+                Some(RequestId::new(&self.request_scope, offset)),
+            ),
             Err(error) => {
                 eprintln!("policy: warn: {error}; denying");
-                Decision::internal_fault()
+                (Decision::internal_fault(), None)
             }
         }
     }
@@ -461,9 +474,11 @@ impl DogwoodEngine {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.submit(|| outcome_event(governed, principal, outcome))
+        self.verify_request_id(request_id)?;
+        self.submit(|_| with_request_id(outcome_event(governed, principal, outcome), request_id))
             .map(|_| ())
             .map_err(PolicyError::Evaluation)
     }
@@ -480,29 +495,53 @@ impl DogwoodEngine {
         &self,
         identity: &ActionIdentity,
         input: &serde_json::Value,
+        request_id: &RequestId,
         status: i32,
     ) -> Result<(), PolicyError> {
-        self.submit(|| {
+        self.verify_request_id(request_id)?;
+        self.submit(|_| {
             let builder = with_input(
                 identity.event_builder(KIND_RESPONSE),
                 entity_json_value(input),
             );
-            with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))])
+            with_request_id(
+                with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))]),
+                request_id,
+            )
         })
         .map(|_| ())
         .map_err(PolicyError::Evaluation)
     }
 
+    fn verify_request_id(&self, request_id: &RequestId) -> Result<(), PolicyError> {
+        if request_id.belongs_to(&self.request_scope) {
+            Ok(())
+        } else {
+            Err(PolicyError::Evaluation(
+                "request identifier belongs to a different opened policy history".to_string(),
+            ))
+        }
+    }
+
     /// Feed one event through the durable engine under the scope lock.
-    fn submit(&self, build: impl FnOnce() -> EventBuilder) -> Result<Option<Decision>, String> {
+    fn submit(
+        &self,
+        build: impl FnOnce(u64) -> EventBuilder,
+    ) -> Result<(Option<Decision>, u64), String> {
         let mut engine = self
             .engine
             .lock()
             .map_err(|_| "dogwood durable engine lock poisoned".to_string())?;
-        let submitted = engine.submit(build()).map_err(|error| error.to_string())?;
+        let offset = engine.log_offset();
+        offset
+            .checked_add(1)
+            .ok_or_else(|| "dogwood history offset exhausted".to_string())?;
+        let submitted = engine
+            .submit(build(offset))
+            .map_err(|error| error.to_string())?;
 
         let DurableOutcome::Decision(response) = submitted.outcome else {
-            return Ok(None);
+            return Ok((None, offset));
         };
 
         let attribution = response
@@ -521,18 +560,28 @@ impl DogwoodEngine {
                     description: reference.description().map(str::to_owned),
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>();
+        let attribution = match attribution {
+            Ok(attribution) => attribution,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return Ok((Some(Decision::internal_fault()), offset));
+            }
+        };
 
         let mut errors = response.diagnostics().errors().peekable();
         if errors.peek().is_some() {
             let joined = errors.collect::<Vec<_>>().join("; ");
             eprintln!("policy: warn: dogwood evaluation failed: {joined}; denying");
-            return Ok(Some(Decision::Deny {
-                reason: DenyReason::InternalFault,
-                rule: RuleId::default_deny(),
-                attribution,
-                resource: String::new(),
-            }));
+            return Ok((
+                Some(Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    rule: RuleId::default_deny(),
+                    attribution,
+                    resource: String::new(),
+                }),
+                offset,
+            ));
         }
 
         let rule = attribution
@@ -540,26 +589,29 @@ impl DogwoodEngine {
             .map(|attribution| attribution.rule.clone())
             .unwrap_or_else(RuleId::default_deny);
 
-        Ok(Some(match response.decision() {
-            DogwoodDecision::Allow => Decision::Allow {
-                rule,
-                attribution,
-                resource: String::new(),
-            },
-            DogwoodDecision::Deny => {
-                let reason = if attribution.is_empty() {
-                    DenyReason::NoMatch
-                } else {
-                    DenyReason::Forbidden
-                };
-                Decision::Deny {
-                    reason,
+        Ok((
+            Some(match response.decision() {
+                DogwoodDecision::Allow => Decision::Allow {
                     rule,
                     attribution,
                     resource: String::new(),
+                },
+                DogwoodDecision::Deny => {
+                    let reason = if attribution.is_empty() {
+                        DenyReason::NoMatch
+                    } else {
+                        DenyReason::Forbidden
+                    };
+                    Decision::Deny {
+                        reason,
+                        rule,
+                        attribution,
+                        resource: String::new(),
+                    }
                 }
-            }
-        }))
+            }),
+            offset,
+        ))
     }
 
     #[cfg(test)]
@@ -758,24 +810,51 @@ fn block_end(bytes: &[u8], open: usize) -> Option<usize> {
 /// are the authored rules in order.
 pub(crate) fn validate_canonical_policy_set(
     canonical_policies: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_canonical_policy_set(canonical_policies, mcp_schemas, operator, positions)
-        .map_err(Refused::into_error)
+    check_canonical_policy_set(
+        canonical_policies,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        positions,
+    )
+    .map_err(Refused::into_error)
 }
 
 /// Strict-validate canonical policy statements, keeping the findings of a refusal.
 pub(crate) fn check_canonical_policy_set(
     canonical_policies: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), Refused> {
     let source = canonical_policies.join("\n");
-    check_and_expand(&source, mcp_schemas, operator, false, positions)
-        .map(|(_, schema, warnings)| (schema, warnings))
+    check_and_expand(
+        &source,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        false,
+        positions,
+    )
+    .map(|(_, schema, warnings)| (schema, warnings))
+}
+
+/// Strict-validate authored `source` against the canonical, tool grammar, and MCP schemas.
+pub(crate) fn validate_with_schemas(
+    source: &str,
+    grammar_schemas: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+) -> Result<Vec<PolicyWarning>, PolicyError> {
+    check_and_expand(source, grammar_schemas, mcp_schemas, operator, true, &[])
+        .map(|(_, _, warnings)| warnings)
+        .map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle before the durable engine installs it.
@@ -784,12 +863,13 @@ fn validate_and_expand(
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_and_expand(source, mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
+    check_and_expand(source, &[], mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle, keeping the findings of a refusal, located when `source` is authored.
 pub(crate) fn check_and_expand(
     source: &str,
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
     authored: bool,
@@ -800,7 +880,7 @@ pub(crate) fn check_and_expand(
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
-    let effective_schema = action_schema(mcp_schemas)?;
+    let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
     check_against(source, effective_schema, operator, authored, positions)
 }
 
@@ -1342,6 +1422,11 @@ fn policy_set_change_parts(
 
 fn durable_history_error(error: DurableError) -> PolicyError {
     PolicyError::Evaluation(error.to_string())
+}
+
+/// Attach the correlation field declared by the event schema, outside Cedar request context.
+fn with_request_id(builder: EventBuilder, request_id: &RequestId) -> EventBuilder {
+    builder.logged_field("requestId", Value::String(request_id.as_str().to_string()))
 }
 
 /// Build the decision-kind event for one request.
@@ -1892,16 +1977,20 @@ when temporal {
         input["force"] = serde_json::json!("yes");
         let mistyped = invocation.request().with_input(input);
 
-        let typed = engine.decide(
-            &governed(),
-            &Principal::agent(),
-            ActionRequest::Grammar(&typed),
-        );
-        let mistyped = engine.decide(
-            &governed(),
-            &Principal::agent(),
-            ActionRequest::Grammar(&mistyped),
-        );
+        let typed = engine
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Grammar(&typed),
+            )
+            .0;
+        let mistyped = engine
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Grammar(&mistyped),
+            )
+            .0;
 
         assert!(typed.is_allow(), "the typed input is allowed: {typed:?}");
         assert!(
@@ -1962,6 +2051,59 @@ when temporal {
     }
 
     #[test]
+    fn request_identifiers_follow_log_offsets_when_the_clock_stalls_or_moves_backward() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000).expect("policy loads");
+        let mut identifiers = Vec::new();
+        for seconds in [0, 0, -100, 1] {
+            engine.advance_clock(seconds);
+            let offset = engine.log_offset();
+            let request_id = permitted_http_request(&engine);
+            assert_eq!(request_id.as_str(), offset.to_string());
+            identifiers.push(request_id);
+        }
+        for (left, request_id) in identifiers.iter().enumerate() {
+            assert!(
+                !identifiers[..left].contains(request_id),
+                "each request is unique despite clock rollback"
+            );
+        }
+        for request_id in identifiers.iter().rev() {
+            engine
+                .observe_outcome(&governed(), &Principal::agent(), request_id, &delivered(1))
+                .expect("reverse-order completion records");
+        }
+        drop(engine);
+        let log = DurableLog::open(&path).expect("history opens");
+        let mut stored = Vec::new();
+        log.scan_from(0, |offset, bytes| {
+            if let Record::Event(event) = Record::decode(bytes).expect("record decodes") {
+                stored.push((offset, event));
+            }
+        })
+        .expect("history scans");
+        assert_eq!(stored.len(), 8);
+        let expected = identifiers.iter().chain(identifiers.iter().rev());
+        for ((_, event), request_id) in stored.iter().zip(expected) {
+            assert_eq!(
+                event.field_path(&["requestId".to_string()]),
+                Some(&Value::String(request_id.as_str().to_string()))
+            );
+        }
+        for (offset, event) in stored
+            .iter()
+            .filter(|(_, event)| event.kind() == KIND_REQUEST)
+        {
+            assert_eq!(
+                event.field_path(&["requestId".to_string()]),
+                Some(&Value::String(offset.to_string()))
+            );
+        }
+    }
+
+    #[test]
     fn every_determining_policy_keeps_its_token_and_raw_annotations() {
         for effect in ["permit", "forbid"] {
             let history = tempfile::tempdir().expect("history directory");
@@ -1987,11 +2129,13 @@ when temporal {
                 .map(|entry| entry.token.to_string())
                 .collect();
             let offset = authority.log_offset();
-            let decision = authority.decide(
-                &governed(),
-                &Principal::agent(),
-                ActionRequest::Request(&http()),
-            );
+            let decision = authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert_eq!(authority.log_offset(), offset + 1);
             assert_eq!(decision.is_allow(), effect == "permit");
             let rule = match &decision {
@@ -2043,11 +2187,13 @@ when temporal {
             let authority = DogwoodEngine::open(&source, &history.path().join("dogwood.redb"))
                 .expect("policy loads");
             let offset = authority.log_offset();
-            let decision = authority.decide(
-                &governed(),
-                &Principal::agent(),
-                ActionRequest::Request(&http()),
-            );
+            let decision = authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert_eq!(authority.log_offset(), offset + 1);
             assert!(matches!(
                 decision,
@@ -2071,11 +2217,13 @@ when temporal {
             }
             authority.poison_scope_for_test();
             assert_eq!(
-                authority.decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                ),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 Decision::internal_fault(),
             );
         }
@@ -2136,21 +2284,25 @@ when temporal {
                 }
             };
             assert_eq!(
-                authority.decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                ),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 expected
             );
             drop(authority);
             authority = DogwoodEngine::open_for_staging(&path).expect("history recovers");
             assert_eq!(
-                authority.decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                ),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 expected
             );
         }
@@ -2167,8 +2319,14 @@ when temporal {
         let future = i64::try_from(now).expect("epoch fits") + 3_600;
         let authority = DogwoodEngine::open_with_test_clock(BUDGET, &path, future)
             .expect("policy installs before clock rollback");
+        let request_id = permitted_http_request(&authority);
         authority
-            .observe_outcome(&governed(), &Principal::agent(), &delivered(101))
+            .observe_outcome(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &delivered(101),
+            )
             .expect("budget consumption records");
         drop(authority);
 
@@ -2192,11 +2350,13 @@ when temporal {
                 .expect("fault-injection open"),
             };
             assert_eq!(
-                authority.decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                ),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 Decision::Deny {
                     reason: DenyReason::NoMatch,
                     rule: RuleId::default_deny(),
@@ -2214,8 +2374,14 @@ when temporal {
         let path = history.path().join("dogwood.redb");
         for _ in 0..3 {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &Principal::agent(), &delivered(10))
+                .observe_outcome(
+                    &governed(),
+                    &Principal::agent(),
+                    &request_id,
+                    &delivered(10),
+                )
                 .expect("history records");
         }
         let snapshot = || {
@@ -2236,7 +2402,7 @@ when temporal {
             "a backlog below the interval must not checkpoint"
         );
 
-        recover(3);
+        recover(6);
         assert!(
             snapshot().is_some(),
             "a backlog at the interval must checkpoint on recovery"
@@ -2374,6 +2540,16 @@ when temporal {
         }
     }
 
+    fn permitted_http_request(engine: &DogwoodEngine) -> RequestId {
+        let (decision, request_id) = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Request(&http()),
+        );
+        assert!(decision.is_allow(), "the fixture request must be permitted");
+        request_id.expect("a submitted request has an identifier")
+    }
+
     #[test]
     fn a_poisoned_lock_denies_every_later_decision() {
         // The engine is a large body of vendored code behind a `Mutex`. A panic inside
@@ -2385,15 +2561,7 @@ when temporal {
         // very events a `forbid` depends on. Denying permanently is a liveness cost
         // (the box stops making outbound progress) taken deliberately over that.
         let engine = engine();
-        assert!(
-            engine
-                .decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                )
-                .is_allow()
-        );
+        let request_id = permitted_http_request(&engine);
 
         // Poison the lock by panicking while holding it.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2408,11 +2576,13 @@ when temporal {
 
         // Every subsequent verdict is a denial, not a permit.
         for _ in 0..3 {
-            let verdict = engine.decide(
-                &governed(),
-                &Principal::agent(),
-                ActionRequest::Request(&http()),
-            );
+            let verdict = engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert!(
                 matches!(
                     verdict,
@@ -2432,6 +2602,7 @@ when temporal {
                 .observe_outcome(
                     &governed(),
                     &Principal::agent(),
+                    &request_id,
                     &Outcome::Http {
                         host: "api.example.com",
                         port: 443,
@@ -2458,18 +2629,15 @@ when temporal {
 
         // Exhaust the budget with real deliveries.
         for _ in 0..2 {
-            assert!(
-                engine
-                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
-                    .is_allow()
-            );
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(60))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
             !engine
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "budget closed"
         );
@@ -2479,6 +2647,7 @@ when temporal {
             assert!(
                 !engine
                     .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .0
                     .is_allow(),
                 "a denied request must not reopen the budget"
             );
@@ -2493,18 +2662,15 @@ when temporal {
         let egress = Principal::agent();
 
         for _ in 0..2 {
-            assert!(
-                engine
-                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
-                    .is_allow()
-            );
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(60))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
             !engine
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "budget closed"
         );
@@ -2514,6 +2680,7 @@ when temporal {
         assert!(
             !engine
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "the window has not elapsed yet"
         );
@@ -2523,6 +2690,7 @@ when temporal {
         assert!(
             engine
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "the budget must reopen once the window truly elapses"
         );
@@ -2545,17 +2713,9 @@ when temporal {
             status: Some(200),
             intercepted: true,
         };
-        assert!(
-            engine
-                .decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                )
-                .is_allow()
-        );
+        let request_id = permitted_http_request(&engine);
         engine
-            .observe_outcome(&governed(), &Principal::agent(), &outcome)
+            .observe_outcome(&governed(), &Principal::agent(), &request_id, &outcome)
             .expect("records");
         assert!(
             !engine
@@ -2564,6 +2724,7 @@ when temporal {
                     &Principal::agent(),
                     ActionRequest::Request(&http())
                 )
+                .0
                 .is_allow(),
             "a recorded 150-byte delivery must exhaust a 100-byte budget; if this \
              allows, the predicate is not matching the recorded event at all"
@@ -2623,6 +2784,7 @@ when temporal {{
                 assert!(
                     engine
                         .decide(&governed(), &agent, ActionRequest::Request(&exec()))
+                        .0
                         .is_allow()
                 );
             }
@@ -2724,13 +2886,9 @@ when temporal {{
 
         let offset_before_reopen = {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(
-                engine
-                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
-                    .is_allow()
-            );
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             engine.log_offset()
         };
@@ -2744,6 +2902,7 @@ when temporal {{
         assert!(
             !recovered
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "the recovered delivery must keep the budget closed"
         );
@@ -2917,17 +3076,14 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(MACRO_BUDGET, &path).expect("policy loads");
-            assert!(
-                engine
-                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
-                    .is_allow()
-            );
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             assert!(
                 !engine
                     .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .0
                     .is_allow(),
                 "a 150-byte delivery must exhaust a 100-byte budget"
             );
@@ -2939,6 +3095,7 @@ when temporal {
         assert!(
             !recovered
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "a whitespace-only edit must not reopen an exhausted budget"
         );
@@ -2952,13 +3109,9 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(
-                engine
-                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
-                    .is_allow()
-            );
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
         }
 
@@ -2972,6 +3125,7 @@ when temporal {
         assert!(
             !recovered
                 .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
                 .is_allow(),
             "inserting an unrelated statement must not reset an unchanged budget"
         );
@@ -2991,7 +3145,7 @@ mod authored_positions {
                 .to_string(),
         ];
         let Err(refused) =
-            check_canonical_policy_set(&subset, &[], &Operator::unanchored(), &[3, 7])
+            check_canonical_policy_set(&subset, &[], &[], &Operator::unanchored(), &[3, 7])
         else {
             panic!("one @id on two rules must refuse");
         };

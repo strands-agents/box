@@ -171,6 +171,9 @@
 
 use std::process::ExitCode;
 
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod user_namespace;
+
 #[cfg(target_os = "linux")]
 mod proc_mem_probe;
 
@@ -757,6 +760,10 @@ fn attempt_terminal_injection(byte: u8) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn linux_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_arch = "aarch64")]
+    if args.get(1).is_some_and(|value| value == "--user-namespace") {
+        return user_namespace::run(&args);
+    }
     match args.get(1).map(String::as_str) {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
@@ -1066,6 +1073,27 @@ fn run_probe(spec: &str) -> Result<bool, String> {
         // a BSD file flag and needs no root: an entry the workload writes refuses the operator,
         // who owns the file, so `remove_dir_all` over the box home fails.
         "acl" => acl_probe(target)?,
+        // Setting a file's modification time. One verb per kernel route, because the routes are
+        // checked against different Seatbelt operations: `utimes` against `file-write-times`, and
+        // `utimensat` (what `touch` calls) and `setattrlist` against the bare `file-write*` family.
+        "utimes-old" => time_probe(target, TimeCall::Utimes)?,
+        "utimensat" => time_probe(target, TimeCall::Utimensat)?,
+        "setattrlist-modtime" => time_probe(target, TimeCall::SetAttrListModTime)?,
+        // Storing the set-user-ID bit through `setattrlist` rather than `chmod`. The two reach
+        // different Seatbelt operations, and only this one rides the bare `file-write*` family.
+        "setattrlist-setuid" => setattrlist_setuid_probe(target)?,
+        // Moving the file to another group the caller holds through `setattrlist` rather than
+        // `chown`. Only this route rides the bare `file-write*` family.
+        "setattrlist-group" => setattrlist_group_probe(target)?,
+        // Setting a modification time on a target the box cannot stat, such as a refused path. The
+        // verdict is the return code alone, so the caller reads the stored time from outside.
+        "utimensat-unseen" => utimensat_unseen_probe(target)?,
+        // Giving the file to its own owner through `setattrlist` `ATTR_CMN_OWNERID`. The owner does
+        // not change, so the verdict is whether the profile let the call through.
+        "setattrlist-owner-self" => setattrlist_owner_self_probe(target)?,
+        // Storing Finder information through `setattrlist` `ATTR_CMN_FNDRINFO`, which the
+        // `file-write-finderinfo` leaf governs.
+        "setattrlist-finderinfo" => setattrlist_finderinfo_probe(target)?,
         // Removing the granted file itself, rather than writing its contents. The file cell's
         // counterpart to `rmdir` on a write root.
         "unlink" => unlink_probe(target)?,
@@ -1991,6 +2019,310 @@ fn chown_probe(target: &str) -> Result<bool, String> {
             "chown on {target} failed with {error}, which is neither a grant nor a refusal"
         )),
         _ => Ok(stored),
+    }
+}
+
+/// The kernel route a time probe sets a modification time through.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum TimeCall {
+    Utimes,
+    Utimensat,
+    SetAttrListModTime,
+}
+
+/// Set `target`'s modification time to a past instant it does not carry, and report whether it
+/// stuck.
+///
+/// The verdict is the stored time, and every inconclusive outcome is an `Err`.
+#[cfg(target_os = "macos")]
+fn time_probe(target: &str, call: TimeCall) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    /// Two whole seconds long before any fixture is made, so a stored time cannot match by chance.
+    const PAST_SECONDS: [libc::time_t; 2] = [1_000_000_000, 1_000_086_400];
+
+    require_owned(target, "set the modification time of")?;
+    let name = std::ffi::CString::new(target)
+        .map_err(|error| format!("target is not a C string: {target}: {error}"))?;
+    let seconds_now = || -> Result<i64, String> {
+        std::fs::metadata(target)
+            .map(|metadata| metadata.mtime())
+            .map_err(|error| format!("cannot read the modification time of {target}: {error}"))
+    };
+    // An earlier time probe on the same file may have stored the first instant, so take the other.
+    let before = seconds_now()?;
+    let fixed_seconds = if before == PAST_SECONDS[0] {
+        PAST_SECONDS[1]
+    } else {
+        PAST_SECONDS[0]
+    };
+    // SAFETY (every call below): `name` is NUL terminated and outlives the call, and every
+    // structure passed is a local that the call only reads.
+    let outcome = match call {
+        TimeCall::Utimes => {
+            let times = [
+                libc::timeval {
+                    tv_sec: fixed_seconds,
+                    tv_usec: 0,
+                },
+                libc::timeval {
+                    tv_sec: fixed_seconds,
+                    tv_usec: 0,
+                },
+            ];
+            unsafe { libc::utimes(name.as_ptr(), times.as_ptr()) }
+        }
+        TimeCall::Utimensat => {
+            let times = [
+                libc::timespec {
+                    tv_sec: fixed_seconds,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: fixed_seconds,
+                    tv_nsec: 0,
+                },
+            ];
+            unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) }
+        }
+        TimeCall::SetAttrListModTime => {
+            let mut requested: libc::attrlist = unsafe { std::mem::zeroed() };
+            requested.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+            requested.commonattr = libc::ATTR_CMN_MODTIME;
+            let mut value = libc::timespec {
+                tv_sec: fixed_seconds,
+                tv_nsec: 0,
+            };
+            unsafe {
+                libc::setattrlist(
+                    name.as_ptr(),
+                    (&raw mut requested).cast(),
+                    (&raw mut value).cast(),
+                    std::mem::size_of::<libc::timespec>(),
+                    0,
+                )
+            }
+        }
+    };
+    let error = std::io::Error::last_os_error();
+    let stored = seconds_now()? == fixed_seconds;
+    match (outcome, error.raw_os_error()) {
+        (0, _) if !stored => Err(format!(
+            "the call on {target} returned 0 and stored nothing, so it was permitted while the time was not kept"
+        )),
+        (0, _) => Ok(true),
+        (_, Some(code)) if is_refusal(code) => Ok(false),
+        _ => Err(format!(
+            "the call on {target} failed with {error}, which is neither a grant nor a refusal"
+        )),
+    }
+}
+
+/// Store the set-user-ID bit on `target` through `setattrlist` `ATTR_CMN_ACCESSMASK`, and report
+/// whether it stuck. The bit is cleared again when it did.
+#[cfg(target_os = "macos")]
+fn setattrlist_setuid_probe(target: &str) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    require_owned(target, "setattrlist")?;
+    let name = std::ffi::CString::new(target)
+        .map_err(|error| format!("target is not a C string: {target}: {error}"))?;
+    let mode_now = || -> Result<u32, String> {
+        std::fs::metadata(target)
+            .map(|metadata| metadata.mode() & 0o7777)
+            .map_err(|error| format!("cannot read the mode of {target}: {error}"))
+    };
+    // SAFETY (the closure): `name` outlives the call and `value` is a local the call only reads.
+    let set = |mode: u32| -> std::io::Result<()> {
+        let mut requested: libc::attrlist = unsafe { std::mem::zeroed() };
+        requested.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        requested.commonattr = libc::ATTR_CMN_ACCESSMASK;
+        let mut value: u32 = mode;
+        let result = unsafe {
+            libc::setattrlist(
+                name.as_ptr(),
+                (&raw mut requested).cast(),
+                (&raw mut value).cast(),
+                std::mem::size_of::<u32>(),
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+
+    let before = mode_now()?;
+    if before & libc::S_ISUID as u32 != 0 {
+        return Err(format!(
+            "{target} already carries the set-user-ID bit, so a refusal cannot be told from a success"
+        ));
+    }
+    let outcome = set(before | libc::S_ISUID as u32);
+    let stored = mode_now()? & libc::S_ISUID as u32 != 0;
+    if stored {
+        set(before)
+            .map_err(|error| format!("cannot restore mode {before:#o} on {target}: {error}"))?;
+    }
+    match &outcome {
+        Err(error) if error.raw_os_error().is_some_and(|code| !is_refusal(code)) => Err(format!(
+            "setattrlist on {target} failed with {error}, which is neither a grant nor a refusal"
+        )),
+        _ => Ok(stored),
+    }
+}
+
+/// Move `target` to another group this process holds through `setattrlist` `ATTR_CMN_GRPID`, and
+/// report whether it stuck. The group is restored when it did.
+#[cfg(target_os = "macos")]
+fn setattrlist_group_probe(target: &str) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    require_owned(target, "setattrlist")?;
+    let name = std::ffi::CString::new(target)
+        .map_err(|error| format!("target is not a C string: {target}: {error}"))?;
+    let group_now = || -> Result<libc::gid_t, String> {
+        std::fs::metadata(target)
+            .map(|metadata| metadata.gid())
+            .map_err(|error| format!("cannot read the group of {target}: {error}"))
+    };
+    // SAFETY (the closure): `name` outlives the call and `value` is a local the call only reads.
+    let set = |group: libc::gid_t| -> std::io::Result<()> {
+        let mut requested: libc::attrlist = unsafe { std::mem::zeroed() };
+        requested.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        requested.commonattr = libc::ATTR_CMN_GRPID;
+        let mut value: libc::gid_t = group;
+        let result = unsafe {
+            libc::setattrlist(
+                name.as_ptr(),
+                (&raw mut requested).cast(),
+                (&raw mut value).cast(),
+                std::mem::size_of::<libc::gid_t>(),
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+
+    let before = group_now()?;
+    let moved_to = groups_held()
+        .into_iter()
+        .find(|group| *group != before)
+        .ok_or_else(|| {
+            format!(
+                "this process holds no group other than {before}, so a group change on {target} \
+                 could not be told from a refusal"
+            )
+        })?;
+    let outcome = set(moved_to);
+    let stored = group_now()? == moved_to;
+    if stored {
+        set(before)
+            .map_err(|error| format!("cannot restore group {before} on {target}: {error}"))?;
+    }
+    match &outcome {
+        Err(error) if error.raw_os_error().is_some_and(|code| !is_refusal(code)) => Err(format!(
+            "setattrlist on {target} failed with {error}, which is neither a grant nor a refusal"
+        )),
+        Ok(()) if !stored => Err(format!(
+            "setattrlist on {target} returned 0 and stored nothing, so it was permitted while the \
+             group was not kept"
+        )),
+        _ => Ok(stored),
+    }
+}
+
+/// Call `setattrlist` on `target` with one common attribute and its value, and separate a refusal
+/// from every other failure.
+#[cfg(target_os = "macos")]
+fn setattrlist_one<T>(
+    target: &str,
+    attribute: libc::attrgroup_t,
+    value: &mut T,
+) -> Result<bool, String> {
+    let name = std::ffi::CString::new(target)
+        .map_err(|error| format!("target is not a C string: {target}: {error}"))?;
+    // SAFETY: `name` is NUL terminated and outlives the call, and `requested` and `value` are
+    // locals the call only reads.
+    let mut requested: libc::attrlist = unsafe { std::mem::zeroed() };
+    requested.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+    requested.commonattr = attribute;
+    let outcome = unsafe {
+        libc::setattrlist(
+            name.as_ptr(),
+            (&raw mut requested).cast(),
+            (value as *mut T).cast(),
+            std::mem::size_of::<T>(),
+            0,
+        )
+    };
+    let (code, error) = last_error();
+    match outcome {
+        0 => Ok(true),
+        _ if is_refusal(code) => Ok(false),
+        _ => Err(format!(
+            "setattrlist on {target} failed with {error}, which is neither a grant nor a refusal"
+        )),
+    }
+}
+
+/// Give `target` to its own owner through `setattrlist`, and report whether the profile let it.
+#[cfg(target_os = "macos")]
+fn setattrlist_owner_self_probe(target: &str) -> Result<bool, String> {
+    require_owned(target, "setattrlist")?;
+    // SAFETY: no arguments, and the value is this process's own.
+    let mut owner: libc::uid_t = unsafe { libc::getuid() };
+    setattrlist_one(target, libc::ATTR_CMN_OWNERID, &mut owner)
+}
+
+/// Store Finder information on `target` through `setattrlist`, and clear it again when it stuck.
+#[cfg(target_os = "macos")]
+fn setattrlist_finderinfo_probe(target: &str) -> Result<bool, String> {
+    require_owned(target, "setattrlist")?;
+    let mut info = [0u8; 32];
+    info[..8].copy_from_slice(b"TEXTttxt");
+    let stored = setattrlist_one(target, libc::ATTR_CMN_FNDRINFO, &mut info)?;
+    if stored {
+        setattrlist_one(target, libc::ATTR_CMN_FNDRINFO, &mut [0u8; 32])
+            .map_err(|error| format!("cannot clear the Finder information on {target}: {error}"))?;
+    }
+    Ok(stored)
+}
+
+/// Call `utimensat` on `target` without reading it first, and report whether the call succeeded.
+///
+/// For a target the box cannot stat, so the verdict is the return code, and a failure that is not
+/// a refusal is an `Err`. The caller reads the stored time from outside the box.
+#[cfg(target_os = "macos")]
+fn utimensat_unseen_probe(target: &str) -> Result<bool, String> {
+    let name = std::ffi::CString::new(target)
+        .map_err(|error| format!("target is not a C string: {target}: {error}"))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 1_000_000_000,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: 1_000_000_000,
+            tv_nsec: 0,
+        },
+    ];
+    // SAFETY: `name` is NUL terminated and outlives the call, and `times` is a local it only reads.
+    let outcome = unsafe { libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), 0) };
+    let (code, error) = last_error();
+    match outcome {
+        0 => Ok(true),
+        _ if is_refusal(code) => Ok(false),
+        _ => Err(format!(
+            "utimensat on {target} failed with {error}, which is neither a grant nor a refusal"
+        )),
     }
 }
 

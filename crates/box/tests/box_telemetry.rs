@@ -489,25 +489,45 @@ when {{ context.input.path == {denied_path:?} }};"#
         let begin = format!("\nCASE_{name}_BEGIN\n");
         let end = format!("\nCASE_{name}_END=");
         let block = stdout.split_once(&begin).expect("case begins").1;
-        let (reply, tail) = block.split_once(&end).expect("case ends");
-        assert_eq!(tail.lines().next(), Some("0"), "{name}: {output:?}");
-        let reply = reply.trim_start_matches('\n').replace("\r\n", "\n");
-        let (status, body) = if *monty {
-            let (status, body) = reply.split_once('\n').expect("Monty status and body");
-            (status.trim().parse::<u16>().unwrap(), body.trim())
+        let (raw_reply, tail) = block.split_once(&end).expect("case ends");
+        let exit_code = tail
+            .lines()
+            .next()
+            .expect("case exit code")
+            .parse::<i32>()
+            .expect("numeric exit code");
+        let reply = raw_reply.trim_start_matches('\n').replace("\r\n", "\n");
+        let (status, body) = if !*monty && !*allowed {
+            assert_ne!(exit_code, 0, "{name}: {output:?}");
+            assert!(raw_reply.is_empty(), "{name}: {raw_reply:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!(
+                    "curl: http:request gate: policy denied this operation on '{host}:{port}{denied_path}' [policy: deny-hosted-http]."
+                )),
+                "{name}: {stderr}"
+            );
+            (None, "")
         } else {
-            let (head, body) = reply
-                .split_once("\n\n")
-                .expect("curl includes response headers");
-            let status = head
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<u16>()
-                .unwrap();
-            (status, body.trim())
+            assert_eq!(exit_code, 0, "{name}: {output:?}");
+            let (status, body) = if *monty {
+                let (status, body) = reply.split_once('\n').expect("Monty status and body");
+                (status.trim().parse::<u16>().unwrap(), body.trim())
+            } else {
+                let (head, body) = reply
+                    .split_once("\n\n")
+                    .expect("curl includes response headers");
+                let status = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap();
+                (status, body.trim())
+            };
+            assert_eq!(status, if *allowed { 200 } else { 403 }, "{name}: {reply}");
+            (Some(status), body)
         };
-        assert_eq!(status, if *allowed { 200 } else { 403 }, "{name}: {reply}");
         let (parent, state) = if index == 4 {
             (&parents[5], "explicit=header")
         } else {
@@ -539,7 +559,7 @@ when {{ context.input.path == {denied_path:?} }};"#
                     .unwrap();
                 assert_eq!(value, expected, "{origin}");
             }
-        } else {
+        } else if *monty {
             assert!(body.contains("deny-hosted-http"), "{name}: {body}");
         }
         let fields: Vec<_> = parent.split('-').collect();
@@ -569,7 +589,8 @@ when {{ context.input.path == {denied_path:?} }};"#
             "{span}"
         );
         results.push(serde_json::json!({
-            "case": name, "status": status, "parent": parent, "tracestate": state,
+            "case": name, "exit_code": exit_code, "status": status,
+            "parent": parent, "tracestate": state,
             "policy_span_id": span["spanId"], "verdict": verdict,
             "origin_echo_verified": allowed,
         }));

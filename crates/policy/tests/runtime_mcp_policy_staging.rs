@@ -101,6 +101,7 @@ fn a_canonical_bundle_is_ready_without_an_mcp_schema() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the canonical fast path must install before discovery"
     );
@@ -137,6 +138,7 @@ fn an_empty_authored_bundle_is_ready_and_denies_by_default() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow()
     );
     authority
@@ -180,18 +182,20 @@ permit(principal, action == alpha::Action::"write", resource);
     .observed_by(observer.clone());
 
     let arguments = json!({"path": "/workspace/input"});
-    let pending_tool = authority.decide(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        &Request::McpCall {
-            server: "alpha",
-            method: "tools/call",
-            tool: Some("read"),
-            prompt: None,
-            uri: None,
-            arguments: Some(&arguments),
-        },
-    );
+    let pending_tool = authority
+        .decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::McpCall {
+                server: "alpha",
+                method: "tools/call",
+                tool: Some("read"),
+                prompt: None,
+                uri: None,
+                arguments: Some(&arguments),
+            },
+        )
+        .0;
     assert!(
         matches!(
             pending_tool,
@@ -228,6 +232,7 @@ permit(principal, action == alpha::Action::"write", resource);
                     arguments: None,
                 },
             )
+            .0
             .is_allow(),
         "tools/list is decided by the schema-independent subset while discovering"
     );
@@ -257,6 +262,7 @@ permit(principal, action == alpha::Action::"write", resource);
                     arguments: Some(&json!({})),
                 },
             )
+            .0
             .is_allow(),
         "a degraded server's tool call is denied fail-closed after completion"
     );
@@ -1603,18 +1609,20 @@ permit(principal, action == alpha::Action::"read", resource);
 
     let arguments = json!({"path": "/workspace/input"});
     assert!(matches!(
-        authority.decide(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            &Request::McpCall {
-                server: "alpha",
-                method: "tools/call",
-                tool: Some("read"),
-                prompt: None,
-                uri: None,
-                arguments: Some(&arguments),
-            },
-        ),
+        authority
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::McpCall {
+                    server: "alpha",
+                    method: "tools/call",
+                    tool: Some("read"),
+                    prompt: None,
+                    uri: None,
+                    arguments: Some(&arguments),
+                },
+            )
+            .0,
         Decision::Deny {
             reason: DenyReason::PolicyPending,
             ..
@@ -1688,24 +1696,27 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "a schema-independent request is served by the subset while discovering"
     );
     let beta_arguments = json!({"value": 7});
     assert!(
         matches!(
-            authority.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::McpCall {
-                    server: "beta",
-                    method: "tools/call",
-                    tool: Some("write"),
-                    prompt: None,
-                    uri: None,
-                    arguments: Some(&beta_arguments),
-                },
-            ),
+            authority
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::McpCall {
+                        server: "beta",
+                        method: "tools/call",
+                        tool: Some("write"),
+                        prompt: None,
+                        uri: None,
+                        arguments: Some(&beta_arguments),
+                    },
+                )
+                .0,
             Decision::Deny {
                 reason: DenyReason::PolicyPending,
                 ..
@@ -1728,6 +1739,7 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                     arguments: Some(&alpha_arguments),
                 },
             )
+            .0
             .is_allow(),
         "the staged Alpha tool is enforced during discovery"
     );
@@ -1754,6 +1766,7 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                     arguments: Some(&beta_arguments),
                 },
             )
+            .0
             .is_allow(),
         "the Beta tool is enforced once its schema stages"
     );
@@ -1787,18 +1800,20 @@ fn a_fragment_staged_under_another_server_is_rejected_without_state_change() {
     // being held transiently (there is no read-only `finish` anymore — it degrades and completes).
     assert!(
         matches!(
-            authority.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::McpCall {
-                    server: "alpha",
-                    method: "tools/call",
-                    tool: Some("read"),
-                    prompt: None,
-                    uri: None,
-                    arguments: Some(&json!({ "path": "/x" })),
-                },
-            ),
+            authority
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::McpCall {
+                        server: "alpha",
+                        method: "tools/call",
+                        tool: Some("read"),
+                        prompt: None,
+                        uri: None,
+                        arguments: Some(&json!({ "path": "/x" })),
+                    },
+                )
+                .0,
             Decision::Deny {
                 reason: DenyReason::PolicyPending,
                 ..
@@ -2095,6 +2110,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                     &Principal::agent(),
                     &shell_request(),
                 )
+                .0
                 .is_allow()
         );
     }
@@ -2119,18 +2135,20 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
     assert!(reason.contains("requires namespace"), "{reason}");
     let rejected_arguments = json!({"path": 7});
     assert!(matches!(
-        authority.decide(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            &Request::McpCall {
-                server: "bad",
-                method: "tools/call",
-                tool: Some("read"),
-                prompt: None,
-                uri: None,
-                arguments: Some(&rejected_arguments),
-            },
-        ),
+        authority
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::McpCall {
+                    server: "bad",
+                    method: "tools/call",
+                    tool: Some("read"),
+                    prompt: None,
+                    uri: None,
+                    arguments: Some(&rejected_arguments),
+                },
+            )
+            .0,
         Decision::Deny {
             reason: DenyReason::InternalFault,
             ..
@@ -2143,6 +2161,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the same ready authority must remain operational after rejection"
     );
@@ -2190,6 +2209,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the prior authority must remain operational"
     );
@@ -2351,15 +2371,13 @@ fn partial_staging_retains_the_unchanged_authority_and_adds_the_staged_tool() {
             &path,
         )
         .expect("the existing authority installs");
-        assert!(
-            authority
-                .decide(&governed, &principal, &http_request())
-                .is_allow()
-        );
+        let (decision, request_id) = authority.decide(&governed, &principal, &http_request());
+        assert!(decision.is_allow());
         authority
             .record(
                 &governed,
                 &principal,
+                &request_id.expect("the request records"),
                 &Outcome::Http {
                     host: "api.example.com",
                     port: 443,
@@ -2507,10 +2525,20 @@ fn discovering_record_observes_an_outcome() {
         ],
         &path,
     );
+    let (decision, request_id) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &http_request(),
+    );
+    assert!(
+        decision.is_allow(),
+        "the canonical request is admitted while discovering"
+    );
     authority
         .record(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::Http {
                 host: "api.example.com",
                 port: 443,
@@ -2537,8 +2565,8 @@ fn discovering_record_observes_an_outcome() {
     .expect("the records scan");
     assert_eq!(
         after_events,
-        before_events + 1,
-        "the outcome recorded while discovering must append to durable history"
+        before_events + 2,
+        "the request and outcome recorded while discovering must append to durable history"
     );
 }
 
@@ -2677,6 +2705,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the recovered namespaced request must satisfy the temporal forbid"
     );
@@ -2808,6 +2837,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the Box action identity must start with empty temporal state"
     );
@@ -2826,6 +2856,7 @@ when temporal {
                     operation: policy::FsOperation::ReadContent,
                 },
             )
+            .0
             .is_allow(),
         "the new fixed request records under Box"
     );
@@ -2836,6 +2867,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "new Box temporal state must govern later requests"
     );
@@ -2852,6 +2884,7 @@ when temporal {
                     operation: policy::FsOperation::WriteContent,
                 },
             )
+            .0
             .is_allow(),
         "the namespaced temporal identity must start empty"
     );
@@ -2884,15 +2917,13 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
             &path,
         )
         .expect("budget opens");
-        assert!(
-            authority
-                .decide(&governed, &principal, &http_request())
-                .is_allow()
-        );
+        let (decision, request_id) = authority.decide(&governed, &principal, &http_request());
+        assert!(decision.is_allow());
         authority
             .record(
                 &governed,
                 &principal,
+                &request_id.expect("the request records"),
                 &Outcome::Http {
                     host: "api.example.com",
                     port: 443,
@@ -2939,6 +2970,7 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
     assert!(
         !authority
             .decide(&governed, &principal, &http_request())
+            .0
             .is_allow(),
         "the unchanged temporal policy must retain its exhausted budget"
     );

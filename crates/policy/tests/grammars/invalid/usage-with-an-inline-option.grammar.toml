@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status]`: usage has option "-z"; declare it in `options`, and write `[options]` in the usage
+# expect: `<grammar>.shell.status.usage` has option "-z"; declare it in `options`, and write `[options]` in the usage
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

@@ -14,13 +14,12 @@ use strands_shell::{
 
 use crate::GovernedBox;
 use crate::grammar::{
-    CoverageRefusal, GrammarBindings, GrammarCoverage, GrammarInvocation, PendingGrammarResponse,
-    ProgramFile,
+    CoverageRefusal, GrammarCoverage, GrammarInvocation, PendingGrammarResponse, Starter,
 };
 use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
-use crate::{Decision, Outcome, PolicyEngine, Principal, Request};
+use crate::{Decision, Outcome, PolicyEngine, Principal, Request, RequestId};
 
 /// Binds one policy and Shell principal to the Shell effect-interception seam.
 pub struct ShellPolicyInterceptor {
@@ -38,7 +37,7 @@ pub struct ShellPolicyInterceptor {
     home: Option<std::path::PathBuf>,
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
-    grammar_bindings: Arc<GrammarBindings>,
+    starter: Starter,
 }
 
 impl ShellPolicyInterceptor {
@@ -54,7 +53,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            starter: Starter::Agent,
         })
     }
 
@@ -75,7 +74,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            starter: Starter::Agent,
         })
     }
 
@@ -92,7 +91,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            starter: Starter::Agent,
         })
     }
 
@@ -110,20 +109,18 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            starter: Starter::Agent,
         })
     }
 
-    /// Construct the handle that decides a spawn of a program a tool grammar binds as its grammar
-    /// action (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
-    #[cfg(test)]
-    pub(crate) fn into_handle_with_grammar_bindings(
+    /// Construct the handle that decides the start of a declared stdio MCP server, reporting every
+    /// path under `home` as `~/<relative>` when there is one.
+    pub fn into_server_start_handle(
         policy: Arc<PolicyEngine>,
         principal: Principal,
         governed: GovernedBox,
         home: Option<std::path::PathBuf>,
         spawn_credentials: BTreeMap<String, Vec<String>>,
-        grammar_bindings: GrammarBindings,
     ) -> Arc<dyn EffectInterceptor> {
         Arc::new(Self {
             policy,
@@ -131,7 +128,7 @@ impl ShellPolicyInterceptor {
             governed,
             home,
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::new(grammar_bindings),
+            starter: Starter::Server,
         })
     }
 
@@ -147,16 +144,6 @@ impl ShellPolicyInterceptor {
             admitted,
             home: self.home.clone(),
         })
-    }
-
-    /// How the installed grammars cover a spawn of `program_path` spelled `program`, or `None` when
-    /// `shell:spawn` decides it (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
-    fn grammar_coverage(&self, program: &str, program_path: &str) -> Option<GrammarCoverage<'_>> {
-        if self.grammar_bindings.is_empty() {
-            return None;
-        }
-        self.grammar_bindings
-            .coverage(ProgramFile::read(program_path), program)
     }
 }
 
@@ -291,6 +278,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             _ => None,
         };
         if let EffectAttempt::ShellSpawn {
+            command,
             program,
             program_path,
             args,
@@ -298,9 +286,24 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             ..
         } = effect
         {
-            match self.grammar_coverage(program, program_path) {
+            match self
+                .policy
+                .grammar_coverage(program_path, program, self.starter)
+            {
                 None => {}
                 Some(GrammarCoverage::Refused(refusal)) => {
+                    self.policy.observe_refused(
+                        &self.governed,
+                        &self.principal,
+                        &Request::ShellSpawn {
+                            command,
+                            program,
+                            program_path: reported_program_path.as_deref().unwrap_or(program_path),
+                            credential_reads,
+                            args,
+                            cwd,
+                        },
+                    );
                     return Err(refused_spawn(program_path, &refusal));
                 }
                 Some(GrammarCoverage::Parsed { grammar, file }) => {
@@ -325,7 +328,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 }
             }
         }
-        let decision = match effect {
+        let admission = match effect {
             // One resolved command. The Shell has already parsed, expanded, and resolved
             // it, so `program` is what will run rather than what was typed.
             EffectAttempt::ShellRun {
@@ -336,7 +339,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 // `literal` is deliberately unread: a decision is about what runs, never about
                 // how a word was spelled. Reading it would make the spelling a policy input.
                 ..
-            } => self.policy.decide(
+            } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::ShellExec {
@@ -354,7 +357,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                 args,
                 cwd,
                 ..
-            } => self.policy.decide(
+            } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::ShellSpawn {
@@ -372,7 +375,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             // its own, which is the LIVE GAP recorded in the crate's `AGENTS.md`.
             EffectAttempt::Filesystem { path, operation } => {
                 let approved = ApprovedPath::under_home(*path, self.home.as_deref());
-                self.policy.decide(
+                self.policy.admit(
                     &self.governed,
                     &self.principal,
                     &Request::Fs {
@@ -415,42 +418,43 @@ impl EffectInterceptor for ShellPolicyInterceptor {
                     self.home.as_deref(),
                 );
                 let destination = ApprovedPath::under_home(*to, self.home.as_deref());
-                let mut legs = vec![
-                    Request::Fs {
-                        path: &source,
-                        operation: pair_operation,
-                    },
-                    Request::Fs {
-                        path: &source,
-                        operation: FsOperation::ReadContent,
-                    },
-                ];
-                if let Some(removal) = destination_removal(*operation) {
-                    legs.push(Request::Fs {
-                        path: &destination,
-                        operation: removal,
-                    });
-                }
-                legs.push(Request::Fs {
+                let authorize = |request: &Request<'_>| {
+                    self.policy
+                        .admit(&self.governed, &self.principal, request)
+                        .map_err(|decision| denied(&decision))
+                };
+                // Stop at the first refusal. Each recorded outcome keeps its own leg's token.
+                authorize(&Request::Fs {
+                    path: &source,
+                    operation: pair_operation,
+                })?;
+                let source_read_id = authorize(&Request::Fs {
+                    path: &source,
+                    operation: FsOperation::ReadContent,
+                })?;
+                let removal = destination_removal(*operation);
+                let removal_id = removal
+                    .map(|removal| {
+                        authorize(&Request::Fs {
+                            path: &destination,
+                            operation: removal,
+                        })
+                    })
+                    .transpose()?;
+                let request_id = authorize(&Request::Fs {
                     path: &destination,
                     operation: pair_operation,
-                });
-                // First denial wins, and short-circuits: a later leg is never asked about
-                // an effect already refused. The last leg's verdict stands when every
-                // earlier one allowed, so an all-allow pair reports a real rule id.
-                let mut legs = legs.iter();
-                let mut verdict = self.policy.decide(
-                    &self.governed,
-                    &self.principal,
-                    legs.next().expect("at least three legs"),
-                );
-                for leg in legs {
-                    if !matches!(verdict, Decision::Allow { .. }) {
-                        break;
-                    }
-                    verdict = self.policy.decide(&self.governed, &self.principal, leg);
-                }
-                verdict
+                })?;
+                return Ok(self.permit(Admitted::FilesystemPair {
+                    request_id,
+                    source_read_id,
+                    removal_id,
+                    source_read_path: matches!(operation, FsPairOperation::Rename { .. })
+                        .then(|| (*from).to_string()),
+                    target_path: (*to).to_string(),
+                    destination_removal: removal,
+                    operation: pair_operation,
+                }));
             }
             // No network arm: the Shell raises no request attempt. An outbound
             // request is authorized at the egress boundary by
@@ -473,14 +477,13 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             }
         };
 
-        match decision {
-            Decision::Allow { .. } => Ok(self.permit(Admitted::capture(
-                effect,
-                credential_reads,
-                reported_program_path.as_deref(),
-            ))),
-            Decision::Deny { .. } => Err(denied(&decision)),
-        }
+        let request_id = admission.map_err(|decision| denied(&decision))?;
+        Ok(self.permit(Admitted::capture(
+            effect,
+            credential_reads,
+            reported_program_path.as_deref(),
+            request_id,
+        )))
     }
 }
 
@@ -488,6 +491,7 @@ impl EffectInterceptor for ShellPolicyInterceptor {
 enum Admitted {
     /// One resolved command whose program the Shell implements.
     Run {
+        request_id: RequestId,
         command: String,
         program: String,
         args: Vec<String>,
@@ -495,6 +499,7 @@ enum Admitted {
     },
     /// One resolved command executed by a host binary.
     Spawn {
+        request_id: RequestId,
         command: String,
         program: String,
         program_path: String,
@@ -506,11 +511,15 @@ enum Admitted {
     /// the path the effect mutates — under the same operation both legs were authorized
     /// as, so the response names the action whose request was permitted.
     Filesystem {
+        request_id: RequestId,
         path: String,
         operation: FsOperation,
     },
     /// One filesystem pair whose rename source also needs a read response in history.
     FilesystemPair {
+        request_id: RequestId,
+        source_read_id: RequestId,
+        removal_id: Option<RequestId>,
         source_read_path: Option<String>,
         target_path: String,
         destination_removal: Option<FsOperation>,
@@ -528,6 +537,7 @@ impl Admitted {
         effect: &EffectAttempt<'_>,
         credential_reads: &[String],
         reported_program_path: Option<&str>,
+        request_id: RequestId,
     ) -> Self {
         match effect {
             EffectAttempt::ShellRun {
@@ -537,6 +547,7 @@ impl Admitted {
                 cwd,
                 ..
             } => Self::Run {
+                request_id,
                 command: (*command).to_string(),
                 program: (*program).to_string(),
                 args: args.to_vec(),
@@ -550,6 +561,7 @@ impl Admitted {
                 cwd,
                 ..
             } => Self::Spawn {
+                request_id,
                 command: (*command).to_string(),
                 program: (*program).to_string(),
                 program_path: reported_program_path.unwrap_or(program_path).to_string(),
@@ -558,19 +570,9 @@ impl Admitted {
                 cwd: (*cwd).to_string(),
             },
             EffectAttempt::Filesystem { path, operation } => Self::Filesystem {
+                request_id,
                 path: (*path).to_string(),
                 operation: fs_operation(*operation),
-            },
-            EffectAttempt::FilesystemPair {
-                from,
-                to,
-                operation,
-            } => Self::FilesystemPair {
-                source_read_path: matches!(operation, FsPairOperation::Rename { .. })
-                    .then(|| (*from).to_string()),
-                target_path: (*to).to_string(),
-                destination_removal: destination_removal(*operation),
-                operation: fs_pair_operation(*operation),
             },
             _ => Self::Unmapped,
         }
@@ -623,6 +625,7 @@ struct PolicyEffectPermit {
 impl PolicyEffectPermit {
     fn record_fs_outcome(
         &self,
+        request_id: &RequestId,
         path: &str,
         operation: FsOperation,
         result: FsResult,
@@ -631,6 +634,7 @@ impl PolicyEffectPermit {
         self.policy.record(
             &self.governed,
             &self.principal,
+            request_id,
             &Outcome::Fs {
                 path: Path::new(reported.as_str()),
                 operation,
@@ -646,6 +650,7 @@ impl PolicyEffectPermit {
                 .policy
                 .record_grammar_response(pending, reported_status.unwrap_or(-1)),
             Admitted::Run {
+                request_id,
                 command,
                 program,
                 args,
@@ -653,6 +658,7 @@ impl PolicyEffectPermit {
             } => self.policy.record(
                 &self.governed,
                 &self.principal,
+                &request_id,
                 &Outcome::ShellRun {
                     command: &command,
                     program: &program,
@@ -662,6 +668,7 @@ impl PolicyEffectPermit {
                 },
             ),
             Admitted::Spawn {
+                request_id,
                 command,
                 program,
                 program_path,
@@ -671,6 +678,7 @@ impl PolicyEffectPermit {
             } => self.policy.record(
                 &self.governed,
                 &self.principal,
+                &request_id,
                 &Outcome::ShellSpawn {
                     command: &command,
                     program: &program,
@@ -691,10 +699,15 @@ impl PolicyEffectPermit {
             // `input.path` of `~/…/secret` never fired, because the resolution still carried the
             // host path. Egress stayed open after the secret was read, which is the one thing that
             // rule exists to close.
-            Admitted::Filesystem { path, operation } => {
-                self.record_fs_outcome(&path, operation, result)
-            }
+            Admitted::Filesystem {
+                request_id,
+                path,
+                operation,
+            } => self.record_fs_outcome(&request_id, &path, operation, result),
             Admitted::FilesystemPair {
+                request_id,
+                source_read_id,
+                removal_id,
                 source_read_path,
                 target_path,
                 destination_removal,
@@ -703,14 +716,23 @@ impl PolicyEffectPermit {
                 .as_ref()
                 .filter(|_| result.response_result().is_some())
                 .map_or(Ok(()), |source_read_path| {
-                    self.record_fs_outcome(source_read_path, FsOperation::ReadContent, result)
+                    self.record_fs_outcome(
+                        &source_read_id,
+                        source_read_path,
+                        FsOperation::ReadContent,
+                        result,
+                    )
                 })
                 .and_then(|()| {
-                    destination_removal.map_or(Ok(()), |removal| {
-                        self.record_fs_outcome(&target_path, removal, result)
-                    })
+                    destination_removal
+                        .zip(removal_id)
+                        .map_or(Ok(()), |(removal, removal_id)| {
+                            self.record_fs_outcome(&removal_id, &target_path, removal, result)
+                        })
                 })
-                .and_then(|()| self.record_fs_outcome(&target_path, operation, result)),
+                .and_then(|()| {
+                    self.record_fs_outcome(&request_id, &target_path, operation, result)
+                }),
             Admitted::Unmapped => Ok(()),
         };
 
@@ -753,11 +775,24 @@ mod tests {
 
     use super::*;
     use crate::Policy;
+    use crate::grammar::ProgramFile;
     use crate::rerun;
 
     struct InterceptorFixture {
         interceptor: Arc<dyn EffectInterceptor>,
         _history: tempfile::TempDir,
+    }
+
+    impl InterceptorFixture {
+        /// Close the engine, and keep its history.
+        fn close(self) -> tempfile::TempDir {
+            let Self {
+                interceptor,
+                _history,
+            } = self;
+            drop(interceptor);
+            _history
+        }
     }
 
     impl Deref for InterceptorFixture {
@@ -809,6 +844,52 @@ mod tests {
             interceptor,
             _history: history,
         }
+    }
+
+    #[tokio::test]
+    async fn a_rename_records_each_outcome_with_its_own_leg_id() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let fixture = interceptor(
+            r#"
+            permit(principal, action == Box::Action::"fs:read", resource);
+            permit(principal, action == Box::Action::"fs:move", resource);
+            permit(principal, action == Box::Action::"fs:delete", resource);
+        "#,
+        );
+        let path = fixture._history.path().join("dogwood.redb");
+        let permit = fixture
+            .intercept(&EffectAttempt::FilesystemPair {
+                from: "/work/source",
+                to: "/work/target",
+                operation: FsPairOperation::Rename {
+                    destination_exists: true,
+                    destination_is_dir: false,
+                },
+            })
+            .await
+            .expect("all four rename legs admitted");
+        permit
+            .record_outcome(EffectOutcome::Kernel(EffectResult::Completed))
+            .await
+            .expect("rename records");
+        drop(fixture.interceptor);
+        let events = events(&path);
+        assert_eq!(events.len(), 7, "four requests and three existing outcomes");
+        assert_pair(&events[1], &events[4]);
+        assert_pair(&events[2], &events[5]);
+        assert_pair(&events[3], &events[6]);
+        assert_eq!(
+            events[..4]
+                .iter()
+                .map(id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(
+            events[4..].iter().all(|event| id(event) != id(&events[0])),
+            "the source mutation remains request-only"
+        );
     }
 
     /// **A home-relative `program_path` rule decides a spawn under the home**, so `shell:spawn`
@@ -1212,41 +1293,42 @@ mod tests {
         }
     }
 
-    fn grammar(name: &str) -> crate::grammar::Grammar {
-        crate::grammar::Grammar::load(
-            &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("tests/grammars/valid/{name}.grammar.toml")),
-        )
-        .expect("the fixture grammar loads")
-    }
-
     /// An interceptor over an engine that knows `grammars`, with `bind` as its bindings.
     fn interceptor_with_grammars(
         source: &str,
         grammars: &[&str],
-        bind: impl FnOnce(&mut GrammarBindings),
+        bind: impl FnOnce(&mut crate::GrammarBindings),
     ) -> InterceptorFixture {
         let history = tempfile::tempdir().expect("history directory");
-        let installed: Vec<_> = grammars.iter().map(|name| grammar(name)).collect();
-        let policy = PolicyEngine::open_with_grammars(
+        interceptor_with_grammars_over(source, grammars, history, bind)
+    }
+
+    /// An `interceptor_with_grammars` over the history in `history`.
+    fn interceptor_with_grammars_over(
+        source: &str,
+        grammars: &[&str],
+        history: tempfile::TempDir,
+        bind: impl FnOnce(&mut crate::GrammarBindings),
+    ) -> InterceptorFixture {
+        let policy = PolicyEngine::open_with_tool_grammars(
             vec![Policy {
                 origin: PathBuf::from("shell-adapter-test.dw"),
                 text: source.to_string(),
             }],
-            &installed,
+            crate::ToolGrammars::corpus(grammars),
             &history.path().join("dogwood.redb"),
         )
         .expect("policy opens");
-        let mut bindings = GrammarBindings::new(installed).expect("distinct grammars");
+        let mut bindings = policy.grammar_bindings();
         bind(&mut bindings);
+        let policy = policy
+            .bound_by(bindings)
+            .expect("the engine issued the bindings");
         InterceptorFixture {
-            interceptor: ShellPolicyInterceptor::into_handle_with_grammar_bindings(
+            interceptor: ShellPolicyInterceptor::into_handle(
                 Arc::new(policy),
                 Principal::agent(),
                 GovernedBox::assigned("test-box"),
-                None,
-                BTreeMap::new(),
-                bindings,
             ),
             _history: history,
         }
@@ -1267,6 +1349,187 @@ mod tests {
         }
     }
 
+    /// A git grammar written inline, with `status` and `push` and no other action.
+    const INLINE_GIT: &str = r#"
+        format = 1
+        version = 1
+        name = "git"
+        program = "git"
+        [shell.status]
+        usage = "git status"
+        [shell.push]
+        usage = "git push [<remote>]"
+    "#;
+
+    fn inline_git() -> crate::ToolGrammars {
+        let table: toml::Table = toml::from_str(INLINE_GIT).expect("the grammar parses");
+        let grammar =
+            crate::ToolGrammar::from_table(table, "tool.git.grammar").expect("the grammar loads");
+        crate::ToolGrammars::new(vec![grammar]).expect("one grammar installs")
+    }
+
+    fn engine_with_inline_git(source: &str) -> (PolicyEngine, tempfile::TempDir) {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open_with_tool_grammars(
+            vec![Policy {
+                origin: PathBuf::from("shell-adapter-test.dw"),
+                text: source.to_string(),
+            }],
+            inline_git(),
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens");
+        (policy, history)
+    }
+
+    /// Every action that an engine reports a verdict for, as a rule spells it.
+    #[derive(Default)]
+    struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+    impl crate::DecisionObserver for DecidedActions {
+        fn observed(&self, action: &str, _resource: &str, _decision: &Decision) {
+            self.0
+                .lock()
+                .expect("the list locks")
+                .push(action.to_string());
+        }
+    }
+
+    /// **A denied grammar action reads as any other denial**, also for `unmodeled`, and the engine
+    /// decided the grammar action.
+    #[tokio::test]
+    async fn a_denied_grammar_action_reads_as_any_denial_and_is_decided_as_its_action() {
+        let programs = Programs::new();
+        let git = programs.path("git");
+        let (policy, history) = engine_with_inline_git(
+            r#"@id("no_push")
+               forbid (principal, action == Tool::git::Action::"push", resource);
+               permit (principal, action in Tool::git::Action::"*", resource);"#,
+        );
+        let decided = Arc::new(DecidedActions::default());
+        let policy = policy.observed_by(Arc::clone(&decided) as Arc<dyn crate::DecisionObserver>);
+        let mut bindings = policy.grammar_bindings();
+        bindings.declare(&programs.file("git"), "git");
+        let interceptor = InterceptorFixture {
+            interceptor: ShellPolicyInterceptor::into_handle(
+                Arc::new(policy.bound_by(bindings).expect("the engine issued them")),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            _history: history,
+        };
+
+        for (args, action, expected) in [
+            (
+                words(&["push", "origin"]),
+                r#"Tool::git::Action::"push""#,
+                format!("policy denied this operation on '{git}' [policy: no_push]."),
+            ),
+            (
+                words(&["frobnicate"]),
+                r#"Tool::git::Action::"unmodeled""#,
+                format!(
+                    "policy denied this operation on '{git}' [default-deny]: No permit policy \
+                     matched this request."
+                ),
+            ),
+        ] {
+            let refused = interceptor
+                .intercept(&spawn("git", &git, &args))
+                .await
+                .err()
+                .map(|error| error.to_string());
+            assert_eq!(refused, Some(expected), "{args:?}");
+            assert_eq!(
+                decided
+                    .0
+                    .lock()
+                    .expect("the list locks")
+                    .last()
+                    .map(String::as_str),
+                Some(action),
+                "{args:?}"
+            );
+        }
+        assert!(
+            interceptor
+                .intercept(&spawn("git", &git, &words(&["status"])))
+                .await
+                .is_ok(),
+            "the permit admits a modeled action that no forbid names"
+        );
+    }
+
+    /// **Bindings that another engine issued are refused**, so a Shell decides only with the
+    /// bindings of the engine it asks.
+    #[test]
+    fn bindings_from_another_engine_are_refused() {
+        let (issuer, _first) = engine_with_inline_git("permit (principal, action, resource);");
+        let (other, _second) = engine_with_inline_git("permit (principal, action, resource);");
+
+        let refused = other
+            .bound_by(issuer.grammar_bindings())
+            .expect_err("the bindings came from another engine");
+
+        assert_eq!(refused, crate::BindingRefusal::AnotherEngine);
+    }
+
+    /// **A spawn that Box refuses before any rule decides it still enters history** as a
+    /// `shell:spawn` request, so a rule that counts attempts sees it.
+    #[tokio::test]
+    async fn a_refused_spawn_enters_history_as_a_shell_spawn_request() {
+        let programs = Programs::new();
+        let mise = programs.path("mise");
+        let echo = EffectAttempt::ShellRun {
+            command: "echo",
+            program: "echo",
+            args: &[],
+            literal: &[],
+            cwd: "/work",
+        };
+        let (policy, history) = engine_with_inline_git(
+            r#"permit (principal, action, resource);
+               @id("after_a_refused_spawn")
+               forbid (principal, action == Box::Action::"shell:exec", resource)
+               when temporal {
+                   formerly within 1h Box::Action::"shell:spawn"::request{ input.program: "python" }
+               };"#,
+        );
+        let mut bindings = policy.grammar_bindings();
+        bindings.declare(&programs.file("mise"), "git");
+        let interceptor = InterceptorFixture {
+            interceptor: ShellPolicyInterceptor::into_handle(
+                Arc::new(policy.bound_by(bindings).expect("the engine issued them")),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            _history: history,
+        };
+        let none = words(&[]);
+
+        assert!(
+            interceptor.intercept(&echo).await.is_ok(),
+            "no refused spawn is in history yet"
+        );
+        let refused = interceptor
+            .intercept(&spawn("python", &mise, &none))
+            .await
+            .err()
+            .expect("an undeclared name on a bound file is refused");
+        assert!(refused.to_string().contains("[tool-grammar]"), "{refused}");
+        let after = interceptor
+            .intercept(&echo)
+            .await
+            .err()
+            .expect("history holds the refused spawn");
+        assert!(
+            after
+                .to_string()
+                .contains("[policy: after_a_refused_spawn]"),
+            "{after}"
+        );
+    }
+
     /// **A bound program is decided only as its grammar action**: a `shell:spawn` permit does not
     /// admit it, and a `shell:spawn` forbid does not refuse it.
     #[tokio::test]
@@ -1277,9 +1540,7 @@ mod tests {
         let push = words(&["push", "origin", "main"]);
         let bound = |source: &str| {
             interceptor_with_grammars(source, &["git"], |bindings| {
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             })
         };
 
@@ -1324,7 +1585,7 @@ mod tests {
         @id("push_after_a_passing_test")
         forbid (principal, action == Tool::git::Action::"push", resource)
         unless temporal {
-            formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+            formerly within 1h Tool::cargo::Action::"test"::response{ input.cwd: "/work", output.status: 0 }
         };
     "#;
 
@@ -1336,10 +1597,8 @@ mod tests {
         let (git, cargo) = (programs.path("git"), programs.path("cargo"));
         let interceptor =
             interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
-                b.bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
-                b.bind(&programs.file("cargo"), "cargo", "cargo")
-                    .expect("cargo binds");
+                b.declare(&programs.file("git"), "git");
+                b.declare(&programs.file("cargo"), "cargo");
             });
         let push = words(&["push", "origin", "main"]);
         let test = words(&["test"]);
@@ -1374,6 +1633,74 @@ mod tests {
         assert!(pushed().await.is_ok(), "a test exited 0");
     }
 
+    /// **A test that passed in another directory does not satisfy a rule pinned to `input.cwd`.**
+    #[tokio::test]
+    async fn a_test_that_passed_in_another_directory_does_not_allow_the_push() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let interceptor =
+            interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
+                b.declare(&programs.file("git"), "git");
+                b.declare(&programs.file("cargo"), "cargo");
+            });
+        let test = words(&["test"]);
+        interceptor
+            .intercept(&EffectAttempt::ShellSpawn {
+                command: "cargo",
+                program: "cargo",
+                program_path: &cargo,
+                args: &test,
+                literal: &[],
+                cwd: "/tmp/scratch",
+            })
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        assert!(
+            interceptor
+                .intercept(&spawn("git", &git, &words(&["push", "origin"])))
+                .await
+                .is_err(),
+            "a test in /tmp/scratch does not allow a push from /work"
+        );
+    }
+
+    /// **A grammar response is durable:** a new engine on the same history reads it.
+    #[tokio::test]
+    async fn a_new_engine_on_the_same_history_reads_an_earlier_grammar_response() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let bind = |bindings: &mut crate::GrammarBindings| {
+            bindings.declare(&programs.file("git"), "git");
+            bindings.declare(&programs.file("cargo"), "cargo");
+        };
+        let push = words(&["push", "origin", "main"]);
+        let test = words(&["test"]);
+        let first = interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], bind);
+        first
+            .intercept(&spawn("cargo", &cargo, &test))
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        let second = interceptor_with_grammars_over(
+            PUSH_AFTER_A_PASSING_TEST,
+            &["git", "cargo"],
+            first.close(),
+            bind,
+        );
+
+        assert!(
+            second.intercept(&spawn("git", &git, &push)).await.is_ok(),
+            "the test that exited 0 before the new engine opened allows the push"
+        );
+    }
+
     /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
     /// under a policy that permits every action, and a file that no grammar binds stays a
     /// `shell:spawn`.
@@ -1390,12 +1717,10 @@ mod tests {
             &["git", "cargo", "aws"],
             |bindings| {
                 let shim = programs.file("mise");
-                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
-                bindings.bind(&shim, "aws", "aws").expect("aws binds");
+                bindings.declare(&shim, "cargo");
+                bindings.declare(&shim, "aws");
                 bindings.declare(&shim, "node");
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             },
         );
         let none = words(&[]);
@@ -1472,12 +1797,8 @@ mod tests {
                    permit (principal, action in Tool::cargo::Action::"*", resource);"#,
                 &["git", "cargo"],
                 |bindings| {
-                    bindings
-                        .bind(&programs.file("git"), "git", "git")
-                        .expect("git binds");
-                    bindings
-                        .bind(&programs.file("cargo"), "cargo", "cargo")
-                        .expect("cargo binds");
+                    bindings.declare(&programs.file("git"), "git");
+                    bindings.declare(&programs.file("cargo"), "cargo");
                 },
             );
             programs.link("git", target);
@@ -1504,7 +1825,7 @@ mod tests {
             &["cargo"],
             |bindings| {
                 let shim = programs.file("mise");
-                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
+                bindings.declare(&shim, "cargo");
                 bindings.declare(&shim, "node");
             },
         );
@@ -1525,8 +1846,8 @@ mod tests {
         }
     }
 
-    /// **A bound link retargeted to another bound file is refused**, and is never decided as the
-    /// other file's grammar action.
+    /// **A bound link retargeted to another bound file is refused**, and is never decided as a
+    /// grammar action of that file.
     #[tokio::test]
     async fn a_bound_link_retargeted_to_another_bound_file_is_refused() {
         let programs = Programs::new();
@@ -1539,14 +1860,10 @@ mod tests {
             |bindings| {
                 let linked =
                     ProgramFile::read(programs.0.path().join("git")).expect("the link reads");
-                bindings.bind(&linked, "git", "git").expect("git binds");
+                bindings.declare(&linked, "git");
                 let cargo = programs.file("cargo");
-                bindings
-                    .bind(&cargo, "cargo", "cargo")
-                    .expect("cargo binds");
-                bindings
-                    .bind(&cargo, "git", "cargo")
-                    .expect("cargo binds a second name on its own file");
+                bindings.declare(&cargo, "cargo");
+                bindings.declare(&cargo, "git");
             },
         );
         programs.link("git", "cargo");
@@ -1579,9 +1896,7 @@ mod tests {
             r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
             &["git"],
             |bindings| {
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             },
         );
         std::fs::remove_file(&git).expect("the file is removed");
@@ -1620,9 +1935,7 @@ mod tests {
             bindings.declare(&programs.file("mise"), "node");
         });
         let bound_elsewhere = interceptor_with_grammars(POLICY, &["git"], |bindings| {
-            bindings
-                .bind(&programs.file("vendored-git"), "git", "git")
-                .expect("git binds another file");
+            bindings.declare(&programs.file("vendored-git"), "git");
         });
         let today = interceptor(POLICY);
         let engine = {
@@ -1657,7 +1970,7 @@ mod tests {
             ("ls", &absent, words(&["-l"])),
         ] {
             let attempt = spawn(program, program_path, &args);
-            let direct = engine.0.decide(
+            let (direct, _) = engine.0.decide(
                 &GovernedBox::assigned("test-box"),
                 &Principal::agent(),
                 &Request::ShellSpawn {

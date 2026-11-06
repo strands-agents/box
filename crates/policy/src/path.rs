@@ -190,7 +190,7 @@ impl PathResolver {
         self
     }
 
-    /// Approve a path in the **host** namespace, following symlinks.
+    /// Approve a host path through symlink resolution where only `NotFound` indicates absence and all other lookup errors cause refusal.
     ///
     /// This is the box's seam. It resolves with the filesystem, refuses a spelling that
     /// differs from the canonical identity, and refuses an identity outside every
@@ -206,7 +206,7 @@ impl PathResolver {
         }
         let canonical = match std::fs::canonicalize(requested) {
             Ok(canonical) => canonical,
-            Err(error) => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let parent = requested
                     .parent()
                     .ok_or_else(|| PathRefusal::Unresolvable {
@@ -225,15 +225,29 @@ impl PathResolver {
                         reason: error.to_string(),
                     })?
                     .join(name);
-                if leaf.symlink_metadata().is_ok() {
-                    return Err(PathRefusal::Unresolvable {
-                        path: requested.to_path_buf(),
-                        reason: "the leaf name is already taken by an object this \
-                                 resolver will not write through"
-                            .to_string(),
-                    });
+                match leaf.symlink_metadata() {
+                    Ok(_) => {
+                        return Err(PathRefusal::Unresolvable {
+                            path: requested.to_path_buf(),
+                            reason: "the leaf name is already taken by an object this \
+                                     resolver will not write through"
+                                .to_string(),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => leaf,
+                    Err(error) => {
+                        return Err(PathRefusal::Unresolvable {
+                            path: requested.to_path_buf(),
+                            reason: error.to_string(),
+                        });
+                    }
                 }
-                leaf
+            }
+            Err(error) => {
+                return Err(PathRefusal::Unresolvable {
+                    path: requested.to_path_buf(),
+                    reason: error.to_string(),
+                });
             }
         };
         self.admit(requested, canonical)
@@ -511,5 +525,38 @@ mod tests {
             .approve_host(&root.join("new.txt"))
             .expect("a new leaf inside the root is approved");
         assert_eq!(approved.as_path(), root.join("new.txt"));
+    }
+
+    #[test]
+    fn the_host_resolver_refuses_invalid_names_instead_of_approving_a_new_leaf() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let resolver = PathResolver::over([root.clone()]).unwrap();
+        for name in ["x".repeat(4096), "invalid\0name".to_string()] {
+            let path = root.join(name);
+            let error = std::fs::canonicalize(&path).unwrap_err();
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                matches!(
+                    resolver.approve_host(&path),
+                    Err(PathRefusal::Unresolvable { .. })
+                ),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_resolver_refuses_a_symlink_loop_instead_of_approving_a_new_leaf() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("loop");
+        std::os::unix::fs::symlink("loop", &path).unwrap();
+        let resolver = PathResolver::over([root]).unwrap();
+        assert!(matches!(
+            resolver.approve_host(&path),
+            Err(PathRefusal::Unresolvable { .. })
+        ));
     }
 }

@@ -30,26 +30,29 @@ async fn spawn_registered(
         not(all(target_os = "macos", feature = "native-filesystem-policy")),
         allow(unused_mut)
     )]
-    let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        hold_for_registration: registration.is_some(),
-        config_path: boundary.containment_config(),
-        config_file: boundary.containment_config_file(),
-        config_sha256: boundary.containment_digest(),
-        target_environment: boundary.target_environment(),
-        executable: boundary.executable(),
-        arguments: boundary.arguments(),
-        argument_zero: boundary.argument_zero(),
-        working_directory: boundary.working_directory(),
-        image_name: &|digest| {
-            Ok(trampoline::ImageCache::new(
-                layout.trampoline_image(digest),
-                layout.open_trampoline_cache()?,
-            ))
+    let (mut command, mut trampoline) = trampoline::command(
+        trampoline::Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: registration.is_some(),
+            config_path: boundary.containment_config(),
+            config_file: boundary.containment_config_file(),
+            config_sha256: boundary.containment_digest(),
+            target_environment: boundary.target_environment(),
+            executable: boundary.executable(),
+            arguments: boundary.arguments(),
+            argument_zero: boundary.argument_zero(),
+            working_directory: boundary.working_directory(),
+            image_name: &|digest| {
+                Ok(trampoline::ImageCache::new(
+                    layout.trampoline_image(digest),
+                    layout.open_trampoline_cache()?,
+                ))
+            },
+            #[cfg(target_os = "linux")]
+            relay_control,
         },
-        #[cfg(target_os = "linux")]
-        relay_control,
-    })?;
+        boundary.installation(),
+    )?;
     configure_streams(&mut command);
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     let gate = trampoline.take_launch_gate();
@@ -594,16 +597,7 @@ impl Contained {
         termination_result?;
         native_result?;
         terminal_result?;
-        // A setup failure outranks the status: `exit 3` from a refused apply is
-        // the trampoline's, not the workload's.
-        if let Some(stage) = setup_result? {
-            return Err(TrampolineError::SetupFailed {
-                stage,
-                detail: None,
-            }
-            .into());
-        }
-        Ok(exit_code(status))
+        contained_exit_code(status, setup_result)
     }
 }
 
@@ -763,12 +757,7 @@ impl LeafBox {
         })
     }
 
-    /// Spawn a host binary in a leaf box with long-lived piped stdin and stdout, for a streaming
-    /// session — a contained stdio MCP server, which speaks JSON-RPC over those pipes for its whole
-    /// lifetime rather than running to completion. Containment is confirmed to have reached `exec`
-    /// (via the trampoline's status pipe) BEFORE the live streams are handed back, so a containment
-    /// setup failure surfaces as [`TrampolineError::SetupFailed`] here and is never mistaken for a
-    /// broken MCP protocol later.
+    /// Return live streams after setup completes without a reported executable launch failure.
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -802,11 +791,7 @@ impl LeafBox {
         let stdout = group.child_mut().stdout.take();
         let mut stderr = group.child_mut().stderr.take();
 
-        // Confirm containment reached `exec`. `setup_failure` reads one status byte: `0` or EOF is
-        // success — the reaper writes `0` once the mount view is up, and macOS and the buffered path
-        // signal by EOF at exec — and any other byte names the failure stage. It blocks on the pipe,
-        // so it runs on a blocking task, not the async runtime. The trampoline is dropped there: its
-        // job ends once exec is confirmed; the boundary and relays are what the running server retains.
+        // The reader waits for completed preparation and channel closure, or a reported failure.
         let setup = tokio::task::spawn_blocking(move || {
             let mut trampoline = trampoline;
             trampoline.close_setup_writer();
@@ -832,9 +817,7 @@ impl LeafBox {
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 
-        // Containment reached `exec`: the workload owns stderr now. Drain it to nowhere for the
-        // server's life so a chatty server never blocks on a full pipe. The task ends on its own when
-        // the child exits — `kill_on_drop` closes the pipe, so the copy reaches EOF and returns.
+        // Drain stderr so a running server cannot block on a full pipe.
         if let Some(mut stderr) = stderr {
             tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
@@ -929,6 +912,27 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
             .trim(),
     };
     Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
+}
+
+pub(super) fn contained_exit_code(
+    status: ExitStatus,
+    setup: Result<Option<crate::error::SetupStage>, TrampolineError>,
+) -> Result<ExitCode, BoxError> {
+    match setup {
+        #[cfg(unix)]
+        Err(TrampolineError::SetupIncomplete)
+            if std::os::unix::process::ExitStatusExt::signal(&status).is_some() => {}
+        result => {
+            if let Some(stage) = result? {
+                return Err(TrampolineError::SetupFailed {
+                    stage,
+                    detail: None,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(exit_code(status))
 }
 
 /// A process's exit code, or `128 + signal` when it died from one.
@@ -1154,6 +1158,42 @@ mod tests {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(libc::SIGINT))),
             format!("{:?}", ExitCode::from(128 + libc::SIGINT as u8))
+        );
+    }
+
+    #[test]
+    fn incomplete_agent_setup_preserves_signal_exit_codes() {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGKILL] {
+            let status = ExitStatus::from_raw(signal);
+            let result = contained_exit_code(status, Err(TrampolineError::SetupIncomplete));
+            assert_eq!(
+                format!("{:?}", result.unwrap()),
+                format!("{:?}", exit_code(status))
+            );
+        }
+        for code in [0, 1, 127] {
+            assert!(
+                contained_exit_code(
+                    ExitStatus::from_raw(code << 8),
+                    Err(TrampolineError::SetupIncomplete),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_signal_does_not_hide_reported_or_malformed_setup() {
+        let status = ExitStatus::from_raw(libc::SIGTERM);
+        assert!(contained_exit_code(status, Ok(Some(SetupStage::Apply))).is_err());
+        assert!(
+            contained_exit_code(
+                status,
+                Err(TrampolineError::StatusProtocol {
+                    reason: "unknown marker".into(),
+                })
+            )
+            .is_err()
         );
     }
 

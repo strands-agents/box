@@ -34,8 +34,14 @@ Box runs an agent, or another command, under an operator's policy, with operatin
   so its `bash` tool is its only way to a project file, and watch the policy permit three tasks and
   refuse two.
 
+- [`tutorials/eks.md`](./tutorials/eks.md): build and run a Box coding workload on Amazon EKS, then inspect its permitted operations and refusals.
+- [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a Strands or LangChain shipment agent to AgentCore Runtime with Box.
+- [`tutorials/google-cloud.md`](./tutorials/google-cloud.md): run a Strands agent with Gemini on Google Compute Engine and verify its deployment retry cooldown.
+
 ## Reference
 
+- [`cloud-deployments.md`](./cloud-deployments.md): Linux deployment requirements and configuration guidance
+  for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box
