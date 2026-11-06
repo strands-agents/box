@@ -2,8 +2,8 @@
 
 `docs/site-manifest.json` is the versioned publication contract for an external documentation
 site. A locked publication reads the manifest and its source pages from the same selected commit.
-A local working-tree preview can include uncommitted content; its selected commit still supplies
-repository-link provenance.
+A local working-tree preview can include uncommitted content. Its repository links still refer to
+the selected commit.
 
 The Markdown files under `docs/user/` own page content and H1 headings. The manifest selects the
 published pages and owns their external route suffix, summary, and navigation. The external site
@@ -19,7 +19,7 @@ Do not increase `schemaVersion` for a normal page addition or removal, or for a 
 that follows the current contract.
 
 An existing page keeps its `id` and `slug`. The `id` is a producer-assigned stable identifier
-reserved for cross-revision page identity; it does not determine the route. The `slug` is the
+reserved to identify the same page across revisions. It does not determine the route. The `slug` is the
 stable route suffix. Do not reuse either value for a different page. A route removal or move needs
 a coordinated consumer change and a redirect before it merges.
 
@@ -49,9 +49,8 @@ move does not create a new page.
 | `pages[].nav.group` | The external navigation group. Each group occupies one contiguous page block. |
 | `pages[].nav.order` | A positive and unique position in its group. |
 
-The manifest test refuses an absent page, an extra page, an unsafe source or slug, a duplicate
-identity or navigation position, an unknown field or status, and a title that differs from the
-source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
+The manifest test refuses absent or extra pages, unsafe sources or slugs, duplicate identities or
+navigation positions, and unknown fields or statuses. It also requires each title to match the source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
 a page removal or route move without the required retirement, an existing slug assigned to a
 different ID, reuse of a retired value, or removal of a retirement.
 

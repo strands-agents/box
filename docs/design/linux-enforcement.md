@@ -11,7 +11,8 @@ This page covers ARM64, the 64-bit Arm architecture.
 
 The box's trusted process starts each workload through the containment trampoline.
 The trampoline is a small program that applies the sandbox before it starts the workload.
-It creates [namespaces](#terms), constructs the filesystem view, removes setup authority, and installs [seccomp](#terms) filters.
+It creates [namespaces](#terms) and the filesystem view. It then removes the privileges used for
+setup and installs [seccomp](#terms) filters.
 An unsuccessful setup stops startup.
 Box does not start the workload with a partly constructed sandbox.
 
@@ -35,8 +36,8 @@ Before creating the workload, it sets `PR_SET_DUMPABLE=0` to restrict workload a
 If that operation fails, it reports setup failure and terminates the namespace before the workload starts.
 
 This guard restricts memory access independently of whether `/proc` permits writes.
-A read-only `/proc` does not itself establish that reads of the reaper’s memory are refused.
-Box installs its seccomp filters only in the workload after creating it; the reaper remains outside those filters.
+A read-only `/proc` does not itself prevent reads of the reaper's memory.
+Box installs its seccomp filters in the workload after creating it. The reaper does not receive those filters.
 
 The workload's `/proc` is read-only to prevent writes through process-memory files to executable pages.
 Process inspection remains available.
@@ -56,7 +57,7 @@ See the [platform comparison](platform-differences.md#behavior-and-configuration
 
 A Linux [capability](#terms) is a privilege for an operation such as namespace administration.
 Box clears every capability set before the workload starts.
-This step removes startup authority but does not prevent Linux from granting capabilities in a nested user namespace.
+This removes the privileges used for startup. Linux can still grant capabilities in a nested user namespace.
 
 The filters permit `unshare`, `clone`, and `clone3` to create user namespaces, and `setns` to enter eligible child namespaces.
 The process can then hold capabilities within that namespace and the namespaces it owns.
@@ -87,7 +88,8 @@ A protection alias must resolve to its producing writable grant's verified mount
 Box refuses a redirect to another location, including a replaced descendant link.
 Box applies bind permissions through the retained mount reference, then verifies the flags and that same mount's placement.
 If the final checks cannot confirm the same mount at its verified location, startup refuses.
-Submount enumeration still uses mount-table pathnames; these checks do not establish protection against every concurrent descendant change.
+Box still enumerates submounts through mount-table pathnames. These checks do not protect against
+every concurrent change to a descendant.
 
 `read` exposes a file or directory tree without write access.
 `read_file` selects one existing file.
@@ -97,7 +99,8 @@ The `workspace` field selects the initial directory but grants no access to its 
 `write` and `write_file` expose readable, writable mounts on Linux.
 Linux does not enforce write-only content access through these mounts.
 Box refuses a Linux write grant unless an explicit `read` or `read_file` grant covers its entire scope.
-This check applies to the agent, tools, and local Model Context Protocol (MCP) servers before they start.
+This check applies to the agent, tools, and local MCP servers before they start.
+MCP means Model Context Protocol.
 Execute grants do not satisfy the read requirement.
 
 Startup output identifies each content grant's access mode.
@@ -115,7 +118,8 @@ For denied files and directories beneath writable grants, Box protects the inter
 It binds those directories onto themselves, then covers those mounts with the original writable grant.
 Within the workload's mount namespace, Linux keeps the hidden mounts attached to those directory entries and refuses to rename them.
 The visible grant stays continuous, so unrelated file and directory renames across those ancestors remain available.
-Box installs nested grants and denial masks after this covering bind, preserving their precedence and source identity checks.
+Box installs nested grants and denial masks after this covering bind. They retain their precedence
+and source identity checks.
 Existing boundaries between separate grants or filesystems still apply.
 
 Linux refuses `list`, because the mount view cannot expose directory names without file contents.
@@ -191,7 +195,7 @@ Nonzero upper bits do not bypass the restriction.
 Console request numbers follow the Linux user API headers
 [`kd.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/kd.h)
 and [`vt.h`](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/include/uapi/linux/vt.h).
-The filter defines missing constants privately; it needs no unreleased library definitions.
+The filter defines missing constants privately, without unreleased library definitions.
 
 Ordinary input, output, terminal settings, window-size queries, and resizing remain permitted.
 The filter also refuses virtual-console keyboard modes, display modes, switching, deallocation, and console-wide resizing.
@@ -217,7 +221,8 @@ A relay carries its connections to the local egress gateway in the box's trusted
 The gateway supports outbound HTTP and HTTPS requests.
 The gateway applies policy, as described in [egress enforcement](egress.md).
 
-The sandbox cannot connect directly to the surrounding OS's loopback (`localhost`) listeners or [abstract Unix sockets](#terms).
+The sandbox cannot connect directly to the surrounding OS's loopback listeners, such as
+`localhost`, or [abstract Unix sockets](#terms).
 A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
 Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
 Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
@@ -250,7 +255,8 @@ A non-executable mount or refused operation can produce an access error.
 Diagnose the operation, path, grants, and workload output together.
 The error alone does not identify the responsible restriction.
 
-Each deployment needs its own image, kernel, identity, setup privileges, workload grants, and execution evidence.
+Qualify each deployment with its intended image, kernel, identity, setup privileges, and workload
+grants. Keep the execution results as evidence.
 A local Linux result does not establish a cloud platform's allowed setup operations.
 Minimum versions, minimum privileges, package installation, and testing the assembled Box build remain outside this explanation.
 

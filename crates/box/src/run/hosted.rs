@@ -40,6 +40,7 @@ use crate::run::broker::BrokerHost;
 use crate::run::broker::complete::{DiscoveryCoordinator, DiscoveryDoor};
 use crate::run::broker::mcp::DiscoveryRegistryHost;
 use crate::run::broker::shell::EgressRouting;
+use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     ApprovedReach, Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
 };
@@ -705,40 +706,88 @@ impl HostedBox {
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
         grammars: policy::ToolGrammars,
-    ) -> Result<Arc<PolicyEngine>, BoxError> {
+    ) -> Result<PolicyEngine, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
-        Ok(Arc::new(
-            PolicyEngine::open_staged_file_with_grammars(
-                operator,
-                sources,
-                grammars,
-                database,
-                database_path,
-            )?
-            .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
-        ))
+        Ok(PolicyEngine::open_staged_file_with_grammars(
+            operator,
+            sources,
+            grammars,
+            database,
+            database_path,
+        )?
+        .observed_by(Arc::new(telemetry::PolicyDecisionObserver)))
     }
 
-    /// The bindings of the tool grammars `policy` installs, with every `[tool.<name>]` in `record`
-    /// declared (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
+    /// for it, with each stdio `[mcp.<name>]` program declared for its own start
+    /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
-        policy: &PolicyEngine,
+        policy: PolicyEngine,
         record: &Record,
-    ) -> Result<policy::GrammarBindings, BoxError> {
+        commands: &ConfiguredCommands,
+    ) -> Result<PolicyEngine, BoxError> {
         let mut bindings = policy.grammar_bindings();
         if !record.experimental_features.tool_grammars {
-            return Ok(bindings);
+            return Ok(policy);
         }
-        for spec in record.tool.values() {
-            let program =
-                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())?;
+        let programs: BTreeSet<&str> = record
+            .tool
+            .values()
+            .filter(|spec| spec.grammar.is_some())
+            .map(crate::record::config::grammar::called_name)
+            .collect();
+        for (label, spec) in &record.tool {
+            let command = commands.get(label).ok_or_else(|| ConfigError::Process {
+                table: format!("[tool.{label}]"),
+                reason: "has no configured command for this run".to_string(),
+            })?;
+            if programs.contains(crate::record::config::grammar::called_name(spec)) {
+                command.refuse_a_grammar_on_several_names()?;
+            }
             bindings.declare_tool(
+                command.opened(),
+                command.path(),
+                command.invoked(),
+                crate::record::config::grammar::called_name(spec),
+            )?;
+        }
+        for (label, contained) in &record.contained_mcp {
+            let spec = &contained.spec;
+            let Ok(program) =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+            else {
+                continue;
+            };
+            let Ok(opened) = crate::record::layout::open_without_following(program.granted_path())
+            else {
+                continue;
+            };
+            let called = crate::record::config::grammar::called_name(spec);
+            let names = opened.metadata().map_or(1, |metadata| {
+                use std::os::unix::fs::MetadataExt as _;
+                metadata.nlink()
+            });
+            if programs.contains(called) && names > 1 {
+                return Err(ConfigError::Process {
+                    table: format!("[mcp.{label}]"),
+                    reason: format!(
+                        "configured command {} has {names} names, and a tool grammar on it \
+                         refuses each name that no `[tool]` declares. Point `command` at a copy \
+                         with one name",
+                        program.granted_path().display()
+                    ),
+                }
+                .into());
+            }
+            bindings.declare_server(
+                &opened,
+                program.granted_path(),
                 program.invoked(),
                 crate::record::config::grammar::called_name(spec),
             )?;
         }
-        Ok(bindings)
+        Ok(policy.bound_by(bindings)?)
     }
 
     /// Open this box's trusted half, or refuse. `workspace` and `home` are the agent's effective
@@ -748,6 +797,7 @@ impl HostedBox {
         root: &BoxRoot,
         record: &Record,
         policy: Arc<PolicyEngine>,
+        commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
         protected_sources: &[AuthoritySource],
         owned: Lock,
@@ -898,7 +948,11 @@ impl HostedBox {
         crate::record::config::mcp::refuse_a_shared_command(&record.mcp, launched)?;
         crate::record::config::mcp::refuse_overlapping_wildcard_commands(&record.mcp, launched)?;
         // Every process table's lists, judged once, before any of them spawns.
-        let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
+        let approved = Arc::new(ApprovedReach::judge_with(
+            record,
+            protected_sources,
+            commands,
+        )?);
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let file_monitor = if record.experimental_features.native_filesystem_policy {
@@ -994,6 +1048,7 @@ impl HostedBox {
             sources,
             policy::ToolGrammars::default(),
         )
+        .map(Arc::new)
     }
 
     /// What this run's boundary reads.
@@ -1126,6 +1181,270 @@ mod tests {
         }
     }
 
+    /// A record whose one `[tool.git]` runs `program` and carries a grammar with `status` and `push`.
+    fn grammar_record(root: &BoxRoot, program: &Path) -> Record {
+        let mut record = record_with_mcp(root, Vec::new());
+        record.experimental_features.tool_grammars = true;
+        let spec: ProcessSpec = toml::from_str(&format!(
+            "command = [{:?}]\n[grammar]\nformat = 1\nversion = 1\nname = \"git\"\n\
+             program = \"git\"\n[grammar.shell.status]\nusage = \"git status\"\n\
+             [grammar.shell.push]\nusage = \"git push [<remote>]\"\n",
+            program.display().to_string()
+        ))
+        .expect("the tool parses");
+        record.tool.insert("git".to_string(), spec);
+        record
+    }
+
+    /// The engine a run opens over `record` and `text`, bound as `run` binds it.
+    fn bound_engine(
+        root: &BoxRoot,
+        record: &Record,
+        commands: &ConfiguredCommands,
+        text: &str,
+    ) -> Arc<PolicyEngine> {
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine = HostedBox::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            vec![policy::Policy {
+                origin: root.policy(),
+                text: text.to_string(),
+            }],
+            grammars,
+        )
+        .expect("the policy opens");
+        Arc::new(HostedBox::bind_tool_grammars(engine, record, commands).expect("the tools bind"))
+    }
+
+    async fn spawned(
+        engine: &Arc<PolicyEngine>,
+        program_path: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            command: "git",
+            program: "git",
+            program_path,
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string())
+    }
+
+    #[tokio::test]
+    async fn binding_decides_a_declared_tool_as_its_grammar_action() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-binding");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let path = program.display().to_string();
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        spawned(&engine, &path, &["status"])
+            .await
+            .expect("the grammar action permit admits the spawn");
+        let capture = telemetry::ObservationCapture::begin();
+        let refused = spawned(&engine, &path, &["push", "origin"])
+            .await
+            .expect_err("no rule permits the push, and `shell:spawn` does not decide it");
+        let decided = capture.last().expect("the engine decided the spawn");
+        assert_eq!(decided.action(), r#"Tool::git::Action::"push""#);
+        assert!(
+            refused.starts_with(&format!(
+                "policy denied this operation on '{path}' [default-deny]"
+            )),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_uses_the_file_the_run_opened_and_not_what_its_path_holds_later() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-identity");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let staged = home.path().join("git.new");
+        install_program(&staged);
+        std::fs::rename(&staged, &program)
+            .expect("the program is replaced after the run opened it");
+
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            "permit (principal, action, resource);",
+        );
+
+        let refused = spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect_err("the file at the path is not the file the run approved");
+        assert!(refused.contains("[tool-grammar]"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn an_mcp_server_that_shares_a_bound_file_is_declared_for_its_own_start_alone() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let server = home.path().join("git-mcp");
+        std::os::unix::fs::symlink(&program, &server).expect("a second name for the file");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "git-mcp".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        let args: Vec<String> = Vec::new();
+        let started = policy::ShellPolicyInterceptor::into_server_start_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+            None,
+            Default::default(),
+        )
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+
+        assert_eq!(
+            started,
+            Ok(()),
+            "the operator declared the name, so `shell:spawn` decides the start"
+        );
+        let by_the_agent = policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+        assert!(
+            by_the_agent
+                .as_ref()
+                .is_err_and(|refused| refused.contains("[tool-grammar]")),
+            "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_that_a_grammar_binds_is_refused_when_its_file_has_several_names() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp-names");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let shared = home.path().join("shared");
+        std::fs::create_dir(&shared).expect("a second directory");
+        let server = shared.join("git");
+        install_program(&server);
+        std::fs::hard_link(&server, shared.join("make")).expect("a second name");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "repo".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine =
+            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
+                .expect("the policy opens");
+
+        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
+            .expect_err("a grammar on a server file with several names is refused")
+            .to_string();
+
+        assert!(
+            refusal.contains("[mcp.repo]") && refusal.contains("has 2 names"),
+            "{refusal}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_grammar_on_apples_git_is_refused_because_its_file_has_several_names() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-several");
+        let record = grammar_record(&root, Path::new("/usr/bin/git"));
+        let commands = ConfiguredCommands::load(&record).expect("/usr/bin/git loads");
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine =
+            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
+                .expect("the policy opens");
+
+        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
+            .expect_err("a grammar on a file with several names is refused")
+            .to_string();
+
+        assert!(
+            refusal.contains("names, and a tool grammar on it refuses"),
+            "{refusal}"
+        );
+    }
+
+    fn install_program(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("the program is written");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the program is executable");
+    }
+
     /// The operator home a test root sits under, which is also the agent's workspace here.
     fn workspace_of(root: &BoxRoot) -> PathBuf {
         root.operator_home()
@@ -1180,15 +1499,18 @@ permit (principal, action == alpha::Action::"read", resource);"#
             }],
             policy::ToolGrammars::default(),
         )
+        .map(Arc::new)
         .expect("the staged authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
             .expect("the lock is free");
         let workspace = workspace_of(root);
+        let commands = Arc::new(ConfiguredCommands::load(record).expect("the commands load"));
         let hosted = HostedBox::open(
             root,
             record,
             policy,
+            commands,
             Arc::clone(&collector),
             &[],
             owned,
@@ -1249,6 +1571,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             Vec::new(),
             policy::ToolGrammars::default(),
         )
+        .map(Arc::new)
         .expect("an empty authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
@@ -1259,6 +1582,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 &root,
                 &record,
                 policy,
+                Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
                 &[],
                 owned,
@@ -1442,7 +1766,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .expect("a resolver")
             .approve_host(&canonical.join("secret.txt"))
             .expect("inside the root");
-        let decision = authority.decide(
+        let (decision, _) = authority.decide(
             &GovernedBox::assigned(root.name()),
             &Principal::agent(),
             &Request::Fs {

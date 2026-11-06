@@ -41,7 +41,9 @@ The table's name, `fetch` or `github`, is the server name. Policy reads it as
 | `network.contain_egress` | bool | `true` | How the server reaches the network. See [Network](#network). |
 
 The box starts the server when the agent's harness runs the server's full `command`, and only
-when policy permits `shell:spawn` for it. By default, the box runs the `command` and arguments from `box.toml`.
+when policy permits `shell:spawn` for it. When an experimental tool grammar binds the server's
+program, the grammar's action decides the start in place of `shell:spawn`, as for a
+[spawn in the Shell](shell.md#shellspawn). By default, the box runs the `command` and arguments from `box.toml`.
 
 Without argument wildcards, the harness's command must be the same words, in the same order, as `command`.
 The harness runs the alias with its arguments, and the box starts the server whose `command`
@@ -111,6 +113,9 @@ A `shell:spawn` permit that checks only the program matches every value in those
 The server runs with its own configured permissions, which can exceed the workload's.
 For example, `["npx", "-y", "*"]` lets the caller choose the package that runs with those
 permissions. Put `*` only in positions whose values you intend the caller to choose.
+When an experimental tool grammar binds the server's program file under another name, such as a
+mise shim, the start is a `shell:spawn` decision, and no grammar reads the values in the `*`
+positions.
 
 Only an argument equal to `*` is a wildcard. It accepts one argument, including an empty string.
 The executable, argument count, order, and every other argument must match. `--token=*` is

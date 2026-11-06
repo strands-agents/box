@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use policy::{GovernedBox, Outcome, Policy, PolicyEngine, Principal, ShellPolicyInterceptor};
+use policy::{
+    GovernedBox, Outcome, Policy, PolicyEngine, Principal, Request, ShellPolicyInterceptor,
+};
 use strands_shell::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit};
 
 const HOME: &str = "/home/operator";
@@ -193,10 +195,20 @@ async fn temporal_rules_distinguish_requests_and_outcomes_in_the_reported_workin
             when {{ context.input.program == "response_probe" }}
             unless temporal {{ formerly within 60s
                 Box::Action::"{action}"::response{{ input.program: "seed", input.cwd: "~/project", output.status: 0 }}
-            }};"#
+            }};
+            forbid(principal, action == Box::Action::"{action}", resource)
+            when {{ context.input.program == "correlated_probe" }}
+            unless temporal {{ exists (r: String). (
+                formerly within 60s (
+                    Box::Action::"{action}"::response{{ requestId: r, input.program: "seed", input.cwd: "~/project", output.status: 0 }}
+                    && formerly within 60s (
+                        Box::Action::"{action}"::request{{ requestId: r, input.program: "seed", input.cwd: "~/project" }}
+                    )
+                )
+            ) }};"#
         );
         let interceptor = interceptor(&source, Some(HOME));
-        for probe in ["request_probe", "response_probe"] {
+        for probe in ["request_probe", "response_probe", "correlated_probe"] {
             assert!(
                 admit(interceptor.as_ref(), action, probe, PROJECT)
                     .await
@@ -214,7 +226,7 @@ async fn temporal_rules_distinguish_requests_and_outcomes_in_the_reported_workin
             .expect("sibling seed is permitted"),
         )
         .await;
-        for probe in ["request_probe", "response_probe"] {
+        for probe in ["request_probe", "response_probe", "correlated_probe"] {
             assert!(
                 admit(interceptor.as_ref(), action, probe, PROJECT)
                     .await
@@ -237,7 +249,19 @@ async fn temporal_rules_distinguish_requests_and_outcomes_in_the_reported_workin
                 .is_err(),
             "an admitted request must not count as a completed effect"
         );
+        assert!(
+            admit(interceptor.as_ref(), action, "correlated_probe", PROJECT)
+                .await
+                .is_err(),
+            "a correlated pair requires the outcome"
+        );
         complete(seed).await;
+        complete(
+            admit(interceptor.as_ref(), action, "correlated_probe", PROJECT)
+                .await
+                .expect("the reported directory and request identifier join the same operation"),
+        )
+        .await;
         complete(
             admit(interceptor.as_ref(), action, "response_probe", PROJECT)
                 .await
@@ -319,10 +343,24 @@ async fn reopened_history_preserves_old_cwd_spelling_and_records_new_spelling() 
         ),
     }];
     let policy = PolicyEngine::open(sources.clone(), &history).expect("initial policy opens");
+    let (_, request_id) = policy.decide(
+        &GovernedBox::assigned("cwd-test"),
+        &Principal::agent(),
+        &Request::ShellSpawn {
+            command: "seed",
+            program: "seed",
+            program_path: "/usr/bin/printf",
+            credential_reads: &[],
+            args: &[],
+            cwd: PROJECT,
+        },
+    );
+    let request_id = request_id.expect("historical absolute-directory request is admitted");
     policy
         .record(
             &GovernedBox::assigned("cwd-test"),
             &Principal::agent(),
+            &request_id,
             &Outcome::ShellSpawn {
                 command: "seed",
                 program: "seed",
