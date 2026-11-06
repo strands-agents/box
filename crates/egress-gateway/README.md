@@ -57,7 +57,12 @@ kinds, and the proxy presents each one immediately before its effect:
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
-| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
+| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes; for a streamed response, at its head, before the first body byte |
+
+A response streams when nothing on the response leg reads its body: no credential matches its
+target, its host is no MCP server, and its method is not `HEAD`. Its `body_bytes` is the declared
+`Content-Length`, or `None` for a chunked response; for a buffered response it is the bytes in hand.
+Either way the release permit's outcome reports the bytes the workload took.
 
 No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
@@ -203,7 +208,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `bind_addr` | `SocketAddr` | `127.0.0.1:0` |
 | `unix_socket_path` | `Option<PathBuf>` | `None` |
 | `intercept_ca_dir` | `Option<PathBuf>` | `None` |
-| `response_limits` | `ResponseLimits` | `max_body_bytes: 16 MiB` |
+| `response_limits` | `ResponseLimits` | `max_body_bytes: 16 MiB`, for request bodies and buffered response bodies; a streamed response body has no size limit |
 | `expected_token` | `Option<String>` | `None` |
 | `upstream_ca_pems` | `Vec<String>` | empty |
 | `dns_overrides` | `Vec<(String, IpAddr)>` | empty |

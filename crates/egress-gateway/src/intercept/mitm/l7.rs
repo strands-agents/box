@@ -4,6 +4,8 @@ use std::borrow::Cow;
 use std::io;
 use std::net::TcpStream;
 
+use hyper::body::Body as _;
+
 use crate::audit::RequestId;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
@@ -11,7 +13,7 @@ use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
-use crate::client::http::Upstream;
+use crate::client::http::{StreamedResponse, Upstream, UpstreamBody};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
@@ -227,6 +229,23 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
+    // A response streams when nothing on the response leg reads its body: no credential applies
+    // to this target, so there is no leak-back scrub, and the host is no MCP server, so there is no
+    // catalog to stage (strands-agents/box#171). A HEAD response has no body to stream. The request
+    // bytes are copied out unwiped only on this path, because no credential was attached to them.
+    let streams = method != "HEAD"
+        && state.mcp_server_for(&connect.host).is_none()
+        && !state.controls.matches_any(&target.as_destination());
+    if streams {
+        let head = prepared_request.as_bytes().to_vec();
+        let (outcome, response) = upstream
+            .send_streamed(state, &method, head, forwarded_body.to_vec())
+            .await;
+        request_permit.record_outcome(outcome).map_err(|error| {
+            ProxyError::Io(format!("recording upstream request outcome: {error}"))
+        })?;
+        return release_streamed(state, connect, &method, &workload_path, response?);
+    }
     // The request permit is consumed at reply time, or when no reply comes.
     let (outcome, response) = upstream
         .send(state, &method, prepared_request.as_bytes(), &forwarded_body)
@@ -278,7 +297,7 @@ async fn run_l7_legs(
         method: &method,
         path: &workload_path,
         status: res.status,
-        body_bytes: res.body.len(),
+        body_bytes: Some(res.body.len()),
     };
     let response_permit = match claim_effect(state, &response_attempt) {
         Ok(permit) => permit,
@@ -290,8 +309,47 @@ async fn run_l7_legs(
         reason: None,
         headers: res.headers,
         body: res.body,
+        streamed: None,
         release: Some(response_permit),
         header_case: parsed.header_case,
+    })
+}
+
+/// Release a streamed response: claim the release before its first body byte, with the length
+/// the upstream declared, and hand the workload the body as it arrives.
+fn release_streamed(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    method: &str,
+    workload_path: &str,
+    streamed: StreamedResponse,
+) -> Result<WorkloadResponse> {
+    let StreamedResponse { mut head, body } = streamed;
+    // As on the buffered path: only the gateway claims a refusal.
+    head.headers.remove(crate::PROXY_ORIGIN_HEADER);
+    let response_attempt = EffectAttempt::ResponseRelease {
+        host: &connect.host,
+        port: connect.port,
+        method,
+        path: workload_path,
+        status: head.status,
+        body_bytes: head.declared_len,
+    };
+    let response_permit = match claim_effect(state, &response_attempt) {
+        Ok(permit) => permit,
+        Err(error) => return Ok(interceptor_error(&error, None)),
+    };
+    // A response with no body (a 204, a 304, an empty body) goes out as the buffered path sends
+    // it, so its framing headers stay as they are.
+    let streamed = (!body.is_end_stream()).then(|| Box::new(body));
+    Ok(WorkloadResponse {
+        status: head.status,
+        reason: None,
+        headers: head.headers,
+        body: Vec::new(),
+        streamed,
+        release: Some(response_permit),
+        header_case: head.header_case,
     })
 }
 
@@ -362,6 +420,9 @@ pub(crate) struct WorkloadResponse {
     pub(crate) reason: Option<&'static str>,
     pub(crate) headers: HeaderMap,
     pub(crate) body: Vec<u8>,
+    /// The body of a streamed response, read from the upstream as hyper writes it. When set,
+    /// `body` is empty. Boxed, so a refusal stays small.
+    pub(crate) streamed: Option<Box<UpstreamBody>>,
     /// The claimed release of a governed response, recorded once hyper has written it.
     pub(crate) release: Option<ClaimedEffectPermit>,
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
@@ -392,6 +453,7 @@ impl WorkloadResponse {
             reason,
             headers: HeaderMap::new(),
             body: Vec::new(),
+            streamed: None,
             release: None,
             header_case: hyper::http::Extensions::new(),
         }

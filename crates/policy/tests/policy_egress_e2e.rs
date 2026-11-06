@@ -264,7 +264,7 @@ fn response_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
         method: "POST",
         path: "/v1/messages",
         status: 201,
-        body_bytes,
+        body_bytes: Some(body_bytes),
     }
 }
 

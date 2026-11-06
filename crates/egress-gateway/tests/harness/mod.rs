@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
@@ -42,6 +42,7 @@ impl SeenRequest {
 enum Reply {
     Whole(Arc<[u8]>),
     Drip(Arc<[u8]>, Duration),
+    Pieces(Arc<[Vec<u8>]>, Duration),
     Silent,
     Deaf,
     Sip(Duration),
@@ -88,6 +89,18 @@ impl TlsUpstream {
     /// Start a TLS upstream that returns the supplied static HTTP response.
     pub fn start_with_response(host: &str, response: &'static [u8]) -> Self {
         Self::start_serving(host, Reply::Whole(Arc::from(response)))
+    }
+
+    /// Start a TLS upstream that returns `response`, built at run time for a body too large to
+    /// spell as a literal.
+    pub fn start_with_bytes(host: &str, response: Vec<u8>) -> Self {
+        Self::start_serving(host, Reply::Whole(Arc::from(response)))
+    }
+
+    /// Start a TLS upstream that writes `pieces` in order and waits `gap` between them, as an
+    /// origin that flushes part of a reply and finishes later.
+    pub fn start_in_pieces(host: &str, pieces: Vec<Vec<u8>>, gap: Duration) -> Self {
+        Self::start_serving(host, Reply::Pieces(Arc::from(pieces), gap))
     }
 
     /// Start a TLS upstream that reads each request and never replies, holding the connection
@@ -188,6 +201,16 @@ impl TlsUpstream {
                                         break;
                                     }
                                     std::thread::sleep(*interval);
+                                }
+                            }
+                            Reply::Pieces(pieces, gap) => {
+                                for (index, piece) in pieces.iter().enumerate() {
+                                    if index > 0 {
+                                        std::thread::sleep(*gap);
+                                    }
+                                    if tls.write_all(piece).and_then(|()| tls.flush()).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                             Reply::Silent => {
@@ -397,6 +420,84 @@ impl WorkloadClient {
     /// Read the response status code the proxy returned over the TLS tunnel.
     pub fn read_status(&mut self) -> u16 {
         parse_status(&self.read_response())
+    }
+
+    /// Read a response head, up to and including its blank line. Empty when the proxy closes
+    /// the connection without answering.
+    pub fn read_head(&mut self) -> String {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while matches!(tls.read(&mut byte), Ok(1)) {
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") || head.len() > 64 * 1024 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// Read every byte that follows the head until the proxy closes the connection.
+    pub fn read_to_close(&mut self) -> Vec<u8> {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        while let Ok(n) = tls.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        bytes
+    }
+
+    /// Read what follows the head until `needle` appears, and return how long after `since` it
+    /// arrived. `None` when the proxy closes the connection first.
+    pub fn time_until(&mut self, needle: &[u8], since: Instant) -> Option<Duration> {
+        let tls = self.tls.as_mut().expect("connect (TLS) first");
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = tls.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&buf[..n]);
+            if seen.windows(needle.len()).any(|window| window == needle) {
+                return Some(since.elapsed());
+            }
+        }
+        None
+    }
+}
+
+/// The value of header `name` in a raw response head (case-insensitive), if present.
+pub fn header_value(head: &str, name: &str) -> Option<String> {
+    head.split("\r\n").skip(1).find_map(|line| {
+        let (n, v) = line.split_once(':')?;
+        n.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
+    })
+}
+
+/// Decode a chunked body. `None` when it is malformed or ends before its last chunk.
+pub fn decode_chunked(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut rest = raw;
+    loop {
+        let line_end = rest.windows(2).position(|pair| pair == b"\r\n")?;
+        let size_text = std::str::from_utf8(&rest[..line_end]).ok()?;
+        let size_text = size_text.split(';').next()?.trim();
+        let size = usize::from_str_radix(size_text, 16).ok()?;
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return Some(body);
+        }
+        if rest.len() < size + 2 || &rest[size..size + 2] != b"\r\n" {
+            return None;
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
     }
 }
 

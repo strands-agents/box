@@ -54,7 +54,7 @@ enum AttemptSnapshot {
         method: String,
         path: String,
         status: u16,
-        body_bytes: usize,
+        body_bytes: Option<usize>,
     },
 }
 
@@ -387,7 +387,7 @@ fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
         &events[5],
         Event::Attempt(AttemptSnapshot::ResponseRelease {
             status: 200,
-            body_bytes: 2,
+            body_bytes: Some(2),
             ..
         })
     ));
@@ -518,7 +518,7 @@ fn scrubbed_cross_host_redirect_crosses_response_release() {
         event,
         Event::Attempt(AttemptSnapshot::ResponseRelease {
             status: 302,
-            body_bytes: 10,
+            body_bytes: Some(10),
             ..
         })
     )));
@@ -611,14 +611,18 @@ fn a_request_with_no_reply_records_its_delivery_without_a_status() {
     );
 }
 
-/// A reply whose body is cut short after its head: the request outcome keeps the status the head
-/// carried, so a rule counting 500 replies still sees it.
+/// A streamed reply whose body is cut short after its head: the request outcome keeps the status
+/// the head carried, so a rule counting 500 replies still sees it. The head and the bytes before
+/// the cut reach the workload, the release is claimed at the head with the declared length, and
+/// its outcome is partial.
 #[test]
 fn a_reply_cut_short_after_its_head_records_its_status() {
     const RESPONSE: &[u8] =
         b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort";
     let host = "short-reply.test";
-    let upstream = TlsUpstream::start_with_response(host, RESPONSE);
+    // The upstream sends the head and 5 of the 100 bytes, pauses, then closes.
+    let pieces = vec![RESPONSE.to_vec(), Vec::new()];
+    let upstream = TlsUpstream::start_in_pieces(host, pieces, Duration::from_millis(200));
     let port = upstream.port();
     let shared = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
@@ -630,6 +634,92 @@ fn a_reply_cut_short_after_its_head_records_its_status() {
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("GET", "/short", &[], b"");
+    let head = client.read_head();
+    assert!(
+        head.starts_with("HTTP/1.1 500"),
+        "the head streams: {head:?}"
+    );
+    assert_eq!(
+        client.read_to_close(),
+        b"short",
+        "the body ends where the upstream cut it"
+    );
+
+    let events = wait_for_event_count(&shared, 7);
+    assert!(
+        matches!(
+            &events[4],
+            Event::Outcome(
+                EffectKind::HttpRequest,
+                EffectOutcome::Replied { status: 500, .. }
+            )
+        ),
+        "{:?}",
+        event_names(&events)
+    );
+    assert!(
+        matches!(
+            &events[5],
+            Event::Attempt(AttemptSnapshot::ResponseRelease {
+                status: 500,
+                body_bytes: Some(100),
+                ..
+            })
+        ),
+        "{:?}",
+        event_names(&events)
+    );
+    assert!(
+        matches!(
+            &events[6],
+            Event::Outcome(
+                EffectKind::ResponseRelease,
+                EffectOutcome::Partial { accepted_bytes, .. }
+            ) if *accepted_bytes == head.len() + 5
+        ),
+        "a cut-short release is partial, with the bytes the workload took: {:?}",
+        &events[6..]
+    );
+}
+
+/// The same reply from a host with a bound credential is buffered for the leak-back scrub, so a
+/// body cut short is never released: the workload gets nothing, and no release follows.
+#[test]
+fn a_reply_cut_short_from_a_credentialed_host_is_not_released() {
+    const RESPONSE: &[u8] =
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort";
+    const SECRET: &str = "sk_live_cut_short_secret";
+    let host = "short-credentialed.test";
+    let upstream = TlsUpstream::start_with_response(host, RESPONSE);
+    let port = upstream.port();
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(host, port),
+            env_locator(SECRET),
+            InjectMode::header("Bearer {}".to_string(), None).expect("a valid header placement"),
+        ),
+    ))
+    .unwrap();
+    let phantom = opened.phantoms()[0].token().to_string();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(host, port),
+        Arc::new(opened.into_vault()),
+    )]);
+    let handle = MitmInterceptor::start(
+        config_for(host, &upstream),
+        controls,
+        Arc::new(RecordingInterceptor::allowing(shared.clone())),
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request(
+        "GET",
+        "/short",
+        &[("Authorization", &format!("Bearer {phantom}"))],
+        b"",
+    );
     assert_eq!(client.read_response(), "", "a torn reply is not released");
 
     let events = wait_for_event_count(&shared, 5);

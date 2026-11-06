@@ -1414,7 +1414,7 @@ mod tests {
                 method: "POST",
                 path: "/v1/messages",
                 status: 201,
-                body_bytes: 84,
+                body_bytes: Some(84),
             })
             .expect("response release is allowed")
             .record_outcome(EgressEffectOutcome::Completed(120))
@@ -1440,7 +1440,7 @@ mod tests {
             method: "GET",
             path: "/",
             status: 200,
-            body_bytes: 0,
+            body_bytes: Some(0),
         };
 
         // A cap of two `::response` records within the window. One exchange must leave it unfired.

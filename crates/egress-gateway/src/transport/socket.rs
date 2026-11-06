@@ -58,6 +58,24 @@ pub(crate) struct Writes {
 }
 
 impl Writes {
+    /// The outcome of a message that starts at `start` and whose body failed partway, as a
+    /// streamed body does when its upstream stops early: the peer took only a prefix, however
+    /// cleanly that prefix was flushed.
+    pub(crate) fn cut_short(self, start: usize, error_kind: io::ErrorKind) -> EffectOutcome {
+        let accepted_bytes = self.accepted.saturating_sub(start);
+        if accepted_bytes == 0 {
+            EffectOutcome::Failed {
+                accepted_bytes,
+                error_kind,
+            }
+        } else {
+            EffectOutcome::Partial {
+                accepted_bytes,
+                error_kind,
+            }
+        }
+    }
+
     /// The outcome of a message that starts at `start`, in an exchange that ended with `error`.
     pub(crate) fn outcome(self, start: usize, error: Option<io::ErrorKind>) -> EffectOutcome {
         let accepted_bytes = self.accepted.saturating_sub(start);

@@ -5,7 +5,7 @@ use std::future::Future;
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use http_body_util::Full;
+use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderName, HeaderValue, PROXY_AUTHORIZATION};
 use hyper::upgrade::OnUpgrade;
@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 
 use crate::audit::RequestId;
+use crate::client::http::UpstreamBody;
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::connect::{self, ConnectRequest};
 use crate::intercept::mitm::l7::{self, WorkloadResponse};
@@ -196,22 +197,32 @@ where
         .with_upgrades()
         .await;
     if let Some((permit, start)) = release.take() {
-        let error = served.as_ref().err().map(|error| socket::error_kind(error));
-        permit
-            .record_outcome(writes.get().outcome(start, error))
-            .map_err(|error| {
-                ProxyError::Io(format!(
-                    "recording governed response outcome after I/O: {error}"
-                ))
-            })?;
+        let written = writes.get();
+        let outcome = match served.as_ref().err() {
+            // The response body failed after its head, as a streamed body does when its upstream
+            // stops early: hyper reports the body's error as a user error.
+            Some(error) if error.is_user() => written.cut_short(start, socket::error_kind(error)),
+            error => written.outcome(start, error.map(|error| socket::error_kind(error))),
+        };
+        permit.record_outcome(outcome).map_err(|error| {
+            ProxyError::Io(format!(
+                "recording governed response outcome after I/O: {error}"
+            ))
+        })?;
     }
     served.map_err(|error| ProxyError::Io(format!("serving the workload: {error}")))
 }
 
-/// The response as hyper writes it. hyper frames a body itself, so a stale length is dropped.
-fn hyper_response(response: WorkloadResponse) -> Response<Full<Bytes>> {
-    let keep_length = response.body.is_empty() && response.status != 204;
-    let mut out = Response::new(Full::new(Bytes::from(response.body)));
+/// The response as hyper writes it. hyper frames a body itself, so a stale length is dropped. A
+/// streamed body goes out as it arrives, framed by the length the upstream declared, or chunked.
+fn hyper_response(response: WorkloadResponse) -> Response<Either<Full<Bytes>, UpstreamBody>> {
+    let keep_length =
+        response.streamed.is_none() && response.body.is_empty() && response.status != 204;
+    let body = match response.streamed {
+        Some(streamed) => Either::Right(*streamed),
+        None => Either::Left(Full::new(Bytes::from(response.body))),
+    };
+    let mut out = Response::new(body);
     *out.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     *out.extensions_mut() = response.header_case;
     if let Some(reason) = response.reason {
@@ -245,6 +256,7 @@ mod tests {
             reason: None,
             headers,
             body: body.to_vec(),
+            streamed: None,
             release: None,
             header_case: Default::default(),
         }

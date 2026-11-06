@@ -274,11 +274,20 @@ where
     })
 }
 
-/// Read the upstream's final response up to `max_body`, and refuse an ambiguous framing first.
-pub(crate) async fn read_response(
-    response: hyper::Response<hyper::body::Incoming>,
-    max_body: usize,
-) -> Result<ParsedResponse> {
+/// A final response head from the upstream, checked as [`read_response`] checks it.
+pub(crate) struct ResponseHead {
+    pub(crate) status: u16,
+    /// The headers, with the hop-by-hop fields removed.
+    pub(crate) headers: HeaderMap,
+    /// The body length the upstream declared in `Content-Length`, if it declared one.
+    pub(crate) declared_len: Option<usize>,
+    /// The header case the upstream sent, which hyper writes back to the workload.
+    pub(crate) header_case: hyper::http::Extensions,
+}
+
+/// Check the upstream's final response head, refusing an upgrade and an ambiguous framing, and
+/// return the body unread.
+pub(crate) fn read_response_head<B>(response: hyper::Response<B>) -> Result<(ResponseHead, B)> {
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
     if status == 101 {
@@ -293,17 +302,36 @@ pub(crate) async fn read_response(
         )
     }));
     let framing = explicit_body_framing(&headers)?;
+    let declared_len = match &framing {
+        Some(BodyFraming::ContentLength(len)) => Some(*len),
+        _ => None,
+    };
     validate_transfer_coding_version(
         Some(u8::from(head.version == hyper::Version::HTTP_11)),
         framing,
     )?;
-    let body = collect(body, max_body).await?;
     strip_hop_by_hop_headers(&mut headers)?;
     // Pass on the header case, not the upstream's reason phrase.
     head.extensions.remove::<hyper::ext::ReasonPhrase>();
-    Ok(ParsedResponse {
-        response: InterceptedResponse::http(status, headers, body),
+    let head = ResponseHead {
+        status,
+        headers,
+        declared_len,
         header_case: head.extensions,
+    };
+    Ok((head, body))
+}
+
+/// Read the upstream's final response up to `max_body`, and refuse an ambiguous framing first.
+pub(crate) async fn read_response(
+    response: hyper::Response<hyper::body::Incoming>,
+    max_body: usize,
+) -> Result<ParsedResponse> {
+    let (head, body) = read_response_head(response)?;
+    let body = collect(body, max_body).await?;
+    Ok(ParsedResponse {
+        response: InterceptedResponse::http(head.status, head.headers, body),
+        header_case: head.header_case,
     })
 }
 
