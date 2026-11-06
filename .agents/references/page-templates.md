@@ -12,8 +12,6 @@ does not need. No YAML front matter.
 
 <One link to the reference that the operator needs next.>
 
-> **Status.** <One line if the contract still changes. Omit it if it is stable.>
-
 ## Before you start
 
 <Prerequisites as a list.>
@@ -114,3 +112,12 @@ link to the decision behind each reason.>
 
 Add a section on residual risk, platform differences, or a rejected alternative only when a reader
 would ask for it. Each heading in angle brackets is a placeholder: write the real heading.
+
+## Developer guide and crate README
+
+For a developer task, adapt the how-to skeleton to a contributor. Include the build or runtime
+prerequisites, commands, expected results, and failure diagnosis. For a developer contract, use
+the reference skeleton.
+
+For a crate README, state the purpose, public interface, usage example, and build or test steps.
+Keep the current structure during a wording-only rewrite.

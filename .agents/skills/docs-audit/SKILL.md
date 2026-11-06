@@ -1,6 +1,6 @@
 ---
 name: docs-audit
-description: Assess an existing Box documentation page (docs/user/, docs/design/, or a crate README.md) for accuracy against the code and its tests, placement, and voice, and recommend what to fix. Use before a rewrite, when a page may have drifted from the code, or when asked to "audit this page", "is this page still true", or "what is wrong with this doc".
+description: Audit an existing page in docs/user/, docs/design/, docs/dev/, or a crate README for accuracy, placement, and voice. Use when a page may have drifted from the code, before a rewrite that needs fact checking, or for a requested documentation audit.
 ---
 
 # Documentation audit
@@ -27,7 +27,8 @@ finding, and it is the most common structural problem.
 ### Step 2: Accuracy
 
 Follow [`claim-verification.md`](../../references/claim-verification.md). List each claim on the
-page, and check it against the code and the test that pins it.
+page and check it against the evidence required by that table. Behavior claims need the
+implementing code and a test that pins the behavior.
 
 **The code is the authority.** Where the page and the code disagree, the page is wrong. Name the
 symbol or the test that the page disagrees with. Never recommend a code change to agree with a page.
@@ -39,7 +40,9 @@ Check each of these:
 - Each policy action and field against `strands-box policy generate-schema`.
 - Each binary name against what ships (`Cargo.toml`, and the staging step in
   `.github/workflows/deploy-box-artifact.yml`).
-- A test still pins each claim. A test name on a design page is itself a finding.
+- Each developer command, prerequisite, and expected result against the script or workflow that
+  owns it.
+- A test still pins each behavior claim. A test name on a design page is itself a finding.
 - Each `decisions.md` anchor still exists, and the decision still says what the page says.
 - Each relative link resolves.
 - Each claim that a test pins is not stated more broadly than the test.

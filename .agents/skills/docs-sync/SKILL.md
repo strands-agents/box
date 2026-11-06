@@ -134,9 +134,9 @@ checked".
 
 ## Fixing
 
-When asked to fix, use `docs-writer` for a page in `docs/user/` or `docs/design/`, and the
-`voice-guide.md` layers for a crate `README.md`. Use `/kd` for `docs/design/decisions.md`, and only
-when the user decides the question.
+When asked to fix a user, design, or developer guide, or a crate README, use
+[`docs-writer`](../docs-writer/SKILL.md). It includes the independent review and rewrite comparison.
+Use `/kd` for `docs/design/decisions.md`, and only when the user decides the question.
 
 ## Rules
 
