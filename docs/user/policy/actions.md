@@ -200,6 +200,9 @@ when { context.input has server && context.input.server == "time" };
 
 The `has server` guard is required because ordinary shell commands have no server name.
 The name comes from the admitted configuration entry, not from the command's arguments.
+With `argument_wildcards = true`, a permit that checks only the server name accepts any value
+in the `*` positions. To restrict those values, also check the corresponding argument fields
+or `command`.
 A tool grammar action keeps its own input schema; the server field above belongs to
 `shell:spawn`.
 
