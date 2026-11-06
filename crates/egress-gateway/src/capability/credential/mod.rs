@@ -38,17 +38,9 @@ impl CredentialCapability {
             return Ok(Vec::new());
         }
 
-        // The vault owns the whole decision: which binding, where the phantom is, whether it matches,
-        // and — for a signed route — the signature. There is no partial answer to mishandle here.
         // The vault signs these headers, so each one must already hold the value that goes on the
-        // wire, including the `accept-encoding` this capability forces below.
-        let mut headers: Vec<(String, String)> = req
-            .headers
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"))
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
-        headers.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));
+        // wire, including the `accept-encoding` this capability forces.
+        let headers = headers_for_signing(req.headers.iter());
         let url = req.target.url();
         let outbound = Outbound {
             destination: req.target.as_destination(),
@@ -58,18 +50,34 @@ impl CredentialCapability {
             headers: &headers,
             body: &req.body,
         };
+        let (mutations, advisory) = self.edits_for(outbound)?;
+        // An advisory injection (secret attached without a matching placeholder) is a noteworthy
+        // allow. Set only when present, so a second matching control's normal swap cannot clobber it.
+        if let Some(reason) = advisory {
+            req.advisory_note = Some(reason);
+        }
+        Ok(mutations)
+    }
 
+    /// The SigV4 edits for a re-routed request whose `Host` the gateway has already rewritten to the
+    /// backend. `outbound` presents the BACKEND host and the forwarded path, so the backend vault's
+    /// signed route (keyed on the backend host) matches and signs over exactly the bytes the backend
+    /// receives. A backend carrying no signing auth matches nothing and returns no edits.
+    pub(super) fn on_backend_request(&self, outbound: Outbound<'_>) -> Outcome {
+        Ok(self.edits_for(outbound)?.0)
+    }
+
+    /// Turn the vault's `attach_for` result for `outbound` into mutations, plus the advisory reason
+    /// when the vault set one. Shared by the request leg and the post-rewrite backend signature.
+    fn edits_for(
+        &self,
+        outbound: Outbound<'_>,
+    ) -> std::result::Result<(Vec<Mutation>, Option<String>), String> {
         match self.store.attach_for(outbound) {
             // The vault governs no credential for this destination.
-            Ok(None) => Ok(Vec::new()),
+            Ok(None) => Ok((Vec::new(), None)),
             Ok(Some(attachment)) => {
-                // An advisory injection (secret attached without a matching placeholder) is a
-                // noteworthy allow. Carry the vault's non-secret reason to the driver, which journals
-                // it on the allow decision with the destination and requester correlation. Set only
-                // when present, so a second matching control's normal swap cannot clobber the note.
-                if let Some(reason) = attachment.advisory_reason() {
-                    req.advisory_note = Some(reason.to_string());
-                }
+                let advisory = attachment.advisory_reason().map(str::to_string);
                 let mut mutations = Vec::new();
                 // Strips first: the phantom must be gone before the real secret is set, and for a
                 // signed route every inbound signing artifact must be gone before the signature lands.
@@ -107,7 +115,7 @@ impl CredentialCapability {
                     name: "accept-encoding".to_string(),
                     value: Zeroizing::new(IDENTITY_ENCODING.to_string()),
                 });
-                Ok(mutations)
+                Ok((mutations, advisory))
             }
             // An ambiguous binding, a missing or mismatched phantom, an underivable signing scope, or a
             // signer error. Every one of them means the request must not go out carrying this
@@ -166,6 +174,26 @@ impl CredentialCapability {
         }
         Ok(mutations)
     }
+}
+
+/// The request headers to sign over: every header except `accept-encoding` and `content-length`,
+/// then `identity` forced. The signer must cover exactly the headers that leave. `accept-encoding`
+/// is re-added as `identity` (the scrub needs an unencoded response). `content-length` is dropped
+/// because the forwarding layer owns it — `write_request` refreshes it, and omits it entirely on a
+/// bodyless request — so signing the workload's value would attest a header the request may not
+/// send, which a strict SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
+pub(super) fn headers_for_signing<'a>(
+    headers: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = headers
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("accept-encoding")
+                && !name.eq_ignore_ascii_case("content-length")
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    out.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));
+    out
 }
 
 /// The response's `Content-Encoding` when it names any coding other than `identity`.

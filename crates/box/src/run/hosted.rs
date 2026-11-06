@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
-    CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
+    BackendDial, CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
 };
 use policy::{
     EgressPolicyInterceptor, GovernedBox, McpServerKind, PolicyEngine, Principal, ToolCatalogs,
@@ -743,13 +743,45 @@ impl HostedBox {
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
+        // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
+        // provisioned to the workload and stripped at the gateway) and its box-owned backend token
+        // (attached at the gateway, never placed in the workload environment). One control per
+        // destination.
+        let credential::BackendProjection {
+            capabilities: backend_capabilities,
+            workload_environment: backend_environment,
+        } = credential::backend_capabilities(&record.backend_credentials()?)?;
         let capabilities = CapabilitySet::new(
             projection
                 .capabilities
                 .into_iter()
+                .chain(backend_capabilities)
                 .map(|(destination, store)| CredentialCapability::new(destination, store))
                 .collect(),
         );
+        // Every phantom the workload receives: the destination-secret phantoms from the ordinary
+        // routes, plus the strip-phantom placeholders from the backend entries, sharing one
+        // placeholder for a variable named by both.
+        let workload_environment = credential::merge_workload_environment(
+            projection.workload_environment,
+            backend_environment,
+        );
+        // The backend dial targets the gateway re-routes to, keyed by the original destination
+        // pattern. The host decision still runs on the original; the address decision runs on the
+        // backend address.
+        let backend_dials: Vec<(credentials::DestinationPattern, BackendDial)> = record
+            .backend_dials()?
+            .into_iter()
+            .map(|(pattern, target)| {
+                let dial = BackendDial {
+                    tls: target.is_tls(),
+                    host: target.host,
+                    port: target.port,
+                    path_prefix: target.path_prefix,
+                };
+                (pattern, dial)
+            })
+            .collect();
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -798,6 +830,8 @@ impl HostedBox {
                 intercept_ca_dir: Some(trust.clone()),
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
+                // The destinations that re-route to a backend.
+                backends: backend_dials,
                 ..MitmConfig::default()
             },
             capabilities,
@@ -852,7 +886,7 @@ impl HostedBox {
             proxy_port,
             telemetry_port,
             trust_bundle,
-            phantoms: projection.workload_environment,
+            phantoms: workload_environment,
         };
         let launched = |server: &crate::record::config::mcp::McpServer| match record
             .contained_mcp

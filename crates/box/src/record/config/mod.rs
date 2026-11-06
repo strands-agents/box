@@ -46,8 +46,8 @@ use crate::error::{BoxError, ConfigError};
 #[cfg(test)]
 use self::egress::routes_for;
 use self::egress::{
-    EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote, validate_egress,
-    validate_egress_and_remote,
+    BackendTarget, EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote,
+    validate_egress, validate_egress_and_remote,
 };
 #[cfg(test)]
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
@@ -55,6 +55,7 @@ use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 use self::env::{reserved_workload_environment, valid_environment_name};
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
+use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
 pub(super) const DEFAULT_HEADER: &str = "Authorization";
@@ -463,6 +464,8 @@ impl RunContract {
                         destinations: remote.destinations,
                         protocol: Protocol::Mcp,
                         secret: remote.secret,
+                        // A remote MCP server is never a re-route target; it declares no backend.
+                        backends: Vec::new(),
                     },
                 )
             })
@@ -485,6 +488,7 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
+                    has_backend(&egress, &remote_mcp),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -609,7 +613,12 @@ pub(crate) struct Record {
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
 }
 
-/// The ordinary record format; native enforcement uses version 22. Version 21 adds `network` to each
+/// The ordinary record format; native enforcement uses version 22. Version 28 adds `backends` to an
+/// `[egress.<name>]` entry (a destination re-routes to one backend), so a build that predates the
+/// re-route is refused with a version mismatch rather than failing on the unknown `backends` field.
+/// Versions 25 through 27 cover `file-attributes`, whole-argument MCP wildcards, and configured
+/// execution limits, each documented on its constant below.
+/// Version 21 adds `network` to each
 /// `[tool.<name>]`, and stores a stdio MCP server's network in its spec's `network`, where version
 /// 20 kept a separate `native_egress` flag on `ContainedMcp`. Version 20 names a secret's injection mode
 /// `secret.inject`, taking `phantom` or `always`, where version 19 took `secret.phantom` with
@@ -632,6 +641,8 @@ const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 27;
+/// The record version of a record whose egress re-routes a destination to a backend.
+const BACKEND_RECORD_VERSION: u32 = 28;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,15 +682,20 @@ impl ExperimentalFeatures {
     }
 }
 
-/// The record version for what a record holds.
+/// The record version for what a record holds. A backend re-route is the newest feature, so it wins
+/// over the others: a record that carries one requires a build that understands `backends`, which
+/// understands every earlier format too.
 fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
+    has_backend: bool,
 ) -> u32 {
-    if !limits.is_default() {
+    if has_backend {
+        BACKEND_RECORD_VERSION
+    } else if !limits.is_default() {
         LIMITS_RECORD_VERSION
     } else if mcp.iter().any(|server| server.argument_wildcards) {
         MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
@@ -690,6 +706,17 @@ fn record_version<'a>(
     } else {
         process_record_version(features, specs)
     }
+}
+
+/// Whether any egress or remote-MCP entry re-routes its destination to a backend.
+fn has_backend(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> bool {
+    egress
+        .values()
+        .chain(remote_mcp.values())
+        .any(|entry| !entry.backends.is_empty())
 }
 
 fn process_record_version<'a>(
@@ -936,6 +963,7 @@ impl Record {
             FILE_ATTRIBUTES_RECORD_VERSION,
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -959,6 +987,7 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
+            has_backend(&record.egress, &record.remote_mcp),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1010,6 +1039,42 @@ impl Record {
     /// destination, so the gateway learns every plain-HTTP credential and every remote MCP host.
     pub(crate) fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
         routes_for_and_remote(&self.egress, &self.remote_mcp)
+    }
+
+    /// The credential routes for each backend entry, grouped per entry so each opens in one vault
+    /// (one credential authority on one destination): the entry's strip-phantom destination secret
+    /// and its box-owned backend token together. An entry with no credentials contributes no group.
+    pub(crate) fn backend_credentials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
+        let mut groups = Vec::new();
+        for entry in self.egress.values() {
+            let routes = entry.backend_credential_routes()?;
+            if routes.is_empty() {
+                continue;
+            }
+            // The vault registers under the ORIGINAL destination, so the gateway finds it both for
+            // the pre-rewrite strip (keyed on the original) and the post-rewrite backend signature
+            // (whose signed route is keyed on the backend host). A backend entry has exactly one
+            // destination, so `primary_destination` is `Some`.
+            let Some(original) = entry.primary_destination()? else {
+                continue;
+            };
+            groups.push((original, routes));
+        }
+        Ok(groups)
+    }
+
+    /// The backend dial target for every re-routed destination, keyed by the original destination
+    /// pattern. The gateway dials these instead of the original destination.
+    pub(crate) fn backend_dials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
+        let mut dials = Vec::new();
+        for entry in self.egress.values() {
+            dials.extend(entry.backend_dials()?);
+        }
+        Ok(dials)
     }
 
     /// The remote MCP servers this box declares, as `(host, name)` pairs — one per destination of
@@ -1379,7 +1444,8 @@ mod tests {
                 &stored.experimental_features,
                 &stored.limits,
                 std::iter::empty(),
-                &stored.mcp
+                &stored.mcp,
+                has_backend(&stored.egress, &stored.remote_mcp)
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1605,6 +1671,7 @@ mod tests {
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
+                                    false,
                                 ),
                                 27
                             );
@@ -2268,6 +2335,7 @@ native-filesystem-policy = false
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["api.stripe.com".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -2481,7 +2549,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, BACKEND_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2707,6 +2775,7 @@ env = {}
                 (
                     "wildcard".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["*.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2723,6 +2792,7 @@ env = {}
                 (
                     "exact".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["api.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2754,6 +2824,7 @@ env = {}
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["*:443".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -2808,6 +2879,7 @@ env = {}
         stored.egress.insert(
             "model".to_string(),
             EgressEntry {
+                backends: Vec::new(),
                 destinations: vec!["api.stripe.com".to_string()],
                 protocol: Protocol::Http,
                 secret: Some(EgressSecret {
@@ -3337,6 +3409,54 @@ command = ["mcp-server-fetch"]
             Record::parse(&distinct.to_toml().unwrap(), Path::new("record.toml")),
             Err(ConfigError::RecordVersion {
                 found: SHARED_PROGRAM_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    /// A `box.toml` whose egress re-routes a destination to a backend.
+    const BACKEND_EGRESS: &str = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         [[egress.github.backends]]\nurl = \"https://gateway-1.example.com/github\"\n";
+
+    /// A re-route stores the backend record version, which no earlier build reads.
+    #[test]
+    fn a_backend_reroute_stores_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(BACKEND_EGRESS);
+        assert_eq!(stored.version, BACKEND_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// A re-routing record may not hide under an earlier version.
+    #[test]
+    fn the_backend_version_states_what_the_record_holds() {
+        let mut reroute = pinned_record(BACKEND_EGRESS);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            reroute.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&reroute.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: BACKEND_RECORD_VERSION })
+                        if found == version
+                ),
+                "a re-route may not hide under version {version}"
+            );
+        }
+        let mut plain = pinned_record(DISTINCT_PROGRAMS);
+        plain.version = BACKEND_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&plain.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: BACKEND_RECORD_VERSION,
                 expected: RECORD_VERSION
             })
         ));

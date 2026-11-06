@@ -327,9 +327,25 @@ fn push_header_line(out: &mut String, name: &str, value: &str) {
 
 /// Append the refreshed `Content-Length` header and the blank-line head terminator, formatting the
 /// length in place (no temporary allocation).
-fn write_content_length_and_terminator(out: &mut String, len: usize) {
+fn write_content_length_and_terminator(out: &mut String, method: &str, len: usize) {
     use std::fmt::Write as _;
-    let _ = write!(out, "Content-Length: {len}\r\n\r\n");
+    // RFC 7230 3.3.2: a user agent SHOULD NOT send Content-Length on a request with no body whose
+    // method does not anticipate one. A `Content-Length: 0` on a GET is rejected by some strict
+    // origins (an nginx/CloudFront front answers 400), so omit it; a body-bearing method keeps the
+    // explicit `0` so the origin does not wait for a body.
+    if len > 0 || method_anticipates_body(method) {
+        let _ = write!(out, "Content-Length: {len}\r\n\r\n");
+    } else {
+        out.push_str("\r\n");
+    }
+}
+
+/// Whether the method's semantics anticipate a request body, so an empty body is framed as
+/// `Content-Length: 0` rather than omitted.
+fn method_anticipates_body(method: &str) -> bool {
+    ["POST", "PUT", "PATCH"]
+        .iter()
+        .any(|anticipating| method.eq_ignore_ascii_case(anticipating))
 }
 
 /// A head-buffer capacity that the write cannot exceed, so `out` allocates **once**.
@@ -373,7 +389,7 @@ pub(super) fn write_request(
         push_header_line(&mut out, name, value);
     }
     out.push_str("Connection: close\r\n");
-    write_content_length_and_terminator(&mut out, body_len);
+    write_content_length_and_terminator(&mut out, method, body_len);
     Ok(out)
 }
 
@@ -537,6 +553,40 @@ mod tests {
         assert!(matches!(check(response), Err(ProxyError::Intercept(_))));
     }
 
+    /// A bodyless request whose method does not anticipate a body omits `Content-Length` (RFC 7230
+    /// 3.3.2); a body-bearing method frames its empty body with `Content-Length: 0`, and any request
+    /// with a real body is framed.
+    #[test]
+    fn a_bodyless_get_omits_content_length_but_a_body_method_keeps_it() {
+        let headers = HeaderMap::from_pairs([("Host".to_string(), "h".to_string())]);
+
+        for method in ["GET", "HEAD", "DELETE", "OPTIONS", "get"] {
+            let head = write_request(method, "/zen", &headers, 0).unwrap();
+            assert!(
+                !head.to_ascii_lowercase().contains("content-length"),
+                "{method} with no body must omit Content-Length: {}",
+                *head
+            );
+            assert!(
+                head.ends_with("\r\n\r\n"),
+                "{method}: head still terminates"
+            );
+        }
+
+        for method in ["POST", "PUT", "PATCH"] {
+            let head = write_request(method, "/x", &headers, 0).unwrap();
+            assert!(
+                head.contains("Content-Length: 0"),
+                "{method} frames its empty body so the origin does not wait: {}",
+                *head
+            );
+        }
+
+        // A GET that does carry a body is framed — the omission is for a *bodyless* request only.
+        let with_body = write_request("GET", "/x", &headers, 5).unwrap();
+        assert!(with_body.contains("Content-Length: 5"));
+    }
+
     /// The head buffer never outgrows its estimate, so the credential in it is never `memcpy`'d to a
     /// new allocation and left behind unscrubbed.
     #[test]
@@ -607,7 +657,7 @@ mod tests {
                 push_header_line(&mut out, name, value);
             }
             out.push_str("Connection: close\r\n");
-            write_content_length_and_terminator(&mut out, usize::MAX);
+            write_content_length_and_terminator(&mut out, method, usize::MAX);
 
             assert!(
                 out.len() <= budget,

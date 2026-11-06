@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::audit::RequestId;
 
+use super::BackendDial;
 use super::SharedState;
 use super::connect::ConnectRequest;
 use super::l7::{self, WorkloadResponse};
@@ -118,14 +119,19 @@ impl OpenUpstreamError {
 
 /// Run the connect decisions for one destination, for every transport and request shape, and
 /// open the pinned upstream socket. On refusal, return the refusal for the caller to answer.
+///
+/// When the destination re-routes to a backend, the returned [`BackendDial`] names the host the
+/// upstream leg must present (SNI, certificate, `Host`); `None` leaves the upstream leg on the
+/// original destination.
 pub(crate) fn open_governed_upstream(
     state: &SharedState,
     connect: &ConnectRequest,
     correlation: &RequestId,
-) -> std::result::Result<TcpStream, OpenUpstreamError> {
+) -> std::result::Result<(TcpStream, Option<BackendDial>), OpenUpstreamError> {
     // Policy decides the host before it is resolved, so a denied destination sends no DNS query: a
     // workload cannot carry data out in the labels of a name the gateway looks up and then refuses.
-    // The per-address `net:connect` below still decides every resolved address.
+    // The host decision is the ORIGINAL destination — the agent's intent — even when a backend
+    // re-routes the dial; the per-address `net:connect` below decides every resolved BACKEND address.
     let resolve = EffectAttempt::Resolve {
         host: &connect.host,
         port: connect.port,
@@ -149,11 +155,22 @@ pub(crate) fn open_governed_upstream(
         }
     }
 
+    // A backend re-routes the dial to a different host and port. Box resolves and dials only the
+    // backend; it never resolves or dials the original destination. The host decision above already
+    // ran on the original, so the agent's intent is authorized exactly once
+    // (docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination). The
+    // supervisor DNS override applies to whichever host is actually resolved.
+    let backend = state.backend_for(&connect.host, connect.port).cloned();
+    let (resolve_host, resolve_port) = match &backend {
+        Some(dial) => (dial.host.as_str(), dial.port),
+        None => (connect.host.as_str(), connect.port),
+    };
+
     // Resolve-once + pin, honoring any supervisor DNS override. A resolution failure
-    // is a hard 502, never a retry.
-    let override_ip = state.dns_override(&connect.host);
+    // is a hard 502, never a retry — and never a fallback to the original destination.
+    let override_ip = state.dns_override(resolve_host);
     let pinned =
-        match PinnedDestination::resolve_with_override(&connect.host, connect.port, override_ip) {
+        match PinnedDestination::resolve_with_override(resolve_host, resolve_port, override_ip) {
             Ok(pinned) => pinned,
             Err(error) => {
                 emit_connect_decision(
@@ -169,9 +186,11 @@ pub(crate) fn open_governed_upstream(
 
     // Authorization is Cedar's, enforced inside `open_upstream` through the `EffectInterceptor` seam
     // (`EffectAttempt::Connect`) before the socket opens — there is no allow/deny authority in this
-    // crate. Every connection is terminated and inspected; see `open_upstream`'s `http_visibility` for
-    // why no route is an opaque tunnel.
-    open_upstream(state, connect, &pinned, correlation)
+    // crate. The Connect carries the ORIGINAL host and port; the backend address and port appear only
+    // in the dialled `address`. Every connection is terminated and inspected; see `open_upstream`'s
+    // `http_visibility` for why no route is an opaque tunnel.
+    let upstream = open_upstream(state, connect, &pinned, correlation)?;
+    Ok((upstream, backend))
 }
 
 /// Claim and perform pinned upstream socket attempts shared by TLS and opaque paths.
@@ -718,5 +737,163 @@ mod tests {
         assert_eq!(fixture.refused.addr.port(), fixture.dead.port());
         confirm_closed(fixture.dead).unwrap();
         fixture.refused.assert_live();
+    }
+
+    /// A [`SharedState`] whose config carries the given backend re-routes.
+    fn state_with_backends(
+        policy: Arc<dyn EffectInterceptor>,
+        backends: Vec<(credentials::DestinationPattern, BackendDial)>,
+    ) -> SharedState {
+        let config = super::super::MitmConfig {
+            backends,
+            ..super::super::MitmConfig::default()
+        };
+        SharedState {
+            controls: CapabilitySet::default(),
+            config,
+            ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
+            upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
+            emitter: Box::new(StubEmitter::new()),
+            effect_interceptor: policy,
+        }
+    }
+
+    /// A destination with a backend dials ONLY the backend address, and the per-address decision runs
+    /// on the backend address while the host decision stays on the original destination. The original
+    /// destination is never resolved or dialled.
+    #[test]
+    fn a_backend_reroutes_the_dial_to_the_backend_address() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let backend_ip = backend.addr.ip();
+        let backend_port = backend.addr.port();
+
+        // The backend host is a literal IP, so it resolves to itself with no DNS — the dial lands on
+        // the recorder. The original destination is a name that MUST NOT be resolved; if it were, the
+        // test would hit the network. The policy permits only the backend IP.
+        let policy = AddressPolicy::permitting(backend_ip);
+        let dial = BackendDial {
+            host: backend_ip.to_string(),
+            port: backend_port,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(policy.clone(), vec![(pattern, dial)]);
+
+        let correlation = RequestId::new("test");
+        let (upstream, backend_leg) =
+            open_governed_upstream(&shared, &connect_to("api.github.com", 443), &correlation)
+                .ok()
+                .expect("the backend address connects");
+
+        // The dial landed on the backend recorder, not the original destination.
+        assert_eq!(
+            upstream.peer_addr().unwrap(),
+            SocketAddr::new(backend_ip, backend_port)
+        );
+        assert_eq!(
+            backend.accepted(),
+            before + 1,
+            "the backend was dialled once"
+        );
+        // The per-address decision saw the BACKEND address, never the original destination's.
+        assert_eq!(
+            policy.seen(),
+            vec![(SocketAddr::new(backend_ip, backend_port), true)],
+            "the address check runs on the backend address"
+        );
+        // The returned leg names the backend the upstream must present.
+        let leg = backend_leg.expect("a re-routed destination returns its backend leg");
+        assert_eq!(leg.host, backend_ip.to_string());
+        assert_eq!(leg.port, backend_port);
+        drop(upstream);
+    }
+
+    /// A backend whose address the policy denies is refused, with no dial and no fallback to the
+    /// original destination. This is how the metadata and private-range floor refuses a backend that
+    /// resolves to a forbidden address.
+    #[test]
+    fn a_backend_whose_address_is_denied_is_refused_with_no_dial() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let backend_ip = backend.addr.ip();
+        let backend_port = backend.addr.port();
+
+        // The policy permits some OTHER address, so the backend's own address is denied.
+        let permitted_elsewhere = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let policy = AddressPolicy::permitting(permitted_elsewhere);
+        let dial = BackendDial {
+            host: backend_ip.to_string(),
+            port: backend_port,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(policy.clone(), vec![(pattern, dial)]);
+
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Denied(_))),
+            "a denied backend address refuses the connect"
+        );
+        assert_eq!(
+            policy.seen(),
+            vec![(SocketAddr::new(backend_ip, backend_port), false)],
+            "the address check ran on the backend address and denied it"
+        );
+        assert_eq!(
+            backend.accepted(),
+            before,
+            "the denied backend was never dialled"
+        );
+    }
+
+    /// A backend that resolves to nothing fails closed, with no fallback to the original destination.
+    #[test]
+    fn a_backend_that_resolves_to_nothing_fails_closed() {
+        // `.invalid` is reserved to never resolve (RFC 2606), so this is deterministic and offline.
+        let dial = BackendDial {
+            host: "no-such-host.invalid".to_string(),
+            port: 443,
+            tls: true,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(AddressPolicy::permit_all(), vec![(pattern, dial)]);
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Failed)),
+            "a backend that resolves to nothing fails closed"
+        );
+    }
+
+    /// A destination with no backend returns no backend leg, so the upstream leg stays on the
+    /// original destination (today's behaviour).
+    #[test]
+    fn no_backend_returns_no_leg() {
+        let recorder = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        let port = recorder.addr.port();
+        let ip = recorder.addr.ip();
+        let policy = AddressPolicy::permitting(ip);
+        let shared = state(policy);
+        let correlation = RequestId::new("test");
+        // A literal-IP destination resolves to itself, so no DNS and no network.
+        let (upstream, backend_leg) =
+            open_governed_upstream(&shared, &connect_to(&ip.to_string(), port), &correlation)
+                .ok()
+                .expect("the destination connects directly");
+        assert!(backend_leg.is_none(), "no backend means no re-route leg");
+        drop(upstream);
     }
 }

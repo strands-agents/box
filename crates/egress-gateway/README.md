@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 34 names, 30 unconditional and 4
+The crate root is the complete public API — 35 names, 30 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -28,7 +28,7 @@ behind the `tls-intercept` feature:
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
-| Default adapter | `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
+| Default adapter | `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.
 
@@ -196,7 +196,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has nine fields:
+`MitmConfig` has eleven fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -209,6 +209,8 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `dns_overrides` | `Vec<(String, IpAddr)>` | empty |
 | `upstream_read_deadline` | `Duration` | 300 s |
 | `max_connections` | `usize` | `256` |
+| `mcp_servers` | `Vec<(String, String)>` | empty |
+| `backends` | `Vec<(DestinationPattern, BackendDial)>` | empty |
 
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
@@ -220,6 +222,11 @@ upstream that never drains or sips the request, or never replies or drips its re
 exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
 exchange whose request and reply together take longer than the deadline, with no reply to the
 workload; `box.toml` exposes no key for it.
+
+`backends` re-routes a destination: a request whose destination matches a `BackendDial`'s pattern is
+dialled to that backend instead, the backend host is presented on the upstream leg, and the backend
+path prefix joins in front of the agent's path. The host decision still runs on the original
+destination and the address decision on the backend address, so policy judges the agent's intent.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, and `shutdown()`.

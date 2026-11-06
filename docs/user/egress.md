@@ -54,7 +54,8 @@ when { context.input.host == "api.github.com" };
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
-| `secret.ref` | string | required | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `secret.ref` | string | required, unless the entry declares a backend | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `backends` | table array | none | A destination to re-route this entry's requests to. At most one. See [Backends](#backends). |
 | `secret.placement` | string | `header` | For `env://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
 | `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` with `placement = "header"`: the text before the credential. |
@@ -91,6 +92,54 @@ The canonical form keeps repeated slashes, and a path prefix matches by whole se
 [Forbid one URL path on a host](policy.md#forbid-one-url-path-on-a-host) shows rules for these
 paths in policy.
 
+## Backends
+
+A backend re-routes an entry's requests to a destination you control. The agent sends a request to
+the destination, and the box sends it to the backend instead. Policy still decides the original
+destination, not the backend: the re-route is the box's action, not the agent's.
+
+```toml
+[egress.github]
+destinations = ["api.github.com"]
+
+[[egress.github.backends]]
+url      = "https://gateway-1.example.com/github"
+auth.ref = "env://BOX_GW_TOKEN"
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. A path prefix is allowed; a query or fragment is not. |
+| `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host. |
+
+The box dials the backend's host and port, presents the backend host for TLS and in the `Host`
+header, and validates the backend's certificate against the backend host. If the `url` has a path
+prefix, the box puts it in front of the agent's request path, so a request to `api.github.com/zen`
+with a backend `url` of `https://gateway-1.example.com/github` leaves as
+`gateway-1.example.com/github/zen`. The original destination and the agent's own path stay in policy
+and in the audit record. The box checks the backend's address against policy before it connects, so
+a `forbid` on a metadata or private address refuses a backend that resolves there.
+
+A backend's `auth` rides an `https` backend. An `env://` token is attached as-is; an `aws://` profile
+is SigV4-signed over the **backend** host — the box signs the request after it rewrites the `Host` to
+the backend, so the signature covers the bytes the backend receives, and it derives the service and
+region from the backend host (for example a Bedrock AgentCore Gateway signs as `bedrock-agentcore`).
+A `credsd://` auth is refused.
+
+An entry may keep its own `secret` beside a backend, and it must be `env://`. It is phantom-only: the
+box provisions the placeholder to the workload (so the agent's credential-shaped code works) and
+strips it from the request, and never injects the real destination credential — the backend handles
+the destination's auth. Because the box never reads the real value, the named variable need not be
+set; name it for the placeholder the workload expects. If the destination `secret` and the backend
+`auth` name the same header, the backend token wins.
+
+A backend entry names exactly one destination with an exact host: no path, no wildcard, and not
+several destinations. The box presents the backend host on the wire, so distinct origins sent to one
+backend would reach it as the same bytes with the agent's host lost. Write one entry per host.
+
+This version re-routes to one backend. More than one backend and routing rules are not yet
+available.
+
 ## Credential sources
 
 | `secret.ref` | Read from | When |
@@ -115,6 +164,12 @@ names is refused.
 | A route has no `destinations`, or an entry is empty, `*`, or has port `0` | Name each host the credential goes to. |
 | Two routes, or two entries in one route, match the same destination | Narrow one of them, for example by path or port. |
 | A route names an http MCP server's host | Put the credential on the `[mcp.<name>]` table. |
+| An entry declares more than one backend | Keep one backend. Routing across several is not yet available. |
+| A `backends.url` has a query, fragment, no host, or a scheme other than `http`/`https` | Name the backend as `scheme://host[:port][/prefix]`. A path prefix is allowed; a query or fragment is not. |
+| An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
+| An entry has a backend and a signed (`aws://`/`credsd://`) `secret` | A re-routed destination secret is phantom-only, so it must be `env://`. |
+| A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
+| A `backends.auth` uses `aws://`, but no AWS service/region can be derived from the backend host | An `aws://` auth signs over the backend host. Name an AWS backend host (such as a `*.gateway.bedrock-agentcore.<region>.amazonaws.com` gateway), or use an `env://` token. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |
