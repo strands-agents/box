@@ -7,8 +7,9 @@ Signing authorizes Endpoint Security access; it does not activate the experiment
 ## Configure access
 
 Create a GitHub environment named `macos-signing`.
-Restrict deployments to `main` and require a release owner to approve access.
+Restrict deployments to `main` and clear **Required reviewers** in the environment settings.
 Keep the existing `release-gate` environment for publication approval.
+A maintainer can produce signed artifacts before publication approval, including in signed dry runs.
 
 Create an AWS role for GitHub's OpenID Connect identity.
 OpenID Connect lets a workflow obtain temporary AWS credentials without a stored AWS access key.
@@ -76,7 +77,7 @@ The protected premerge mode below also permits a signed test from one upstream w
 
 For the complete signing test, dispatch from upstream `main` with `dry_run=true` and `sign_macos=true`.
 Select a source commit in `main` history.
-Approve the `macos-signing` environment request.
+Signing starts automatically after the tests and build pass.
 This run signs, notarizes, and tests the package, but does not publish a GitHub release.
 
 The macOS jobs use the `xcode-27` hosted runner.
