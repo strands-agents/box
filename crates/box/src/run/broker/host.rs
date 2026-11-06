@@ -272,8 +272,10 @@ impl ShellSpec {
     }
 }
 
-/// Decide `shell:spawn` for starting `server`, on the program the start will exec.
-fn authorize_mcp_start(
+/// Decide starting `server` on the program the start will exec: as its grammar action when a tool
+/// grammar binds that program, and as `shell:spawn` otherwise
+/// (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
+async fn authorize_mcp_start(
     spec: &ShellSpec,
     server: &crate::record::config::mcp::McpServer,
     program_path: &std::path::Path,
@@ -289,7 +291,8 @@ fn authorize_mcp_start(
             None => path.display().to_string(),
         }
     };
-    let program_path = reported(program_path);
+    let host_program_path = program_path.display().to_string();
+    let reported_program_path = reported(program_path);
     let cwd = reported(working_directory);
     let command_arguments = if server.has_argument_wildcards() {
         arguments
@@ -300,32 +303,57 @@ fn authorize_mcp_start(
         .chain(command_arguments.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-    let (decision, request_id) = spec.policy.decide(
-        &spec.governed,
-        &policy::Principal::agent(),
-        &policy::Request::ShellSpawn {
+    let credentials =
+        std::collections::BTreeMap::from([(host_program_path.clone(), credential_reads.to_vec())]);
+    let interceptor = policy::ShellPolicyInterceptor::into_server_start_handle(
+        Arc::clone(&spec.policy),
+        policy::Principal::agent(),
+        spec.governed.clone(),
+        home.map(std::path::PathBuf::from),
+        credentials,
+    );
+    let capture = crate::run::telemetry::ObservationCapture::begin();
+    let admitted = interceptor
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
             command: &command,
             program: server.program(),
-            program_path: &program_path,
-            credential_reads,
+            program_path: &host_program_path,
             args: arguments,
+            literal: &[],
             cwd: &cwd,
-        },
-    );
-    spec.recorder
-        .record(crate::run::telemetry::EffectiveDecision::from_policy(
-            r#"Box::Action::"shell:spawn""#,
-            &program_path,
-            &decision,
-        ));
-    match &decision {
-        policy::Decision::Allow { .. } => request_id
-            .map(|_| ())
-            .ok_or_else(|| io::Error::other("permitted MCP start has no committed request token")),
-        policy::Decision::Deny { .. } => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("MCP server {:?} may not start: {decision}", server.name),
-        )),
+        })
+        .await;
+    let determined = capture.last();
+    let action = determined
+        .as_ref()
+        .map_or(r#"Box::Action::"shell:spawn""#, |observed| {
+            observed.action()
+        });
+    match admitted {
+        Ok(_permit) => {
+            spec.recorder
+                .record(crate::run::telemetry::EffectiveDecision::gate_permit(
+                    action,
+                    &reported_program_path,
+                    "shell-policy",
+                    determined.as_ref(),
+                ));
+            Ok(())
+        }
+        Err(refused) => {
+            spec.recorder
+                .record(crate::run::telemetry::EffectiveDecision::gate_deny(
+                    action,
+                    &reported_program_path,
+                    "shell-policy",
+                    refused.to_string(),
+                    determined.as_ref(),
+                ));
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("MCP server {:?} may not start: {refused}", server.name),
+            ))
+        }
     }
 }
 
@@ -364,7 +392,8 @@ async fn start_mcp_server(
             boundary.arguments(),
             boundary.working_directory(),
             &credential_reads,
-        )?;
+        )
+        .await?;
         let leaf = launcher
             .spawn(boundary)
             .await
@@ -393,7 +422,8 @@ async fn start_mcp_server(
         server.arguments(),
         &spec.mcp_working_directory,
         &[],
-    )?;
+    )
+    .await?;
     // **NOT the box home.** The box home is the workload's own read-write grant, so starting an
     // uncontained child there let the agent plant the child's configuration with its own syscalls
     match spec.mcp_working_directory_handle.as_deref() {
@@ -1880,6 +1910,168 @@ done"#;
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(started.exists(), "the permitted server ran");
+        drop(running);
+    }
+
+    /// Every action an engine reports a verdict for.
+    #[derive(Default)]
+    struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+    impl policy::DecisionObserver for DecidedActions {
+        fn observed(&self, action: &str, _resource: &str, _decision: &policy::Decision) {
+            self.0
+                .lock()
+                .expect("the list locks")
+                .push(action.to_string());
+        }
+    }
+
+    /// `mcp_spec_with_policy`'s spec over an engine whose grammar `sh` binds `/bin/sh` as `sh`.
+    fn mcp_spec_with_bound_sh(
+        decided: Arc<DecidedActions>,
+        marker_directory: &Path,
+        history: &Path,
+        command: Vec<String>,
+        policy: &str,
+    ) -> Arc<ShellSpec> {
+        let table: toml::Table =
+            toml::from_str("format = 1\nversion = 1\nname = \"sh\"\nprogram = \"sh\"\n")
+                .expect("the grammar parses");
+        let grammars = policy::ToolGrammars::new(vec![
+            policy::ToolGrammar::from_table(table, "tool.sh.grammar").expect("the grammar loads"),
+        ])
+        .expect("one grammar installs");
+        let database = history.join("dogwood.redb");
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&database)
+            .expect("the history opens");
+        let engine = PolicyEngine::open_staged_file_with_grammars(
+            &policy::Operator::unanchored(),
+            vec![Policy {
+                origin: PathBuf::from("mcp-grammar-test.dw"),
+                text: policy.to_string(),
+            }],
+            grammars,
+            file,
+            database,
+        )
+        .expect("the policy opens");
+        let shell = Path::new("/bin/sh");
+        let mut bindings = engine.grammar_bindings();
+        bindings
+            .declare_tool(
+                &std::fs::File::open(shell).expect("the program opens"),
+                &shell.canonicalize().expect("the program resolves"),
+                shell,
+                "sh",
+            )
+            .expect("the program binds");
+        let server = Path::new(&command[0]);
+        bindings
+            .declare_server(
+                &std::fs::File::open(server).expect("the server program opens"),
+                &server.canonicalize().expect("the server program resolves"),
+                server,
+                server
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("the server program has a name"),
+            )
+            .expect("the server declares");
+        let mut spec = Arc::into_inner(mcp_spec_with_policy(marker_directory, command, ""))
+            .expect("the spec is not shared yet");
+        spec.policy = Arc::new(
+            engine
+                .observed_by(decided)
+                .bound_by(bindings)
+                .expect("the engine issued them"),
+        );
+        Arc::new(spec)
+    }
+
+    /// An MCP start whose program a tool grammar binds is decided as the grammar action, and a
+    /// `shell:spawn` permit does not admit it.
+    #[test]
+    fn an_mcp_start_of_a_bound_program_is_decided_as_its_grammar_action() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+        let decided = Arc::new(DecidedActions::default());
+        let spec = mcp_spec_with_bound_sh(
+            Arc::clone(&decided),
+            markers.path(),
+            history.path(),
+            command.clone(),
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+        let error = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .err()
+            .expect("no rule permits the grammar action");
+        assert_eq!(
+            decided.0.lock().expect("the list locks").as_slice(),
+            [r#"Tool::sh::Action::"unmodeled""#.to_string()]
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("policy denied this operation on '/")
+                && error.to_string().contains("[default-deny]"),
+            "{error}"
+        );
+
+        let history = tempfile::tempdir().expect("history directory");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Tool::sh::Action::"unmodeled", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the grammar action permit starts the server");
+        drop(running);
+    }
+
+    /// An MCP start under the server's own name on a bound file is decided as `shell:spawn`.
+    #[test]
+    fn an_mcp_start_under_its_own_name_on_a_bound_file_is_decided_as_shell_spawn() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let link = markers.path().join("mcp-sh");
+        std::os::unix::fs::symlink("/bin/sh", &link).expect("a second name for the shell");
+        let command = vec![
+            link.display().to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the operator declared the name for this start");
         drop(running);
     }
 

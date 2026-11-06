@@ -66,11 +66,21 @@ pub(crate) struct ApprovedReach {
 
 impl ApprovedReach {
     /// Judge every process table's lists, once, before any of them spawns.
+    #[cfg(test)]
     pub(crate) fn judge(
         stored: &Record,
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
         let commands = std::sync::Arc::new(crate::run::commands::ConfiguredCommands::load(stored)?);
+        Self::judge_with(stored, protected_sources, commands)
+    }
+
+    /// Judge every process table's lists, once, against the commands this run already opened.
+    pub(crate) fn judge_with(
+        stored: &Record,
+        protected_sources: &[AuthoritySource],
+        commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    ) -> Result<Self, BoxError> {
         let installation =
             std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?);
         let agent = stored

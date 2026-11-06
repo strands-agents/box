@@ -77,7 +77,6 @@ pub(crate) struct ObservedDecision {
 }
 
 impl ObservedDecision {
-    #[cfg(test)]
     pub(crate) fn action(&self) -> &str {
         &self.action
     }

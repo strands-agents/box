@@ -168,13 +168,7 @@ impl Authority {
                 proposal.mark_all_ready();
                 (Readiness::Ready, BTreeSet::new(), warnings)
             }
-            Err(
-                inert @ (PolicyError::Spelling(_)
-                | PolicyError::InputAcrossFamilies(_)
-                | PolicyError::SharedRuleId(_)
-                | PolicyError::ReservedAction(_)
-                | PolicyError::InertTemporalPermit(_)),
-            ) => {
+            Err(inert) if is_inert(&inert) => {
                 return Err(inert.into());
             }
             Err(_) => {
@@ -1116,6 +1110,7 @@ fn is_inert(error: &PolicyError) -> bool {
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)
+            | PolicyError::UnsupportedClause(_)
     )
 }
 

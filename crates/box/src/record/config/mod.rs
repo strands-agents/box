@@ -101,6 +101,12 @@ pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxEr
     Ok(servers)
 }
 
+/// The tool grammars that one workspace config installs, checked.
+pub(crate) fn read_tool_grammars(path: &Path) -> Result<ToolGrammars, BoxError> {
+    let file = ConfigFile::read(path)?;
+    Ok(grammar::tool_grammars(&file.tool)?)
+}
+
 /// A remote MCP server: an `[egress.<name>]` entry speaking `mcp`, resolved to a discovery URL.
 pub(crate) struct RemoteMcpServer {
     /// The entry key, which is the server name a rule reads as `context.input.server`.
@@ -1298,6 +1304,18 @@ impl ConfigFile {
                 self.experimental_features.native_filesystem_policy,
             )?;
         }
+        if self.experimental_features.tool_grammars
+            && self.mcp.contains_key(grammar::TOOL_GRAMMAR_NAMESPACE)
+        {
+            return Err(ConfigError::Mcp {
+                name: grammar::TOOL_GRAMMAR_NAMESPACE.to_string(),
+                reason: format!(
+                    "`{}` is the namespace of every tool grammar action \
+                     while `tool-grammars` is on; give the server another name",
+                    grammar::TOOL_GRAMMAR_NAMESPACE
+                ),
+            });
+        }
         validate_egress(&self.egress)
     }
 
@@ -1803,6 +1821,42 @@ native-filesystem-policy = false
         let encoded = toml::to_string(&ordinary).unwrap();
         let restored = Record::parse(&encoded, Path::new("record.toml"));
         assert_eq!(restored.unwrap(), ordinary);
+    }
+
+    #[test]
+    fn a_grammar_given_as_a_path_is_refused() {
+        let text = format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n[experimental-features]\n\
+             tool-grammars = true\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             grammar = \"git.grammar.toml\"\n"
+        );
+
+        let error = ConfigFile::parse(&text, Path::new("box.toml"))
+            .expect_err("a grammar is a table in box.toml, never a file it names");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid type: string \"git.grammar.toml\", expected a map"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_named_tool_is_refused_while_tool_grammars_is_on() {
+        let server = "[mcp.Tool]\ntype = \"stdio\"\ncommand = [\"fake-tool-mcp\"]\n";
+
+        let error = load(&format!(
+            "[experimental-features]\ntool-grammars = true\n{server}"
+        ))
+        .expect_err("`Tool` is the grammar namespace");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid MCP server \"Tool\": `Tool` is the namespace of every tool grammar action \
+             while `tool-grammars` is on; give the server another name"
+        );
+        load(server).expect("with the switch off, `Tool` is an ordinary server name");
     }
 
     const GIT_TOOL: &str = "name = \"codex\"\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
