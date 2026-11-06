@@ -1,7 +1,7 @@
 //! The installed tool grammars, each bound to a program file's identity and the name it is called
 //! by (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -100,6 +100,17 @@ pub struct GrammarBindings {
     bound: BTreeMap<(FileIdentity, String), usize>,
     spellings: BTreeMap<PathBuf, FileIdentity>,
     named: BTreeMap<String, BTreeMap<PathBuf, FileIdentity>>,
+    declared: BTreeSet<(FileIdentity, String)>,
+    servers: BTreeSet<(FileIdentity, String)>,
+}
+
+/// Who starts a spawn that the bindings cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Starter {
+    /// The agent, through the hosted Shell.
+    Agent,
+    /// The box, for a declared stdio MCP server.
+    Server,
 }
 
 /// How the installed grammars cover one spawn.
@@ -118,6 +129,11 @@ pub(crate) enum GrammarCoverage<'a> {
 /// Why Box refuses a spawn of a file that a grammar binds, whatever the policy permits.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CoverageRefusal {
+    #[error(
+        "`{name}` runs `{}`, which a tool grammar covers, but only a stdio `[mcp]` server start calls it `{name}`",
+        .program_path.display()
+    )]
+    ServerName { name: String, program_path: PathBuf },
     #[error(
         "`{name}` runs `{}`, which a tool grammar bound, but the file at that path is no longer the file it bound",
         .program_path.display()
@@ -187,6 +203,8 @@ impl GrammarBindings {
             bound: BTreeMap::new(),
             spellings: BTreeMap::new(),
             named: BTreeMap::new(),
+            declared: BTreeSet::new(),
+            servers: BTreeSet::new(),
         }
     }
 
@@ -212,7 +230,8 @@ impl GrammarBindings {
     }
 
     /// Declare that a stdio `[mcp]` server runs the program file `opened` under the name `called`,
-    /// as [`declare_tool`](Self::declare_tool) does.
+    /// as [`declare_tool`](Self::declare_tool) does. An agent spawn of a bound file under that
+    /// name, when no grammar binds the name and no `[tool]` declares it, is refused.
     pub fn declare_server(
         &mut self,
         opened: &std::fs::File,
@@ -220,12 +239,23 @@ impl GrammarBindings {
         invoked: &Path,
         called: &str,
     ) -> Result<(), BindingRefusal> {
-        self.declare_tool(opened, path, invoked, called)
+        let program = opened_program(opened, path, invoked)?;
+        self.declare_as(&program, called, Starter::Server);
+        Ok(())
     }
 
     /// Declare that a `[tool]` runs `program` under the name `called`, and bind the grammar whose
     /// `program` is `called`, when one is installed.
     pub(crate) fn declare(&mut self, program: &ProgramFile, called: &str) {
+        self.declare_as(program, called, Starter::Agent);
+    }
+
+    fn declare_as(&mut self, program: &ProgramFile, called: &str, starter: Starter) {
+        let pair = (program.identity, called.to_string());
+        match starter {
+            Starter::Agent => self.declared.insert(pair),
+            Starter::Server => self.servers.insert(pair),
+        };
         let Some(index) = self
             .grammars
             .iter()
@@ -263,6 +293,13 @@ impl GrammarBindings {
         })
     }
 
+    fn binds_file(&self, identity: FileIdentity) -> bool {
+        self.bound
+            .range((identity, String::new())..)
+            .next()
+            .is_some_and(|((bound, _), _)| *bound == identity)
+    }
+
     /// Whether a bound spelling now leads somewhere other than a file it was bound to under `name`:
     /// a spelling of `program` itself, or a bound spelling that now resolves to `program`.
     fn replaced(&self, program: &ProgramFile, name: &str) -> bool {
@@ -280,12 +317,24 @@ impl GrammarBindings {
         })
     }
 
-    /// How the grammars cover a spawn spelled `spelling` of the program file that `read` found, or
-    /// `None` when no grammar does and `shell:spawn` decides it.
+    /// How the grammars cover a spawn that the agent starts, spelled `spelling`, of the program file
+    /// that `read` found, or `None` when no grammar does.
+    #[cfg(test)]
     pub(crate) fn coverage(
         &self,
         read: Result<ProgramFile, UnreadableProgramFile>,
         spelling: &str,
+    ) -> Option<GrammarCoverage<'_>> {
+        self.coverage_for(read, spelling, Starter::Agent)
+    }
+
+    /// How the grammars cover a spawn that `starter` starts, spelled `spelling`, of the program file
+    /// that `read` found, or `None` when no grammar does and `shell:spawn` decides it.
+    pub(crate) fn coverage_for(
+        &self,
+        read: Result<ProgramFile, UnreadableProgramFile>,
+        spelling: &str,
+        starter: Starter,
     ) -> Option<GrammarCoverage<'_>> {
         let name = called_name(spelling);
         let refused = |refusal: fn(String, PathBuf) -> CoverageRefusal, path: &Path| {
@@ -316,6 +365,16 @@ impl GrammarBindings {
             && let Some(gone) = self.gone_under(name)
         {
             return refused(replaced, gone);
+        }
+        if starter == Starter::Agent
+            && self.servers.contains(&pair)
+            && !self.declared.contains(&pair)
+            && self.binds_file(program.identity)
+        {
+            return refused(
+                |name, program_path| CoverageRefusal::ServerName { name, program_path },
+                &program.path,
+            );
         }
         None
     }
@@ -388,12 +447,14 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Answer {
         Parsed(String),
+        ServerName,
         Replaced,
     }
 
     fn answer(coverage: Option<GrammarCoverage<'_>>) -> Option<Answer> {
         coverage.map(|coverage| match coverage {
             GrammarCoverage::Parsed { grammar, .. } => Answer::Parsed(grammar.name.clone()),
+            GrammarCoverage::Refused(CoverageRefusal::ServerName { .. }) => Answer::ServerName,
             GrammarCoverage::Refused(CoverageRefusal::ReplacedFile { .. }) => Answer::Replaced,
         })
     }
@@ -614,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn a_server_name_on_a_bound_file_binds_no_grammar() {
+    fn a_server_name_on_a_bound_file_is_declared_for_the_server_start_alone() {
         let host = Host::new();
         let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
         let mise = host.program(MISE);
@@ -623,16 +684,52 @@ mod tests {
         bindings
             .declare_server(&opened, mise.path(), mise.path(), "mise")
             .expect("the server declares");
+        let covered = |bindings: &GrammarBindings, name, starter| {
+            answer(bindings.coverage_for(Ok(mise.clone()), name, starter))
+        };
+
+        for (case, name, starter, expected) in [
+            ("the server start", "mise", Starter::Server, None),
+            (
+                "the agent under the server's name",
+                "mise",
+                Starter::Agent,
+                Some(Answer::ServerName),
+            ),
+            (
+                "the agent under a name that nothing declares",
+                "make",
+                Starter::Agent,
+                None,
+            ),
+            ("the declared name", "git", Starter::Agent, parsed("git")),
+        ] {
+            assert_eq!(covered(&bindings, name, starter), expected, "{case}");
+        }
+
+        bindings.declare(&mise, "mise");
+        assert_eq!(
+            covered(&bindings, "mise", Starter::Agent),
+            None,
+            "a `[tool]` that declares the name lets the agent run it as `shell:spawn`"
+        );
+    }
+
+    #[test]
+    fn a_server_name_on_a_file_that_no_grammar_binds_stays_a_spawn_for_the_agent() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        bindings.declare(&host.program(GIT), "git");
+        let server = host.program("opt/servers/notes");
+        let opened = std::fs::File::open(server.path()).expect("the program opens");
+        bindings
+            .declare_server(&opened, server.path(), server.path(), "notes")
+            .expect("the server declares");
 
         assert_eq!(
-            answer(bindings.coverage(Ok(mise.clone()), "mise")),
+            answer(bindings.coverage_for(Ok(server), "notes", Starter::Agent)),
             None,
-            "the server's name stays a `shell:spawn`"
-        );
-        assert_eq!(
-            answer(bindings.coverage(Ok(mise.clone()), "git")),
-            parsed("git"),
-            "the declared name keeps its grammar"
+            "no grammar binds the server's file, so the agent's spawn skips no grammar"
         );
     }
 
@@ -769,16 +866,26 @@ mod tests {
 
     #[test]
     fn a_refusal_names_the_called_name_and_the_program_file() {
-        let refusal = CoverageRefusal::ReplacedFile {
-            name: "git".to_string(),
-            program_path: PathBuf::from("/usr/bin/git"),
-        };
-
-        assert_eq!(
-            refusal.to_string(),
-            "`git` runs `/usr/bin/git`, which a tool grammar bound, but the file at that path is no \
-             longer the file it bound"
-        );
+        for (refusal, message) in [
+            (
+                CoverageRefusal::ServerName {
+                    name: "mise".to_string(),
+                    program_path: PathBuf::from("/usr/local/bin/mise"),
+                },
+                "`mise` runs `/usr/local/bin/mise`, which a tool grammar covers, but only a stdio \
+                 `[mcp]` server start calls it `mise`",
+            ),
+            (
+                CoverageRefusal::ReplacedFile {
+                    name: "git".to_string(),
+                    program_path: PathBuf::from("/usr/bin/git"),
+                },
+                "`git` runs `/usr/bin/git`, which a tool grammar bound, but the file at that path \
+                 is no longer the file it bound",
+            ),
+        ] {
+            assert_eq!(refusal.to_string(), message);
+        }
     }
 
     #[test]

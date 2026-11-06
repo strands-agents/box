@@ -608,7 +608,8 @@ program is decided as a grammar action in place of `shell:spawn`, as
 [`shell:spawn`](shell.md#shellspawn) states, and a user guide for tool grammars is coming later.
 `run` prints one line for each `[tool]` and stdio `[mcp.<name>]` whose program a grammar decides,
 so you can move its `shell:spawn` rules. A `shell:spawn` rule still decides each other name of that
-program file, such as `make` through macOS `/usr/bin/git`:
+program file, such as `make` through macOS `/usr/bin/git`, except in the cases that
+[`shell:spawn`](shell.md#shellspawn) refuses:
 
 ```text
 strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it

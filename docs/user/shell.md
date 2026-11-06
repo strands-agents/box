@@ -94,16 +94,19 @@ When an experimental [tool grammar](config.md#toolnamegrammar) binds the program
 spawn as the grammar's action, such as `Tool::git::Action::"push"`, or as `unmodeled` when the
 grammar can't read the command, and `shell:spawn` doesn't decide it. A grammar binds the program
 file of each `[tool]` and each stdio `[mcp.<name>]` whose command runs its `program`, under that
-name. A spawn of a bound file by any other name is a `shell:spawn`. For example, macOS
-`/usr/bin/git` is one file with many names, so with a git grammar on it, `git` is decided by the
-grammar and `make` is decided by `shell:spawn`. The agent may be able to make a link to a bound file
+name. A spawn of a bound file by any other name is a `shell:spawn`, except in the refused cases
+below. For example, macOS `/usr/bin/git` is one file with many names, so with a git grammar on it,
+`git` is decided by the grammar and `make` is decided by `shell:spawn`. The agent may be able to make a link to a bound file
 under a name that no grammar binds, and `shell:spawn` decides that spawn too. So pin each
 `shell:spawn` permit on both `context.input.program` and `context.input.program_path`, such as
 `program == "make"` with `program_path == "/usr/bin/make"`.
 
-Box refuses a spawn of a bound name before any rule decides it, and no rule can permit it, in these
+Box refuses a spawn of a bound file before any rule decides it, and no rule can permit it, in these
 cases:
 
+- The agent called the file by a name that only a stdio `[mcp.<name>]` declares for it. That name
+  is for the start of that server alone, because the server's start and the agent's spawn would
+  otherwise make the same `shell:spawn` request.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
   replaced, so `PATH` would find another file.

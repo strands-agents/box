@@ -1208,7 +1208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_mcp_server_that_shares_a_bound_file_starts_as_shell_spawn_by_its_own_name() {
+    async fn an_mcp_server_that_shares_a_bound_file_is_declared_for_its_own_start_alone() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp");
         let program = home.path().join("git");
@@ -1273,10 +1273,11 @@ mod tests {
         .await
         .map(drop)
         .map_err(|error| error.to_string());
-        assert_eq!(
-            by_the_agent,
-            Ok(()),
-            "no grammar binds the server's name, so `shell:spawn` decides the agent's spawn too"
+        assert!(
+            by_the_agent
+                .as_ref()
+                .is_err_and(|refused| refused.contains("[tool-grammar]")),
+            "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
         );
         assert!(
             spawned(&engine, &program.display().to_string(), &["push"])

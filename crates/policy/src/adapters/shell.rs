@@ -13,7 +13,9 @@ use strands_shell::{
 };
 
 use crate::GovernedBox;
-use crate::grammar::{CoverageRefusal, GrammarCoverage, GrammarInvocation, PendingGrammarResponse};
+use crate::grammar::{
+    CoverageRefusal, GrammarCoverage, GrammarInvocation, PendingGrammarResponse, Starter,
+};
 use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
@@ -35,6 +37,7 @@ pub struct ShellPolicyInterceptor {
     home: Option<std::path::PathBuf>,
     /// Credential paths keyed by the canonical identity a `shell:spawn` decision names.
     spawn_credentials: Arc<BTreeMap<String, Vec<String>>>,
+    starter: Starter,
 }
 
 impl ShellPolicyInterceptor {
@@ -50,6 +53,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
+            starter: Starter::Agent,
         })
     }
 
@@ -70,6 +74,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
+            starter: Starter::Agent,
         })
     }
 
@@ -86,6 +91,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Agent,
         })
     }
 
@@ -103,6 +109,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Agent,
         })
     }
 
@@ -121,6 +128,7 @@ impl ShellPolicyInterceptor {
             governed,
             home,
             spawn_credentials: Arc::new(spawn_credentials),
+            starter: Starter::Server,
         })
     }
 
@@ -278,7 +286,10 @@ impl EffectInterceptor for ShellPolicyInterceptor {
             ..
         } = effect
         {
-            match self.policy.grammar_coverage(program_path, program) {
+            match self
+                .policy
+                .grammar_coverage(program_path, program, self.starter)
+            {
                 None => {}
                 Some(GrammarCoverage::Refused(refusal)) => {
                     self.policy.observe_refused(

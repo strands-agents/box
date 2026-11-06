@@ -1163,7 +1163,7 @@ mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. On
 was rejected, because then only one tool that mise manages could have a grammar.
 
 A spawn of a bound file by a name that no grammar binds is decided as `shell:spawn`, whether or not a
-`[tool]` or an `[mcp.<name>]` declares that name. macOS `/usr/bin/git` is one developer-tool launcher
+`[tool]` declares that name. macOS `/usr/bin/git` is one developer-tool launcher
 file with about 78 names, such as `make` and `clang`, and it runs the tool its called name selects.
 A git grammar on it decides `git`, and the `shell:spawn` rules decide `make`. We rejected refusing an
 undeclared name outright, before any rule decides it. On a file with several names, such as that
@@ -1172,12 +1172,16 @@ launcher, every other name would become a spawn that no policy can permit, so a 
 `unmodeled` action was also rejected. When several grammars bind one file, no single grammar owns
 the name, and a rule that permits `unmodeled` would admit a program that the operator never named.
 
-Box refuses a spawn of a bound name before the policy decision in two cases, and no rule can permit
-either. The first is a replaced file: the bound path or link now leads to another file, for example
-after an update while the box runs. The second is a bare name whose bound file is gone or replaced,
-so `PATH` would find another file. A new file therefore cannot claim a grammar's permits under a
-bound name. Box also refuses bindings that another policy engine issued, so the bindings that decide
-a spawn are always those of the engine that decides it.
+Box refuses a spawn of a bound file before the policy decision in three cases, and no rule can
+permit any of them. The first is a replaced file: the bound path or link now leads to another file,
+for example after an update while the box runs. The second is a bare name whose bound file is gone
+or replaced, so `PATH` would find another file. A new file therefore cannot claim a grammar's
+permits under a bound name. The third is an agent spawn under a name that only a stdio
+`[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
+start, because the start and an agent spawn under the same spelling make the same `shell:spawn`
+request, and the permit the server needs would otherwise let the agent skip the grammar. Box also
+refuses bindings that another policy engine issued, so the bindings that decide a spawn are always
+those of the engine that decides it.
 
 The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
 and `/opt/homebrew/bin/git` both read with the one git grammar. A bound file called by a name that no
