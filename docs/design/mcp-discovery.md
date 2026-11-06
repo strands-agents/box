@@ -128,7 +128,11 @@ not trigger that fallback. A timeout within a partial frame fails discovery, so 
 cannot become a new message. If the server closes stdout before sending any response bytes,
 discovery reaps it and starts it once more with the legacy handshake as its first request.
 A partial response followed by EOF fails without a restart. The probe uses two seconds of the
-existing 30-second discovery deadline. The restart uses the time remaining under that deadline. Each modern page request carries its own metadata.
+existing 30-second discovery deadline. If a valid modern discovery reply arrives while the legacy handshake waits, discovery reaps
+the server and starts a fresh process with a metadata-bearing `tools/list` request. This also
+applies when an initialize error arrives before the late discovery reply. An explicit legacy
+probe error cannot select this path. Both fallback paths share one restart allowance and the
+time remaining under the original deadline. Each modern page request carries its own metadata.
 
 ### An http server
 

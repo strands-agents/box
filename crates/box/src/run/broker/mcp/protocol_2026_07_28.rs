@@ -47,7 +47,6 @@ pub(super) struct ModernRequest {
 }
 
 pub(super) struct PendingInputs {
-    pub(super) remaining: usize,
     pub(super) key: InputKey,
     pub(super) methods: BTreeMap<String, String>,
 }
@@ -289,7 +288,6 @@ impl ModernRequest {
             }
         }
         Ok(ModernReply::InputRequired(PendingInputs {
-            remaining: 1,
             key: self.input_key(state),
             methods,
         }))

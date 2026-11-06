@@ -471,12 +471,13 @@ under that identity.
 Before forwarding a retry, the broker matches that identity and rejects unknown input IDs.
 The outer call first meets its catalog and policy checks. Each answer then meets a separate
 `mcp:call` decision on its requested method. An outer refusal creates no input-answer decisions.
-A successful forward consumes one continuation allowance; a denial sends none of the answers
-to the server. Identical input IDs and methods under the same identity accumulate separate
+A retry with matching state and valid input IDs consumes one continuation allowance before
+policy admission. A denial sends none of the answers to the server. Identical input IDs and methods under the same identity accumulate separate
 allowances. Conflicting input IDs or methods under that identity fail the connection.
 
 The broker bounds both pending modern requests and continuation allowances at 64 per connection.
-Identical continuations each count toward this limit.
+Identical continuations each count toward this limit. A new continuation at capacity evicts
+the oldest allowance. An evicted retry is refused without closing the connection.
 Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
 survive a connection closing. A client that reconnects must repeat the initial operation.
 A cancellation retains the request ID until its late reply arrives or the connection closes.

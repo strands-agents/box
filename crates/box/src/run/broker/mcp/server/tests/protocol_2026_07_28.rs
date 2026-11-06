@@ -161,3 +161,75 @@ exit 1"#,
         1
     );
 }
+
+#[tokio::test]
+async fn discovery_lifecycle_accepts_a_slow_modern_only_server() {
+    for reversed in [false, true] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut script = r#"printf '{"pid":%s}\n' "$$" >> "$1"
+sleep 3
+while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"server/discover"'*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}}' ;;
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"modern only"}}'; exit 1 ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[],"ttlMs":0,"cacheScope":"private"}}' ;;
+esac
+done"#.to_string();
+        if reversed {
+            script = script
+                .replace("sleep 3\n", "")
+                .replace(
+                    "*'\"method\":\"server/discover\"'*) printf",
+                    "*'\"method\":\"server/discover\"'*) (sleep 3; printf",
+                )
+                .replacen(
+                    "\"cacheScope\":\"private\"}}' ;;",
+                    "\"cacheScope\":\"private\"}}') & ;;",
+                    1,
+                );
+            script = script.replace("; exit 1 ;;", " ;;");
+        }
+        let tools = discover_script(&script, log.path())
+            .await
+            .expect("late discovery selects modern requests");
+        assert_eq!(tools["result"]["tools"], json!([]));
+        let frames: Vec<Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let starts: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| frame["pid"].as_u64())
+            .collect();
+        assert_eq!(
+            starts.len(),
+            2,
+            "discovery restarts exactly once: {frames:?}"
+        );
+        assert_ne!(starts[0], starts[1]);
+        let requests: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.get("method").is_some())
+            .collect();
+        assert_eq!(requests[0]["method"], "server/discover");
+        if reversed {
+            assert_eq!(requests[1]["method"], "initialize");
+        }
+        let replacement = frames
+            .iter()
+            .position(|frame| frame["pid"] == starts[1])
+            .unwrap();
+        assert_eq!(
+            frames.len(),
+            replacement + 2,
+            "fresh process receives only tools/list"
+        );
+        assert_eq!(frames[replacement + 1]["method"], "tools/list");
+        assert_eq!(
+            frames[replacement + 1]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            "2026-07-28"
+        );
+    }
+}

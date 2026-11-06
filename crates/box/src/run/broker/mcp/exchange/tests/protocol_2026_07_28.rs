@@ -463,7 +463,7 @@ fn modern_pending_request_and_continuation_limits_are_enforced() {
                 send(&program, call).await;
                 if continuations || id == 66 {
                     let response = next_output(&mut output).await;
-                    if id == 66 {
+                    if id == 66 && !continuations {
                         assert!(
                             response["error"]["message"]
                                 .as_str()
@@ -618,5 +618,90 @@ fn legacy_parameter_names_and_cancellation_keep_their_existing_behavior() {
         let frames = read_log(log.path());
         assert!(frames.iter().any(|frame| frame["method"] == "notifications/cancelled"));
         assert!(frames.iter().any(|frame| frame["params"]["requestState"] == "custom"));
+    }));
+}
+
+#[test]
+fn continuation_lifecycle_evicts_oldest_without_closing_the_connection() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut command = input_server(log.path());
+        command[2] = command[2].replace(
+            "*'\"inputResponses\"'*) ;;",
+            "*'\"inputResponses\"'*|*'\"value\":\"normal\"'*) ;;",
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        for id in 2..=66 {
+            let mut call = input_call(id);
+            call["params"]["arguments"]["value"] = json!(id.to_string());
+            send(&program, call).await;
+            let response = next_output(&mut output).await;
+            assert_eq!(
+                response["result"]["resultType"], "input_required",
+                "{response}"
+            );
+        }
+        for (id, original, expected) in [(100, 2, false), (101, 3, true)] {
+            let mut retry = input_call(id);
+            retry["params"]["arguments"]["value"] = json!(original.to_string());
+            retry["params"]["requestState"] = json!("opaque");
+            retry["params"]["inputResponses"] = json!({"root": {"roots": []}});
+            send(&program, retry).await;
+            let response = next_output(&mut output).await;
+            if expected {
+                assert_eq!(response["result"]["resultType"], "complete", "{response}");
+            } else {
+                assert_eq!(response["error"]["code"], -32602, "{response}");
+            }
+        }
+        send(
+            &program,
+            modern_request(
+                102,
+                "tools/call",
+                json!({"name":"Search","arguments":{"value":"normal"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            next_output(&mut output).await["result"]["resultType"],
+            "complete"
+        );
+        program.stop_and_wait().await.unwrap();
+    }));
+}
+
+#[test]
+fn continuation_lifecycle_releases_a_policy_denied_retry() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let policy = format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input.method == "roots/list" }};"#
+        );
+        let fixture = fixture(&policy);
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let (mut program, mut output) = exchange(input_server(log.path()), &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        send(&program, input_call(2)).await;
+        assert_eq!(
+            next_output(&mut output).await["result"]["resultType"],
+            "input_required"
+        );
+        let mut retry = input_call(3);
+        retry["params"]["requestState"] = json!("opaque");
+        retry["params"]["inputResponses"] = json!({"root":{"roots":[]}});
+        send(&program, retry.clone()).await;
+        assert_eq!(next_output(&mut output).await["error"]["code"], -32001);
+        retry["id"] = json!(4);
+        send(&program, retry).await;
+        assert_eq!(next_output(&mut output).await["error"]["code"], -32602);
+        program.stop_and_wait().await.unwrap();
     }));
 }

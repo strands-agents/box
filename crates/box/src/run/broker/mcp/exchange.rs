@@ -133,8 +133,7 @@ struct McpConnection {
     server_requests: BTreeMap<String, String>,
     modern_requests: BTreeMap<String, super::protocol_2026_07_28::ModernRequest>,
     cancelled: std::collections::BTreeSet<String>,
-    pending_inputs:
-        BTreeMap<super::protocol_2026_07_28::InputKey, super::protocol_2026_07_28::PendingInputs>,
+    pending_inputs: VecDeque<super::protocol_2026_07_28::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
     policy: Arc<PolicyEngine>,
@@ -274,7 +273,7 @@ async fn run_mcp_program(
         server_requests: BTreeMap::new(),
         modern_requests: BTreeMap::new(),
         cancelled: std::collections::BTreeSet::new(),
-        pending_inputs: BTreeMap::new(),
+        pending_inputs: VecDeque::new(),
         held: VecDeque::new(),
         policy: Arc::clone(&policy),
         governed: governed.clone(),

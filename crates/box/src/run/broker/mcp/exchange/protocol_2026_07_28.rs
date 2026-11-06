@@ -57,7 +57,12 @@ pub(super) async fn handle_request(
     let retry = modern.retry_key(request);
     let mut methods = Vec::new();
     if let Some(retry) = &retry {
-        let Some(pending) = exchange.connection.pending_inputs.get(retry) else {
+        let Some(position) = exchange
+            .connection
+            .pending_inputs
+            .iter()
+            .position(|pending| pending.key == *retry)
+        else {
             return refuse(
                 exchange,
                 request,
@@ -66,6 +71,7 @@ pub(super) async fn handle_request(
             )
             .await;
         };
+        let pending = &exchange.connection.pending_inputs[position];
         if let Some(inputs) = request["params"]["inputResponses"].as_object() {
             for (key, answer) in inputs {
                 let Some(method) = pending.methods.get(key).filter(|_| answer.is_object()) else {
@@ -80,6 +86,7 @@ pub(super) async fn handle_request(
                 methods.push(method.clone());
             }
         }
+        exchange.connection.pending_inputs.remove(position);
     }
     let outcome = if modern.method == "tools/list" {
         handle_tools_list(frame, request, exchange, policy, governed).await?
@@ -100,14 +107,6 @@ pub(super) async fn handle_request(
             exchange.connection.phase = McpConnectionPhase::PerRequestMetadata;
         }
         exchange.connection.modern_requests.insert(key, modern);
-        if let Some(retry) = retry
-            && let Some(pending) = exchange.connection.pending_inputs.get_mut(&retry)
-        {
-            pending.remaining -= 1;
-            if pending.remaining == 0 {
-                exchange.connection.pending_inputs.remove(&retry);
-            }
-        }
     }
     Ok(outcome)
 }
@@ -199,24 +198,15 @@ pub(super) fn accept_reply(
             if exchange
                 .connection
                 .pending_inputs
-                .values()
-                .map(|inputs| inputs.remaining)
-                .sum::<usize>()
-                >= protocol_2026_07_28::MAXIMUM_PENDING
+                .iter()
+                .any(|previous| previous.key == inputs.key && previous.methods != inputs.methods)
             {
-                return Err(invalid_data("too many pending MCP input requests"));
+                return Err(invalid_data("MCP server returned ambiguous input requests"));
             }
-            if let Some(previous) = exchange.connection.pending_inputs.get_mut(&inputs.key) {
-                if previous.methods != inputs.methods {
-                    return Err(invalid_data("MCP server returned ambiguous input requests"));
-                }
-                previous.remaining += 1;
-            } else {
-                exchange
-                    .connection
-                    .pending_inputs
-                    .insert(inputs.key, inputs);
+            if exchange.connection.pending_inputs.len() >= protocol_2026_07_28::MAXIMUM_PENDING {
+                exchange.connection.pending_inputs.pop_front();
             }
+            exchange.connection.pending_inputs.push_back(inputs);
             return Ok(false);
         }
     }
