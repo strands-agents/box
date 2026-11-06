@@ -256,6 +256,7 @@ What each caller records as a response:
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | When the upstream response completes, fails, or is abandoned, once per exchange | `status`: the upstream's reply status, when received |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
+| A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes over stdio, or when the upstream response completes, fails, or is abandoned over HTTP | none |
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one

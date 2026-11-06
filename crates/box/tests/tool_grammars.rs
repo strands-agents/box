@@ -45,6 +45,31 @@ permit (principal, action in Tool::git::Action::"*", resource);
 forbid (principal, action == Tool::git::Action::"push", resource);
 "#;
 
+const CARGO_GRAMMAR: &str = r#"
+[tool.cargo.grammar]
+format = 1
+version = 1
+name = "cargo"
+program = "cargo"
+
+[tool.cargo.grammar.shell.test]
+usage = "cargo test"
+"#;
+
+/// A push only after a `cargo test` that exited 0.
+const PUSH_AFTER_A_PASSING_TEST: &str = r#"
+permit (principal, action == Box::Action::"shell:exec", resource);
+permit (principal, action == Box::Action::"fs:read", resource);
+permit (principal, action in Tool::git::Action::"*", resource);
+permit (principal, action in Tool::cargo::Action::"*", resource);
+@id("push_after_a_passing_test")
+@description("Run the tests before you push.")
+forbid (principal, action == Tool::git::Action::"push", resource)
+unless temporal {
+    formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+};
+"#;
+
 const SWITCH_ON: &str = "\n[experimental-features]\ntool-grammars = true\n";
 
 /// A `[tool.git]` whose program is a copy of `true(1)`, named `git`, that the test owns.
@@ -72,6 +97,40 @@ fn git_program(home: &Path) -> std::path::PathBuf {
     program.canonicalize().expect("the git stand-in resolves")
 }
 
+/// A `[tool.cargo]` whose program is the test's own `cargo`.
+fn cargo_tool(home: &Path) -> String {
+    format!(
+        "[tool.cargo]\ncommand = [{:?}]\n[tool.cargo.filesystem]\nread = [{:?}]\n",
+        cargo_path(home).display().to_string(),
+        tools_directory(home).display().to_string()
+    )
+}
+
+fn cargo_path(home: &Path) -> std::path::PathBuf {
+    tools_directory(home).join("cargo")
+}
+
+/// Make the test's `cargo` a new copy of `program`, and return its canonical path.
+fn install_cargo(home: &Path, program: &str) -> String {
+    std::fs::create_dir_all(tools_directory(home)).expect("the tools directory");
+    let path = cargo_path(home);
+    let staged = path.with_extension("new");
+    std::fs::copy(program, &staged).expect("a cargo stand-in");
+    std::fs::rename(&staged, &path).expect("install the cargo stand-in");
+    path.canonicalize()
+        .expect("the cargo stand-in resolves")
+        .display()
+        .to_string()
+}
+
+/// `false(1)`, at the path this platform ships it.
+fn failing_program() -> &'static str {
+    ["/usr/bin/false", "/bin/false"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+        .expect("this platform ships `false` at neither /usr/bin/false nor /bin/false")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -79,10 +138,15 @@ fn stdout(output: &Output) -> String {
 /// A created box whose `git` tool has the grammar, under `policy`, and whose trusted process finds
 /// that `git` first on its search path.
 fn grammar_box(home: &Path, policy: &str) -> Configured {
+    grammar_box_with(home, policy, "")
+}
+
+/// A `grammar_box` whose configuration also holds `more`.
+fn grammar_box_with(home: &Path, policy: &str, more: &str) -> Configured {
     Request::with_config(
         "grammar-enforce",
         policy,
-        &format!("{}{GRAMMAR}{SWITCH_ON}", git_tool(home)),
+        &format!("{}{GRAMMAR}{more}{SWITCH_ON}", git_tool(home)),
     )
     .env(
         "PATH",
@@ -271,6 +335,57 @@ fn a_command_through_sh_is_decided_as_the_grammar_action_a_direct_command_raises
         "the same forbid denies the push through `sh -c`: {output:?}"
     );
     assert_grammar_decision(&box_, "push");
+}
+
+#[test]
+fn a_push_is_denied_until_a_test_exits_0_and_stays_allowed_after_a_restart() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let cargo = install_cargo(home.path(), failing_program());
+    let box_ = grammar_box_with(
+        home.path(),
+        PUSH_AFTER_A_PASSING_TEST,
+        &format!("{}{CARGO_GRAMMAR}", cargo_tool(home.path())),
+    );
+    let git = git_program(home.path()).display().to_string();
+
+    let failed = box_.bash(&format!(
+        r#"zsh -c '{git} push origin; printf "|untested=%s" "$?"; {cargo} test; printf "|test=%s" "$?"; {git} push origin; printf "|after_a_failure=%s" "$?"'"#
+    ));
+
+    assert!(
+        stdout(&failed).contains("|untested=126|test=1|after_a_failure=126"),
+        "a push before any test, and after a test that exited 1, is denied: {failed:?}"
+    );
+    assert_eq!(
+        stderr(&failed)
+            .matches("[policy: push_after_a_passing_test]")
+            .count(),
+        2,
+        "the rule denies both pushes: {failed:?}"
+    );
+
+    let cargo = install_cargo(home.path(), support::fixture::no_op_program());
+    let passed = box_.bash(&format!(
+        r#"zsh -c '{cargo} test; printf "|test=%s" "$?"; {git} push origin; printf "|push=%s" "$?"'"#
+    ));
+
+    assert!(
+        stdout(&passed).contains("|test=0|push=0"),
+        "a test that exited 0 allows the push: {passed:?}"
+    );
+
+    let restarted = box_.bash(&format!(
+        r#"zsh -c '{git} push origin; printf "|push=%s" "$?"'"#
+    ));
+
+    assert!(
+        stdout(&restarted).contains("|push=0"),
+        "a new run on the same box directory reads the test from history: {restarted:?}"
+    );
 }
 
 #[test]
