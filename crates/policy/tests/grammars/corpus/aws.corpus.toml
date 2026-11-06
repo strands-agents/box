@@ -305,3 +305,36 @@ action = "unmodeled"
 [[case]]
 argv = ["aws", "s3", "cp", "a", "s3://b/", "--grants"]
 action = "unmodeled"
+
+# `authenticated-read` grants read to every AWS account holder
+[[case]]
+argv = ["aws", "s3", "cp", "/etc/hostname", "s3://b/k", "--acl", "authenticated-read"]
+action = "s3_cp"
+fields = { acl = "authenticated-read", destination = "s3://b/k", source = "/etc/hostname" }
+effects = ["make_public", "write_data"]
+
+[[case]]
+argv = ["aws", "s3", "mv", "./f", "s3://b/k", "--acl", "authenticated-read"]
+action = "s3_mv"
+fields = { acl = "authenticated-read", destination = "s3://b/k", source = "./f" }
+effects = ["delete_data", "make_public", "write_data"]
+
+[[case]]
+argv = ["aws", "s3", "sync", "./site", "s3://b/", "--acl", "authenticated-read"]
+action = "s3_sync"
+fields = { acl = "authenticated-read", destination = "s3://b/", source = "./site" }
+effects = ["make_public", "write_data"]
+
+# The parser does not read the policy document, so a public bucket policy is not make_public
+[[case]]
+argv = ["aws", "s3api", "put-bucket-policy", "--bucket", "b", "--policy", "file://public.json"]
+action = "s3api_put_bucket_policy"
+fields = { bucket = "b", policy = "file://public.json" }
+effects = ["modify_resource_policy"]
+
+# `--ca-bundle` changes the trust anchor and keeps the certificate checks on
+[[case]]
+argv = ["aws", "s3", "ls", "--ca-bundle", "/etc/pki/ca.pem"]
+action = "s3_ls"
+fields = { ca_bundle = "/etc/pki/ca.pem" }
+effects = ["custom_ca", "read_only"]

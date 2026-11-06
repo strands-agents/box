@@ -22,6 +22,7 @@ install_binary    = "Installs a binary into the cargo install root"
 publish_crate     = "Uploads a crate to a registry"
 modify_sources    = "Rewrites source files"
 override_config   = "Overrides cargo configuration for this one command"
+run_program       = "Makes cargo run a program that configuration names"
 
 # EXT-3. The rustup toolchain selector `+<toolchain>` is a usage token (EXT-8), not an
 # option. clap marks every option below as global except -C, so they may also follow the
@@ -33,9 +34,9 @@ options.color     = { flag = ["--color"], value = "required", anywhere = true }
 options.locked    = { flag = ["--locked"], anywhere = true, removes = ["update_lockfile"] }
 options.offline   = { flag = ["--offline"], anywhere = true, removes = ["network"] }
 options.frozen    = { flag = ["--frozen"], anywhere = true, removes = ["update_lockfile", "network"] }
-options.config    = { flag = ["--config"], value = "required", repeated = true, anywhere = true, adds = ["override_config"] }
+options.config    = { flag = ["--config"], value = "required", repeated = true, anywhere = true, adds = ["override_config", "run_program"] }
 options.unstable  = { flag = ["-Z"], value = "required", repeated = true, anywhere = true }
-options.directory = { flag = ["-C"], value = "required" }
+options.directory = { flag = ["-C"], value = "required", adds = ["override_config", "run_program"] }
 
 # ---------------------------------------------------------------- shared shape
 # Every build-like action repeats this option block. TOML has no include, and the design
@@ -217,7 +218,7 @@ operands.dependency = {}
 [shell.remove]
 usage   = "cargo [+<toolchain>] [global options] remove [options] <dependency>..."
 aliases = ["rm"]
-adds    = ["modify_manifest", "update_lockfile"]
+adds    = ["modify_manifest", "update_lockfile", "network"]
 options.dry_run       = { flag = ["-n", "--dry-run"], removes = ["modify_manifest", "update_lockfile"] }
 options.dev           = { flag = ["--dev"] }
 options.build         = { flag = ["--build"] }
@@ -284,9 +285,17 @@ operands.crate = {}
 # ---------------------------------------------------------------- clippy
 # `cargo clippy` runs the external `cargo-clippy` found on PATH or in ~/.cargo/bin.
 # Any other unknown `cargo <word>` runs `cargo-<word>` and is unmodeled.
+# cargo does not pass a global option before `clippy` to cargo-clippy, so the usage has no
+# `[global options]` and such a line is unmodeled. cargo-clippy passes the options after
+# `clippy` to `cargo check`.
 [shell.clippy]
-usage = "cargo [+<toolchain>] [global options] clippy [options] [-- <clippy_args>...]"
+usage = "cargo [+<toolchain>] clippy [options] [-- <clippy_args>...]"
 adds  = ["update_lockfile", "network", "run_build_scripts"]
+options.verbose       = { flag = ["-v", "--verbose"] }
+options.quiet         = { flag = ["-q", "--quiet"] }
+options.locked        = { flag = ["--locked"], removes = ["update_lockfile"] }
+options.offline       = { flag = ["--offline"], removes = ["network"] }
+options.frozen        = { flag = ["--frozen"], removes = ["update_lockfile", "network"] }
 options.fix           = { flag = ["--fix"], adds = ["modify_sources"] }
 options.allow_dirty   = { flag = ["--allow-dirty"] }
 options.allow_staged  = { flag = ["--allow-staged"] }
@@ -316,10 +325,13 @@ operands.clippy_args = {}
 
 # ---------------------------------------------------------------- fmt
 # `cargo fmt` runs the external `cargo-fmt`, which takes no global cargo options after the
-# subcommand except its own -v/-q.
+# subcommand except its own -v/-q. cargo does not pass a global option before `fmt` either,
+# so the usage has no `[global options]`.
 [shell.fmt]
-usage = "cargo [+<toolchain>] [global options] fmt [options] [-- <rustfmt_args>...]"
+usage = "cargo [+<toolchain>] fmt [options] [-- <rustfmt_args>...]"
 adds  = ["modify_sources"]
+options.verbose        = { flag = ["-v", "--verbose"] }
+options.quiet          = { flag = ["-q", "--quiet"] }
 options.check          = { flag = ["--check"], removes = ["modify_sources"] }
 options.all            = { flag = ["--all"] }
 options.package        = { flag = ["-p", "--package"], value = "required", repeated = true }
