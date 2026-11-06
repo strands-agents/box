@@ -1318,8 +1318,9 @@ and inode, require the file to have one filesystem name, and revalidate path and
 backend's last safe point. One method also subtracts writes, for a file that sits below a wider
 writable grant; the other grants no access at all, for a file outside every writable grant. A third
 method pins a configured tool's program: it records the link count the file has, and revalidation
-requires that count, because Box accepts a program with several names only when the user that runs
-Box cannot write it through any name. A backend
+requires that count, because Box first rules out workload writes through its other names. On macOS,
+Box can establish this by scanning every process's declared writable directories before the workload
+starts; Linux requires ownership and access checks to rule out writes through every name. A backend
 that cannot keep both the write subtraction and write-xor-execute may make the file non-executable, so
 a caller must not use write protection to preserve an execute grant.
 

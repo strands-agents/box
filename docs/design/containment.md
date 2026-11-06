@@ -470,14 +470,30 @@ sandbox, which ends when the program does
 
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
-execution. Box refuses a command file with more than one hard link when the user that runs Box can
-write it, because a name that Box can't find could expose the same contents to writes. A file that
-this user can't write through any name, such as a root-owned system program, keeps its other
-names: the kernel refuses a write through each of them. Before each launch, Box then requires the
-same link count, owner, group, and mode, and checks again that this user can't write the file.
+execution. A hard link is another name for the same file, so writing through either name changes
+the command's contents. Box accepts files whose ownership and access checks rule out writes by the
+operator through every name, such as a root-owned system program.
+
+On macOS, Box can also accept a command with multiple hard links that the operator can write.
+Before the workload starts, Box scans the declared writable directories of the agent, every tool,
+and every local MCP server, including subdirectories excluded by `deny`.
+The scan must finish without finding a hard-link name for the command. An unreadable entry or
+exceeding 100,000 entries or 128 directory levels per tree prevents startup. The command's own
+path, its symbolic-link routes, and their enclosing directories must still remain outside
+writable grants. For commands with multiple hard links, Linux requires the ownership and access
+checks to rule out writes through every name.
+
+Before each launch, a command with multiple hard links must retain its link count, owner, group,
+and mode. Box also repeats the write-access check for a command admitted through ownership and
+access checks.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity.
 Direct writable-grant refusals and the broker's mutation checks protect the program's contents.
+On macOS, Seatbelt refuses a new hard link or a rename when its source lies outside the
+process's write grants. Creating a symbolic link does not grant write access to its target.
+For commands admitted through macOS scanning, the broker inspects directories before changing
+them. It refuses the change if a directory contains one of their hard-link names or the scan
+cannot finish within the same inspection limits.
 This protection covers the program in element 0 of `[tool.<name>] command`.
 Libraries, plugins, and scripts named only in arguments still follow their own access checks.
 The file handle does not freeze bytes against changes by other processes in the surrounding OS.
@@ -593,7 +609,8 @@ policy engine decides for the whole box
 ([the interpreters run in the box's trusted process](decisions.md#the-interpreters-run-in-the-trusted-process)).
 Each one asks policy before it touches a file, then applies the reachable paths check.
 This check also refuses changes to configured tool programs and the installed trusted binaries,
-including changes to their enclosing paths. Reads remain subject to policy. These checks are
+including changes to their enclosing paths. On macOS, it also scans directory changes for hard-link
+names of commands admitted through the startup scan. Reads remain subject to policy. These checks are
 separate from the agent's own grants.
 
 No credential floor sits beneath them. A broad `fs:read` permit lets Strands Shell read `~/.aws`,

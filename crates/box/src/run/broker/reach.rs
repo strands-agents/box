@@ -436,7 +436,7 @@ const ENCLOSES_BOX_STATE: &str =
 const TRUSTED_EXECUTABLE: &str = "cannot change a trusted Box executable or its path";
 
 const CONFIGURED_COMMAND: &str =
-    "is a configured tool command or its ancestor, which this run does not allow to change";
+    "cannot establish that this mutation preserves a configured tool command";
 
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";
@@ -1134,5 +1134,126 @@ mod private_tree_mutation_tests {
         let sibling = temporary.path().canonicalize().unwrap().join("sibling");
         assert!(reach.refuse_forbidden(&sibling, "dummy", true).is_ok());
         assert_eq!(reach.approve_mutation(&sibling, "dummy").unwrap(), sibling);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod linked_command_mutation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+
+    use crate::record::config::Record;
+    use crate::record::config::process::ProcessSpec;
+    use crate::run::commands::ConfiguredCommands;
+
+    fn fixture() -> (tempfile::TempDir, Reach, PathBuf) {
+        let temporary = tempfile::tempdir().expect("fixture directory");
+        let home = temporary.path().canonicalize().expect("canonical fixture");
+        let tools = home.join("tools");
+        let staging = home.join("staging/nested");
+        std::fs::create_dir(&tools).expect("tool directory");
+        std::fs::create_dir_all(&staging).expect("alias directory");
+        std::fs::create_dir(home.join("output")).expect("unrelated directory");
+        let command = tools.join("reader");
+        std::fs::write(&command, "#!/bin/sh\nexit 0\n").expect("fixture command");
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
+            .expect("executable command");
+        std::fs::hard_link(&command, staging.join("alias")).expect("preexisting hard link");
+        let record = Record {
+            version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
+            box_id: "linked-command-reach".to_string(),
+            box_dir: home.join("box-state"),
+            name: "linked-command-reach".to_string(),
+            policy: None,
+            agent: None,
+            tool: BTreeMap::from([(
+                "reader".to_string(),
+                ProcessSpec {
+                    native_filesystem_policy: None,
+                    command: vec![command.display().to_string()],
+                    workspace: None,
+                    env: Default::default(),
+                    filesystem: Default::default(),
+                    network: None,
+                    grammar: None,
+                },
+            )]),
+            egress: Default::default(),
+            remote_mcp: Default::default(),
+            mcp: Default::default(),
+            contained_mcp: Default::default(),
+            telemetry: Default::default(),
+        };
+        let commands = ConfiguredCommands::load(&record).expect("linked command is admitted");
+        let reach = Reach::over(&home, None, None)
+            .expect("reachable fixture")
+            .with_commands(Arc::new(commands));
+        (temporary, reach, home)
+    }
+
+    #[test]
+    fn a_preexisting_command_alias_and_its_ancestors_refuse_mutation() {
+        let (_temporary, reach, home) = fixture();
+        for relative in ["staging", "staging/nested", "staging/nested/alias"] {
+            let named = home.join(relative);
+            assert_eq!(
+                reach
+                    .approve(&named, relative)
+                    .expect("reading remains reachable"),
+                named
+            );
+            let refusal = reach
+                .approve_mutation(&named, relative)
+                .expect_err("a mutation could import the configured command's alias");
+            assert_eq!(
+                refusal.to_string(),
+                format!("{relative}: {CONFIGURED_COMMAND}")
+            );
+            assert!(
+                reach.refuse_forbidden(&named, relative, true).is_err(),
+                "canonical mutation validation must protect {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_directory_and_new_destination_mutations_remain_reachable() {
+        let (_temporary, reach, home) = fixture();
+        for relative in ["output", "output/new"] {
+            let named = home.join(relative);
+            assert_eq!(
+                reach
+                    .approve_mutation(&named, relative)
+                    .expect("an unrelated mutation remains reachable"),
+                named
+            );
+            assert!(reach.refuse_forbidden(&named, relative, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_unreadable_directory_cannot_be_cleared_for_mutation() {
+        let (_temporary, reach, home) = fixture();
+        let named = home.join("output");
+        std::fs::write(named.join("ordinary"), "ordinary contents").expect("directory entry");
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o000))
+            .expect("remove directory access");
+        let inaccessible = std::fs::read_dir(&named).is_err();
+        let result = reach.approve_mutation(&named, "output");
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o755))
+            .expect("restore fixture access");
+        if !inaccessible {
+            eprintln!(
+                "skipping: this identity can enumerate the mode-000 directory, so the refusal is unmeasured"
+            );
+            return;
+        }
+        let refusal = result.expect_err("an incomplete alias scan must refuse the mutation");
+        assert_eq!(refusal.to_string(), format!("output: {CONFIGURED_COMMAND}"));
     }
 }
