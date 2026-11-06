@@ -895,6 +895,16 @@ depth therefore bounds availability and does not establish enforcement strength.
 also evaluates against recorded history and not against requests in flight, so each request in a
 parallel burst can pass while the burst exceeds the limit.
 
+<a id="box-carries-an-opaque-request-token-into-each-outcome"></a>
+### Box carries an opaque request token into each outcome
+
+Box owns request correlation because its callers know which admitted effect produced each outcome.
+`PolicyEngine::decide` returns an opaque `RequestId`, and `record` requires that token to reuse the request's declared identifier.
+A gateway exchange identifier cannot substitute for it because one exchange can require several policy decisions.
+The token uses the durable log offset and belongs to one opened engine; reload preserves it, but reopening requires new tokens.
+Callers must retain each token until its effect ends, and existing unlabeled events remain unchanged.
+`durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
+
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
 ### History is durable per box, and it offers no rewind and no audit record
 

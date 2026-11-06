@@ -1710,7 +1710,7 @@ when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.pa
                     .expect("fixture root")
                     .approve_virtual(&home.join(format!("probe-{action}-{event}")))
                     .expect("fixture probe");
-                let decision = policy.decide(
+                let (decision, _) = policy.decide(
                     &GovernedBox::assigned("codex"),
                     &Principal::agent(),
                     &policy::Request::Fs {

@@ -5,9 +5,9 @@ use std::path::Path;
 use super::model::UNMODELED_ACTION;
 use super::shell_grammar::{BASE_FIELDS, FieldValue, Parsed};
 use super::{Grammar, ProgramFile};
-use crate::Decision;
 use crate::path::ApprovedPath;
 use crate::schema::ActionIdentity;
+use crate::{Decision, RequestId};
 
 /// One spawn of a grammar-bound program, and what its grammar reads the command line as.
 pub(crate) struct GrammarInvocation<'a> {
@@ -23,6 +23,7 @@ pub(crate) struct GrammarInvocation<'a> {
 /// The `::response` that an allowed grammar action owes, holding the exact action and input.
 #[must_use = "a dropped pending response is a `::response` that history never sees"]
 pub(crate) struct PendingGrammarResponse {
+    request_id: RequestId,
     identity: ActionIdentity,
     input: serde_json::Value,
 }
@@ -31,9 +32,9 @@ impl PendingGrammarResponse {
     /// Hand the decided action and input to `record`, once.
     pub(crate) fn complete<T>(
         self,
-        record: impl FnOnce(&ActionIdentity, &serde_json::Value) -> T,
+        record: impl FnOnce(&ActionIdentity, &serde_json::Value, &RequestId) -> T,
     ) -> T {
-        record(&self.identity, &self.input)
+        record(&self.identity, &self.input, &self.request_id)
     }
 }
 
@@ -66,8 +67,16 @@ impl GrammarRequest {
     }
 
     /// The `::response` that this action owes when `decision` allows it.
-    pub(crate) fn allowed_by(self, decision: &Decision) -> Option<PendingGrammarResponse> {
-        decision.is_allow().then_some(PendingGrammarResponse {
+    pub(crate) fn allowed_by(
+        self,
+        decision: &Decision,
+        request_id: Option<RequestId>,
+    ) -> Option<PendingGrammarResponse> {
+        if !decision.is_allow() {
+            return None;
+        }
+        Some(PendingGrammarResponse {
+            request_id: request_id?,
             identity: self.identity,
             input: self.input,
         })
@@ -286,7 +295,10 @@ mod tests {
         );
         let recorded = pending
             .expect("an allowed action owes a response")
-            .complete(|identity, input| (identity.clone(), input.clone()));
+            .complete(|identity, input, request_id| {
+                assert!(!request_id.as_str().is_empty());
+                (identity.clone(), input.clone())
+            });
 
         assert!(decision.is_allow(), "{decision:?}");
         let request = invocation.request();
@@ -294,6 +306,115 @@ mod tests {
             recorded,
             (request.identity().clone(), request.input().clone())
         );
+    }
+
+    #[test]
+    fn grammar_events_conform_to_reserved_schema_fields_and_retain_each_pending_identifier() {
+        use crate::{Policy, PolicyEngine};
+        use dogwood_language::{LoweredPolicySet, PolicySchema, Value};
+
+        let git = valid("git");
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let actions = crate::schema::composed_action_schema(&[git.schema()], &[])
+            .expect("grammar schema composes");
+        let service = crate::dogwood::service_schema().expect("event schema parses");
+        let action_schema =
+            PolicySchema::from_cedarschema_str(&actions.source).expect("action schema parses");
+        let lowered = LoweredPolicySet::from_str(
+            "permit(principal, action, resource);",
+            &service,
+            &action_schema,
+        )
+        .expect("event schema derives");
+        let signatures: Vec<_> = lowered.event_signatures().collect();
+        let engine = PolicyEngine::open_with_grammars(
+            vec![Policy {
+                origin: "grammar-contract.dw".into(),
+                text: r#"permit(principal, action, resource);
+                    forbid(principal, action == Tool::git::Action::"commit", resource);"#
+                    .to_string(),
+            }],
+            std::slice::from_ref(&git),
+            &path,
+        )
+        .expect("grammar authority opens");
+        let git_file = ProgramFile::fixed("/usr/bin/git", 1);
+        let mut pending = Vec::new();
+        let mut identifiers = Vec::new();
+        for words in [
+            &["status"][..],
+            &["push", "origin", "main"][..],
+            &["commit", "-m", "change"][..],
+        ] {
+            let args = argv(words);
+            let invocation =
+                GrammarInvocation::new(&git, "git", &git_file, None, "/work", &args, &[]);
+            let (decision, response) = engine.decide_grammar_action(
+                &GovernedBox::assigned("grammar-contract"),
+                &Principal::agent(),
+                &invocation,
+            );
+            if words[0] == "commit" {
+                assert!(!decision.is_allow());
+                assert!(response.is_none(), "denied requests owe no response");
+            } else {
+                assert!(
+                    decision.is_allow(),
+                    "fixture action is allowed: {decision:?}"
+                );
+                let response = response.expect("allowed action retains its request identifier");
+                identifiers.push(response.request_id.as_str().to_string());
+                pending.push(response);
+            }
+        }
+        for (status, response) in pending.into_iter().rev().enumerate() {
+            engine
+                .record_grammar_response(response, status as i32)
+                .expect("completion records");
+        }
+        drop(engine);
+        let events = crate::test_history::events(&path);
+        assert_eq!(
+            events.len(),
+            5,
+            "three requests and two completions record exactly once"
+        );
+        assert_ne!(identifiers[0], identifiers[1]);
+        for (event, expected) in [
+            (&events[0], &identifiers[0]),
+            (&events[1], &identifiers[1]),
+            (&events[3], &identifiers[1]),
+            (&events[4], &identifiers[0]),
+        ] {
+            assert_eq!(crate::test_history::identifier(event), expected.as_str());
+        }
+        assert_eq!(events[3].action(), "push");
+        assert_eq!(events[4].action(), "status");
+        assert_eq!(
+            events[3].field_path(&["output".to_string(), "status".to_string()]),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            events[4].field_path(&["output".to_string(), "status".to_string()]),
+            Some(&Value::Int(1))
+        );
+        for event in &events {
+            assert_eq!(
+                event.request_context_path(&["requestId".to_string()]),
+                None,
+                "the reserved event field must not alter Cedar request context"
+            );
+            let signature = signatures
+                .iter()
+                .find(|signature| {
+                    signature.namespace() == event.namespace()
+                        && signature.action() == event.action()
+                        && signature.kind() == event.kind()
+                })
+                .expect("grammar event belongs to the declared event schema");
+            crate::test_event_schema::assert_reserved_fields(event, signature, false);
+        }
     }
 
     const NO_SPAWN_AFTER_A_PUSH: &str = r#"
@@ -336,11 +457,14 @@ mod tests {
             cwd: "/work",
         };
         let spawned = || {
-            engine.engine().decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &spawn,
-            )
+            engine
+                .engine()
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &spawn,
+                )
+                .0
         };
 
         assert!(
