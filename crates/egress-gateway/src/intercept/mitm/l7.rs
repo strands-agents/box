@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use crate::audit::RequestId;
 
 use super::connect::{ConnectRequest, parse_authority, same_host};
-use super::{SharedState, http1};
+use super::{BackendDial, SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
@@ -19,19 +19,26 @@ use crate::mcp::{
 };
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
+///
+/// When `backend` re-routes the destination, the upstream leg presents the backend host (SNI,
+/// certificate, and `Host`); the client leg's binding is still checked against the original CONNECT
+/// authority, so a workload cannot pivot.
 pub(crate) async fn forward_tls(
     mut parsed: http1::ParsedRequest,
     upstream: TcpStream,
+    backend: Option<&BackendDial>,
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
 ) -> Result<WorkloadResponse> {
-    // Check the upstream's TLS name before any request effect.
-    let server_name =
-        rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
-            ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
-        })?;
-    let upstream = Upstream::new(upstream, Some(server_name), state);
+    // The upstream leg presents the backend host when a backend re-routes, else the original
+    // destination. A TLS backend terminates a fresh handshake to the backend's own certificate; a
+    // plaintext backend forwards without one. With no backend the client's CONNECT leg is mirrored.
+    let (upstream_host, upstream_tls) = match backend {
+        Some(dial) => (dial.host.as_str(), dial.tls),
+        None => (connect.host.as_str(), true),
+    };
+    let upstream = make_upstream(upstream, upstream_host, upstream_tls, state)?;
     let correlation = correlation.with_headers(&parsed.headers);
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
@@ -49,6 +56,7 @@ pub(crate) async fn forward_tls(
     // flag inside the shared core.
     run_l7_legs(
         connect,
+        backend,
         req,
         upstream,
         state,
@@ -58,10 +66,41 @@ pub(crate) async fn forward_tls(
     .await
 }
 
+/// Build the upstream leg: a TLS handshake to `host`'s certificate, or a plaintext forward.
+fn make_upstream(
+    socket: TcpStream,
+    host: &str,
+    tls: bool,
+    state: &SharedState,
+) -> Result<Upstream> {
+    let server_name = if tls {
+        Some(
+            rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
+                ProxyError::UpstreamConnect(format!("invalid upstream host {host}"))
+            })?,
+        )
+    } else {
+        None
+    };
+    Ok(Upstream::new(socket, server_name, state))
+}
+
+/// The `Host` authority a re-routed request presents to the backend: `host`, or `host:port` when the
+/// port is not the scheme's default.
+fn backend_host_header(dial: &BackendDial) -> String {
+    let default_port = if dial.tls { 443 } else { 80 };
+    if dial.port == default_port {
+        dial.host.clone()
+    } else {
+        format!("{}:{}", dial.host, dial.port)
+    }
+}
+
 /// Run the request and response legs, and return the response for the workload. `revalidate`
 /// re-checks the CONNECT binding after the credential edit; plain HTTP passes a no-op.
 async fn run_l7_legs(
     connect: &ConnectRequest,
+    backend: Option<&BackendDial>,
     mut req: InterceptedRequest,
     upstream: Upstream,
     state: &SharedState,
@@ -134,12 +173,25 @@ async fn run_l7_legs(
     let allow_reason = req.advisory_note.take().unwrap_or_default();
 
     // Serialize the fully mutated request before claiming its effect permit.
-    let fwd_target = reconstruct_target(&req.target);
+    // The target the upstream receives. A backend may prepend a path prefix, so the agent's
+    // `/zen` leaves as `/github/zen`. This is the box's action: `workload_path` above (what policy
+    // and audit judge) stays the agent's own path, and the credential match already ran on it.
+    let backend_prefix = backend.map(|dial| dial.path_prefix.as_str()).unwrap_or("");
+    let fwd_target = prefixed_target(backend_prefix, &req.target);
     if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
         return Ok(refuse(
             &error.to_string(),
             WorkloadResponse::refusal(error.http_status(), b"request authority rejected"),
         ));
+    }
+    // A re-route presents the backend host to the backend, AFTER the binding re-check above has
+    // confirmed the workload named the original destination. The `Host` the workload sent is the
+    // original (and stays the authorized, judged, and credential-matched identity); only the byte
+    // that leaves for the backend names the backend, so the backend's own edge routes and validates
+    // on its own name
+    // (docs/design/decisions.md#a-re-routed-request-presents-the-backend-as-its-origin).
+    if let Some(dial) = backend {
+        req.headers.set("Host", backend_host_header(dial));
     }
     // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
     // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
@@ -295,16 +347,25 @@ async fn run_l7_legs(
     })
 }
 
-/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`.
+/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`. When `backend`
+/// re-routes the destination, the upstream leg dials the backend (with TLS when the backend scheme is
+/// `https`), and `run_l7_legs` rewrites `Host` to the backend.
 pub(crate) async fn forward_plain(
     upstream: TcpStream,
+    backend: Option<&BackendDial>,
     connect: &ConnectRequest,
     parsed: http1::ParsedRequest,
     origin_target: String,
     state: &SharedState,
     correlation: RequestId,
 ) -> Result<WorkloadResponse> {
-    let upstream = Upstream::new(upstream, None, state);
+    // With no backend the plain request forwards over plaintext, as today. A backend may raise the
+    // upstream leg to TLS (`https` backend) against the backend's own certificate.
+    let (upstream_host, upstream_tls) = match backend {
+        Some(dial) => (dial.host.as_str(), dial.tls),
+        None => (connect.host.as_str(), false),
+    };
+    let upstream = make_upstream(upstream, upstream_host, upstream_tls, state)?;
     let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
@@ -325,6 +386,7 @@ pub(crate) async fn forward_plain(
 
     run_l7_legs(
         connect,
+        backend,
         req,
         upstream,
         state,
@@ -512,6 +574,19 @@ fn split_target(target: &str) -> (String, String) {
     }
 }
 
+/// The origin-form target the upstream receives, with a backend path `prefix` prepended. An empty
+/// `prefix` forwards the agent's target unchanged; otherwise `/zen` becomes `/github/zen`. A target
+/// that is not origin-form (the `*` of `OPTIONS *`) takes no prefix, because a prefix only composes
+/// with a path.
+fn prefixed_target(prefix: &str, target: &Target) -> String {
+    let origin = reconstruct_target(target);
+    if prefix.is_empty() || !origin.starts_with('/') {
+        origin
+    } else {
+        format!("{prefix}{origin}")
+    }
+}
+
 /// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
 fn reconstruct_target(target: &Target) -> String {
     if target.query.is_empty() {
@@ -570,6 +645,63 @@ fn validate_request_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backend path prefix is prepended to the agent's path; an empty prefix forwards unchanged.
+    #[test]
+    fn prefixed_target_prepends_the_backend_prefix() {
+        let mut t = Target::new("api.github.com".to_string(), 443);
+        t.path = "/zen".to_string();
+        assert_eq!(prefixed_target("/github", &t), "/github/zen");
+        assert_eq!(prefixed_target("", &t), "/zen");
+
+        // The query rides along after the joined path.
+        t.path = "/search".to_string();
+        t.query = "q=rust".to_string();
+        assert_eq!(prefixed_target("/github", &t), "/github/search?q=rust");
+
+        // A root request under a prefix keeps one slash from the agent path.
+        t.path = "/".to_string();
+        t.query = String::new();
+        assert_eq!(prefixed_target("/github", &t), "/github/");
+
+        // An `OPTIONS *` asterisk-form target is not origin-form, so a prefix does not compose with
+        // it: forward `*` unchanged rather than the malformed `/github*`.
+        t.path = "*".to_string();
+        t.query = String::new();
+        assert_eq!(prefixed_target("/github", &t), "*");
+    }
+
+    /// The backend `Host` header omits the scheme's default port and keeps any other.
+    #[test]
+    fn backend_host_header_omits_the_default_port() {
+        let dial = |host: &str, port, tls| BackendDial {
+            host: host.to_string(),
+            port,
+            tls,
+            path_prefix: String::new(),
+        };
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 443, true)),
+            "gw.example.com"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 8443, true)),
+            "gw.example.com:8443"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 80, false)),
+            "gw.example.com"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 8080, false)),
+            "gw.example.com:8080"
+        );
+        // A TLS backend on port 80 is not the default for https, so the port is kept.
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 80, true)),
+            "gw.example.com:80"
+        );
+    }
 
     /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
     /// denial, so a refusal this gateway writes must name itself.

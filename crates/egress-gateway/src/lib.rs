@@ -33,4 +33,4 @@ pub use mcp::{
 pub use seams::{Emitter, StubEmitter};
 
 #[cfg(feature = "tls-intercept")]
-pub use intercept::{MitmConfig, MitmHandle, MitmInterceptor, ResponseLimits};
+pub use intercept::{BackendDial, MitmConfig, MitmHandle, MitmInterceptor, ResponseLimits};

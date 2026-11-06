@@ -1917,6 +1917,81 @@ that one server, with a warning on stderr, exactly as
 describes. Only a durable fault is fatal to the box. Putting that orchestration inside the policy engine was rejected, because it
 changes the policy facade to buy something the box already owns.
 
+<a id="a-destination-re-routes-to-one-backend"></a>
+### A destination re-routes to one backend, named as a base URL
+
+An `[egress.<name>]` entry carries one `[[egress.<name>.backends]]` table, and the box dials that
+backend in place of the destination. The table holds a `url` as a base URL
+(`scheme://host[:port][/prefix]`) and an optional `auth`. The word is backend, not target, because
+open-source proxies use backend for this and the box already uses target for what the agent wants to
+reach. The `url` path is a prefix the box joins in front of the agent's request path, which is origin
+substitution, not request rewriting, so a query or a fragment on the `url` is refused. The launch
+limit is one backend, so routing rules across several are not yet possible. A backend entry names
+exactly one destination with an exact host: the re-route is matched per connection, on host and port,
+before the path is known, and the box presents the backend host on the wire, so a path, a wildcard,
+or several destinations would bypass the backend or reach it with the agent's host lost. The operator
+writes one entry per host. `more_than_one_backend_is_refused`, `a_backend_destination_is_one_exact_host`,
+`a_backend_destination_may_not_carry_a_path`, and `a_single_backend_loads_and_resolves_its_target` pin
+the shape.
+
+<a id="a-re-route-is-authorized-on-the-original-destination"></a>
+### A re-route is authorized on the original destination, and the address check moves to the backend
+
+Policy authorizes the agent's intent, which is the original destination, and the re-route itself is a
+Box action with no policy action of its own, like credential injection. The box runs the `net:connect`
+host check on the original destination before DNS, so a denied destination resolves nothing, and no
+new action is added. The box then resolves the backend, pins its addresses, and runs the per-address
+`net:connect` check on each backend address with the original host and port still in the context, so
+the metadata and private-range `forbid` floor reads the real dialled IP as `ip4` or `ip6` and refuses
+a backend that resolves to a metadata or private address. The box never resolves or dials the original
+destination, and a backend that resolves to nothing fails closed with no fallback. A backend action
+was rejected, because it would either lose the policy on the destination when one backend serves many,
+or let the agent reach the backend directly once it learns the URL. The cost: the metadata protection
+holds only while the operator keeps the standard `forbid` rules, the same contract a direct destination
+has. `a_backend_reroutes_the_dial_to_the_backend_address` pins that the address check runs on the
+backend address.
+
+<a id="a-re-routed-request-presents-the-backend-as-its-origin"></a>
+### A re-routed request presents the backend as its origin
+
+The box dials the backend host and port, sets the TLS name and the certificate check and the `Host`
+header to the backend host, uses the backend scheme for the upstream leg, and joins the backend path
+prefix in front of the agent's path. The original host and the agent's own path stay what policy and
+the audit record judge, and only the bytes sent to the backend carry the backend host and the joined
+path. The `Host` rewrite runs after the request's authority is bound to the `CONNECT` authority, so a
+workload cannot pivot to a host the box did not authorize. Preserving the original `Host` for a
+forward-proxy backend was rejected for launch, because it needs the backend to read the original
+destination and route onward, which the box does not build. The cost: a backend that routes by the
+original `Host` is not reachable yet. `prefixed_target_prepends_the_backend_prefix` pins the join and
+the `OPTIONS *` edge.
+
+<a id="a-backend-carries-its-own-box-owned-credential"></a>
+### A re-route presents a box-owned backend token, and the destination secret is phantom-only
+
+A re-routed entry carries two credentials, both keyed by the original destination and opened in one
+vault, so one control carries the whole re-route. The backend `auth` is the box's own token: it
+attaches unconditionally at the backend connection, mints no phantom, and provisions no workload
+variable, so `inject` and `phantom_prefix` are refused. The destination's own `secret` is
+phantom-only: the box provisions its placeholder to the workload (so the agent's credential-shaped
+code works) and strips it from the request, and never injects the real destination credential,
+because the backend handles the destination's auth downstream. On the same header the strip runs
+before the backend token attaches, so the backend token wins and no placeholder rides upstream.
+A signed (`aws://` or `credsd://`) backend `auth` is refused, because the `Host` rewrite invalidates
+a SigV4 signature; an `auth` on a plaintext `http` backend is refused, because a credential must ride
+TLS; and a signed destination `secret` beside a backend is refused, because it mints no phantom to
+strip. Because the box never reads the destination secret's value, a re-routed entry launches with
+its variable unset — the case a backend exists for. When one `env://` variable is named by both a
+re-routed entry and a direct entry, the workload holds one placeholder: the direct route's
+Strict-checked phantom, which the re-routed host's unconditional strip removes just the same. The
+cost: a backend authenticates with an `env://` token only, and a SigV4-fronted backend is
+not reachable yet. `backend_auth_routes_are_box_owned_and_key_by_the_original_destination`,
+`a_destination_secret_beside_a_backend_is_phantom_only`, `a_signed_backend_auth_is_refused`,
+`a_backend_auth_needs_an_https_backend`,
+`a_backend_strip_phantom_opens_without_the_destination_secret_set`,
+`a_shared_variable_keeps_the_ordinary_phantom_and_drops_the_backend_duplicate`, and the credentials
+crate's `box_owned_route_attaches_the_real_secret_with_no_phantom` and
+`strip_phantom_route_mints_a_placeholder_and_attaches_nothing` pin the rules.
+
 ## Credentials
 
 <a id="the-workload-holds-a-phantom-and-the-gateway-holds-the-secret"></a>

@@ -36,8 +36,8 @@ use credentials::{
     Backend, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec, Vault, VaultConfig,
 };
 use egress_gateway::{
-    AuditDecision, CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor,
-    EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, StubEmitter,
+    AuditDecision, BackendDial, CapabilitySet, CredentialCapability, EffectAttempt,
+    EffectInterceptor, EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, StubEmitter,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -154,6 +154,23 @@ fn advisory_store(host: &str, port: u16, secret: &'static str) -> Arc<Vault> {
     Arc::new(opened.into_vault())
 }
 
+/// A backend store for `host:port`: ONE vault holding both a strip-phantom route (the destination
+/// secret) and a box-owned route (the backend token), exactly as the box opens a backend entry.
+fn backend_store(host: &str, port: u16, backend_secret: &'static str) -> Arc<Vault> {
+    let header = || InjectMode::header("Bearer {}".to_string(), None).expect("a valid placement");
+    let opened = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant")
+            .route(RouteSpec::strip_phantom(pat(host, port), header()))
+            .route(RouteSpec::box_owned(
+                pat(host, port),
+                env_locator(backend_secret),
+                header(),
+            )),
+    )
+    .expect("the backend vault opens");
+    Arc::new(opened.into_vault())
+}
+
 /// A `host:port` destination pattern (the test upstream is on an ephemeral port, so patterns must
 /// carry the exact port — the matcher's default web-port inference only covers 443/80).
 fn pat(host: &str, port: u16) -> DestinationPattern {
@@ -239,6 +256,149 @@ fn opaque_swap_reaches_upstream_with_real_secret() {
     for record in records() {
         assert!(!format!("{record:?}").contains("sk_live_REALSECRET"));
     }
+}
+
+// ============================================================================================
+// POSITIVE: a backend re-route presents the backend on the wire, policy judges the original
+// ============================================================================================
+
+#[test]
+fn a_backend_reroute_presents_the_backend_and_judges_the_original() {
+    // The backend is the recording upstream, addressed by its own host so its certificate matches
+    // the SNI the gateway sends. The original destination is a different host the workload names.
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // One control on the original destination: a single vault holds both the strip-phantom route
+    // (the destination secret, whose placeholder is removed) and the box-owned route (the backend
+    // token, attached by the box). On the same `Authorization` header the backend token wins.
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        // The BACKEND host resolves to the upstream; the original is never resolved.
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    // Policy authorizes the ORIGINAL host only.
+    // See docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload CONNECTs to the original host and sends GET /zen presenting its destination
+    // placeholder on Authorization (the strip-phantom route provisions it).
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request(
+        "GET",
+        "/zen",
+        &[("Authorization", "Bearer strands_box_workloadphantom")],
+        b"",
+    );
+    let status = client.read_status();
+    let seen = upstream.last_request();
+
+    assert_eq!(status, 200, "the re-routed request succeeded end-to-end");
+    // On the wire the backend sees its own host (with the non-default port) and the joined path.
+    assert_eq!(
+        seen.header("host"),
+        Some(format!("{backend_host}:{port}")),
+        "the backend receives its own Host, not the original destination"
+    );
+    assert!(
+        seen.raw.starts_with("GET /github/zen "),
+        "the backend path prefix joins in front of the agent path: {:?}",
+        seen.raw.lines().next()
+    );
+    // The backend token won on Authorization; the workload's destination placeholder was stripped.
+    assert_eq!(
+        seen.header("authorization").as_deref(),
+        Some("Bearer gw-token-SECRET"),
+        "the backend credential reaches the backend"
+    );
+    assert!(
+        !seen.raw.contains("strands_box_workloadphantom"),
+        "the destination placeholder is stripped and never rides to the backend"
+    );
+    // Policy judged the ORIGINAL destination, never the backend host.
+    assert!(
+        records().iter().any(|r| r.host == original),
+        "policy and audit judge the original destination"
+    );
+    assert!(
+        !records().iter().any(|r| r.host == backend_host),
+        "the backend host is never what policy judges"
+    );
+}
+
+// ============================================================================================
+// NEGATIVE: a re-route does not open a Host pivot; the binding check runs before the rewrite
+// ============================================================================================
+
+#[test]
+fn a_backend_reroute_still_refuses_a_host_pivot() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+    let before = upstream.request_count();
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload CONNECTs to the original, then sends an inner request whose Host names a
+    // DIFFERENT authority. The binding check must refuse it, before any backend Host rewrite.
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request_with_authority("GET", "/zen", "evil.example.test", &[], b"");
+    let status = client.read_status();
+
+    assert_ne!(status, 200, "a Host pivot is refused, not forwarded");
+    assert_eq!(
+        upstream.request_count(),
+        before,
+        "the pivot never reached the backend"
+    );
 }
 
 // ============================================================================================

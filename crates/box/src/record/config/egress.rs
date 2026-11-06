@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::env::checked_provisioned_name;
+use super::env::{checked_provisioned_name, checked_provisioned_name_without_value};
 use super::{
     AWS_SCHEME, BASIC_AUTH_PLACEMENT, BEARER_PREFIX, CREDSD_SCHEME, DEFAULT_HEADER,
     HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, QUERY_PARAM_PLACEMENT, URL_PATH_PLACEMENT,
@@ -230,7 +230,7 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
                     host: destination.clone(),
                     reason: format!(
                         "`{name}` overlaps `{earlier}` at {host:?}; one destination is one \
-                         credential authority, and a request matching both has no unambiguous secret"
+                         authority, and a request matching both has no unambiguous secret or backend"
                     ),
                 });
             }
@@ -238,6 +238,18 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
         }
     }
     Ok(())
+}
+
+/// How an egress route attaches, which selects the vault route kind it builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteMode {
+    /// The default: the workload presents a phantom and the gateway swaps in the real secret.
+    Opaque,
+    /// A re-routed destination's own secret: a phantom is provisioned to the workload and stripped
+    /// from the request, with nothing attached (the real credential is never injected to the backend).
+    StripPhantom,
+    /// A re-route's backend token: the box attaches its own credential, with no phantom.
+    BoxOwned,
 }
 
 /// One egress route: which secret attaches at which destination.
@@ -262,6 +274,10 @@ pub(crate) struct EgressRoute {
 
     /// The literal prefix the minted phantom carries, or `None` for the vault's default.
     phantom_prefix: Option<String>,
+
+    /// Which vault route kind this builds: an ordinary opaque swap, a strip-phantom (a re-routed
+    /// destination's own secret), or a box-owned attach (a re-route's backend token).
+    mode: RouteMode,
 }
 
 /// Where a credential lands on an outbound request.
@@ -313,25 +329,58 @@ impl EgressRoute {
     }
 
     pub(crate) fn to_route_spec(&self) -> Result<RouteSpec, ConfigError> {
-        Ok(match self.placement.inject_mode(&self.host)? {
-            // The harness location defaults to the inject location: the workload presents
-            // the phantom where the real credential will go.
-            Some(mode) => {
-                let spec = RouteSpec::opaque(self.destination.clone(), self.locator.clone(), mode)
-                    .phantom_check(self.phantom);
-                match &self.phantom_prefix {
-                    // `validate` already refused an unsafe prefix.
-                    Some(prefix) => spec.phantom_prefix(prefix.clone()).map_err(|source| {
-                        ConfigError::Credential {
+        let with_prefix = |spec: RouteSpec| -> Result<RouteSpec, ConfigError> {
+            match &self.phantom_prefix {
+                // `validate` already refused an unsafe prefix.
+                Some(prefix) => {
+                    spec.phantom_prefix(prefix.clone())
+                        .map_err(|source| ConfigError::Credential {
                             host: self.host.clone(),
                             reason: source.to_string(),
-                        }
-                    })?,
-                    None => spec,
+                        })
                 }
+                None => Ok(spec),
             }
-            None => RouteSpec::signed_aws(self.destination.clone(), self.locator.clone()),
-        })
+        };
+        // The inject location, `None` only for a signed route (which has no single location).
+        let inject = self.placement.inject_mode(&self.host)?;
+        match self.mode {
+            // A box-owned token: the box attaches its own credential, with no phantom. Never signed,
+            // so the inject location is always present.
+            RouteMode::BoxOwned => {
+                let inject = inject.ok_or_else(|| ConfigError::Credential {
+                    host: self.host.clone(),
+                    reason: "a backend auth is attached at one location, so it is never signed"
+                        .to_string(),
+                })?;
+                Ok(RouteSpec::box_owned(
+                    self.destination.clone(),
+                    self.locator.clone(),
+                    inject,
+                ))
+            }
+            // A re-routed destination's own secret: provision a phantom and strip it, attach nothing.
+            // Never signed (a signed secret mints no phantom to strip), so the harness is present.
+            RouteMode::StripPhantom => {
+                let harness = inject.ok_or_else(|| ConfigError::Credential {
+                    host: self.host.clone(),
+                    reason: "a re-routed destination secret mints a phantom, so it is never signed"
+                        .to_string(),
+                })?;
+                with_prefix(RouteSpec::strip_phantom(self.destination.clone(), harness))
+            }
+            // The default: an opaque swap, or a signed route when there is no single inject location.
+            RouteMode::Opaque => match inject {
+                Some(mode) => with_prefix(
+                    RouteSpec::opaque(self.destination.clone(), self.locator.clone(), mode)
+                        .phantom_check(self.phantom),
+                ),
+                None => Ok(RouteSpec::signed_aws(
+                    self.destination.clone(),
+                    self.locator.clone(),
+                )),
+            },
+        }
     }
 }
 
@@ -377,6 +426,62 @@ pub(crate) struct EgressEntry {
     /// Which secret to attach, and where it lands. Absent for a target that needs none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) secret: Option<EgressSecret>,
+
+    /// The backends this destination re-routes to. At most one at launch; an empty list means no
+    /// re-route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) backends: Vec<EgressBackend>,
+}
+
+/// One `[[egress.<name>.backends]]` table: a destination Box dials instead of the original.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EgressBackend {
+    /// The backend to dial, as a `scheme://host[:port][/prefix]` URL. The path prefix joins in front
+    /// of the agent's request path; a query or fragment is refused.
+    pub(crate) url: String,
+
+    /// The credential the backend connection presents. It takes the full `EgressSecret` vocabulary
+    /// and defaults `inject` to `always`, because the workload presents no phantom for it. Absent for
+    /// a backend that needs none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth: Option<EgressSecret>,
+}
+
+/// The scheme a backend dials on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendScheme {
+    Http,
+    Https,
+}
+
+impl BackendScheme {
+    fn default_port(self) -> u16 {
+        match self {
+            BackendScheme::Http => 80,
+            BackendScheme::Https => 443,
+        }
+    }
+}
+
+/// A backend `url` resolved to the parts Box dials on: scheme, host, port, and an optional path
+/// prefix the gateway puts in front of the agent's own request path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackendTarget {
+    pub(crate) scheme: BackendScheme,
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    /// The path prefix, normalized to empty or `/segment...` with no trailing slash. The gateway
+    /// prepends it to the agent's request path, so `api.github.com/zen` with a `/github` prefix
+    /// leaves as `/github/zen`.
+    pub(crate) path_prefix: String,
+}
+
+impl BackendTarget {
+    /// Whether the upstream leg speaks TLS (the backend scheme is `https`).
+    pub(crate) fn is_tls(&self) -> bool {
+        matches!(self.scheme, BackendScheme::Https)
+    }
 }
 
 /// What an egress destination speaks.
@@ -478,6 +583,87 @@ impl EgressEntry {
         })
     }
 
+    /// Every credential route a backend entry opens, for its single destination, in one vault: the
+    /// destination's own `secret` as a strip-phantom route (a phantom is provisioned to the workload
+    /// and stripped, nothing real injected), and the backend `auth` as a box-owned route (the box
+    /// attaches its own token). Both are keyed by the ORIGINAL destination, so one control carries
+    /// the whole re-route. An entry with no backend contributes none; one with neither secret nor
+    /// auth contributes an empty list.
+    pub(crate) fn backend_credential_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
+        let Some(backend) = self.backends.first() else {
+            return Ok(Vec::new());
+        };
+        let mut routes = Vec::new();
+        // The destination's own secret: phantom-only (`validate` restricts it to env://).
+        if let Some(secret) = &self.secret {
+            let locator =
+                Locator::parse_uri(&secret.reference).map_err(|source| ConfigError::Locator {
+                    locator: secret.reference.clone(),
+                    source,
+                })?;
+            for destination in &self.destinations {
+                // Name-only: the strip route provisions a placeholder under this variable and strips
+                // it, so the box never reads the real value and must not require it to be set.
+                let provisioned_name = match secret.deliverable() {
+                    Some((SecretScheme::Env, name)) => {
+                        Some(checked_provisioned_name_without_value(destination, name)?)
+                    }
+                    _ => None,
+                };
+                routes.push(EgressRoute {
+                    destination: self.pattern(destination)?,
+                    host: destination.clone(),
+                    locator: locator.clone(),
+                    provisioned_name,
+                    placement: Self::placement(secret),
+                    phantom: secret.phantom_check(),
+                    phantom_prefix: secret.phantom_prefix.clone(),
+                    mode: RouteMode::StripPhantom,
+                });
+            }
+        }
+        // The backend token: the box's own credential, attached with no phantom.
+        if let Some(auth) = &backend.auth {
+            let locator =
+                Locator::parse_uri(&auth.reference).map_err(|source| ConfigError::Locator {
+                    locator: auth.reference.clone(),
+                    source,
+                })?;
+            for destination in &self.destinations {
+                routes.push(EgressRoute {
+                    destination: self.pattern(destination)?,
+                    host: destination.clone(),
+                    locator: locator.clone(),
+                    provisioned_name: None,
+                    placement: Self::placement(auth),
+                    phantom: PhantomCheck::Strict,
+                    phantom_prefix: None,
+                    mode: RouteMode::BoxOwned,
+                });
+            }
+        }
+        Ok(routes)
+    }
+
+    /// The backend dial target for each destination this entry re-routes, keyed by the original
+    /// destination pattern. An entry with no backend contributes none.
+    pub(crate) fn backend_dials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
+        let Some(backend) = self.backends.first() else {
+            return Ok(Vec::new());
+        };
+        let target = backend.target().map_err(|reason| ConfigError::Credential {
+            host: backend.url.clone(),
+            reason,
+        })?;
+        let mut out = Vec::with_capacity(self.destinations.len());
+        for destination in &self.destinations {
+            out.push((self.pattern(destination)?, target.clone()));
+        }
+        Ok(out)
+    }
+
     /// Whether this credential signs in-boundary instead of attaching at one location. An `aws://`
     /// profile and a `credsd://` source both sign.
     fn signs_in_boundary(secret: &EgressSecret) -> bool {
@@ -519,6 +705,12 @@ impl EgressEntry {
     ///
     /// An entry with no secret (a remote MCP target that needs none) contributes no binding.
     pub(crate) fn to_bindings(&self) -> Result<Vec<EgressRoute>, BoxError> {
+        // A backend entry's credentials (its strip-phantom destination secret and its box-owned
+        // backend token) are one credential authority on one destination, so they open in one vault
+        // through `backend_credential_routes`, not here. Skip them so they are not registered twice.
+        if !self.backends.is_empty() {
+            return Ok(Vec::new());
+        }
         let Some(secret) = &self.secret else {
             return Ok(Vec::new());
         };
@@ -527,6 +719,7 @@ impl EgressEntry {
                 locator: secret.reference.clone(),
                 source,
             })?;
+        let mode = RouteMode::Opaque;
         let mut bindings = Vec::with_capacity(self.destinations.len());
         for destination in &self.destinations {
             // Only an `env://` secret has a name to provision a phantom under. Every other scheme
@@ -545,6 +738,7 @@ impl EgressEntry {
                 placement: Self::placement(secret),
                 phantom: secret.phantom_check(),
                 phantom_prefix: secret.phantom_prefix.clone(),
+                mode,
             });
         }
         Ok(bindings)
@@ -613,199 +807,353 @@ impl EgressEntry {
             self.validate_destination(destination)?;
         }
 
+        // A backend re-routes this destination to a different host. At most one at launch, and a
+        // destination secret may not sit beside it: the re-routed connection presents the backend's
+        // own credential, not the destination's.
+        if self.backends.len() > 1 {
+            return refuse(
+                "a destination declares at most one backend in this version; routing rules across \
+                 several backends are not yet available",
+            );
+        }
+        if let Some(backend) = self.backends.first() {
+            // A destination `secret` beside a backend is phantom-only: the box provisions the phantom
+            // to the workload and strips it, never injecting the real credential (the backend handles
+            // auth downstream). That needs a phantom, so the secret must be `env://`; a signed secret
+            // (aws:// or credsd://) mints none and is refused.
+            if let Some(secret) = &self.secret
+                && Self::signs_in_boundary(secret)
+            {
+                return refuse(
+                    "a destination secret beside a backend must be env://: the box provisions a \
+                     phantom and strips it, and a signed secret (aws:// or credsd://) mints no \
+                     phantom",
+                );
+            }
+            // A backend entry names exactly one destination with an exact host. The re-route is
+            // matched per connection, on host and port, before TLS is terminated and the path is
+            // known: a path could not match at that point, and the box presents the backend host on
+            // the wire, so a wildcard or several destinations would send distinct origins to one
+            // backend as identical bytes, losing which origin the agent named.
+            if self.destinations.len() != 1 {
+                return refuse(
+                    "a destination with a backend names exactly one destination: the box presents \
+                     the backend host on the wire, so several destinations would reach the backend \
+                     as the same bytes with the agent's host lost",
+                );
+            }
+            let destination = &self.destinations[0];
+            if destination.contains('/') {
+                return refuse(&format!(
+                    "a destination with a backend may not carry a path ({destination:?}): the \
+                     re-route is matched per connection, on host and port, before the path is known"
+                ));
+            }
+            if destination.contains('*') {
+                return refuse(&format!(
+                    "a destination with a backend may not be a wildcard ({destination:?}): the box \
+                     presents the backend host, so distinct origins would reach the backend as the \
+                     same bytes with the agent's host lost"
+                ));
+            }
+            // Parse and validate the backend URL; a query or fragment is refused, a path prefix is kept.
+            let target = backend.target().map_err(|reason| ConfigError::Credential {
+                host: backend.url.clone(),
+                reason,
+            })?;
+            if let Some(auth) = &backend.auth {
+                validate_secret(auth, &label)?;
+                // A re-route rewrites the `Host` to the backend AFTER the credential attaches, which
+                // invalidates a SigV4 signature (the signed host is the original, the sent host is the
+                // backend). A signed credential is refused rather than shipped broken.
+                if Self::signs_in_boundary(auth) {
+                    return refuse(
+                        "a backend auth may not sign in-boundary (aws:// or credsd://): a re-route \
+                         rewrites the Host to the backend, which invalidates a SigV4 signature; use \
+                         an env:// credential for a backend",
+                    );
+                }
+                // A credential rides only TLS. A plaintext backend would carry it in the clear, which
+                // the gateway refuses at request time; refuse it at load so the gap is visible.
+                if !target.is_tls() {
+                    return refuse(
+                        "a backend auth needs an https backend: a credential does not ride a \
+                         plaintext upstream",
+                    );
+                }
+                // The backend credential is the box's own, and the workload presents no placeholder
+                // for it, so there is no phantom to tune. `inject` and `phantom_prefix` are refused.
+                if auth.inject.is_some() || auth.phantom_prefix.is_some() {
+                    return refuse(
+                        "a backend auth takes no inject or phantom_prefix: the credential is the \
+                         box's own, and the workload presents no placeholder to check or seed",
+                    );
+                }
+            }
+        }
+
         let Some(secret) = &self.secret else {
-            // No secret. Only a protocol that needs none may omit it; a bare `http` entry declares
-            // only a destination, which policy already decides.
-            if self.protocol == Protocol::Http {
+            // No secret. A bare `http` entry with no backend declares only a destination, which
+            // policy already decides. A backend is the exception: it states where the destination
+            // re-routes, so a secretless `http` entry with a backend is complete.
+            if self.protocol == Protocol::Http && self.backends.is_empty() {
                 return refuse(
                     "an entry with no secret declares only a destination, which policy already \
-                     decides; give it a secret, or set protocol = \"mcp\" for a remote MCP server",
+                     decides; give it a secret, add a backend, or set protocol = \"mcp\" for a \
+                     remote MCP server",
                 );
             }
             return Ok(());
         };
 
-        if secret.reference.is_empty() {
-            return refuse(
-                "secret is required: an entry with no secret declares only a destination, \
-                 which policy already decides",
-            );
-        }
-        let Some((scheme, _)) = secret.reference.split_once("://") else {
-            return refuse("secret must be a URI such as env://NAME or aws://profile");
-        };
-
-        // Only a scheme the box can actually deliver. `env://` names a variable to seed the phantom
-        // into, and `aws://` needs none, because the signer places the signature. Every other
-        if secret.deliverable().is_none() {
-            return refuse(&format!(
-                "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
-                 credential the workload presents as a placeholder, aws://profile for one signed \
-                 in the boundary, or credsd://<environment> for a credsd-vended credential"
-            ));
-        }
-
-        // A `credsd://` source names a daemon environment and no credential type: the box infers the
-        // type from the `credential/get` response's `material.type` per request. The box
-        // carries no `secret.type` key, so `deny_unknown_fields` refuses one on any scheme.
-        if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
-            && environment.is_empty()
-        {
-            return refuse(
-                "a credsd:// reference must name an environment, as in credsd://prod-inference",
-            );
-        }
-
-        // A signature spans several headers, so naming one header for it describes something the
-        // mechanism cannot do.
-        if Self::signs_in_boundary(secret)
-            && (secret.header.is_some()
-                || secret.prefix.is_some()
-                || secret.placement.is_some()
-                || secret.param.is_some())
-        {
-            return refuse(
-                "a signed AWS secret (aws:// or a credsd:// source) is signed in-boundary \
-                 across several headers, so it takes no header, prefix, placement, or param",
-            );
-        }
-
-        // The injection mode tunes the phantom swap, which only an `env://` route performs. A
-        // signed route mints no phantom, so the key has no meaning there.
-        if secret.inject.is_some() && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
-        {
-            return refuse(
-                "inject tunes the env:// phantom swap, so it belongs only with an env:// \
-                 reference; a signed route (aws:// or credsd://) mints no phantom to check",
-            );
-        }
-        if let Some(mode) = &secret.inject
-            && mode != INJECT_PHANTOM
-            && mode != INJECT_ALWAYS
-        {
-            return refuse(&format!(
-                "inject {mode:?} is not one of \"phantom\" or \"always\""
-            ));
-        }
-
-        // The phantom prefix shapes the minted placeholder, which only an `env://` route mints. A
-        // signed route mints none, so the key has no meaning there.
-        if secret.phantom_prefix.is_some()
-            && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
-        {
-            return refuse(
-                "phantom_prefix sets the minted phantom's prefix, so it belongs only with an \
-                 env:// reference; a signed route (aws:// or credsd://) mints no phantom",
-            );
-        }
-        if let Some(prefix) = &secret.phantom_prefix {
-            if prefix.is_empty() {
-                return refuse(
-                    "phantom_prefix is empty; omit the key for the default strands_box_ prefix",
-                );
-            }
-            if prefix.len() > PHANTOM_PREFIX_MAX_LEN {
-                return refuse(&format!(
-                    "phantom_prefix must be at most {PHANTOM_PREFIX_MAX_LEN} characters"
-                ));
-            }
-            if let Some(byte) = prefix.bytes().find(|byte| !is_unreserved(*byte)) {
-                return refuse(&format!(
-                    "phantom_prefix character {:?} is not one of A-Z, a-z, 0-9, '-', '_', '.', '~'",
-                    byte as char
-                ));
-            }
-        }
-
-        // Where the credential lands. `url_path` is named explicitly rather than falling into the
-        // unknown-value branch, so an operator learns it is withheld and not misspelled: its secret
-        match secret.placement.as_deref() {
-            None | Some(HEADER_PLACEMENT) => {
-                if secret.param.is_some() {
-                    return refuse(
-                        "param names a query parameter, so it belongs only with \
-                         secret.placement = \"query_param\"",
-                    );
-                }
-            }
-            Some(BASIC_AUTH_PLACEMENT) => {
-                if secret.header.is_some() || secret.prefix.is_some() {
-                    return refuse(
-                        "placement = \"basic_auth\" attaches to Authorization as a \
-                         Basic pair, so it takes no header or prefix",
-                    );
-                }
-                if secret.param.is_some() {
-                    return refuse("param belongs only with placement = \"query_param\"");
-                }
-            }
-            Some(QUERY_PARAM_PLACEMENT) => {
-                if secret.header.is_some() || secret.prefix.is_some() {
-                    return refuse(
-                        "placement = \"query_param\" attaches to the query string, so \
-                         it takes no header or prefix",
-                    );
-                }
-                match &secret.param {
-                    None => {
-                        return refuse(
-                            "placement = \"query_param\" needs credential_param to \
-                             name the parameter",
-                        );
-                    }
-                    Some(param) => {
-                        // Asked of the vault's constructor, which owns the rule, so the refusal
-                        // lands at `configure` rather than at daemon start.
-                        if let Err(source) = InjectMode::query_param(param.clone()) {
-                            return refuse(&source.to_string());
-                        }
-                    }
-                }
-            }
-            Some(URL_PATH_PLACEMENT) => {
-                return refuse(
-                    "placement = \"url_path\" is not available in this version: a \
-                     path-spliced credential reaches the request path, which policy and audit \
-                     inputs read. Use \"header\", \"basic_auth\", or \"query_param\"",
-                );
-            }
-            Some(other) => {
-                return refuse(&format!(
-                    "placement {other:?} is not one of \"header\", \"basic_auth\", \
-                     or \"query_param\""
-                ));
-            }
-        }
-
-        if let Some(header) = &secret.header {
-            if header.is_empty() {
-                return refuse("header is empty");
-            }
-            // Asked of the type that owns the rule rather than re-implemented here. A header name
-            // is an RFC 7230 token, or a config value could forge a header boundary on the wire,
-            if let Err(source) = InjectMode::header("{}", Some(header.clone())) {
-                return refuse(&source.to_string());
-            }
-        }
-        if let Some(prefix) = &secret.prefix
-            && prefix.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-        {
-            return refuse("prefix contains a control character");
-        }
-
-        // Braces at `configure`, not at start. The prefix is concatenated into a `{}`-substituted
-        // template, so an operator's braces would consume the substitution slot the secret goes
-        if let Some(prefix) = &secret.prefix
-            && (prefix.contains('{') || prefix.contains('}'))
-        {
-            return refuse(
-                "prefix carries no braces: it is prepended to the credential, and a \
-                 brace there would consume the substitution slot the secret goes into",
-            );
-        }
-
-        Ok(())
+        validate_secret(secret, &label)
     }
+}
+
+impl EgressBackend {
+    /// Parse and validate the backend `url` into the parts Box dials on: scheme, host, port, and an
+    /// optional path prefix. A query or fragment is refused, because merging a query or sending a
+    /// fragment is request rewriting, which this version does not do.
+    pub(crate) fn target(&self) -> Result<BackendTarget, String> {
+        let Some((scheme, rest)) = self.url.split_once("://") else {
+            return Err(format!(
+                "backend url {:?} is not absolute: name a scheme, as in \
+                 https://gateway.example.com",
+                self.url
+            ));
+        };
+        let scheme = match scheme.to_ascii_lowercase().as_str() {
+            "http" => BackendScheme::Http,
+            "https" => BackendScheme::Https,
+            other => {
+                return Err(format!(
+                    "backend url scheme {other:?} is not one of \"http\" or \"https\""
+                ));
+            }
+        };
+        // A query or a fragment is refused anywhere in the url: the backend is an origin plus an
+        // optional path prefix, and a query to merge or a fragment to send would be rewriting.
+        if rest.contains(['?', '#']) {
+            return Err(format!(
+                "backend url {:?} carries a query or fragment; a backend is a scheme, host, port, \
+                 and optional path prefix only",
+                self.url
+            ));
+        }
+        // The authority ends at the first '/'. The rest is the path prefix the gateway prepends to
+        // the agent's own request path.
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, path) = rest.split_at(authority_end);
+        let host = host_of(authority);
+        if host.is_empty() {
+            return Err(format!("backend url {:?} names no host", self.url));
+        }
+        let port = match declared_port(authority) {
+            Some(0) => return Err("backend url port must be between 1 and 65535".to_string()),
+            Some(port) => port,
+            None => scheme.default_port(),
+        };
+        // Normalize the prefix to empty or `/segment...` with no trailing slash, so the join with
+        // the agent's path is one predictable slash. A bare `/` (root) is no prefix.
+        let path_prefix = path.trim_end_matches('/').to_string();
+        Ok(BackendTarget {
+            scheme,
+            host: host.to_string(),
+            port,
+            path_prefix,
+        })
+    }
+}
+
+/// Reject a secret (a destination `secret` or a backend `auth`) this file may not express. `label`
+/// is the destination an entry-level refusal names.
+fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError> {
+    let refuse = |reason: &str| {
+        Err(ConfigError::Credential {
+            host: label.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+
+    if secret.reference.is_empty() {
+        return refuse(
+            "secret is required: an entry with no secret declares only a destination, \
+             which policy already decides",
+        );
+    }
+    let Some((scheme, _)) = secret.reference.split_once("://") else {
+        return refuse("secret must be a URI such as env://NAME or aws://profile");
+    };
+
+    // Only a scheme the box can actually deliver. `env://` names a variable to seed the phantom
+    // into, and `aws://` needs none, because the signer places the signature. Every other
+    if secret.deliverable().is_none() {
+        return refuse(&format!(
+            "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
+             credential the workload presents as a placeholder, aws://profile for one signed \
+             in the boundary, or credsd://<environment> for a credsd-vended credential"
+        ));
+    }
+
+    // A `credsd://` source names a daemon environment and no credential type: the box infers the
+    // type from the `credential/get` response's `material.type` per request. The box
+    // carries no `secret.type` key, so `deny_unknown_fields` refuses one on any scheme.
+    if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
+        && environment.is_empty()
+    {
+        return refuse(
+            "a credsd:// reference must name an environment, as in credsd://prod-inference",
+        );
+    }
+
+    // A signature spans several headers, so naming one header for it describes something the
+    // mechanism cannot do.
+    if EgressEntry::signs_in_boundary(secret)
+        && (secret.header.is_some()
+            || secret.prefix.is_some()
+            || secret.placement.is_some()
+            || secret.param.is_some())
+    {
+        return refuse(
+            "a signed AWS secret (aws:// or a credsd:// source) is signed in-boundary \
+             across several headers, so it takes no header, prefix, placement, or param",
+        );
+    }
+
+    // The injection mode tunes the phantom swap, which only an `env://` route performs. A
+    // signed route mints no phantom, so the key has no meaning there.
+    if secret.inject.is_some() && !matches!(secret.deliverable(), Some((SecretScheme::Env, _))) {
+        return refuse(
+            "inject tunes the env:// phantom swap, so it belongs only with an env:// \
+             reference; a signed route (aws:// or credsd://) mints no phantom to check",
+        );
+    }
+    if let Some(mode) = &secret.inject
+        && mode != INJECT_PHANTOM
+        && mode != INJECT_ALWAYS
+    {
+        return refuse(&format!(
+            "inject {mode:?} is not one of \"phantom\" or \"always\""
+        ));
+    }
+
+    // The phantom prefix shapes the minted placeholder, which only an `env://` route mints. A
+    // signed route mints none, so the key has no meaning there.
+    if secret.phantom_prefix.is_some()
+        && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
+    {
+        return refuse(
+            "phantom_prefix sets the minted phantom's prefix, so it belongs only with an \
+             env:// reference; a signed route (aws:// or credsd://) mints no phantom",
+        );
+    }
+    if let Some(prefix) = &secret.phantom_prefix {
+        if prefix.is_empty() {
+            return refuse(
+                "phantom_prefix is empty; omit the key for the default strands_box_ prefix",
+            );
+        }
+        if prefix.len() > PHANTOM_PREFIX_MAX_LEN {
+            return refuse(&format!(
+                "phantom_prefix must be at most {PHANTOM_PREFIX_MAX_LEN} characters"
+            ));
+        }
+        if let Some(byte) = prefix.bytes().find(|byte| !is_unreserved(*byte)) {
+            return refuse(&format!(
+                "phantom_prefix character {:?} is not one of A-Z, a-z, 0-9, '-', '_', '.', '~'",
+                byte as char
+            ));
+        }
+    }
+
+    // Where the credential lands. `url_path` is named explicitly rather than falling into the
+    // unknown-value branch, so an operator learns it is withheld and not misspelled: its secret
+    match secret.placement.as_deref() {
+        None | Some(HEADER_PLACEMENT) => {
+            if secret.param.is_some() {
+                return refuse(
+                    "param names a query parameter, so it belongs only with \
+                     secret.placement = \"query_param\"",
+                );
+            }
+        }
+        Some(BASIC_AUTH_PLACEMENT) => {
+            if secret.header.is_some() || secret.prefix.is_some() {
+                return refuse(
+                    "placement = \"basic_auth\" attaches to Authorization as a \
+                     Basic pair, so it takes no header or prefix",
+                );
+            }
+            if secret.param.is_some() {
+                return refuse("param belongs only with placement = \"query_param\"");
+            }
+        }
+        Some(QUERY_PARAM_PLACEMENT) => {
+            if secret.header.is_some() || secret.prefix.is_some() {
+                return refuse(
+                    "placement = \"query_param\" attaches to the query string, so \
+                     it takes no header or prefix",
+                );
+            }
+            match &secret.param {
+                None => {
+                    return refuse(
+                        "placement = \"query_param\" needs credential_param to \
+                         name the parameter",
+                    );
+                }
+                Some(param) => {
+                    // Asked of the vault's constructor, which owns the rule, so the refusal
+                    // lands at `configure` rather than at daemon start.
+                    if let Err(source) = InjectMode::query_param(param.clone()) {
+                        return refuse(&source.to_string());
+                    }
+                }
+            }
+        }
+        Some(URL_PATH_PLACEMENT) => {
+            return refuse(
+                "placement = \"url_path\" is not available in this version: a \
+                 path-spliced credential reaches the request path, which policy and audit \
+                 inputs read. Use \"header\", \"basic_auth\", or \"query_param\"",
+            );
+        }
+        Some(other) => {
+            return refuse(&format!(
+                "placement {other:?} is not one of \"header\", \"basic_auth\", \
+                 or \"query_param\""
+            ));
+        }
+    }
+
+    if let Some(header) = &secret.header {
+        if header.is_empty() {
+            return refuse("header is empty");
+        }
+        // Asked of the type that owns the rule rather than re-implemented here. A header name
+        // is an RFC 7230 token, or a config value could forge a header boundary on the wire,
+        if let Err(source) = InjectMode::header("{}", Some(header.clone())) {
+            return refuse(&source.to_string());
+        }
+    }
+    if let Some(prefix) = &secret.prefix
+        && prefix.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    {
+        return refuse("prefix contains a control character");
+    }
+
+    // Braces at `configure`, not at start. The prefix is concatenated into a `{}`-substituted
+    // template, so an operator's braces would consume the substitution slot the secret goes
+    if let Some(prefix) = &secret.prefix
+        && (prefix.contains('{') || prefix.contains('}'))
+    {
+        return refuse(
+            "prefix carries no braces: it is prepended to the credential, and a \
+             brace there would consume the substitution slot the secret goes into",
+        );
+    }
+
+    Ok(())
 }
 
 /// The explicitly declared port of one destination, if its authority carries one.
@@ -1962,5 +2310,513 @@ mod tests {
                 "the refusal says it signs in-boundary: {error}"
             );
         }
+    }
+
+    // --- Backend re-routing (request re-routing) ---------------------------------------------
+
+    /// A parse that keeps the serde error, for the fields `load` would panic on.
+    fn parse(text: &str) -> Result<BTreeMap<String, EgressEntry>, toml::de::Error> {
+        toml::from_str::<Fixture>(text).map(|fixture| fixture.egress)
+    }
+
+    /// One backend loads, and its url resolves to scheme + host + port. A secretless `http` entry
+    /// is complete when it carries a backend, where without one it is refused.
+    #[test]
+    fn a_single_backend_loads_and_resolves_its_target() {
+        let entries = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect("a secretless http entry with a backend is complete");
+        let backends = &entries["github"].backends;
+        assert_eq!(backends.len(), 1);
+        assert_eq!(
+            backends[0].target().expect("the url resolves"),
+            BackendTarget {
+                scheme: BackendScheme::Https,
+                host: "gateway-1.example.com".to_string(),
+                port: 443,
+                path_prefix: String::new(),
+            }
+        );
+    }
+
+    /// Two backend entries whose destinations overlap are refused, like any other overlap: the
+    /// overlap check runs on every entry's destinations, not only on entries that carry a secret, so
+    /// a request cannot match two backends.
+    #[test]
+    fn two_backend_entries_on_overlapping_destinations_are_refused() {
+        // Exact hosts that overlap: implicit vs explicit `:443`. Each is a valid single-host backend
+        // destination, so the overlap check, not the wildcard or multi-destination rule, is what fires.
+        let error = load(
+            r#"
+            [egress.a]
+            destinations = ["api.github.com"]
+            [[egress.a.backends]]
+            url = "https://gw-a.example.com"
+
+            [egress.b]
+            destinations = ["api.github.com:443"]
+            [[egress.b.backends]]
+            url = "https://gw-b.example.com"
+            "#,
+        )
+        .expect_err("two backends on overlapping destinations have no unambiguous re-route");
+        assert!(
+            error.to_string().contains("overlaps"),
+            "the overlap check covers secretless backend entries: {error}"
+        );
+    }
+
+    /// A backend entry's destination may not carry a path: the re-route is matched per connection
+    /// (host and port), before the path is known, so a path-scoped destination would silently dial
+    /// the original and bypass the backend.
+    #[test]
+    fn a_backend_destination_may_not_carry_a_path() {
+        for destination in ["api.github.com/v1", "api.github.com/*", "*.github.com/x"] {
+            let error = load(&format!(
+                "[egress.github]\ndestinations = [{destination:?}]\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n"
+            ))
+            .expect_err(&format!(
+                "a path-scoped backend destination is refused: {destination}"
+            ));
+            assert!(
+                error.to_string().contains("may not carry a path"),
+                "the refusal explains the connection-level match: {error}"
+            );
+        }
+        // Host-only and host:port destinations with a backend still load.
+        for destination in ["api.github.com", "api.github.com:8443"] {
+            load(&format!(
+                "[egress.github]\ndestinations = [{destination:?}]\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n"
+            ))
+            .unwrap_or_else(|e| panic!("{destination} with a backend must load: {e}"));
+        }
+    }
+
+    /// A backend url may carry a path prefix: the gateway prepends it to the agent's request path.
+    /// A trailing slash is trimmed, and a bare `/` is no prefix.
+    #[test]
+    fn a_backend_url_may_carry_a_path_prefix() {
+        for (url, prefix) in [
+            ("https://gw.example.com/github", "/github"),
+            ("https://gw.example.com/github/", "/github"),
+            ("https://gw.example.com/a/b/c", "/a/b/c"),
+            ("https://gw.example.com", ""),
+            ("https://gw.example.com/", ""),
+            ("https://gw.example.com:8443/github", "/github"),
+        ] {
+            let backend = EgressBackend {
+                url: url.to_string(),
+                auth: None,
+            };
+            let target = backend.target().unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(target.path_prefix, prefix, "{url}");
+            assert_eq!(target.host, "gw.example.com", "{url}");
+        }
+    }
+
+    /// A secretless `http` entry with no backend is still refused: the regression guard for the
+    /// relaxation above.
+    #[test]
+    fn a_secretless_http_entry_with_no_backend_is_still_refused() {
+        let error = load(
+            r#"
+            [egress.a]
+            destinations = ["api.github.com"]
+            "#,
+        )
+        .expect_err("a bare http entry declares only a destination");
+        assert!(
+            error.to_string().contains("add a backend"),
+            "the refusal names the backend as one way to complete the entry: {error}"
+        );
+    }
+
+    /// The default port follows the scheme, and an explicit port is kept.
+    #[test]
+    fn a_backend_port_defaults_by_scheme_and_keeps_an_explicit_one() {
+        for (url, scheme, port) in [
+            ("https://gw.example.com", BackendScheme::Https, 443),
+            ("http://gw.example.com", BackendScheme::Http, 80),
+            ("https://gw.example.com:8443", BackendScheme::Https, 8443),
+            ("http://gw.example.com:8080", BackendScheme::Http, 8080),
+            // A trailing slash is an empty path, which is allowed.
+            ("https://gw.example.com/", BackendScheme::Https, 443),
+        ] {
+            let backend = EgressBackend {
+                url: url.to_string(),
+                auth: None,
+            };
+            let target = backend.target().unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(target.scheme, scheme, "{url}");
+            assert_eq!(target.port, port, "{url}");
+            assert_eq!(target.host, "gw.example.com", "{url}");
+        }
+    }
+
+    /// More than one backend is refused, and the refusal names the one-backend limit.
+    #[test]
+    fn more_than_one_backend_is_refused() {
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+
+            [[egress.github.backends]]
+            url = "https://gateway-2.example.com"
+            "#,
+        )
+        .expect_err("a second backend is refused at launch");
+        assert!(
+            error.to_string().contains("at most one backend"),
+            "the refusal names the one-backend limit: {error}"
+        );
+    }
+
+    /// A backend url that is not scheme + host + port + optional path prefix is refused. A query or
+    /// fragment is refused; a path prefix is allowed (see `a_backend_url_may_carry_a_path_prefix`).
+    #[test]
+    fn a_backend_url_must_be_scheme_host_port_and_optional_prefix() {
+        for (url, why) in [
+            ("https://gw.example.com?x=1", "a query"),
+            ("https://gw.example.com/github?x=1", "a query after a path"),
+            ("https://gw.example.com#frag", "a fragment"),
+            ("gateway-1.example.com", "no scheme"),
+            ("https://", "no host"),
+            ("ftp://gw.example.com", "a scheme the box cannot dial"),
+            ("https://gw.example.com:0", "port zero"),
+        ] {
+            let error = load(&format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+                 [[egress.github.backends]]\nurl = {url:?}\n"
+            ))
+            .expect_err(&format!("{why} must be refused: {url}"));
+            assert!(
+                error.to_string().contains("backend url")
+                    || error.to_string().contains("port must be"),
+                "{why}: the refusal names the backend url: {error}"
+            );
+        }
+    }
+
+    /// A destination secret may sit beside a backend, as a phantom-only (strip) route: an `env://`
+    /// secret loads and becomes a `StripPhantom` route, and a signed secret is refused (it mints no
+    /// phantom to strip).
+    #[test]
+    fn a_destination_secret_beside_a_backend_is_phantom_only() {
+        // SAFETY: namespaced to this test.
+        unsafe { std::env::set_var("STRANDS_BOX_DEST_FOR_TESTS", "github-token") };
+        let entries = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "env://STRANDS_BOX_DEST_FOR_TESTS"
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect("an env:// destination secret beside a backend loads");
+        // A backend entry's destination secret is NOT an ordinary binding; it opens with the backend.
+        assert!(
+            entries["github"]
+                .to_bindings()
+                .expect("no ordinary binding")
+                .is_empty(),
+            "a backend entry contributes no ordinary egress binding"
+        );
+        let routes = entries["github"]
+            .backend_credential_routes()
+            .expect("routes build");
+        assert_eq!(routes.len(), 1, "the destination secret's strip route");
+        assert!(
+            routes[0].provisioned_name().is_some(),
+            "the phantom is still provisioned to the workload"
+        );
+        // It builds a strip-phantom route spec (no real credential is injected).
+        routes[0]
+            .to_route_spec()
+            .expect("the strip-phantom route builds");
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("STRANDS_BOX_DEST_FOR_TESTS") };
+
+        // A signed destination secret beside a backend is refused: it mints no phantom to strip.
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "aws://prod"
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect_err("a signed destination secret beside a backend is refused");
+        assert!(
+            error.to_string().contains("must be env://"),
+            "the refusal explains the phantom requirement: {error}"
+        );
+    }
+
+    /// A backend `auth` is validated like a destination secret, and a valid one loads.
+    #[test]
+    fn a_backend_auth_is_validated() {
+        // Valid: an env:// reference loads (the variable's presence is checked later, at projection).
+        load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            auth.ref = "env://BOX_GW_TOKEN"
+            "#,
+        )
+        .expect("a backend with a valid env:// auth loads");
+
+        // Invalid: a scheme the box cannot deliver is refused, through the shared secret validation.
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            auth.ref = "vault://nope"
+            "#,
+        )
+        .expect_err("a backend auth with an undeliverable scheme is refused");
+        assert!(
+            error.to_string().contains("deliver"),
+            "the backend auth runs the shared secret validation: {error}"
+        );
+    }
+
+    /// A signed backend auth is refused: a re-route rewrites the Host after the credential attaches,
+    /// which invalidates a SigV4 signature.
+    #[test]
+    fn a_signed_backend_auth_is_refused() {
+        for reference in ["aws://default", "credsd://prod"] {
+            let error = load(&format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+                 auth.ref = {reference:?}\n"
+            ))
+            .expect_err("a signed backend auth is refused");
+            assert!(
+                error.to_string().contains("sign in-boundary"),
+                "{reference}: the refusal explains signing is unavailable for a backend: {error}"
+            );
+        }
+    }
+
+    /// A backend auth needs an https backend, because a credential does not ride a plaintext upstream.
+    #[test]
+    fn a_backend_auth_needs_an_https_backend() {
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "http://gateway-1.example.com"
+            auth.ref = "env://BOX_GW_TOKEN"
+            "#,
+        )
+        .expect_err("a credential on a plaintext backend is refused");
+        assert!(
+            error.to_string().contains("https backend"),
+            "the refusal names the https requirement: {error}"
+        );
+
+        // An http backend with NO auth is fine.
+        load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "http://gateway-1.example.com"
+            "#,
+        )
+        .expect("an http backend with no auth loads");
+    }
+
+    /// `url` is required, and an unknown field inside a backend table is refused by serde.
+    #[test]
+    fn a_backend_table_is_strict_about_its_fields() {
+        let missing_url = parse(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nauth.ref = \"env://X\"\n",
+        );
+        assert!(missing_url.is_err(), "a backend with no url is refused");
+
+        let unknown_field = parse(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nurl = \"https://gw.example.com\"\nname = \"primary\"\n",
+        );
+        assert!(
+            unknown_field.is_err(),
+            "an unknown backend field (e.g. the removed `name`) is refused"
+        );
+    }
+
+    /// A backend entry yields one dial, keyed by the original destination pattern, carrying the
+    /// backend scheme/host/port.
+    #[test]
+    fn backend_dials_key_by_the_original_destination() {
+        let entries = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com:8443"
+            "#,
+        )
+        .expect("valid");
+        let dials = entries["github"].backend_dials().expect("dials build");
+        assert_eq!(dials.len(), 1, "one dial for the one destination");
+        let (_pattern, target) = &dials[0];
+        assert_eq!(target.host, "gateway-1.example.com");
+        assert_eq!(target.port, 8443);
+        assert!(target.is_tls(), "https backend dials TLS");
+    }
+
+    /// A backend entry names exactly one destination with an exact host: a wildcard, several
+    /// destinations, or a path is refused, because the box presents the backend host on the wire.
+    #[test]
+    fn a_backend_destination_is_one_exact_host() {
+        // Several destinations.
+        let several = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com", "uploads.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect_err("several destinations with a backend are refused");
+        assert!(
+            several.to_string().contains("exactly one destination"),
+            "the refusal names the one-destination rule: {several}"
+        );
+
+        // A wildcard host.
+        let wildcard = load(
+            r#"
+            [egress.github]
+            destinations = ["*.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect_err("a wildcard destination with a backend is refused");
+        assert!(
+            wildcard.to_string().contains("may not be a wildcard"),
+            "the refusal names the wildcard rule: {wildcard}"
+        );
+    }
+
+    /// A backend `auth` yields one box-owned credential route, keyed by the ORIGINAL destination,
+    /// provisioning no workload variable. An entry with no auth yields none.
+    #[test]
+    fn backend_auth_routes_are_box_owned_and_key_by_the_original_destination() {
+        let with_auth = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            auth.ref = "env://BOX_GW_TOKEN"
+            "#,
+        )
+        .expect("valid");
+        let routes = with_auth["github"]
+            .backend_credential_routes()
+            .expect("routes build");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].host(),
+            "api.github.com",
+            "keyed by the original destination"
+        );
+        assert_eq!(
+            routes[0].provisioned_name(),
+            None,
+            "the backend credential provisions no workload variable"
+        );
+        // It builds a box-owned route spec (attach the real token, no phantom).
+        routes[0]
+            .to_route_spec()
+            .expect("the box-owned route builds");
+
+        // `inject` is refused on a backend auth: the credential is the box's own, and the workload
+        // presents no placeholder, so a phantom mode would only load a config that then fails.
+        for key in [
+            "auth.inject = \"phantom\"",
+            "auth.inject = \"always\"",
+            "auth.phantom_prefix = \"sk-\"",
+        ] {
+            let error = load(&format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+                 auth.ref = \"env://BOX_GW_TOKEN\"\n{key}\n"
+            ))
+            .expect_err(&format!("a backend auth refuses {key}"));
+            assert!(
+                error.to_string().contains("no inject or phantom_prefix"),
+                "the refusal names the rule for {key}: {error}"
+            );
+        }
+
+        // No auth: no routes.
+        let no_auth = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+
+            [[egress.github.backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        )
+        .expect("valid");
+        assert!(
+            no_auth["github"]
+                .backend_credential_routes()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A destination with no backend round-trips with an empty backends list (backward compat).
+    #[test]
+    fn an_entry_with_no_backend_has_an_empty_backends_list() {
+        let entries = load(
+            r#"
+            [egress.a]
+            destinations = ["api.stripe.com"]
+            secret.ref = "env://TOKEN"
+            "#,
+        )
+        .expect("a plain secret entry still loads");
+        assert!(
+            entries["a"].backends.is_empty(),
+            "an absent backends key is an empty list"
+        );
     }
 }
