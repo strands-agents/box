@@ -86,9 +86,12 @@ the failure with its full cause, so a timeout reads differently from a refused k
 
 ## 4. Where does the key come from?
 
-The vault already reads keys from four places: the environment (`env://`), a file (`file://`),
-1Password (`op://`) and credsd (`credsd://`). `aws://` names an AWS profile for the SigV4
-destinations. This design adds one more source:
+A telemetry key comes from the environment (`env://`), or signs with an AWS profile (`aws://`) or a
+credsd environment (`credsd://`). The vault can also read a file (`file://`) and 1Password
+(`op://`), but a telemetry target refuses both: the workload could swap a file it can reach, and
+`op` would run from the trusted process's `PATH`. Box checks each `aws://` and `credsd://`
+credential before the workload starts, so a profile that cannot sign stops the run. This design
+adds one more source:
 
 ```toml
 secret.ref = "aws-secretsmanager://box/telemetry#LANGFUSE_AUTH"
