@@ -274,7 +274,11 @@ Links, other names, and copies are decided as follows:
   `/usr/bin/git` is one launcher file that is also `make`, `clang`, and many other developer tools.
   A grammar for `git` decides only the name `git`, so a spawn of `make` is decided as `shell:spawn`.
   So is a link that the workload makes to the bound file under another name, such as `g`. This holds
-  whether or not a `[tool]` or `[mcp.<name>]` declares the other name.
+  whether or not a `[tool]` declares the other name.
+- **A stdio server's name on a bound file counts only for that server's start.** When a stdio
+  `[mcp.<name>]` runs a bound file under a name that no grammar binds, `shell:spawn` decides the
+  server's start under that name. The agent's own spawn under that name is refused, and no policy
+  can permit it, so the agent can't use the server's name to leave the grammar.
 - **A replaced file is refused.** If the file at a bound path changes while the box runs, for
   example after an update, Box refuses every spawn of that path until the box restarts. Box also
   refuses a bare name, such as `git`, when the file bound under that name is gone or replaced. The
