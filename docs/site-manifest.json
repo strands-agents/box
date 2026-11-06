@@ -3,7 +3,7 @@
   "product": {
     "id": "strands-box",
     "name": "Strands Box",
-    "status": "preview"
+    "status": "stable"
   },
   "pages": [
     {
