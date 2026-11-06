@@ -29,6 +29,24 @@ secret.ref   = "env://GITHUB_MCP_TOKEN"
 The table's name, `fetch` or `github`, is the server name. Policy reads it as
 `context.input.server`.
 
+## Protocol versions
+
+The stdio broker accepts MCP `2026-07-28` and the legacy versions `2024-11-05`,
+`2025-03-26`, `2025-06-18`, and `2025-11-25`. No configuration change is needed.
+
+A modern client sends its protocol version and capabilities with each request. It can list
+tools without an initialization handshake or a discovery request. A legacy client must complete
+its handshake before listing tools. Both paths use the same tool catalog and policy checks.
+`policy generate-schema` also discovers modern stdio servers and falls back to a legacy handshake
+when its discovery probe receives a legacy error or no reply within two seconds.
+
+Some modern calls ask the client for more input, such as a list of roots or an elicitation answer.
+Box checks each answer under the requested method's `mcp:call` policy, then checks the retried call.
+The client must retry on the same connection with the original parameters and the server's exact
+request state. If that connection closes, start the operation again. Box retains up to 64 pending
+requests and 64 pending continuations per connection, with up to 64 input requests per continuation.
+Unknown result types from protocol extensions are refused.
+
 ## `[mcp.<name>]`, `type = "stdio"`
 
 | Key | Type | Default | Meaning |
@@ -250,6 +268,11 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 | A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. |
 | `` `[mcp.<a>]` and `[mcp.<b>]` declare the same command "<command>" `` | Two tables have the same full `command`. Remove one, or change its arguments. |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
+| `modern MCP requests require ...` | The client omitted required protocol metadata. Update the client to one that sends the fields on every request. |
+| `Unsupported MCP protocol version` | The request names a modern version Box does not support. The error lists the supported version. |
+| `modern MCP requests cannot use a legacy handshake connection` | The client mixed the modern request protocol with a legacy handshake. Start a new connection using one protocol era. |
+| `MCP input answers do not match a pending server request` | A retry changed its original parameters or request state, reused a consumed continuation, or arrived on another connection. Restart the operation. |
+| `a modern MCP result has an unsupported resultType` | The server returned a result type the broker cannot validate. |
 
 The harness gets these errors when it starts a server, and the box keeps running:
 

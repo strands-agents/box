@@ -6,12 +6,14 @@
 //! | `discovery` | the stdio servers' share of the box's tool catalogs |
 //! | `exchange` | one client connection, relayed frame by frame |
 //! | `jsonrpc` | ids, cursors, and the frames the broker writes |
+//! | `modern` | per-request metadata, results, and continuation identities |
 //! | `server` | one server process and the offline `tools/list` client |
 
 mod admission;
 mod discovery;
 mod exchange;
 mod jsonrpc;
+mod modern;
 mod server;
 
 pub(crate) use admission::admit_server;

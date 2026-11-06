@@ -25,6 +25,8 @@ use super::server::{
 };
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
 
+mod modern_exchange;
+
 /// How long an MCP caller can wait to enter the exchange input queue.
 pub(super) const MCP_INPUT_SEND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(100);
@@ -91,6 +93,7 @@ enum McpConnectionPhase {
     AwaitingInitialize,
     AwaitingInitialized,
     Active,
+    Modern,
 }
 
 /// A decided client request awaiting its reply, so the reply can record `mcp:call::response`.
@@ -128,6 +131,9 @@ struct McpConnection {
     lists: BTreeMap<String, PendingList>,
     /// Server requests forwarded to the client, by id, with the method each one asked.
     server_requests: BTreeMap<String, String>,
+    modern_requests: BTreeMap<String, super::modern::ModernRequest>,
+    cancelled: std::collections::BTreeSet<String>,
+    pending_inputs: BTreeMap<super::modern::InputKey, super::modern::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
     policy: Arc<PolicyEngine>,
@@ -265,6 +271,9 @@ async fn run_mcp_program(
         decided_calls: BTreeMap::new(),
         lists: BTreeMap::new(),
         server_requests: BTreeMap::new(),
+        modern_requests: BTreeMap::new(),
+        cancelled: std::collections::BTreeSet::new(),
+        pending_inputs: BTreeMap::new(),
         held: VecDeque::new(),
         policy: Arc::clone(&policy),
         governed: governed.clone(),
@@ -603,9 +612,33 @@ async fn handle_client_frame(
                 });
             let request = parse_client_frame(&text)?;
             let Some(method) = request.get("method").and_then(Value::as_str) else {
+                if exchange.connection.phase == McpConnectionPhase::Modern {
+                    return Err(invalid_data(
+                        "modern MCP clients cannot send JSON-RPC responses",
+                    ));
+                }
                 return handle_client_response(&text, &request, exchange, policy, governed).await;
             };
             let method = method.to_string();
+            let notification = method.starts_with("notifications/") && request.get("id").is_none();
+            if !notification
+                && (exchange.connection.phase == McpConnectionPhase::Modern
+                    || super::modern::carries_metadata(&request)
+                    || method == "server/discover")
+            {
+                return modern_exchange::handle_request(
+                    &text, &request, exchange, policy, governed,
+                )
+                .await;
+            }
+            if super::modern::carries_inputs(&request) {
+                return Err(invalid_data(
+                    "only modern MCP requests can carry input answers",
+                ));
+            }
+            if notification {
+                modern_exchange::cancel_request(&request, exchange)?;
+            }
             if method == "tools/list" {
                 if exchange.connection.phase != McpConnectionPhase::Active {
                     emit_request_error(
@@ -831,7 +864,9 @@ async fn handle_request(
     governed: &GovernedBox,
 ) -> io::Result<ProgramAction> {
     if method == "initialize" {
-        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize {
+        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize
+            || exchange.connection.initialize_id.is_some()
+        {
             emit_request_error(
                 exchange.frames,
                 exchange.program,
@@ -975,6 +1010,7 @@ async fn forward_server_frame(
     raw: &[u8],
     exchange: &mut Exchange<'_>,
 ) -> io::Result<ProgramAction> {
+    egress_gateway::refuse_duplicate_mcp_keys(raw)?;
     let response: Value = serde_json::from_slice(raw)
         .map_err(|error| invalid_data(format!("invalid MCP server frame: {error}")))?;
     let object = response
@@ -987,6 +1023,11 @@ async fn forward_server_frame(
     }
     if let Some(method) = object.get("method") {
         if let Some(id) = object.get("id") {
+            if exchange.connection.phase == McpConnectionPhase::Modern {
+                return Err(invalid_data(
+                    "modern MCP servers cannot send JSON-RPC requests",
+                ));
+            }
             let method = method.as_str().unwrap_or_default();
             let key = id_key(id)?;
             if exchange.connection.server_requests.len() >= MAXIMUM_PENDING_SERVER_REQUESTS
@@ -1026,13 +1067,39 @@ async fn forward_server_frame(
             "the MCP server returned an unknown response id",
         ));
     }
+    if exchange.connection.cancelled.remove(&key) {
+        exchange.connection.modern_requests.remove(&key);
+        return Ok(ProgramAction::Continue);
+    }
+    let terminal = match modern_exchange::accept_reply(&key, &response, exchange) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            if exchange.connection.lists.remove(&key).is_some() {
+                exchange.registry.list_failed(
+                    exchange.running.server(),
+                    &exchange.connection.key,
+                    DiscoveryFailure::CatalogCapture,
+                );
+            }
+            emit_request_error(
+                exchange.frames,
+                exchange.program,
+                Some(id),
+                -32603,
+                &error.to_string(),
+                None,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     if let Some(list) = exchange.connection.lists.remove(&key) {
         return forward_list_reply(raw, &response, list, exchange).await;
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
     // The reply reaches the client before its usage is recorded, so bookkeeping never drops it.
     emit_text(exchange.frames, exchange.program, raw, None).await?;
-    if let Some(call) = response_leg
+    if let Some(call) = response_leg.filter(|_| terminal)
         && let Err(error) = exchange.connection.policy.record(
             &exchange.connection.governed,
             &Principal::agent(),
@@ -1110,6 +1177,8 @@ async fn emit_list_failure(
 
 #[cfg(test)]
 mod tests {
+    mod modern_tests;
+
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -1232,6 +1301,11 @@ done"#
             panic!("non-output frame: {:?}", outbound.frame);
         };
         let bytes = crate::run::broker::protocol::decode_payload(&data).expect("output payload");
+        assert_eq!(
+            bytes.last(),
+            Some(&b'\n'),
+            "an MCP response ends with a newline"
+        );
         serde_json::from_slice(&bytes).expect("the MCP output is JSON")
     }
 

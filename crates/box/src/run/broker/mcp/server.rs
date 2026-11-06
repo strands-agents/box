@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt as _;
 
+use super::modern::{self, ModernReply, ModernRequest};
 use crate::record::config::mcp::McpServer;
 
 /// The MCP protocol version the offline `tools/list` client requests.
@@ -146,35 +147,10 @@ async fn list_tools_before_deadline(
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
     maximum_response_bytes: usize,
 ) -> io::Result<Value> {
-    send_json(
-        running,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "strands-box",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }
-        }),
-    )
-    .await?;
-    let (initialized, _) = read_response(running, stdout, 1).await?;
-    validate_initialize_result(&initialized)?;
-
-    send_json(
-        running,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }),
-    )
-    .await?;
+    let modern = probe_modern(running, stdout).await?;
+    if !modern {
+        initialize_legacy(running, stdout).await?;
+    }
 
     let mut tools = Vec::new();
     let mut tool_names = BTreeSet::new();
@@ -184,20 +160,22 @@ async fn list_tools_before_deadline(
     let mut request_id = 2_u64;
     let mut response_bytes = 0;
     loop {
-        let params = cursor
+        let mut params = cursor
             .as_ref()
             .map_or_else(|| json!({}), |cursor| json!({ "cursor": cursor }));
-        send_json(
-            running,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tools/list",
-                "params": params
-            }),
-        )
-        .await?;
-        let (response, page_bytes) = read_response(running, stdout, request_id).await?;
+        if modern {
+            params["_meta"] = modern::request_meta();
+        }
+        let request = json!({
+            "jsonrpc": "2.0", "id": request_id, "method": "tools/list", "params": params
+        });
+        send_json(running, &request).await?;
+        let (response, page_bytes) = read_response(running, stdout, request_id, modern).await?;
+        if modern {
+            ModernRequest::parse(&request)
+                .map_err(|_| invalid_data("invalid offline MCP request"))?
+                .validate_reply(&response)?;
+        }
         admit_discovery_response_bytes(&mut response_bytes, page_bytes, maximum_response_bytes)?;
         let result = response
             .get("result")
@@ -269,6 +247,105 @@ async fn list_tools_before_deadline(
     }))
 }
 
+async fn initialize_legacy(
+    running: &mut RunningMcpServer,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> io::Result<()> {
+    send_json(
+        running,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "strands-box",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+    )
+    .await?;
+    let (initialized, _) = read_response(running, stdout, 1, false).await?;
+    validate_initialize_result(&initialized)?;
+
+    send_json(
+        running,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    )
+    .await
+}
+
+async fn probe_modern(
+    running: &mut RunningMcpServer,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> io::Result<bool> {
+    let request = json!({
+        "jsonrpc": "2.0", "id": 0, "method": "server/discover",
+        "params": {"_meta": modern::request_meta()}
+    });
+    send_json(running, &request).await?;
+    let deadline = Instant::now() + MCP_BROKER_IO_TIMEOUT;
+    let mut frame = Vec::new();
+    loop {
+        match tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            read_server_frame_into(stdout, &mut frame),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) if frame.is_empty() => return Ok(false),
+            Err(_) => {
+                return Err(invalid_data(
+                    "MCP discovery probe timed out within a response frame",
+                ));
+            }
+        }
+        egress_gateway::refuse_duplicate_mcp_keys(&frame)?;
+        let response: Value =
+            serde_json::from_slice(&frame).map_err(|error| invalid_data(error.to_string()))?;
+        if response["jsonrpc"] != "2.0" {
+            return Err(invalid_data(
+                "MCP discovery probe response must declare JSON-RPC 2.0",
+            ));
+        }
+        if response.get("method").is_some() {
+            answer_server_request(running, &response).await?;
+            frame.clear();
+            continue;
+        }
+        if response["id"] != 0 {
+            return Err(invalid_data(
+                "MCP discovery probe received an unexpected response id",
+            ));
+        }
+        let reply = ModernRequest::parse(&request)
+            .map_err(|_| invalid_data("invalid offline MCP discovery request"))?
+            .validate_reply(&response)?;
+        if matches!(reply, ModernReply::LegacyProbe) {
+            return Ok(false);
+        }
+        if response.get("error").is_some() {
+            return Err(invalid_data(
+                "MCP server refused the modern discovery version or capabilities",
+            ));
+        }
+        if !response["result"]["capabilities"]["tools"].is_object() {
+            return Err(invalid_data(
+                "MCP server/discover does not advertise the tools capability",
+            ));
+        }
+        return Ok(true);
+    }
+}
+
 fn admit_discovery_response_bytes(
     total: &mut usize,
     page: usize,
@@ -294,10 +371,12 @@ async fn read_response(
     running: &mut RunningMcpServer,
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
     expected_id: u64,
+    modern: bool,
 ) -> io::Result<(Value, usize)> {
     loop {
         let frame = read_server_frame(stdout).await?;
         let frame_bytes = frame.len();
+        egress_gateway::refuse_duplicate_mcp_keys(&frame)?;
         let response: Value = serde_json::from_slice(&frame).map_err(|source| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -310,12 +389,20 @@ async fn read_response(
             ));
         }
         if response.get("method").is_some() {
+            if modern && response.get("id").is_some() {
+                return Err(invalid_data(
+                    "modern MCP servers cannot send JSON-RPC requests",
+                ));
+            }
             answer_server_request(running, &response).await?;
             continue;
         }
         let Some(id) = response.get("id") else {
             return Err(invalid_data("MCP server response has no id"));
         };
+        if id.as_u64() == Some(0) {
+            continue;
+        }
         if id.as_u64() != Some(expected_id) {
             return Err(invalid_data(format!(
                 "MCP server answered request {id}, expected request {expected_id}"
@@ -403,6 +490,14 @@ pub(super) async fn read_server_frame(
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
 ) -> io::Result<Vec<u8>> {
     let mut frame = Vec::new();
+    read_server_frame_into(stdout, &mut frame).await?;
+    Ok(frame)
+}
+
+async fn read_server_frame_into(
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    frame: &mut Vec<u8>,
+) -> io::Result<()> {
     loop {
         let available = stdout.fill_buf().await?;
         if available.is_empty() {
@@ -431,7 +526,7 @@ pub(super) async fn read_server_frame(
                 frame.clear();
                 continue;
             }
-            return Ok(frame);
+            return Ok(());
         }
     }
 }
@@ -755,6 +850,8 @@ impl Drop for RunningMcpServer {
 
 #[cfg(test)]
 mod tests {
+    mod modern_tests;
+
     use super::*;
 
     #[test]
@@ -887,6 +984,8 @@ mod tests {
             }),
         ];
         let script = r#"
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r request
 printf '%s\n' "$1"
 IFS= read -r notification

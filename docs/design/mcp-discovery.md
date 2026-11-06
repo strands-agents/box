@@ -103,7 +103,7 @@ stages on that thread before it writes the response.
 | Step | What happens | Server state |
 |---|---|---|
 | 1 | The harness runs the server's full command through its alias. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
-| 2 | The harness sends `initialize`. Box forwards it without a decision, and the broker checks the protocol version in the reply. | `Undiscovered` |
+| 2 | A legacy harness completes `initialize` and `notifications/initialized`. A modern harness sends per-request metadata; `server/discover` is optional. The broker validates the selected protocol. | `Undiscovered` |
 | 3 | The harness sends `tools/list`, and `mcp:call` decides it. A refused list never reaches the server. | `Failed` if refused |
 | 4 | The broker relays the request. Box captures a list that names no cursor, and gives it 30 seconds for each reply. | `Undiscovered` |
 | 5 | Box merges and forwards a page with a `nextCursor` immediately. | `Listing` |
@@ -115,6 +115,17 @@ stages on that thread before it writes the response.
 A failure at steps 5 to 7 sends the harness an MCP error that names the failed step, in place of the
 reply. A failed stdio server takes no new connections for the rest of the run, and its other
 connections close.
+
+For MCP `2026-07-28`, the broker validates the version and capabilities on every request.
+It checks that a list result has `resultType: "complete"`, a nonnegative `ttlMs`, and a valid
+`cacheScope` before catalog capture. It forwards these fields unchanged. The catalog holds the
+policy schema for this run; it is not a shared response cache.
+
+The offline schema command starts its own server and probes with `server/discover`. A legacy
+error or an empty probe timeout selects the legacy handshake. A recognized modern error does
+not trigger that fallback. A timeout within a partial frame fails discovery, so a frame suffix
+cannot become a new message. The probe uses two seconds of the existing 30-second discovery
+deadline. Each modern page request carries its own metadata.
 
 ### An http server
 
