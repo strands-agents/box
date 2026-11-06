@@ -108,7 +108,8 @@ Two refusals look like a denial, and no `permit` lifts them:
 ## The actions
 
 The box ships ten actions in four categories, and generates one more for each MCP tool it
-discovers. [The action vocabulary](policy/actions.md) lists the fields of each one.
+discovers. Each experimental [tool grammar](config.md#toolnamegrammar) adds its own `Tool::<name>`
+actions. [The action vocabulary](policy/actions.md) lists the fields of each one.
 
 - **[Filesystem](policy/actions.md#filesystem)**: a file operation in Strands Shell or Monty.
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.

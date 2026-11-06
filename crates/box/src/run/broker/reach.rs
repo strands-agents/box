@@ -54,6 +54,7 @@ pub(super) struct Reach {
     forbidden_exactly: Vec<AuthoritySource>,
 
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
 
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
@@ -197,6 +198,7 @@ impl Reach {
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
             commands: std::sync::Arc::default(),
+            installation: None,
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
@@ -209,6 +211,14 @@ impl Reach {
         commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     ) -> Self {
         self.commands = commands;
+        self
+    }
+
+    pub(super) fn with_installation(
+        mut self,
+        installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
+    ) -> Self {
+        self.installation = Some(installation);
         self
     }
 
@@ -293,6 +303,14 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
+        if mutates
+            && self
+                .installation
+                .as_ref()
+                .is_some_and(|installation| installation.refuses_mutation(named))
+        {
+            return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
+        }
         if mutates && self.commands.refuses_mutation(named) {
             return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
         }
@@ -326,6 +344,14 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<(), Refused> {
+        if mutates
+            && self
+                .installation
+                .as_ref()
+                .is_some_and(|installation| installation.refuses_mutation(approved))
+        {
+            return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
+        }
         if mutates && self.commands.refuses_mutation(approved) {
             return Err(Refused::new(reported_as, CONFIGURED_COMMAND));
         }
@@ -406,6 +432,8 @@ const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no polic
 
 const ENCLOSES_BOX_STATE: &str =
     "contains trusted Box state, so no policy may change this directory";
+
+const TRUSTED_EXECUTABLE: &str = "cannot change a trusted Box executable or its path";
 
 const CONFIGURED_COMMAND: &str =
     "is a configured tool command or its ancestor, which this run does not allow to change";

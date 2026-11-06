@@ -92,6 +92,7 @@ impl FileIdentity {
 #[derive(Debug)]
 pub(crate) struct DirectReach {
     pub(crate) command: Option<std::sync::Arc<crate::run::commands::ConfiguredCommand>>,
+    pub(crate) installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
     /// What the process's own syscalls reach.
     pub(crate) grants: Vec<DirectGrant>,
     /// What stays unreachable inside those grants: `deny` entries, and the directory holding each
@@ -184,6 +185,7 @@ pub(crate) fn direct_grants(
         grants,
         refusals,
         command: None,
+        installation: None,
     })
 }
 

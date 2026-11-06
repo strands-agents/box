@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status] options.short`: declares no flag
+# expect: `<grammar>.shell.status.options.short`: declares no flag
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

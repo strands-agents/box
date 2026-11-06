@@ -54,7 +54,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -75,7 +75,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(BTreeMap::new()),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -92,7 +92,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: None,
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -110,7 +110,7 @@ impl ShellPolicyInterceptor {
             governed,
             home: Some(home.into()),
             spawn_credentials: Arc::new(spawn_credentials),
-            grammar_bindings: Arc::default(),
+            grammar_bindings: Arc::new(GrammarBindings::none()),
         })
     }
 
@@ -1200,14 +1200,6 @@ mod tests {
         }
     }
 
-    fn grammar(name: &str) -> crate::grammar::Grammar {
-        crate::grammar::Grammar::load(
-            &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("tests/grammars/valid/{name}.grammar.toml")),
-        )
-        .expect("the fixture grammar loads")
-    }
-
     /// An interceptor over an engine that knows `grammars`, with `bind` as its bindings.
     fn interceptor_with_grammars(
         source: &str,
@@ -1215,17 +1207,17 @@ mod tests {
         bind: impl FnOnce(&mut GrammarBindings),
     ) -> InterceptorFixture {
         let history = tempfile::tempdir().expect("history directory");
-        let installed: Vec<_> = grammars.iter().map(|name| grammar(name)).collect();
+        let installed = crate::ToolGrammars::corpus(grammars);
         let policy = PolicyEngine::open_with_grammars(
             vec![Policy {
                 origin: PathBuf::from("shell-adapter-test.dw"),
                 text: source.to_string(),
             }],
-            &installed,
+            installed.iter().map(|tool| tool.grammar().as_ref()),
             &history.path().join("dogwood.redb"),
         )
         .expect("policy opens");
-        let mut bindings = GrammarBindings::new(installed).expect("distinct grammars");
+        let mut bindings = GrammarBindings::installed(&installed);
         bind(&mut bindings);
         InterceptorFixture {
             interceptor: ShellPolicyInterceptor::into_handle_with_grammar_bindings(
@@ -1265,9 +1257,7 @@ mod tests {
         let push = words(&["push", "origin", "main"]);
         let bound = |source: &str| {
             interceptor_with_grammars(source, &["git"], |bindings| {
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             })
         };
 
@@ -1324,10 +1314,8 @@ mod tests {
         let (git, cargo) = (programs.path("git"), programs.path("cargo"));
         let interceptor =
             interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
-                b.bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
-                b.bind(&programs.file("cargo"), "cargo", "cargo")
-                    .expect("cargo binds");
+                b.declare(&programs.file("git"), "git");
+                b.declare(&programs.file("cargo"), "cargo");
             });
         let push = words(&["push", "origin", "main"]);
         let test = words(&["test"]);
@@ -1378,12 +1366,10 @@ mod tests {
             &["git", "cargo", "aws"],
             |bindings| {
                 let shim = programs.file("mise");
-                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
-                bindings.bind(&shim, "aws", "aws").expect("aws binds");
+                bindings.declare(&shim, "cargo");
+                bindings.declare(&shim, "aws");
                 bindings.declare(&shim, "node");
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             },
         );
         let none = words(&[]);
@@ -1460,12 +1446,8 @@ mod tests {
                    permit (principal, action in Tool::cargo::Action::"*", resource);"#,
                 &["git", "cargo"],
                 |bindings| {
-                    bindings
-                        .bind(&programs.file("git"), "git", "git")
-                        .expect("git binds");
-                    bindings
-                        .bind(&programs.file("cargo"), "cargo", "cargo")
-                        .expect("cargo binds");
+                    bindings.declare(&programs.file("git"), "git");
+                    bindings.declare(&programs.file("cargo"), "cargo");
                 },
             );
             programs.link("git", target);
@@ -1492,7 +1474,7 @@ mod tests {
             &["cargo"],
             |bindings| {
                 let shim = programs.file("mise");
-                bindings.bind(&shim, "cargo", "cargo").expect("cargo binds");
+                bindings.declare(&shim, "cargo");
                 bindings.declare(&shim, "node");
             },
         );
@@ -1513,8 +1495,8 @@ mod tests {
         }
     }
 
-    /// **A bound link retargeted to another bound file is refused**, and is never decided as the
-    /// other file's grammar action.
+    /// **A bound link retargeted to another bound file is refused**, and is never decided as a
+    /// grammar action of that file.
     #[tokio::test]
     async fn a_bound_link_retargeted_to_another_bound_file_is_refused() {
         let programs = Programs::new();
@@ -1527,14 +1509,10 @@ mod tests {
             |bindings| {
                 let linked =
                     ProgramFile::read(programs.0.path().join("git")).expect("the link reads");
-                bindings.bind(&linked, "git", "git").expect("git binds");
+                bindings.declare(&linked, "git");
                 let cargo = programs.file("cargo");
-                bindings
-                    .bind(&cargo, "cargo", "cargo")
-                    .expect("cargo binds");
-                bindings
-                    .bind(&cargo, "git", "cargo")
-                    .expect("cargo binds a second name on its own file");
+                bindings.declare(&cargo, "cargo");
+                bindings.declare(&cargo, "git");
             },
         );
         programs.link("git", "cargo");
@@ -1567,9 +1545,7 @@ mod tests {
             r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
             &["git"],
             |bindings| {
-                bindings
-                    .bind(&programs.file("git"), "git", "git")
-                    .expect("git binds");
+                bindings.declare(&programs.file("git"), "git");
             },
         );
         std::fs::remove_file(&git).expect("the file is removed");
@@ -1608,9 +1584,7 @@ mod tests {
             bindings.declare(&programs.file("mise"), "node");
         });
         let bound_elsewhere = interceptor_with_grammars(POLICY, &["git"], |bindings| {
-            bindings
-                .bind(&programs.file("vendored-git"), "git", "git")
-                .expect("git binds another file");
+            bindings.declare(&programs.file("vendored-git"), "git");
         });
         let today = interceptor(POLICY);
         let engine = {

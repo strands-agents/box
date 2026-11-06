@@ -68,11 +68,21 @@ fn a_configuration_with_no_policy_has_no_findings() {
 }
 
 #[test]
-fn a_per_tool_rule_is_unchecked_only_when_a_local_mcp_server_is_declared() {
+fn a_per_tool_rule_is_unchecked_only_when_an_mcp_server_is_declared() {
     let directory = tempfile::tempdir().expect("a directory");
     let config = configuration(
         directory.path(),
         "policy = \"policy.dw\"\n[mcp.alpha]\ntype = \"stdio\"\ncommand = [\"fake-alpha-mcp\"]\n",
+        Some(TYPED),
+    );
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(check.errors().is_empty(), "{:?}", check.errors());
+    assert_eq!(check.unchecked()[0].id(), Some("tool"));
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        "policy = \"policy.dw\"\n[mcp.alpha]\ntype = \"http\"\ndestinations = [\"example.com\"]\n",
         Some(TYPED),
     );
     let check = strands_box::check_policy(config).expect("the check runs");
@@ -92,4 +102,41 @@ fn a_check_that_cannot_read_its_files_fails() {
     let config = configuration(directory.path(), "policy = \"absent.dw\"\n", None);
     let failed = strands_box::check_policy(config).expect_err("no policy file");
     assert!(failed.to_string().contains("absent.dw"), "{failed}");
+}
+
+const FORBID_PUSH: &str =
+    "@id(\"push\") forbid (principal, action == Tool::git::Action::\"push\", resource);\n";
+
+const GIT_GRAMMAR: &str = "[experimental-features]\ntool-grammars = true\n\
+    [tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+    [tool.git.grammar]\nformat = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+    [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+
+#[test]
+fn a_check_reads_the_actions_of_each_tool_grammar() {
+    for server in [
+        "",
+        "[mcp.alpha]\ntype = \"stdio\"\ncommand = [\"fake-alpha-mcp\"]\n",
+    ] {
+        let directory = tempfile::tempdir().expect("a directory");
+        let config = configuration(
+            directory.path(),
+            &format!("policy = \"policy.dw\"\n{server}{GIT_GRAMMAR}"),
+            Some(FORBID_PUSH),
+        );
+        let check = strands_box::check_policy(config).expect("the check runs");
+        assert!(check.errors().is_empty(), "{server}: {:?}", check.errors());
+
+        let directory = tempfile::tempdir().expect("a directory");
+        let config = configuration(
+            directory.path(),
+            &format!("policy = \"policy.dw\"\n{server}"),
+            Some(FORBID_PUSH),
+        );
+        let check = strands_box::check_policy(config).expect("the check runs");
+        assert!(
+            !check.errors().is_empty(),
+            "{server}: with no grammar the action is unknown"
+        );
+    }
 }

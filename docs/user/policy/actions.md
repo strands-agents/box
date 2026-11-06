@@ -1,7 +1,8 @@
 # Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships ten actions, and generates one more for each MCP tool it discovers.
+ships ten actions, and generates one more for each MCP tool it discovers. Each experimental [tool
+grammar](../config.md#toolnamegrammar) adds its own `Tool::<name>` actions.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
@@ -195,7 +196,10 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
 `[mcp.<name>]` table names. A policy with no matching `shell:spawn` permit refuses the server at
-startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+startup. For an enabled [MCP wildcard command](../mcp.md#argument-wildcards), `command` contains
+the effective launch command, joined by spaces. Its argument fields contain the same values,
+including the caller's values in wildcard positions.
+A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 

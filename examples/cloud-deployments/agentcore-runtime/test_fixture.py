@@ -36,22 +36,22 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(order["customer_preference"], "replacement")
         self.assertEqual(order["delivery_status"], "delayed")
         self.assertIsNone(order["resolution"])
-        status, eligible, _ = request(self.fixture, "GET", "/orders/42/eligibility")
+        status, eligible, _ = request(self.fixture, "GET", "/orders/42/replacement")
         self.assertEqual((status, eligible["eligible"]), (200, True))
         self.assertEqual(self.fixture.snapshot()["effects"], [])
 
     def test_failed_and_unrelated_eligibility_controls(self):
-        status, failed, _ = request(self.fixture, "GET", "/orders/42/eligibility-failed")
+        status, failed, _ = request(self.fixture, "GET", "/orders/42/replacement-failed")
         self.assertEqual((status, failed["eligible"]), (409, False))
-        status, other, _ = request(self.fixture, "GET", "/orders/43/eligibility")
+        status, other, _ = request(self.fixture, "GET", "/orders/43/replacement")
         self.assertEqual((status, other["order_id"], other["eligible"]), (200, 43, True))
         with FixtureServer(eligibility_status=409) as failed_fixture:
-            status, failed, _ = request(failed_fixture, "GET", "/orders/42/eligibility")
+            status, failed, _ = request(failed_fixture, "GET", "/orders/42/replacement")
             self.assertEqual((status, failed["eligible"]), (409, False))
             self.assertEqual(failed_fixture.snapshot()["effects"], [])
 
     def test_backend_does_not_duplicate_the_box_history_gate(self):
-        status, reply, _ = request(self.fixture, "POST", "/orders/42/dispatch", {})
+        status, reply, _ = request(self.fixture, "POST", "/orders/42/replacement", {})
         self.assertEqual(status, 201)
         self.assertEqual(reply["effect_id"], "dispatch-42-001")
         snap = self.fixture.snapshot()
@@ -59,23 +59,32 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(snap["order"]["replacement_stock"], 2)
         self.assertEqual(len(snap["requests"]), 1)
 
+    def test_replacement_path_uses_method_to_check_or_dispatch(self):
+        status, eligibility, _ = request(self.fixture, "GET", "/orders/42/replacement")
+        self.assertEqual((status, eligibility["eligible"]), (200, True))
+        self.assertEqual(self.fixture.snapshot()["effects"], [])
+        status, receipt, _ = request(self.fixture, "POST", "/orders/42/replacement", {})
+        self.assertEqual((status, receipt["resolution"]), (201, "dispatch"))
+        self.assertEqual(self.fixture.snapshot()["effect_counts"], {"dispatch": 1, "refund": 0})
+
     def test_same_key_replays_the_original_receipt_without_an_effect(self):
-        first = request(self.fixture, "POST", "/orders/42/dispatch", {})
-        replay = request(self.fixture, "POST", "/orders/42/dispatch", {})
+        first = request(self.fixture, "POST", "/orders/42/replacement", {})
+        replay = request(self.fixture, "POST", "/orders/42/replacement", {})
         self.assertEqual(first[:2], replay[:2])
         self.assertEqual(replay[2]["Idempotency-Replayed"], "true")
-        status, _, _ = request(self.fixture, "POST", "/orders/42/dispatch", {}, key="new-key")
+        status, _, _ = request(self.fixture, "POST", "/orders/42/replacement", {}, key="new-key")
         self.assertEqual(status, 409)
         snap = self.fixture.snapshot()
         self.assertEqual(len(snap["effects"]), 1)
         self.assertEqual([r["new_effect"] for r in snap["requests"]], ["dispatch", None, None])
 
     def test_dispatch_and_refund_are_mutually_exclusive(self):
+        paths = {"dispatch": "/orders/42/replacement", "refund": "/orders/42/refund"}
         for first, second in (("dispatch", "refund"), ("refund", "dispatch")):
             with self.subTest(first=first), FixtureServer() as server:
-                status, _, _ = request(server, "POST", "/orders/42/" + first, {})
+                status, _, _ = request(server, "POST", paths[first], {})
                 self.assertEqual(status, 201)
-                status, reply, _ = request(server, "POST", "/orders/42/" + second, {})
+                status, reply, _ = request(server, "POST", paths[second], {})
                 self.assertEqual((status, reply["error"]), (409, "order_already_resolved"))
                 self.assertEqual([e["kind"] for e in server.snapshot()["effects"]], [first])
 
@@ -94,11 +103,11 @@ class FixtureTests(unittest.TestCase):
     def test_lost_dispatch_response_keeps_one_effect_and_replays_receipt(self):
         with FixtureServer(drop_first_dispatch_response=True) as server:
             with self.assertRaises(http.client.RemoteDisconnected):
-                request(server, "POST", "/orders/42/dispatch", {})
+                request(server, "POST", "/orders/42/replacement", {})
             snap = server.snapshot()
             self.assertEqual(len(snap["effects"]), 1)
             self.assertTrue(snap["requests"][0]["response_dropped"])
-            status, replay, headers = request(server, "POST", "/orders/42/dispatch", {})
+            status, replay, headers = request(server, "POST", "/orders/42/replacement", {})
             self.assertEqual((status, replay["effect_id"]), (201, "dispatch-42-001"))
             self.assertEqual(headers["Idempotency-Replayed"], "true")
             status, _, _ = request(server, "POST", "/orders/42/refund", {})
@@ -110,7 +119,7 @@ class FixtureTests(unittest.TestCase):
     def test_concurrent_replays_create_one_effect(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             replies = list(pool.map(
-                lambda _: request(self.fixture, "POST", "/orders/42/dispatch", {}),
+                lambda _: request(self.fixture, "POST", "/orders/42/replacement", {}),
                 range(8),
             ))
         self.assertTrue(all(reply[0] == 201 for reply in replies))
@@ -123,11 +132,11 @@ class FixtureTests(unittest.TestCase):
         cases = [
             ("GET", "/orders/42?other=43", None, 400),
             ("GET", "/orders/42", {"order_id": 43}, 400),
-            ("POST", "/orders/42/dispatch?quantity=2", {}, 400),
-            ("POST", "/orders/42/dispatch", {"quantity": 2}, 400),
-            ("POST", "/orders/42/dispatch", [], 400),
-            ("POST", "/orders/43/dispatch", {}, 404),
-            ("POST", "/orders/42/%64ispatch", {}, 404),
+            ("POST", "/orders/42/replacement?quantity=2", {}, 400),
+            ("POST", "/orders/42/replacement", {"quantity": 2}, 400),
+            ("POST", "/orders/42/replacement", [], 400),
+            ("POST", "/orders/43/replacement", {}, 404),
+            ("POST", "/orders/42/%72eplacement", {}, 404),
             ("DELETE", "/orders/42", None, 405),
         ]
         for method, path, body, expected in cases:
@@ -139,7 +148,7 @@ class FixtureTests(unittest.TestCase):
     def test_mutation_requires_an_idempotency_key(self):
         for key in (None, "bad key"):
             with self.subTest(key=key):
-                status, _, _ = request(self.fixture, "POST", "/orders/42/dispatch", {}, key=key)
+                status, _, _ = request(self.fixture, "POST", "/orders/42/replacement", {}, key=key)
                 self.assertEqual(status, 400)
         self.assertEqual(self.fixture.snapshot()["effects"], [])
 

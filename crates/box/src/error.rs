@@ -50,6 +50,9 @@ pub(crate) enum Internal {
     Trampoline(#[from] TrampolineError),
 
     #[error(transparent)]
+    Installation(#[from] InstallationError),
+
+    #[error(transparent)]
     Supervise(#[from] SuperviseError),
 
     #[error(transparent)]
@@ -63,6 +66,9 @@ pub(crate) enum Internal {
 
     #[error("policy staging failed: {0}")]
     PolicyStaging(#[from] policy::PolicyStagingError),
+
+    #[error("tool grammar binding refused: {0}")]
+    GrammarBinding(#[from] policy::BindingRefusal),
 
     /// The committed record and the durable history disagree about whether this box has run.
     #[error(
@@ -208,10 +214,6 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    #[cfg(target_os = "linux")]
-    #[error("Linux support is experimental. Set EXPERIMENTAL_LINUX_SUPPORT=TRUE to enable it.")]
-    ExperimentalLinuxSupport,
-
     #[error(
         "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
     )]
@@ -239,6 +241,9 @@ pub(crate) enum ConfigError {
 
     #[error("invalid `{table}` table: {reason}")]
     Process { table: String, reason: String },
+
+    #[error("tool grammar refused: {source}")]
+    ToolGrammar { source: policy::ToolGrammarError },
 
     /// The hosted Shell was asked to start a program no `[tool.<name>]` names.
     #[error("no tool runs {program}: {reason}")]
@@ -439,6 +444,21 @@ pub(crate) enum ExecutableError {
         description: &'static str,
         value: String,
     },
+}
+
+/// The installed trusted executables could not retain their identities.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InstallationError {
+    #[error("cannot locate the trusted Box executable: {source}")]
+    Locate { source: std::io::Error },
+
+    #[error("trusted Box executable {path} {reason}")]
+    Invalid { path: PathBuf, reason: String },
+
+    #[error(
+        "trusted Box executable {path} changed after this run loaded it. Stop Box before updating its installation"
+    )]
+    Changed { path: PathBuf },
 }
 
 /// The containment trampoline could not be prepared or launched.

@@ -61,6 +61,87 @@ fn box_under(policy_text: &str, name: &str) -> Configured {
     Request::with_policy(name, policy_text).expect()
 }
 
+#[test]
+fn a_configured_timeout_allows_a_quiet_shell_call_beyond_thirty_five_seconds() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = Request::with_config(
+        "shell-long-timeout",
+        PERMISSIVE_POLICY,
+        "[limits]\nshell.timeout = 45\n",
+    )
+    .expect();
+
+    let output = box_.bash(r#"zsh -c 'sleep 36; printf FINISHED_LONG_CALL'"#);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "FINISHED_LONG_CALL");
+}
+
+#[test]
+fn disabling_the_timeout_allows_a_quiet_call_and_a_subsequent_request() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = Request::with_config(
+        "shell-unlimited-timeout",
+        PERMISSIVE_POLICY,
+        "[limits]\nshell.timeout = false\n",
+    )
+    .expect();
+    let output = box_.bash(
+        r#"
+        zsh -c 'sleep 36; printf FINISHED_UNLIMITED_CALL'
+        printf '\nstatus=%s\n' "$?"
+        zsh -c 'printf STILL_SERVING'
+        "#,
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "FINISHED_UNLIMITED_CALL\nstatus=0\nSTILL_SERVING"
+    );
+    assert!(
+        !stderr(&output).contains("execution timeout exceeded"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_configured_deadline_covers_the_whole_call_and_the_next_call_still_runs() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = Request::with_config(
+        "shell-short-timeout",
+        PERMISSIVE_POLICY,
+        "[limits.shell]\ntimeout = 2\n",
+    )
+    .expect();
+
+    let output = box_.bash(
+        r#"
+        zsh -c 'printf FIRST; sleep 1; printf SECOND; sleep 2; printf TOO_LATE'
+        printf '\nstatus=%s\n' "$?"
+        zsh -c 'printf STILL_SERVING'
+        "#,
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("FIRSTSECOND"), "{text}");
+    assert!(!text.contains("TOO_LATE"), "{text}");
+    assert!(text.contains("status=1"), "{text}");
+    assert!(text.contains("STILL_SERVING"), "{text}");
+    assert!(
+        stderr(&output).contains("execution timeout exceeded"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -2252,9 +2333,9 @@ unless temporal {
 /// Two probe programs declared as the tools a test-before-commit rule names, each reading the
 /// probe directory its `#!` interpreter opens.
 const PROBE_TOOLCHAIN: &str = "[tool.git]\ncommand = [\"git\"]\n[tool.git.filesystem]\n\
-                               read = [\"{box_home}/probe-bin\"]\n\n\
+                               read = [\"{box_home}/probe-bin\"]\n{interpreter_grants}\n\
                                [tool.cargo]\ncommand = [\"cargo\"]\n[tool.cargo.filesystem]\n\
-                               read = [\"{box_home}/probe-bin\"]\n";
+                               read = [\"{box_home}/probe-bin\"]\n{interpreter_grants}";
 
 /// Place a probe program named `name` in `bin` that prints `<NAME>_RAN` and its arguments.
 fn install_probe_program(bin: &std::path::Path, name: &str) {
@@ -2278,10 +2359,19 @@ fn a_spawn_rule_keyed_on_a_prior_spawn_response_lifts_only_after_the_test_run_co
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    let interpreter_grants = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("resolve the probe interpreter");
+        format!("read_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    let toolchain = PROBE_TOOLCHAIN.replace("{interpreter_grants}", &interpreter_grants);
     let request = Request::with_config(
         "spawn-test-before-commit",
         TEST_BEFORE_COMMIT_POLICY,
-        &PROBE_TOOLCHAIN.replace("{box_home}/probe-bin", "~/probe-bin"),
+        &toolchain.replace("{box_home}/probe-bin", "~/probe-bin"),
     );
     // The operator owns the probes outside the agent's writable home.
     let bin = request.operator_home().join("probe-bin");
@@ -3409,6 +3499,63 @@ fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     assert_eq!(std::fs::read(alias).unwrap(), original);
 }
 
+/// A root-owned host program with several names that the user that runs Box cannot write, and the
+/// arguments that make it print.
+fn system_program_with_several_names() -> Option<(&'static str, &'static str)> {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return None;
+    }
+    [("id", "-u"), ("unzip", "-v"), ("bzip2", "--help")]
+        .into_iter()
+        .find(|(name, _)| {
+            std::fs::symlink_metadata(std::path::Path::new("/usr/bin").join(name)).is_ok_and(
+                |metadata| {
+                    metadata.is_file()
+                        && metadata.nlink() > 1
+                        && metadata.uid() == 0
+                        && metadata.mode() & 0o022 == 0
+                },
+            )
+        })
+}
+
+#[test]
+fn a_root_owned_configured_command_with_several_names_runs() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let Some((name, argument)) = system_program_with_several_names() else {
+        if cfg!(target_os = "macos") {
+            panic!(
+                "macOS ships a root-owned id, unzip, or bzip2 with several names, so a skip there \
+                 hides a regression"
+            );
+        }
+        println!("skipping: no root-owned id, unzip, or bzip2 with several names in /usr/bin");
+        return;
+    };
+    let policy = format!(
+        "permit(principal, action == Box::Action::\"shell:exec\", resource);\n\
+         permit(principal, action == Box::Action::\"shell:spawn\", resource) \
+         when {{ context.input.program == \"{name}\" }};\n\
+         permit(principal, action == Box::Action::\"fs:read\", resource);\n"
+    );
+    let tool = format!("[tool.{name}]\ncommand = [\"/usr/bin/{name}\"]\n");
+    let box_ = Request::with_config("cmd-several-names", &policy, &tool).expect();
+
+    let output = box_.bash(&format!("zsh -lc \"{name} {argument}\""));
+
+    assert!(output.status.success(), "/usr/bin/{name}: {output:?}");
+    assert!(
+        !format!("{}{}", stdout(&output), stderr(&output))
+            .trim()
+            .is_empty(),
+        "/usr/bin/{name}: {output:?}"
+    );
+}
+
 #[test]
 fn native_write_grants_cannot_reach_a_configured_command() {
     if !fixture::namespace_launcher_is_usable() {
@@ -3501,16 +3648,25 @@ fn a_configured_linked_script_keeps_its_invocation_path() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let sh = std::path::Path::new("/bin/sh")
+            .canonicalize()
+            .expect("resolve the script interpreter");
+        format!(", {sh:?}")
+    } else {
+        String::new()
+    };
     let request = Request::with_config(
         "cmd-script-path",
         "permit(principal, action, resource);",
-        r#"
+        &r#"
 [tool.script]
 command = ["{workspace}/linked-script"]
 
 [tool.script.filesystem]
-read_file = ["{workspace}/script-target"]
-"#,
+read_file = ["{workspace}/script-target"{interpreter_grant}]
+"#
+        .replace("{interpreter_grant}", &interpreter_grant),
     )
     .without_agent_home();
     let workspace = request.operator_home().join("workspace");

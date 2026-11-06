@@ -101,11 +101,11 @@ class ShipmentTools:
 
     def check_eligibility(self) -> str:
         """Request the service eligibility observation for order 42."""
-        return self.request("check_eligibility", "GET", "/orders/42/eligibility")
+        return self.request("check_eligibility", "GET", "/orders/42/replacement")
 
     def dispatch_replacement(self) -> str:
         """Attempt a replacement dispatch for order 42 using its stable idempotency key."""
-        return self.request("dispatch_replacement", "POST", "/orders/42/dispatch", "replacement-42")
+        return self.request("dispatch_replacement", "POST", "/orders/42/replacement", "replacement-42")
 
     def request_refund(self) -> str:
         """Attempt a refund for order 42 using its stable idempotency key."""

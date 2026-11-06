@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.push] operands.refspec`: `rest` needs this operand alone in the usage, written as `<name>...` and not after a required `--`
+# expect: `<grammar>.shell.push.operands.refspec`: `rest` needs this operand alone in the usage, written as `<name>...` and not after a required `--`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

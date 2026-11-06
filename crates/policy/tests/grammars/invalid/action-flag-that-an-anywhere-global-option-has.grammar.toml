@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `[shell.status] options.silent`: flag "-q" is also a flag of `[global] options.quiet`
+# expect: `<grammar>.shell.status.options.silent`: flag "-q" is also a flag of `<grammar>.global.options.quiet`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

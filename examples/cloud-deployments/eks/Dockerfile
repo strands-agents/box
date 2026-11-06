@@ -6,7 +6,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN git init /src && git -C /src remote add origin https://github.com/strands-agents/box.git && git -C /src fetch --depth 1 origin ${BOX_REV} && git -C /src checkout --detach FETCH_HEAD && test "$(git -C /src rev-parse HEAD)" = "${BOX_REV}"
 WORKDIR /src
 RUN cargo build --locked --release --all-features -p strands-box -p strands-box-containment
-RUN mkdir -p /out && cp target/release/strands-box /out/box && cp target/release/strands-box-sock-alias target/release/strands-box-contain-trampoline /out/ && python3 -c 'import hashlib; from pathlib import Path; Path("/out/box.sha256").write_text(hashlib.sha256(Path("/out/box").read_bytes()).hexdigest())'
+RUN mkdir -p /out && git rev-parse HEAD > /out/box.revision && cp target/release/strands-box /out/box && cp target/release/strands-box-sock-alias target/release/strands-box-contain-trampoline /out/ && python3 -c 'import hashlib; from pathlib import Path; Path("/out/box.sha256").write_text(hashlib.sha256(Path("/out/box").read_bytes()).hexdigest())'
 
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS runtime
 RUN dnf install -y python3.12 bash libstdc++ ca-certificates shadow-utils && dnf clean all && groupadd -g 991 agent && useradd -u 991 -g 991 -m agent

@@ -45,6 +45,27 @@ refuses a mismatch. This binds the checked directory path to dispatch. It does n
 directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
 it requires no version bump.
 
+### Local addition: an embedder can disable the execution timeout
+
+`ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
+defaults to 30 seconds, so omission does not disable the timeout despite the old API prose.
+This additive Rust method lets Box implement an operator's explicit unlimited Shell setting
+without substituting an arbitrary large duration. `timeout(Duration)` can restore a finite
+deadline, zero remains invalid, and the other resource limits remain in force. Shell's own
+TOML, Python, and Node configuration surfaces do not change.
+
+`builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
+repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
+checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Execution deadlines refuse clock overflow
+
+The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout
+returns `InvalidInput` at build time; if it becomes unrepresentable later, the call expires
+before executing its commands. This fixes an upstream panic without treating overflow as
+unlimited execution. `builder_refuses_a_timeout_that_overflows_the_clock` and
+`an_unrepresentable_refreshed_deadline_stops_work` cover the builder, `run`, and `execute`.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.
@@ -53,6 +74,26 @@ Previously, those tasks could outlive cancellation or wait indefinitely for a ho
 The actual Box process cleanup tests cover configured tools and their descendants.
 Background jobs stop when their owning process is dropped or a pending `wait` is cancelled.
 An open shell retains background jobs across completed foreground calls.
+
+### A synchronous command finishing after its deadline reports a timeout
+
+A command that blocked the runtime past its deadline could return success: Tokio's timeout
+wrapper can receive a completed task before polling its timer. `run_pipeline` now checks the
+clock after each task join and reports the existing execution-timeout error when the deadline
+has passed. It also checks limits before expansion and after expansion, so a substitution that
+consumes the deadline stops that pipeline before command dispatch and redirection.
+`execute_item` checks again before returning, so `!` cannot turn the timeout into success. These
+checks do not interrupt synchronous work or undo its completed effects.
+
+This is an upstream deadline-accounting bug, exercised through the script-interpreter hook.
+`a_synchronous_interpreter_cannot_return_success_after_the_shell_deadline` covers late completion
+with `!` and `||`, and a successful subsequent call.
+`an_expired_interpreter_cannot_start_following_commands_or_redirects` covers subsequent commands
+and command substitution.
+`a_late_interpreter_does_not_wait_for_an_open_output_channel` covers cancellation of the output
+drain when a synchronous command finishes late with a writer still open.
+`a_synchronous_interpreter_finishes_with_an_adequate_or_unlimited_deadline` covers both ways to
+complete successfully with a sufficient or disabled limit.
 
 ### Local addition: an effect says which words the script stated (2026-09-25)
 

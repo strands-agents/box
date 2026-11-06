@@ -1266,8 +1266,7 @@ permit(principal, action == demo::Action::"echo", resource);
 forbid(principal, action == demo::Action::"echo", resource)
 when { context.input.text == "denied" };"#,
         &format!(
-            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n\
-             [mcp.unused]\ntype = \"stdio\"\ncommand = [\"false\"]\n",
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
             upstream.authority
         ),
     )

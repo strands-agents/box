@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `version` is required: write `version = 1` for a new grammar
+# expect: `<grammar>.version` is required: write `version = 1` for a new grammar
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

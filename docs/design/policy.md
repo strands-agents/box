@@ -68,7 +68,8 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority)):
 - **The reachable paths check** runs in the Shell and Monty after the engine. It refuses the box directory,
   the `box.toml` and policy this run loaded, and anything outside the operator's home and the
   workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
-  configured tool programs. Reads of those programs remain subject to policy.
+  configured tool programs and the [installed trusted binaries](binaries.md#trampoline---strands-box-contain-trampoline).
+  Reads of these files remain subject to policy.
   Policy decides first, so a counting rule still sees the attempt, and the refusal is
   recorded beside policy's verdict.
 
@@ -125,6 +126,10 @@ three kinds of event:
 - **`::request`** for every attempt, whether it was allowed or denied.
 - **`::response`** for an operation that happened, or may have happened.
 - **`::error`** for an operation that definitely didn't happen.
+
+For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled,
+the `shell:spawn` request records the effective launch command and arguments, including the
+received values in the `*` positions.
 
 A metadata read is an operation that happened once the workload has its answer, so a Shell
 `test -e`, `test -L`, or `test -r`, or a Python `os.stat()` or `Path.exists()`, of a missing file in
@@ -228,7 +233,9 @@ reads `context.input`. The per-tool actions don't exist
 until a server reports its tools, so `run` stages each server's schema as it arrives and validates
 the whole policy once more when every server has reported. Until then a tool call for that server is
 denied without reaching the engine ([discovery serves the schema-independent
-subset](decisions.md#discovery-serves-the-schema-independent-subset)). A server whose tool listing
+subset](decisions.md#discovery-serves-the-schema-independent-subset)). A rule that names only tool
+grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
+from the start, so the rule loads at once or the box refuses it. A server whose tool listing
 the policy refused degrades alone: its per-tool rules don't load, and the box starts without them
 ([a server whose discovery a policy denies degrades
 alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).
@@ -245,8 +252,14 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses configured
-tool programs with multiple hard links or overlap with direct writable grants.
+tool programs that have more than one hard link and that its user can write, or that overlap with
+direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those constraints.
+When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also
+refuses wildcard commands that can select different servers for the same request.
+Box also refuses installed trusted programs with unaccounted hard-link names or overlap with any
+process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
+describes these refusals.
 
 The inert-rule check sorts each rule into one of three classes:
 

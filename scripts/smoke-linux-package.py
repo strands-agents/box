@@ -40,7 +40,7 @@ def unpack(archive, directory):
 def check(archive, allow_root_operator=False):
     if os.getuid() == 0 and not allow_root_operator:
         raise ValueError("run the package smoke test as an ordinary user")
-    root = Path(tempfile.mkdtemp(prefix="box-package-", dir=Path.home()))
+    root = Path(tempfile.mkdtemp(prefix="box-package-", dir=Path.home())).resolve()
     bundle = root / "package"
     bundle.mkdir()
     unpack(archive, bundle)
@@ -89,24 +89,6 @@ read_file = [{json.dumps(str(readonly))}]
         env=environment,
     )
     command = [str(bundle / "box"), "run", "--config", str(root / "box.toml")]
-    refusal_checks = {}
-    for label, value in (("default", None), ("invalid", "true")):
-        refused_environment = dict(environment)
-        if value is not None:
-            refused_environment["EXPERIMENTAL_LINUX_SUPPORT"] = value
-        refused = subprocess.run(
-            command, env=refused_environment, capture_output=True, text=True, timeout=10,
-        )
-        refusal_checks[f"{label}_opt_in_refused"] = (
-            refused.returncode != 0
-            and "EXPERIMENTAL_LINUX_SUPPORT=TRUE" in refused.stderr
-            and "PACKAGE_ENTERED" not in refused.stdout
-            and not (root / "state").exists()
-            and not (workspace / "result.txt").exists()
-        )
-        if not refusal_checks[f"{label}_opt_in_refused"]:
-            raise ValueError(f"{label} Linux opt-in refusal failed")
-    environment["EXPERIMENTAL_LINUX_SUPPORT"] = "TRUE"
     process = subprocess.Popen(
         command, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
@@ -124,7 +106,6 @@ read_file = [{json.dumps(str(readonly))}]
     )
     status = {key: value.strip() for key, value in status.items()}
     checks = {
-        **refusal_checks,
         "box_starts": version.returncode == 0,
         "workload_entered": "PACKAGE_ENTERED\n" in stdout,
         "read_and_write": (workspace / "result.txt").exists()

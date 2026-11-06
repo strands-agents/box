@@ -669,8 +669,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   existing file, not what the renderer emits, so removing the file cell's create deny leaves it green.
   Keep it — it catches a change that made the deny bite, which would break `> /dev/null` everywhere —
   but do not count it as the create deny's guard. `a_granted_file_itself_cannot_be_replaced` is that.
-- **The write cells name the leaves they need and never `file-write*`. That is the whole shape, and it
-  replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
+- **The write cells name the leaves they need and never `file-write*`, unless the `file-attributes`
+  switch is on. That is the whole shape, and it replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
   `create`, `unlink`, `xattr`, `mode`, `times` — and the `Write`+`File` cell names `data` alone. The
   flags, the access-control list, the owner, and the set-user-ID bit are **absent rather than denied**,
   so `(deny default)` refuses each. The bound operations were enumerated by compiling one profile per
@@ -690,12 +690,32 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `(allow file-read* file-write-data (literal "/dev/null"))` and holds 46 bare `file-write-data`
     allows. There is no Apple SBPL reference — `strings` over `libsandbox.1.dylib` and the Sandbox kext
     yields no operation table — so those profiles plus compile-and-measure are the authority.
-  - **`file-write-times` IS closable, by omission.** The earlier reading was that no leaf deny takes it
-    back, which is true and is not the same claim: `touch -t` succeeds under `(allow file-write* …)`
-    with `(deny file-write-times …)` rendered. Withholding the leaf refuses it outright. The leaf stays
-    granted on the write root anyway, because `utimes` is ordinary work, so the backdating residual is
-    a decision now rather than a limit.
-  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them.
+  - **`file-write-times` covers `utimes(2)` and `futimes(2)` only.** `utimensat(2)`, which `touch`
+    calls, and `setattrlist(2)` with `ATTR_CMN_MODTIME` or `ATTR_CMN_ACCTIME` check the bare
+    `file-write*` family, so the six-leaf write root refuses them (box#273). That is also why
+    `touch -t` succeeds under `(allow file-write* …)` with `(deny file-write-times …)` rendered: the
+    leaf deny never reaches the bare check. The leaf stays granted on the write root, because `utimes`
+    is ordinary work, so the backdating residual through `utimes` is a decision rather than a limit.
+  - **The `file-attributes` switch is the one write cell that grants `file-write*`.** With
+    `allow_file_attributes`, the write root adds `(allow file-write* (subpath …))` and denies the four
+    members `WRITE_ROOT_LEAVES` withholds, `FILE_ATTRIBUTE_WITHHELD_LEAVES`: `flags`, `owner`, `acl`,
+    and `finderinfo`. A leaf deny beats the wildcard allow by specificity, so those four leaf operations
+    stay refused (`chflags`, `chown`, `acl_set_file`, and `setattrlist ATTR_CMN_FNDRINFO`).
+    `setugid`, `mount`, and `unmount` lie outside the family, so the wildcard does not reach them and
+    the cell renders no rule for them. `protect_write` and `refusals()` already render
+    `(deny file-write* …)`, which has the same name as the new allow and renders after it, so the
+    last matching rule is the deny. Measured 2026-11-03, macOS 26.7.1 arm64 at `euid` 503, in
+    `tests/contains_file_attributes.rs`: with the switch, `utimensat` and `setattrlist ATTR_CMN_MODTIME`
+    succeed; `chflags`, `acl_set_file`, `chown`, and `chmod` of a set-ID bit stay refused; a
+    protected object, a refused folder inside the root, and a path outside every root keep their
+    refusals. **The residual is pinned, not closed:** `setattrlist` `ATTR_CMN_ACCESSMASK` stores
+    the set-user-ID bit, `ATTR_CMN_GRPID` moves the group, `ATTR_CMN_OWNERID` passes the profile and
+    meets only the ownership check (so a root process gives a file away), and
+    `ATTR_CMN_EXTENDED_SECURITY` stores an ACL. Each rides the bare family check.
+    Without the switch, the cell renders byte for byte what it rendered before, and the goldens hold
+    it.
+  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them
+    (the switch grants `finderinfo` through the wildcard and denies it again).
     `xattr` is named because ordinary work sets one, and `mode` because a workload tightens a file it
     created — Claude Code creates `.claude.json` at 644 and `chmod`s it to 600, and **swallows the
     failure**, so withholding the mode leaves a config holding `mcpServers` world-readable.
@@ -1036,9 +1056,10 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
   `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.
-- **Nothing here refuses or detects root.** `facade.rs` and `floors.rs` judge paths and never the
-  caller, and the one `geteuid` in the tree is a permitted-syscall table entry in
-  `backend/linux/namespace/syscall.rs` rather than a check. **A Seatbelt `deny` binds root**,
+- **macOS retains root creation inside granted directories.** The Linux startup restriction does
+  not apply to Seatbelt. Path denials do not change the owner of permitted new files or establish
+  protection against later privileged consumers. This Linux work did not test that macOS consumer path.
+- **macOS continues to support root launches. A Seatbelt `deny` binds root**,
   measured 2026-08-31 with a control for each row, so the setuid bits, device nodes, both flag
   classes, the write root's own identity, and every ungranted path are all refused at `euid` 0.
   - **`file-write*` carried `file-write-owner`, and the leaf allowlist is what took it back. CLOSED
@@ -1094,11 +1115,23 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     (`FIXTURE_HOME_PARENT_TEXT` is `/var/tmp`). The source-reading guard beside it is deleted, and it
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
-  - **The Linux launcher writes `uid_map` as `0 <uid> 1`**, which under real root is `0 0 1`, so the
-    workload's in-namespace uid 0 is host uid 0. Startup clears every capability set. A nested user
-    namespace can restore privileges within that namespace. Seccomp still refuses `mount` and
-    `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
-    Nothing detects the identity collapse. Still open.
+  - **Linux root launches refuse sandbox directory write grants.** Kevin selected existing-file-only root
+    sandbox writes with private temporary storage on 2026-11-04 and then directed completion of the startup check.
+    `require_nonroot_directory_writes` checks every composed authorization during validation and
+    application, before namespace entry. Either real or effective user ID zero triggers the refusal.
+    Root reads and exact-file writes remain available. `/tmp` is private writable storage, while a
+    granted `/var/tmp` is a host directory and meets the same refusal as other directory writes.
+    The check uses the current user namespace. It can refuse a rootless container's namespace root
+    and does not resolve arbitrary mappings into ancestor namespaces.
+    This restriction covers sandbox grants only. Policy-mediated Shell and Python file creation
+    runs in the trusted process and retains its file identity. That route remains open for review
+    in the box crate's [open findings](../box/AGENTS.md#open-findings--divergences-no-decision-covers).
+    `root_directory_grants_are_refused_before_workload_execution` pins the startup refusal.
+    `root_file_grants_preserve_private_access_and_temporary_storage` pins permitted root behavior.
+    `nonroot_directory_grants_preserve_creation` retains ordinary directory creation.
+    The identity map remains `0 <uid> 1`, and startup still clears every capability set.
+    A nested user namespace can restore privileges within that namespace. Seccomp still refuses
+    `mount` and `fsopen`, as `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux

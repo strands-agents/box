@@ -207,6 +207,7 @@ fn select_tool_with_commands(
             spec: ProcessSpec {
                 command: vec![invoked.display().to_string()],
                 network: None,
+                grammar: None,
                 ..caller.clone()
             },
             trailing: args.to_vec(),
@@ -345,17 +346,18 @@ impl ToolSpawner {
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
 fn tool_spawner(
-    attachment: Attachment,
-    layout: BoxRoot,
-    record: Record,
+    site: Site<'_>,
     approved: Arc<ApprovedReach>,
     workspace: PathBuf,
-    protected_sources: Vec<AuthoritySource>,
     recorder: Arc<telemetry::DecisionRecorder>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         super::macos_enforcement::Registration,
     >,
 ) -> ToolSpawner {
+    let attachment = site.attachment.clone();
+    let layout = site.layout.clone();
+    let record = site.stored.clone();
+    let protected_sources = site.protected_sources.to_vec();
     let selection = Arc::new(ToolSelection {
         attachment,
         record,
@@ -533,14 +535,18 @@ impl McpLeafLauncher {
         .ok()
     }
 
-    /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
-    pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
-        let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
+    /// Prepare the server boundary with its effective launch arguments.
+    pub(crate) fn prepare(
+        &self,
+        server: &crate::record::config::mcp::McpServer,
+        received: &[String],
+    ) -> Result<Boundary, BoxError> {
+        let contained = self.record.contained_mcp.get(&server.name).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
-                reason: format!("no contained MCP server named {server:?}"),
+                reason: format!("no contained MCP server named {:?}", server.name),
             })
         })?;
-        let table = format!("[mcp.{server}]");
+        let table = format!("[mcp.{}]", server.name);
         let reach = self.approved.table(&table).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
                 reason: format!("{table} has no reach judged for this run"),
@@ -553,7 +559,7 @@ impl McpLeafLauncher {
             protected_sources: &self.protected_sources,
         };
         let egress = EgressMode::for_spec(&contained.spec);
-        Boundary::translate(
+        let boundary = Boundary::translate(
             &contained.spec,
             Launch {
                 table: &table,
@@ -566,7 +572,32 @@ impl McpLeafLauncher {
                 approved: Some(reach),
             },
             &site,
-        )
+        )?;
+        if !server.argument_wildcards {
+            return Ok(boundary);
+        }
+        if received.len() != boundary.arguments().len() {
+            return Err(ConfigError::Mcp {
+                name: server.name.clone(),
+                reason: "received argument count differs from the configured command".into(),
+            }
+            .into());
+        }
+        let arguments = contained
+            .spec
+            .fixed_arguments()
+            .iter()
+            .zip(boundary.arguments())
+            .zip(received)
+            .map(|((declared, expanded), received)| {
+                if declared == "*" {
+                    received.clone()
+                } else {
+                    expanded.clone()
+                }
+            })
+            .collect();
+        Ok(boundary.with_arguments(arguments))
     }
 
     /// Spawn the contained streaming leaf `boundary` describes.
@@ -673,13 +704,41 @@ impl HostedBox {
         root: &BoxRoot,
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
+        grammars: policy::ToolGrammars,
     ) -> Result<Arc<PolicyEngine>, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
         Ok(Arc::new(
-            PolicyEngine::open_staged_file(operator, sources, database, database_path)?
-                .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
+            PolicyEngine::open_staged_file_with_grammars(
+                operator,
+                sources,
+                grammars,
+                database,
+                database_path,
+            )?
+            .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
         ))
+    }
+
+    /// The bindings of the tool grammars `policy` installs, with every `[tool.<name>]` in `record`
+    /// declared (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    pub(crate) fn bind_tool_grammars(
+        policy: &PolicyEngine,
+        record: &Record,
+    ) -> Result<policy::GrammarBindings, BoxError> {
+        let mut bindings = policy.grammar_bindings();
+        if !record.experimental_features.tool_grammars {
+            return Ok(bindings);
+        }
+        for spec in record.tool.values() {
+            let program =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())?;
+            bindings.declare_tool(
+                program.invoked(),
+                crate::record::config::grammar::called_name(spec),
+            )?;
+        }
+        Ok(bindings)
     }
 
     /// Open this box's trusted half, or refuse. `workspace` and `home` are the agent's effective
@@ -825,16 +884,19 @@ impl HostedBox {
             trust_bundle,
             phantoms: projection.workload_environment,
         };
-        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, |server| {
-            match record.contained_mcp.get(&server.name) {
-                Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
-                    &contained.spec,
-                    &attachment,
-                )
-                .ok(),
-                None => Some(server.arguments().to_vec()),
-            }
-        })?;
+        let launched = |server: &crate::record::config::mcp::McpServer| match record
+            .contained_mcp
+            .get(&server.name)
+        {
+            Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                &contained.spec,
+                &attachment,
+            )
+            .ok(),
+            None => Some(server.arguments().to_vec()),
+        };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, launched)?;
+        crate::record::config::mcp::refuse_overlapping_wildcard_commands(&record.mcp, launched)?;
         // Every process table's lists, judged once, before any of them spawns.
         let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
         let broker_listener = BrokerHost::bind(root)?;
@@ -853,12 +915,14 @@ impl HostedBox {
         // The host-binary seam: a command the Shell does not implement runs in the
         // boundary of the tool the invocation selects, not as an uncontained child.
         let host_spawner = Some(tool_spawner(
-            attachment.clone(),
-            root.clone(),
-            record.clone(),
+            Site {
+                attachment: &attachment,
+                layout: root,
+                stored: record,
+                protected_sources,
+            },
             Arc::clone(&approved),
             workspace.to_path_buf(),
-            protected_sources.to_vec(),
             Arc::clone(&recorder),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
@@ -892,6 +956,7 @@ impl HostedBox {
             mcp_leaf_launcher,
             protected_sources,
             std::sync::Arc::clone(approved.commands()),
+            std::sync::Arc::clone(approved.installation()),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
@@ -923,7 +988,12 @@ impl HostedBox {
                 text,
             });
         }
-        Self::prepare_policy(root, &policy::Operator::unanchored(), sources)
+        Self::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            sources,
+            policy::ToolGrammars::default(),
+        )
     }
 
     /// What this run's boundary reads.
@@ -1032,6 +1102,8 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
             name: "codex".to_string(),
@@ -1043,6 +1115,7 @@ mod tests {
                 env: Default::default(),
                 filesystem: Default::default(),
                 network: None,
+                grammar: None,
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -1064,6 +1137,7 @@ mod tests {
         record_with_mcp(
             root,
             vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "alpha".to_string(),
                 command: vec!["alpha-mcp".to_string()],
             }],
@@ -1104,6 +1178,7 @@ permit (principal, action == Box::Action::"shell:spawn", resource);
 permit (principal, action == alpha::Action::"read", resource);"#
                     .to_string(),
             }],
+            policy::ToolGrammars::default(),
         )
         .expect("the staged authority opens");
         let owned = Lock::try_acquire(&root.lock())
@@ -1143,6 +1218,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 ..Default::default()
             },
             network: None,
+            grammar: None,
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -1167,8 +1243,13 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .tool
             .insert("u".to_string(), tool(home.join("absent")));
         let collector = collector(operator.path());
-        let policy = HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new())
-            .expect("an empty authority opens");
+        let policy = HostedBox::prepare_policy(
+            &root,
+            &policy::Operator::unanchored(),
+            Vec::new(),
+            policy::ToolGrammars::default(),
+        )
+        .expect("an empty authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
             .expect("the lock is free");
@@ -1408,6 +1489,7 @@ wait"#;
             &root,
             vec![
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "alpha".to_string(),
                     command: vec![
                         "/bin/sh".to_string(),
@@ -1419,6 +1501,7 @@ wait"#;
                     ],
                 },
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "beta".to_string(),
                     command: vec!["/bin/false".to_string()],
                 },
@@ -1986,11 +2069,16 @@ while :; do :; done"#
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 None,
             );
-            launcher.prepare("alpha").expect("unchanged grant");
+            let server = crate::record::config::mcp::McpServer {
+                name: "alpha".into(),
+                command: Vec::new(),
+                argument_wildcards: false,
+            };
+            launcher.prepare(&server, &[]).expect("unchanged grant");
             std::fs::rename(&granted, operator.join("moved")).expect("move granted file");
             std::fs::create_dir(&granted).expect("replace file grant with directory");
             let refusal = launcher
-                .prepare("alpha")
+                .prepare(&server, &[])
                 .err()
                 .expect("changed grant refused");
             let message = refusal.to_string();
@@ -2023,13 +2111,16 @@ while :; do :; done"#
             spec.filesystem.write = vec![projects.clone()];
             record.tool.insert("probe".to_string(), spec);
             let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let attachment = selection_attachment();
             let spawner = tool_spawner(
-                selection_attachment(),
-                root,
-                record,
+                Site {
+                    attachment: &attachment,
+                    layout: &root,
+                    stored: &record,
+                    protected_sources: &[],
+                },
                 approved,
                 admitted.clone(),
-                Vec::new(),
                 telemetry::DecisionRecorder::discarding(),
                 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                 None,
@@ -2079,11 +2170,14 @@ while :; do :; done"#
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         };
         let agent = spec(&["/bin/sh"]);
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -2699,6 +2793,7 @@ while :; do :; done"#
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 
