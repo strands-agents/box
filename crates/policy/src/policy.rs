@@ -191,16 +191,12 @@ impl PolicyEngine {
         &self,
         program_path: &str,
         spelling: &str,
-        starter: crate::grammar::Starter,
     ) -> Option<crate::grammar::GrammarCoverage<'_>> {
         if self.bindings.is_empty() {
             return None;
         }
-        self.bindings.coverage_for(
-            crate::grammar::ProgramFile::read(program_path),
-            spelling,
-            starter,
-        )
+        self.bindings
+            .coverage(crate::grammar::ProgramFile::read(program_path), spelling)
     }
 
     /// Open durable history with the schema fragment of each tool grammar in `grammars`.

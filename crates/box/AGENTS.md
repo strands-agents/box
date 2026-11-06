@@ -66,8 +66,9 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   (exec literals and `PATH` entries, placed when a box is configured), `host` owns the one socket
   and the per-connection reader, `program` is the per-Program state a Call mutates, `shell` and
   `python` are the two interpreters, `reach` states the one reachable path set both share,
-  `mcp` owns the two decisions an MCP server meets — `shell:spawn` for whether it starts and
-  `mcp:call` for each tool call — and `protocol` is the contract between the two ends.
+  `mcp` owns the two decisions an MCP server meets — `shell:spawn`, or the grammar action when a
+  tool grammar binds the server's program, for whether it starts, and `mcp:call` for each tool
+  call — and `protocol` is the contract between the two ends.
   *Why one boundary:* `argv[0]` chooses the interpreter before an alias derives a path, so a
   second socket would re-state a decision the client already made. Adding an interpreter costs
   an `Interpreter` variant and a constructor.
@@ -939,7 +940,8 @@ Do not treat any of these as settled by the code existing.
   branch for an unresolvable home went with it — there is no namespace left to be unable to resolve.
 - **A stdio MCP server runs in a leaf box, and a leaf is wider than the agent's box.**
   `start_mcp_server` starts every declared stdio server as a contained leaf through the trampoline,
-  after `shell:spawn` permits it. The uncontained start below it runs only when the box declares no
+  after `shell:spawn` permits it, or, when a tool grammar binds the server's program, after its
+  grammar action does. The uncontained start below it runs only when the box declares no
   stdio server, so no declared server reaches it, or on a non-unix build. The residuals: the leaf
   reaches its own `filesystem` lists with no `fs:*` decision; on macOS it runs its whole toolchain
   through broad exec, discovers metadata across the operator home, and loses W^X over its own

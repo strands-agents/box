@@ -293,8 +293,9 @@ exit status as `output.status`, the same as a `shell:spawn` response, so a rule 
 the grammar reads as `cargo test`, in a working directory and with arguments the agent chose, and
 that it exited 0. A test in a scratch crate satisfies such a rule, so a rule that must mean "this
 project's tests passed" pins `input.cwd` to the project. A spawn that the binding refuses before any rule decides
-it, such as a bound file called by a name that no `[tool]` declares, enters history as a
-`shell:spawn` request, so a rule that counts attempts still sees it.
+it, such as a bound name whose file was replaced, enters history as a `shell:spawn` request, so a
+rule that counts attempts still sees it. A bound file called by a name that no grammar binds is
+decided as `shell:spawn`.
 
 ## Residual risk
 
