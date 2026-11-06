@@ -274,13 +274,15 @@ Links, other names, and copies are decided as follows:
   `/usr/bin/git` is one launcher file that is also `make`, `clang`, and many other developer tools.
   A grammar for `git` decides only the name `git`, so a spawn of `make` is decided as `shell:spawn`.
   So is a link that the workload makes to the bound file under another name, such as `g`. This holds
-  whether or not a `[tool]` declares the other name.
-- **A stdio server's name on a bound file counts only for that server's start.** When a stdio
-  `[mcp.<name>]` runs a bound file under a name that no grammar binds, `shell:spawn` decides the
-  server's start under that name. The agent's own spawn under that name is refused, and no policy
-  can permit it, so the agent can't use the server's name to leave the grammar.
+  whether or not a `[tool]` declares the other name. The one exception is a name that only a stdio
+  server declares, in the next item.
+- **A name that only a stdio server declares is for that server's start alone.** When a stdio
+  `[mcp.<name>]` runs a bound file under a name that no `[tool]` declares, `shell:spawn` decides the
+  server's start. If the agent calls the file by that name, Box refuses the spawn, and no policy can
+  permit it, because the server's start and the agent's spawn would otherwise make the same
+  `shell:spawn` request. A server on a file that no grammar binds isn't affected.
 - **A replaced file is refused.** If the file at a bound path changes while the box runs, for
-  example after an update, Box refuses every spawn of that path until the box restarts. Box also
+  example after an update, its bound names stay refused until the box restarts. Box also
   refuses a bare name, such as `git`, when the file bound under that name is gone or replaced. The
   denial has `[tool-grammar]` where a rule `@id` would be, and ends with `No policy can permit it.`
 - **A copy at another path is a different file.** When no `[tool]` runs a copy of `git` at another
@@ -288,7 +290,7 @@ Links, other names, and copies are decided as follows:
 
 So a broad `shell:spawn` permit lets another name or a copy of `git` past a `Tool::git` forbid. A
 link such as `g` resolves to the bound file, so a permit that matches only the bound file's
-`context.input.program_path` admits every other name of it. So pin each `shell:spawn` permit on
+`context.input.program_path` admits every other name of it. Pin each `shell:spawn` permit on
 both `context.input.program` and `context.input.program_path`, such as `program == "make"` with
 `program_path == "/usr/bin/make"`.
 
