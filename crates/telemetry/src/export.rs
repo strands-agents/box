@@ -19,6 +19,12 @@ use crate::error::{Result, TelemetryError};
 /// The box a record belongs to, so a merged store stays attributable.
 pub(crate) const BOX_ATTRIBUTE: &str = "strands.box.name";
 
+/// The attribute namespace the box reserves, stripped from every agent payload.
+///
+/// `strands.box.` and not all of `strands.`: the Strands Agents SDK owns its own names under
+/// `strands.`, and a wider reserve would delete them and still answer `200`.
+pub(crate) const RESERVED_PREFIX: &str = "strands.box.";
+
 /// The one invocation of `run` a record belongs to.
 pub(crate) const RUN_ATTRIBUTE: &str = "strands.box.run.id";
 
