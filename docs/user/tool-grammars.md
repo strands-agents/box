@@ -321,7 +321,8 @@ To keep these routes closed:
 
 A grammar reads the command line, and nothing else. It doesn't see:
 
-- **Environment variables.** `GIT_DIR=~/other git push` reads as the same push as `git push`.
+- **Environment variables.** A variable in the tool's own `env`, such as `GIT_SSH_COMMAND`,
+  changes what `git` does, and the grammar reads the same action and effects.
 - **Configuration files.** `.git/config` can set `core.sshCommand` or `core.hooksPath`, and an
   `[alias]` entry in `.cargo/config.toml` can make `cargo t` run another cargo command.
 - **Child processes**, as in [What a grammar governs](#what-a-grammar-governs), and **another
