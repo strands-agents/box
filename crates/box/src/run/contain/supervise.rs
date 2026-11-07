@@ -632,8 +632,8 @@ struct LaunchedLeaf {
 impl LeafBox {
     /// Build the trampoline, spawn the contained child in its own process group, and — on Linux —
     /// start the netns relays held for the child's lifetime. `stdin`/`stdout`/`stderr` are the
-    /// child's stdio: the buffered run pipes stdout/stderr and nulls stdin; the streaming spawn
-    /// pipes stdin/stdout for the JSON-RPC session and nulls stderr.
+    /// child's stdio: the buffered run pipes stdout/stderr and uses null stdin unless the Shell
+    /// supplied redirect bytes; the streaming spawn pipes stdin/stdout for the JSON-RPC session.
     async fn launch_contained(
         boundary: &Boundary,
         layout: &BoxRoot,
@@ -707,15 +707,20 @@ impl LeafBox {
     /// Linux — its own netns relay to the parent gateway. A containment setup failure is a
     /// [`TrampolineError::SetupFailed`], not a workload status. Buffered: the streams come back
     /// whole; a long-lived session uses [`spawn_streaming`](Self::spawn_streaming).
+    ///
+    /// `stdin` is the Shell redirect or pipeline bytes for this spawn. Absent bytes stay
+    /// `/dev/null`, so a leaf that waits on input cannot hold the Call to its deadline when the
+    /// Shell had nothing to feed it.
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
+        stdin: Option<Vec<u8>>,
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
             crate::run::macos_enforcement::Registration,
         >,
     ) -> Result<CapturedLeaf, BoxError> {
-        // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
-        // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
+        use tokio::io::AsyncWriteExt as _;
+
         let LaunchedLeaf {
             mut group,
             mut trampoline,
@@ -724,7 +729,11 @@ impl LeafBox {
         } = Self::launch_contained(
             &boundary,
             layout,
-            Stdio::null(),
+            if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
             Stdio::piped(),
             Stdio::piped(),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
@@ -734,7 +743,24 @@ impl LeafBox {
 
         // The boundary keeps all launch inputs alive until the child exits.
         trampoline.close_setup_writer();
-        let output = group.wait_with_output().await;
+        let child_stdin = stdin
+            .is_some()
+            .then(|| group.child_mut().stdin.take())
+            .flatten();
+        let write_stdin = async {
+            if let (Some(mut pipe), Some(bytes)) = (child_stdin, stdin) {
+                pipe.write_all(&bytes).await?;
+                pipe.shutdown().await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (write_result, output) = tokio::join!(write_stdin, group.wait_with_output());
+        // A child that exits before reading every byte closes the pipe; that is not a spawn failure.
+        if let Err(source) = write_result
+            && source.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(SuperviseError::Wait { source }.into());
+        }
         let termination_result = group.release().await;
         let setup_result = trampoline.setup_failure();
 

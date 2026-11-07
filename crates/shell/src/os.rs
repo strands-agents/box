@@ -271,6 +271,12 @@ pub struct Process {
     pub umask: u32,
     /// `shopt` option names currently set; recorded, with no effect on execution.
     pub shopts: std::collections::BTreeSet<String>,
+    /// Stdin came from a Shell `< file` or here-doc redirect, not the broker Call input.
+    ///
+    /// A host spawn drains stdin only when this is set: draining the broker channel would block
+    /// the Call until `InputEof`, and a child must not inherit the daemon's stdin when the Shell
+    /// supplied nothing.
+    pub stdin_from_shell: bool,
 }
 
 /// Resource limits that can be extracted from a configured Process
@@ -401,6 +407,7 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             shopts: std::collections::BTreeSet::new(),
+            stdin_from_shell: false,
         }
     }
 
@@ -444,6 +451,7 @@ impl Process {
             traps: HashMap::new(),
             umask: 0o022,
             shopts: std::collections::BTreeSet::new(),
+            stdin_from_shell: false,
         }
     }
 
@@ -497,6 +505,8 @@ impl Process {
             traps: self.traps.clone(),
             umask: self.umask,
             shopts: self.shopts.clone(),
+            // A fork starts with an empty fd table, so it has not received a Shell stdin yet.
+            stdin_from_shell: false,
         }
     }
 
@@ -510,6 +520,12 @@ impl Process {
                 buf: Vec::new(),
             },
         );
+    }
+
+    /// Install a Shell-supplied stdin reader (here-doc), not the broker Call input.
+    pub fn set_shell_stdin_reader(&mut self, rx: mpsc::Receiver<Bytes>) {
+        self.set_channel_reader(STDIN, rx);
+        self.stdin_from_shell = true;
     }
 
     pub fn set_channel_writer(&mut self, fd: Fd, tx: mpsc::Sender<Bytes>) {
@@ -553,6 +569,10 @@ impl Process {
     pub fn transfer_fd(&mut self, fd: Fd, target: &mut Process) {
         if let Some(kind) = self.fds.remove(&fd) {
             target.fds.insert(fd, kind);
+            if fd == STDIN {
+                target.stdin_from_shell = self.stdin_from_shell;
+                self.stdin_from_shell = false;
+            }
         }
     }
 
@@ -562,6 +582,10 @@ impl Process {
             .remove(&from)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("bad fd {from}")))?;
         self.fds.insert(to, kind);
+        if to == STDIN {
+            // A redirect `dup2`s an opened file onto stdin; mark it as Shell-supplied.
+            self.stdin_from_shell = true;
+        }
         Ok(())
     }
 
@@ -1193,6 +1217,22 @@ pub type HostSpawner = std::sync::Arc<dyn Fn(HostSpawn) -> HostSpawnFuture + Sen
 pub type HostSpawnFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<HostSpawnOutcome>> + Send>>;
 
+/// What a host binary receives on stdin when the Shell spawns it.
+///
+/// [`HostStdin::Null`] is the default when the stage has no stdin redirect: the child must not
+/// inherit the daemon's stdin, and one that blocked waiting for input must not hold the Call to
+/// its deadline. A Shell `< file` or here-doc becomes [`HostStdin::Bytes`] so the child reads what
+/// the Shell already opened. An upstream pipeline into a host stage stays null for now: draining
+/// it before spawn would block concurrent pipeline stages.
+#[derive(Debug, Default)]
+pub enum HostStdin {
+    /// No bytes for the child; the spawn uses `/dev/null`.
+    #[default]
+    Null,
+    /// The bytes of a Shell `< file` or here-doc redirect.
+    Bytes(Vec<u8>),
+}
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
     /// The resolved absolute path of the program to run.
@@ -1207,6 +1247,8 @@ pub struct HostSpawn {
     /// The composed environment the binary runs with. The built-in spawn applies exactly this,
     /// never the process's inherited environment; an embedder's hook may compose its own instead.
     pub env: Vec<(String, String)>,
+    /// Stdin for the child: null, or the bytes of a redirect / pipeline the Shell already applied.
+    pub stdin: HostStdin,
 }
 
 // No `HttpTransport` seam. Routing the Shell's egress through a boundary is not a
@@ -1486,9 +1528,12 @@ pub trait Kernel: Send + Sync {
 ///
 /// The default behind [`Kernel::spawn_host`], and what a [`crate::vfs_kernel::VfsKernel`] with no
 /// [`HostSpawner`] installed falls back to. The environment is exactly [`HostSpawn::env`] — cleared
-/// first, never inherited — the working directory is [`HostSpawn::cwd`], `stdin` is null, and the
-/// child is detached into a new session so it cannot suspend the caller by opening `/dev/tty`.
+/// first, never inherited — the working directory is [`HostSpawn::cwd`], stdin is
+/// [`HostSpawn::stdin`] (null when absent), and the child is detached into a new session so it
+/// cannot suspend the caller by opening `/dev/tty`.
 pub async fn builtin_spawn_host(spawn: HostSpawn) -> io::Result<HostSpawnOutcome> {
+    use tokio::io::AsyncWriteExt as _;
+
     let mut command = tokio::process::Command::new(&spawn.program);
     #[cfg(unix)]
     {
@@ -1501,7 +1546,14 @@ pub async fn builtin_spawn_host(spawn: HostSpawn) -> io::Result<HostSpawnOutcome
     for (key, value) in &spawn.env {
         command.env(key, value);
     }
-    command.stdin(std::process::Stdio::null());
+    let stdin_bytes = match spawn.stdin {
+        HostStdin::Null => None,
+        HostStdin::Bytes(bytes) => Some(bytes),
+    };
+    command.stdin(match &stdin_bytes {
+        Some(_) => std::process::Stdio::piped(),
+        None => std::process::Stdio::null(),
+    });
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
     #[cfg(unix)]
@@ -1513,8 +1565,34 @@ pub async fn builtin_spawn_host(spawn: HostSpawn) -> io::Result<HostSpawnOutcome
             _ => Ok(()),
         });
     }
-    let output = command.output().await?;
-    Ok(HostSpawnOutcome {
+    let mut child = command.spawn()?;
+    if let Some(bytes) = stdin_bytes {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            io::Error::other("the host binary's stdin was not piped for a Shell redirect")
+        })?;
+        // Write beside the wait so a child that reads slowly cannot fill the pipe and deadlock
+        // against an undrained stdout.
+        let write = async move {
+            stdin.write_all(&bytes).await?;
+            stdin.shutdown().await?;
+            Ok::<_, io::Error>(())
+        };
+        let (write_result, output) = tokio::join!(write, child.wait_with_output());
+        // A child that exits before reading every byte closes the pipe; that is not a spawn failure.
+        if let Err(error) = write_result
+            && error.kind() != io::ErrorKind::BrokenPipe
+        {
+            return Err(error);
+        }
+        let output = output?;
+        return Ok(host_spawn_outcome(output));
+    }
+    let output = child.wait_with_output().await?;
+    Ok(host_spawn_outcome(output))
+}
+
+fn host_spawn_outcome(output: std::process::Output) -> HostSpawnOutcome {
+    HostSpawnOutcome {
         status: output.status.code().unwrap_or_else(|| {
             #[cfg(unix)]
             {
@@ -1528,5 +1606,5 @@ pub async fn builtin_spawn_host(spawn: HostSpawn) -> io::Result<HostSpawnOutcome
         }),
         stdout: output.stdout,
         stderr: output.stderr,
-    })
+    }
 }
