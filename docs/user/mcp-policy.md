@@ -114,6 +114,20 @@ per-tool actions and their argument types:
 
 `/tmp/schema/actions.cedarschema` holds one `namespace` per server, one `action` per tool, and the
 arguments of each tool. A JSON `integer` or `number` is a `Long`, and an `enum` is its base type.
+A `type` list of one type and `null` is that type.
+
+An argument that can have more than one type, from `anyOf`, `oneOf`, or a `type` list, is a record
+with one optional field for each type: `typeChoice0`, `typeChoice1`, and so on, in the server's
+order. Box puts the value in every field whose type matches, and refuses a call whose value
+matches none. Test the field with `has` before you compare it:
+
+```cedar
+forbid (principal, action == deepwiki::Action::"ask_wiki_question", resource)
+when {
+  context.input.repoName has typeChoice0 &&
+  context.input.repoName.typeChoice0 == "my-org/private-repo"
+};
+```
 
 ## Step 4. Narrow the server
 

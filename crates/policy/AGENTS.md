@@ -126,6 +126,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
+  bare value in every member it matches, before the request gate and the event, so a rule on a
+  duplicate member still fires. It refuses a value that matches none, including a value already in
+  the record shape. A record whose fields
+  are all named `typeChoice<N>` is read as a union, so an object property with that name is too.
+  A `null` matches no member. Pinned by
+  `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
+  `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy`.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
