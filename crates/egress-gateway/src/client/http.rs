@@ -4,45 +4,51 @@ use std::cell::Cell;
 use std::io;
 use std::net::TcpStream;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker, ready};
 
-use http_body_util::Empty;
+use http_body_util::{BodyExt, Empty};
 use hyper::Request;
-use hyper::body::Bytes;
+use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
+use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{Instant, Sleep, timeout_at};
 use tokio_rustls::TlsConnector;
+use zeroize::Zeroizing;
 
-use crate::effect::EffectOutcome;
+use crate::effect::{ClaimedEffectPermit, EffectOutcome};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::SharedState;
-use crate::intercept::mitm::http1::{self, ParsedResponse};
+use crate::intercept::mitm::http1::{self, ResponseHead};
 use crate::transport::socket::{self, Counted, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// The pinned upstream socket, and the deadline of the one exchange on it.
-pub(crate) struct Upstream {
+pub(crate) struct Upstream<'a> {
     socket: TcpStream,
     /// The name to verify, when the exchange runs inside TLS.
     tls: Option<ServerName<'static>>,
     deadline: Instant,
+    completion: &'a ResponseCompletion,
 }
 
 /// Why an exchange got no response head, and the I/O kind to record.
 type NoResponse = (io::ErrorKind, ProxyError);
 
-impl Upstream {
+impl<'a> Upstream<'a> {
     /// `socket` is the pinned socket the listener opened. A TLS failure drops the exchange.
     pub(crate) fn new(
         socket: TcpStream,
         tls: Option<ServerName<'static>>,
         state: &SharedState,
+        completion: &'a ResponseCompletion,
     ) -> Self {
         Self {
             socket,
             tls,
             deadline: Instant::now() + state.config.upstream_read_deadline,
+            completion,
         }
     }
 
@@ -51,22 +57,22 @@ impl Upstream {
         self.tls.is_some()
     }
 
-    /// Send the serialized request, and read the whole response before the deadline.
+    /// Send the serialized request and receive the response head under the exchange deadline.
     pub(crate) async fn send(
         self,
         state: &SharedState,
         method: &str,
-        head: &[u8],
-        body: &[u8],
-    ) -> (EffectOutcome, Result<ParsedResponse>) {
+        head: Zeroizing<String>,
+        body: Zeroizing<Vec<u8>>,
+    ) -> (EffectOutcome, Result<UpstreamResponse>) {
         let Self {
             socket,
             tls,
             deadline,
+            completion,
         } = self;
         let writes = WriteCount::default();
         let status = Cell::new(None);
-        let max_body = state.config.response_limits.max_body_bytes;
         let exchange = async {
             let lost = |what: &str, error: io::Error| {
                 (error.kind(), ProxyError::Io(format!("{what}: {error}")))
@@ -76,13 +82,13 @@ impl Upstream {
                 .map_err(|e| lost("upstream socket", e))?;
             let request = (method, head, body);
             match tls {
-                None => round_trip(tcp, &writes, request, &status, max_body).await,
+                None => round_trip(tcp, &writes, request, &status, deadline).await,
                 Some(name) => {
                     let tls = TlsConnector::from(state.upstream_config.clone())
                         .connect(name, tcp)
                         .await
                         .map_err(|e| lost("upstream TLS handshake", e))?;
-                    round_trip(tls, &writes, request, &status, max_body).await
+                    round_trip(tls, &writes, request, &status, deadline).await
                 }
             }
         };
@@ -101,7 +107,79 @@ impl Upstream {
             },
             None => writes.get().outcome(0, kind),
         };
+        if let Ok(response) = &response {
+            completion.body.set(Some(response.body.clone()));
+        }
         (outcome, response)
+    }
+}
+
+/// An upstream response whose body retains the connection and its absolute deadline.
+pub(crate) struct UpstreamResponse {
+    pub(crate) head: ResponseHead,
+    pub(crate) body: UpstreamBody,
+}
+
+/// The connection's upstream response, retained until receipt ends even if delivery stops.
+#[derive(Default)]
+pub(crate) struct ResponseCompletion {
+    body: Cell<Option<UpstreamBody>>,
+}
+
+impl ResponseCompletion {
+    pub(crate) async fn finish(&self) -> io::Result<()> {
+        if let Some(mut body) = self.body.take() {
+            while let Some(frame) = body.frame().await {
+                frame?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the upstream body finished or failed independently of downstream writes.
+#[derive(Clone, Copy)]
+pub(crate) enum ResponseState {
+    Receiving,
+    Received,
+    Failed(io::ErrorKind),
+}
+
+/// The upstream receipt state shared by its body and the workload connection.
+#[derive(Clone)]
+pub(crate) struct ResponseProgress {
+    pub(crate) deadline: Instant,
+    state: Arc<Mutex<ResponseState>>,
+}
+
+impl ResponseProgress {
+    fn new(deadline: Instant, received: bool) -> Self {
+        Self {
+            deadline,
+            state: Arc::new(Mutex::new(if received {
+                ResponseState::Received
+            } else {
+                ResponseState::Receiving
+            })),
+        }
+    }
+
+    pub(crate) fn state(&self) -> ResponseState {
+        *self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn received(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if matches!(*state, ResponseState::Receiving) {
+            *state = ResponseState::Received;
+        }
+    }
+
+    pub(crate) fn fail(&self, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(*state, ResponseState::Failed(_)) {
+            *state = ResponseState::Failed(kind);
+        }
     }
 }
 
@@ -110,12 +188,12 @@ impl Upstream {
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body): (&str, &[u8], &[u8]),
+    (method, head, body): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>),
     status: &Cell<Option<u16>>,
-    max_body: usize,
-) -> std::result::Result<ParsedResponse, NoResponse>
+    deadline: Instant,
+) -> std::result::Result<UpstreamResponse, NoResponse>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let lost = |error: hyper::Error| {
         let kind = socket::error_kind(&error);
@@ -137,37 +215,212 @@ where
         .handshake(TokioIo::new(upstream))
         .await
         .map_err(lost)?;
-    let exchange = async move {
-        let response = sender.send_request(stand_in).await.map_err(lost)?;
-        status.set(Some(response.status().as_u16()));
-        http1::read_response(response, max_body)
-            .await
-            .map_err(|error| (io::ErrorKind::Other, error))
-    };
-    // Drive the connection until the response is read; dropping it closes the upstream.
-    let connection = async {
+    let mut driver = ConnectionDriver(Some(Box::pin(async move {
         let _ = connection.await;
-        std::future::pending::<()>().await
+    })));
+    let response = {
+        let mut response = std::pin::pin!(sender.send_request(stand_in));
+        std::future::poll_fn(|cx| {
+            driver.poll(cx);
+            response.as_mut().poll(cx)
+        })
+        .await
+        .map_err(lost)?
     };
-    tokio::select! {
-        response = exchange => response,
-        () = connection => unreachable!("the connection future never completes"),
+    status.set(Some(response.status().as_u16()));
+    let (head, body) =
+        http1::read_response_head(response).map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    let progress = ResponseProgress::new(deadline, body.is_end_stream());
+    Ok(UpstreamResponse {
+        head,
+        body: UpstreamBody(Arc::new(Mutex::new(ResponseReader {
+            body,
+            driver,
+            _sender: sender,
+            progress,
+            deadline: Box::pin(tokio::time::sleep_until(deadline)),
+            request: None,
+        }))),
+    })
+}
+
+/// The upstream connection future, polled only when its response is requested.
+struct ConnectionDriver(Option<Pin<Box<dyn Future<Output = ()> + Send>>>);
+
+impl ConnectionDriver {
+    fn poll(&mut self, cx: &mut Context<'_>) {
+        if let Some(driver) = &mut self.0
+            && driver.as_mut().poll(cx).is_ready()
+        {
+            self.0 = None;
+        }
     }
 }
 
-/// Writes the box's request bytes in place of hyper's stand-in, and holds reads until they are
-/// flushed, because hyper treats early bytes on an idle connection as an error.
-struct Prepared<'a, S> {
+/// A response reader shared with the connection that must finish it.
+#[derive(Clone)]
+pub(crate) struct UpstreamBody(Arc<Mutex<ResponseReader>>);
+
+impl UpstreamBody {
+    pub(crate) fn progress(&self) -> ResponseProgress {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .progress
+            .clone()
+    }
+
+    pub(crate) fn track_request(
+        &mut self,
+        permit: ClaimedEffectPermit,
+        outcome: EffectOutcome,
+    ) -> io::Result<()> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .track_request(permit, outcome)
+    }
+}
+
+impl Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        Pin::new(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).size_hint()
+    }
+}
+
+/// The upstream connection and the permit whose outcome follows response receipt.
+struct ResponseReader {
+    body: Incoming,
+    driver: ConnectionDriver,
+    _sender: SendRequest<Empty<Bytes>>,
+    pub(crate) progress: ResponseProgress,
+    deadline: Pin<Box<Sleep>>,
+    request: Option<(ClaimedEffectPermit, EffectOutcome)>,
+}
+
+impl ResponseReader {
+    fn track_request(
+        &mut self,
+        permit: ClaimedEffectPermit,
+        outcome: EffectOutcome,
+    ) -> io::Result<()> {
+        self.request = Some((permit, outcome));
+        if matches!(self.progress.state(), ResponseState::Received) {
+            self.record_request_outcome()?;
+        }
+        Ok(())
+    }
+
+    fn record_request_outcome(&mut self) -> io::Result<()> {
+        if let Some((permit, outcome)) = self.request.take() {
+            permit.record_outcome(outcome).map_err(|error| {
+                io::Error::other(format!("recording upstream request outcome: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ResponseReader {
+    fn drop(&mut self) {
+        if self.record_request_outcome().is_err() {
+            eprintln!("strands-box: warning: recording upstream request outcome failed");
+        }
+    }
+}
+
+impl Body for ResponseReader {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        let this = self.get_mut();
+        let frame = if let ResponseState::Failed(kind) = this.progress.state() {
+            Some(Err(io::Error::from(kind)))
+        } else if matches!(this.progress.state(), ResponseState::Receiving)
+            && this.deadline.as_mut().poll(cx).is_ready()
+        {
+            this.progress.fail(io::ErrorKind::TimedOut);
+            Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "upstream deadline passed",
+            )))
+        } else {
+            this.driver.poll(cx);
+            match ready!(Pin::new(&mut this.body).poll_frame(cx)) {
+                Some(Err(error)) => {
+                    this.progress.fail(socket::error_kind(&error));
+                    Some(Err(io::Error::other(error)))
+                }
+                Some(Ok(frame))
+                    if frame
+                        .trailers_ref()
+                        .is_some_and(|trailers| !trailers.is_empty()) =>
+                {
+                    this.progress.fail(io::ErrorKind::InvalidData);
+                    Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chunked trailers are not supported",
+                    )))
+                }
+                frame => {
+                    if frame.is_none() || this.body.is_end_stream() {
+                        this.progress.received();
+                    }
+                    frame.map(|frame| frame.map_err(io::Error::other))
+                }
+            }
+        };
+        if !matches!(this.progress.state(), ResponseState::Receiving)
+            && let Err(error) = this.record_request_outcome()
+        {
+            this.progress.fail(error.kind());
+            return Poll::Ready(Some(Err(error)));
+        }
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// The owned request bytes written in place of hyper's stand-in and wiped after flushing.
+struct Prepared<S> {
     inner: S,
-    head: &'a [u8],
-    body: &'a [u8],
+    head: Zeroizing<String>,
+    body: Zeroizing<Vec<u8>>,
     sent: usize,
     flushed: bool,
     reader: Option<Waker>,
 }
 
-impl<'a, S> Prepared<'a, S> {
-    fn new(inner: S, head: &'a [u8], body: &'a [u8]) -> Self {
+impl<S> Prepared<S> {
+    fn new(inner: S, head: Zeroizing<String>, body: Zeroizing<Vec<u8>>) -> Self {
         Self {
             inner,
             head,
@@ -179,7 +432,7 @@ impl<'a, S> Prepared<'a, S> {
     }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
+impl<S: AsyncRead + Unpin> AsyncRead for Prepared<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -194,7 +447,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prepared<'_, S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -203,12 +456,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<'_, S> {
         let this = self.get_mut();
         while !this.flushed {
             let rest = match this.sent.checked_sub(this.head.len()) {
-                None => &this.head[this.sent..],
+                None => &this.head.as_bytes()[this.sent..],
                 Some(at) => &this.body[at..],
             };
             if rest.is_empty() {
                 ready!(Pin::new(&mut this.inner).poll_flush(cx))?;
                 this.flushed = true;
+                this.head = Zeroizing::default();
+                this.body = Zeroizing::default();
                 if let Some(reader) = this.reader.take() {
                     reader.wake();
                 }
@@ -245,7 +500,7 @@ mod tests {
         response: &[u8],
     ) -> (
         Vec<u8>,
-        std::result::Result<ParsedResponse, NoResponse>,
+        std::result::Result<Vec<u8>, NoResponse>,
         Option<u16>,
         usize,
     ) {
@@ -263,7 +518,23 @@ mod tests {
                 seen.extend(rest);
                 seen
             };
-            let client = round_trip(gateway, &writes, ("POST", HEAD, b"ok"), &status, 1024);
+            let client = async {
+                let response = round_trip(
+                    gateway,
+                    &writes,
+                    (
+                        "POST",
+                        Zeroizing::new(std::str::from_utf8(HEAD).unwrap().to_string()),
+                        Zeroizing::new(b"ok".to_vec()),
+                    ),
+                    &status,
+                    Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await?;
+                http1::collect(response.body, 1024)
+                    .await
+                    .map_err(|error| (io::ErrorKind::InvalidData, error))
+            };
             let (result, seen) = tokio::join!(client, server);
             (seen, result, status.get(), writes.get().accepted)
         })
@@ -278,7 +549,7 @@ mod tests {
         assert_eq!(seen, [HEAD, b"ok"].concat(), "exactly the box's bytes");
         assert_eq!(accepted, HEAD.len() + 2);
         assert_eq!(status, Some(200));
-        assert_eq!(result.unwrap().response.body, b"yes");
+        assert_eq!(result.unwrap(), b"yes");
     }
 
     #[test]

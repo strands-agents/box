@@ -245,7 +245,8 @@ Treat the identifier's spelling as opaque.
 Older events that lack this field remain in history, but cannot match a predicate that requires it.
 
 To cap how many times the agent tries an action, count `A::request`, which also counts denied
-attempts. Use `A::response` when a later rule needs evidence that an earlier operation happened.
+attempts. Use `A::response` when a later rule needs a recorded outcome. Partial or indeterminate
+outcomes also count; an MCP response does not establish tool success.
 
 What each caller records as a response:
 
@@ -253,10 +254,10 @@ What each caller records as a response:
 |---|---|---|
 | `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | When the upstream response completes, fails, or reaches its deadline, once per exchange | `status`: the upstream's reply status, when received |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
-| `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
+| `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

@@ -1,4 +1,4 @@
-//! The tenant-keyed [`Vault`] — one startup door and two request-leg verbs.
+//! The tenant-keyed [`Vault`] for credential attachment and response redaction.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +8,8 @@ use crate::model::RouteKind;
 use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
-    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, Result, RouteSpec, Secret,
-    Skipped, VaultConfig,
+    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, ResponseRedactor, Result,
+    RouteSpec, Secret, Skipped, VaultConfig,
 };
 
 /// The correlation id the eager load uses for its audit records.
@@ -324,6 +324,12 @@ impl Vault {
         // conservative move is to scan nothing rather than fail a response already received.
         let binding = self.resolve_opaque(&res.destination).ok()??;
         Redactions::scan(&res, binding.secret_value())
+    }
+
+    /// Create an owned response scrubber, or `None` when no unique opaque binding matches the destination.
+    pub fn response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor> {
+        let binding = self.resolve_opaque(&destination).ok()??;
+        Some(ResponseRedactor::new(binding.secret_value()))
     }
 
     /// Resolve the opaque binding for `dest`, failing closed on ambiguity.
@@ -766,6 +772,52 @@ mod tests {
             vault
                 .resolve_opaque(&dest("other.example.com", 443, "/"))
                 .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_redactor_preserves_destination_binding_and_outlives_the_vault() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("api.example.com:443/v1/chat")),
+        )
+        .unwrap()
+        .into_vault();
+
+        for destination in [
+            dest("other.example.com", 443, "/v1/chat"),
+            dest("api.example.com", 80, "/v1/chat"),
+            dest("api.example.com", 443, "/v1/chatbot"),
+        ] {
+            assert!(vault.response_redactor(destination).is_none());
+        }
+        let mut redactor = vault
+            .response_redactor(dest("API.EXAMPLE.COM", 443, "/v1/chat/completions"))
+            .unwrap();
+        drop(vault);
+        assert_eq!(
+            redactor.redact_header("private-value").unwrap(),
+            "[REDACTED]"
+        );
+        assert!(redactor.push(b"private-").is_empty());
+        let mut redacted = redactor.push(b"value");
+        redacted.extend(redactor.finish());
+        assert_eq!(redacted, b"[REDACTED]");
+    }
+
+    #[test]
+    fn an_ambiguous_response_has_no_streaming_redactor() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("*.example.com"))
+                .route(opaque_route("api.example.com")),
+        )
+        .unwrap()
+        .into_vault();
+        assert!(
+            vault
+                .response_redactor(dest("api.example.com", 443, "/"))
                 .is_none()
         );
     }

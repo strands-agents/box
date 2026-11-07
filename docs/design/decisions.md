@@ -582,8 +582,8 @@ reaches the server as a JSON-RPC error. A reply to `ping` crosses with no decisi
 and the server receives an empty result whatever the client put in it. Any other response from the
 client is refused. Forwarding the reply with no decision was rejected, because it opens a path from
 the agent to the server that no rule can close. The cost is that a policy that permits only named
-methods must also name these. An http server's own requests are not supported yet, because the
-gateway buffers each response and does not stream it.
+methods must also name these. An http server's own requests are not supported yet; streaming its
+response bytes does not add the broker's request/reply correlation.
 
 <a id="remote-mcp-schemas-are-generated-through-a-direct-client"></a>
 ### `policy generate-schema` covers a remote MCP server through its own discovery client
@@ -1934,9 +1934,10 @@ because a fragment is client-only and must never reach an origin server.
 The gateway classifies each JSON-RPC frame, then raises `mcp:call { server, tool }` after
 `http:request`, and a deny at either gate wins. A `tools/call` reuses the same per-tool refinement
 the local stdio path uses, so per-argument policy behaves the same on both. `initialize` and the
-`*/list` discovery methods carry the server, so a rule can gate them. The gateway buffers remote MCP
-traffic to terminate TLS and parse frames. It does not stream that traffic. The credential controls
-stay deny-only beneath policy, so the classifier adds no allow authority.
+`*/list` discovery methods carry the server, so a rule can gate them. The gateway terminates TLS and
+parses request frames before forwarding. Responses stream, except that `tools/list` retains bounded
+capture for schema staging. The credential controls stay deny-only beneath policy, so the classifier
+adds no allow authority.
 
 <a id="remote-tool-schemas-are-discovered-at-runtime-in-memory"></a>
 ### The box discovers a remote MCP server's tool schemas at runtime, in memory

@@ -1085,7 +1085,6 @@ mod tests {
                 method: "GET",
                 path: "/",
                 status: 200,
-                body_bytes: 0,
             })
             .expect("the response leg is admitted")
             .mark_indeterminate();
