@@ -640,8 +640,8 @@ impl HostedBox {
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
-    /// for it, and to the program file of each stdio `[mcp.<name>]`. A grammar's `program` must
-    /// find its own tool's file on `search_path`
+    /// for it, and to the program file of each stdio `[mcp.<name>]`. A grammar's `program` that is
+    /// not the last component of its tool's `command` must find that tool's file on `search_path`
     /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
         policy: PolicyEngine,
@@ -668,7 +668,7 @@ impl HostedBox {
                     ),
                 }
             })?;
-            if spec.grammar.is_some() {
+            if spec.grammar.is_some() && name != crate::record::config::grammar::called_name(spec) {
                 program_finds_command(label, name, command, search_path)?;
             }
             bindings.declare_tool(command.opened(), command.path(), command.invoked(), name)?;
@@ -1265,6 +1265,25 @@ mod tests {
                 gh.display()
             )
         );
+    }
+
+    #[test]
+    fn a_grammar_whose_command_calls_its_program_binds_when_another_file_is_first_on_path() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-shadowed");
+        let brew = home.path().join("brew");
+        let system = home.path().join("system");
+        std::fs::create_dir(&brew).expect("a first directory");
+        std::fs::create_dir(&system).expect("a second directory");
+        install_program(&brew.join("git"));
+        install_program(&system.join("git"));
+        let git = system.join("git").canonicalize().expect("git resolves");
+        let record = grammar_record(&root, &git);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let search_path = std::env::join_paths([&brew, &system]).expect("the search path joins");
+
+        bind_on(&root, &record, &commands, "", &search_path)
+            .expect("a command that calls `git` binds, whatever `PATH` finds first");
     }
 
     #[test]

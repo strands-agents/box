@@ -221,10 +221,18 @@ fn tools_first(home: &Path) -> String {
 
 fn attempt(policy: &str, body: impl FnOnce(&Path) -> String) -> (Output, Option<i64>) {
     let home = support::fixture::short_temporary_home();
-    let request = Request::with_config("grammar", policy, &body(home.path()))
-        .env("PATH", &tools_first(home.path()));
+    let request = Request::with_config("grammar", policy, &body(home.path()));
     let (configured, output) = request.attempt();
     (output, record_version(&configured.root()))
+}
+
+/// An `attempt` whose trusted process finds the test's tools first on its search path.
+fn attempt_with_tools_first(policy: &str, body: impl FnOnce(&Path) -> String) -> Output {
+    let home = support::fixture::short_temporary_home();
+    Request::with_config("grammar", policy, &body(home.path()))
+        .env("PATH", &tools_first(home.path()))
+        .attempt()
+        .1
 }
 
 const NPM_GRAMMAR: &str = r#"
@@ -596,7 +604,7 @@ fn a_grammar_whose_program_finds_another_file_on_path_is_refused_at_startup() {
     }
     let grammar = GRAMMAR.replace("[tool.git.", "[tool.gh.");
 
-    let (output, _) = attempt(FORBID_PUSH, |home| {
+    let output = attempt_with_tools_first(FORBID_PUSH, |home| {
         git_program(home);
         let gh = tools_directory(home).join("gh");
         std::fs::copy(support::fixture::no_op_program(), &gh).expect("a gh stand-in");
@@ -627,7 +635,7 @@ fn a_grammar_whose_program_finds_nothing_on_path_is_refused_at_startup() {
         .replace("program = \"git\"", "program = \"strands_box_absent\"")
         .replace("usage = \"git ", "usage = \"strands_box_absent ");
 
-    let (output, _) = attempt(ORDINARY, |home| {
+    let output = attempt_with_tools_first(ORDINARY, |home| {
         format!(
             "{}{grammar}{SWITCH_ON}",
             tool_at(home, "absent", &git_program(home))

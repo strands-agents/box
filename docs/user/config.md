@@ -621,12 +621,12 @@ Each of these is refused at startup, before any box state exists:
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
 - A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
   grammar on `[mcp.<name>]` is an unknown field there.
-- A `program` that `PATH` does not resolve to the tool's own file, such as `[tool.gh] command =
-  ["gh"]` with `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git",
-  and `PATH` finds /usr/bin/git, but `command` runs /usr/bin/gh; ...``. The `program` is the name
-  the agent types, so it may differ from the last component of `command`, such as `program = "npm"`
-  for a `command` that names `npm-cli.js`; Box binds the grammar under `npm` when `npm` on `PATH`
-  reaches that same file.
+- A `program` that isn't the last component of `command` and that `PATH` doesn't resolve to the
+  tool's own file, such as `[tool.gh] command = ["gh"]` with `program = "git"`: ``invalid
+  `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
+  `command` runs /usr/bin/gh; ...``. The `program` is the name the agent types, so it may differ
+  from the last component of `command`, such as `program = "npm"` for a `command` that names
+  `npm-cli.js`. Box binds that grammar under `npm` when `npm` on `PATH` reaches the same file.
 - Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
   `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
 - Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
