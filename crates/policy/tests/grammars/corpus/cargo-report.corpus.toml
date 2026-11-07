@@ -49,3 +49,10 @@ action = "unmodeled"
 argv = ["cargo", "+stable", "report"]
 action = "report"
 fields = { toolchain = "stable" }
+
+# `future-incompat` is cargo's alias of `future-incompatibilities` (verified)
+[[case]]
+argv = ["cargo", "report", "future-incompat", "--id", "3"]
+action = "report_future_incompatibilities"
+fields = { id = "3" }
+effects = ["network"]

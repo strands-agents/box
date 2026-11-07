@@ -77,7 +77,6 @@ pub(crate) struct ObservedDecision {
 }
 
 impl ObservedDecision {
-    #[cfg(test)]
     pub(crate) fn action(&self) -> &str {
         &self.action
     }
@@ -1086,7 +1085,6 @@ mod tests {
                 method: "GET",
                 path: "/",
                 status: 200,
-                body_bytes: 0,
             })
             .expect("the response leg is admitted")
             .mark_indeterminate();

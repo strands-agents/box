@@ -40,6 +40,7 @@ delete_infrastructure  = "Deletes a CloudFormation stack and the resources it ow
 invoke_function        = "Runs a Lambda function"
 custom_endpoint        = "Sends the signed request, with its session token, to a URL the command names"
 insecure_tls           = "Turns off TLS certificate checks"
+custom_ca              = "Trusts the certificate authorities in a file the command names"
 
 # EXT-3. Global options, accepted anywhere on the line (`anywhere = true`).
 # Left out on purpose, so each makes the line unmodeled: --cli-auto-prompt (the user edits the
@@ -52,7 +53,7 @@ options.output              = { flag = ["--output"], value = "required", anywher
 options.query               = { flag = ["--query"], value = "required", anywhere = true }
 options.endpoint_url        = { flag = ["--endpoint-url"], value = "required", anywhere = true, adds = ["custom_endpoint"] }
 options.no_verify_ssl       = { flag = ["--no-verify-ssl"], anywhere = true, adds = ["insecure_tls"] }
-options.ca_bundle           = { flag = ["--ca-bundle"], value = "required", anywhere = true, adds = ["insecure_tls"] }
+options.ca_bundle           = { flag = ["--ca-bundle"], value = "required", anywhere = true, adds = ["custom_ca"] }
 options.no_sign_request     = { flag = ["--no-sign-request"], anywhere = true }
 options.debug               = { flag = ["--debug"], anywhere = true }
 options.no_paginate         = { flag = ["--no-paginate"], anywhere = true }
@@ -108,7 +109,7 @@ options.recursive          = { flag = ["--recursive"] }
 options.no_overwrite       = { flag = ["--no-overwrite"] }
 options.include            = { flag = ["--include"], value = "required", repeated = true }
 options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
-options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }   # EXT-5
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write", "authenticated-read"], adds = ["make_public"] }   # EXT-5
 options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }   # EXT-6
 options.follow_symlinks    = { flag = ["--follow-symlinks"] }
 options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
@@ -138,7 +139,7 @@ options.no_overwrite       = { flag = ["--no-overwrite"] }
 options.validate_same_s3_paths = { flag = ["--validate-same-s3-paths"] }
 options.include            = { flag = ["--include"], value = "required", repeated = true }
 options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
-options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write", "authenticated-read"], adds = ["make_public"] }
 options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }
 options.follow_symlinks    = { flag = ["--follow-symlinks"] }
 options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
@@ -163,7 +164,7 @@ options.exact_timestamps   = { flag = ["--exact-timestamps"] }
 options.no_overwrite       = { flag = ["--no-overwrite"] }
 options.include            = { flag = ["--include"], value = "required", repeated = true }
 options.exclude            = { flag = ["--exclude"], value = "required", repeated = true }
-options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write"], adds = ["make_public"] }
+options.acl                = { flag = ["--acl"], value = "required", like = ["public-read", "public-read-write", "authenticated-read"], adds = ["make_public"] }
 options.grants             = { flag = ["--grants"], value = "many", like = ["*AllUsers*", "*AuthenticatedUsers*"], adds = ["make_public"] }
 options.follow_symlinks    = { flag = ["--follow-symlinks"] }
 options.no_follow_symlinks = { flag = ["--no-follow-symlinks"] }
@@ -199,6 +200,8 @@ options.bypass_governance_retention = { flag = ["--bypass-governance-retention"]
 options.request_payer              = { flag = ["--request-payer"], value = "required" }
 options.expected_bucket_owner      = { flag = ["--expected-bucket-owner"], value = "required" }
 
+# A bucket policy that grants access to everyone raises only modify_resource_policy, and never
+# make_public, because the parser does not read the policy document.
 [shell.s3api_put_bucket_policy]
 usage = "aws [global options] s3api put-bucket-policy [options]"
 adds  = ["modify_resource_policy"]

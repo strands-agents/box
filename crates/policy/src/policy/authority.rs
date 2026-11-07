@@ -58,10 +58,10 @@ struct LiveAuthority {
     /// a `tools/call` naming one of these is held with a transient `PolicyPending`. Empty
     /// when `Ready`.
     pending_tools: BTreeSet<(String, String)>,
-    /// The `(namespace, tool)` typed actions whose schema will never stage — the server's
-    /// `tools/list` was denied, so discovery finished without it. A `tools/call` naming one
-    /// is denied fail-closed in any state, so a hardcoded call cannot ride the coarse `mcp:call`
-    /// permit with its argument constraint unenforced. Empty until `finish_mcp_discovery` degrades.
+    /// The `(namespace, tool)` typed actions that a rule still pending when discovery finished
+    /// decides. A `tools/call` naming one is denied fail-closed in any state, so a hardcoded call
+    /// cannot ride the coarse `mcp:call` permit with its argument constraint unenforced. Empty
+    /// until `finish_mcp_discovery` degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
 }
 
@@ -168,21 +168,15 @@ impl Authority {
                 proposal.mark_all_ready();
                 (Readiness::Ready, BTreeSet::new(), warnings)
             }
-            Err(
-                inert @ (PolicyError::Spelling(_)
-                | PolicyError::InputAcrossFamilies(_)
-                | PolicyError::SharedRuleId(_)
-                | PolicyError::ReservedAction(_)
-                | PolicyError::InertTemporalPermit(_)),
-            ) => {
+            Err(inert) if is_inert(&inert) => {
                 return Err(inert.into());
             }
             Err(_) => {
                 proposal.classify(&[])?;
                 // Serve the schema-independent subset while typed schemas stage
-                // (`Discovering`), instead of denying every request. A per-tool rule whose server
-                // never stages (its `tools/list` is denied) is not refused here;
-                // `finish_mcp_discovery` degrades that one server instead.
+                // (`Discovering`), instead of denying every request. A per-tool rule that has
+                // not validated is not refused here; `finish_mcp_discovery` degrades the
+                // servers it waits for instead.
                 let subset = proposal.ready_policy_set();
                 let (effective_schema, warnings) = validate_canonical_policy_set(
                     &subset,
@@ -313,6 +307,7 @@ impl Authority {
                         *proposal_guard = Some(proposed);
                         live.readiness = Readiness::Ready;
                         live.pending_tools = BTreeSet::new();
+                        live.degraded_tools.clear();
                         Ok(SchemaStage::Accepted {
                             authority_ready: true,
                         })
@@ -373,11 +368,11 @@ impl Authority {
     /// Completes discovery, degrading any server whose per-tool rule never staged
     /// (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
     ///
-    /// Every door has drained, so a candidate still pending means its server's `tools/list` was
-    /// denied and its schema will never arrive. Rather than fatally refuse the whole box, the still
-    /// -pending typed tools become `degraded_tools` — denied fail-closed in `decide` — the committed
-    /// schema-independent subset becomes the final `Ready` authority, and the servers whose catalog
-    /// never arrived are returned so the caller can warn. Only a genuine durable fault is an `Err`.
+    /// Every door has drained, so a candidate still pending has not validated against the schemas
+    /// that arrived. Rather than fatally refuse the whole box, the still-pending typed tools
+    /// become `degraded_tools` — denied fail-closed in `decide` — the committed subset becomes the
+    /// final `Ready` authority, and the servers each pending rule waits for are returned so the
+    /// caller can warn. Only a genuine durable fault is an `Err`.
     ///
     /// The tools held and the servers named answer different questions, so they come from different
     /// scans. A rule decides no call to a tool it only reads from history, and yet it still waits
@@ -394,8 +389,8 @@ impl Authority {
         if live.readiness == Readiness::Ready {
             return Ok(Vec::new());
         }
-        // The still-pending typed rules cannot stage (their servers finished discovery denied), so
-        // their tools are permanently unenforceable. Hold them fail-closed and finish `Ready`.
+        // The still-pending typed rules have not validated, so the tools they decide are not
+        // enforceable. Hold them fail-closed and finish `Ready`.
         let degraded = proposal
             .as_ref()
             .map(pending_typed_tools)
@@ -420,8 +415,8 @@ impl Authority {
         let identity = &request.identity();
         match self.live.lock() {
             Ok(live) => {
-                // Fail-closed for a degraded tool: its schema will never stage, so its
-                // argument constraint can never be enforced. Deny outright — in any state — rather
+                // Fail-closed for a degraded tool: a rule that decides it has not validated, so
+                // its argument constraint is not enforceable. Deny outright — in any state — rather
                 // than let a hardcoded call ride the coarse `mcp:call` permit unconstrained.
                 if let ActionIdentity::McpTool { namespace, tool } = identity
                     && live
@@ -1116,6 +1111,7 @@ fn is_inert(error: &PolicyError) -> bool {
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)
+            | PolicyError::UnsupportedClause(_)
     )
 }
 

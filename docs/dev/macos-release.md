@@ -2,7 +2,7 @@
 
 The `Release Box` workflow builds the macOS product with `native-filesystem-policy`.
 The runtime experiment remains opt-in through `box.toml`.
-Signing authorizes Endpoint Security access; it does not activate the experiment.
+Signing authorizes Endpoint Security access. It does not activate the experiment.
 
 ## Configure access
 
@@ -14,7 +14,7 @@ Create an AWS role for GitHub's OpenID Connect identity.
 OpenID Connect lets a workflow obtain temporary AWS credentials without a stored AWS access key.
 Restrict its trust policy to audience `sts.amazonaws.com` and the exact subject reported by the repository's identity configuration.
 With immutable repository identities enabled, the subject includes the organization and repository IDs before `:environment:macos-signing`.
-Read that configuration with `gh api repos/strands-agents/box/actions/oidc/customization/sub`; do not assume the older name-only format.
+Read that configuration with `gh api repos/strands-agents/box/actions/oidc/customization/sub`. Do not assume the older name-only format.
 The environment's branch restriction is required because that subject does not include the branch.
 
 Grant only the signing API calls, access to the designated signing bucket prefixes, and permission to pass the bucket-access role.
@@ -52,7 +52,7 @@ Set these required variables in `macos-signing` before a signed run:
 | `CD_SIGNER_BUCKET` | Bucket for unsigned and signed artifacts. |
 | `CD_SIGNER_BUCKET_ACCESS_ROLE` | Role that the signing service assumes for that bucket. |
 | `CD_SIGNER_TEAM_ID` | Apple team that owns the signing certificate and profile. |
-| `CD_SIGNER_PROFILE_NAME` | Required for signing and verification: the exact Developer ID profile name for `com.amazon.strands.box`. |
+| `CD_SIGNER_PROFILE_NAME` | The exact Developer ID profile name for `com.amazon.strands.box`, required for signing and verification. |
 | `NOTARY_CREDENTIAL_SECRET` | ARN of the Secrets Manager secret that holds the notarization credential. |
 
 The signing client rejects a missing or blank profile name.
@@ -98,7 +98,7 @@ Set `SIGNING_TEST_SOURCE_SHA` to the full product commit from `main` history.
 These environment variables must contain 40 lowercase hexadecimal characters.
 The signing job checks both values before checkout or AWS credential access.
 A branch update requires another reviewed workflow pin.
-The pin check guards accidental changes; the environment reviewer must still inspect the workflow that enforces it.
+The pin check prevents accidental changes. The environment reviewer must still inspect the workflow that enforces it.
 
 Dispatch `Release Box` from `feature/macos-release-notarization` with:
 
@@ -153,10 +153,10 @@ An older source must pass the workflow commit's current tests before publication
 Any signing, verification, or native-test failure blocks publication.
 
 Inspect the `macos-signing-evidence` and `macos-package-verification` workflow artifacts.
-Keep these items with release evidence: the source and verification SHAs, the signing task IDs, and the notarization submission ID.
+Keep the source and verification SHAs, signing task IDs, and notarization submission ID with the release evidence.
 Also keep the package hashes, the verification output, and the native-test log.
 The signing evidence also contains Apple's notarization log if `notarytool` downloaded it.
-The source SHA identifies the product source; the verification SHA identifies the workflow and test source.
+The source SHA identifies the product source. The verification SHA identifies the workflow and test source.
 The package hash identifies the exact distributed bytes.
 
 ## Publish

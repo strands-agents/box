@@ -1,9 +1,8 @@
 # Box design guide
 
-How Box works, and why you can trust it with an untrusted agent.
-
-Audience: a security evaluator who decides whether to run untrusted agents under Box, a
-contributor who changes it, and anyone who is curious how it works. For how to configure
+This guide explains how Box works and how it restricts an untrusted agent. It is for security
+evaluators who decide whether to run agents under Box, contributors who change it, and readers
+who want to understand the design. For how to configure
 and run a box, read [getting started](../user/getting-started.md).
 
 This guide also states how we think an agent sandbox should work. The principles and the
@@ -11,22 +10,22 @@ decisions are meant to hold for any agent sandbox. Box is the example that follo
 
 ## Pages
 
-New here? Read [`architecture.md`](./architecture.md) for the parts, then
+Start with [`architecture.md`](./architecture.md) for the parts, then
 [`security.md`](./security.md) for responsibilities, [`containment.md`](./containment.md) for
 enforcement, [`policy.md`](./policy.md) for decisions, and
 [`limitations.md`](./limitations.md) for residual risk.
 
 | Page | Answers |
 |---|---|
-| [`architecture.md`](./architecture.md) | What the parts of a box are, where each one runs and what it decides, how one command travels from the agent to the file it touches, and the order a run brings the parts up. |
+| [`architecture.md`](./architecture.md) | What the parts of a box are, where each one runs and what it decides, how Box handles a command that accesses a file, and how it starts each part. |
 | [`security.md`](./security.md) | Which responsibilities belong to Box, the operator, and the surrounding environment, and how to distinguish configuration risk from an enforcement defect. |
 | [`binaries.md`](./binaries.md) | What each of the three binaries is, where it runs, and why a box needs all three. |
 | [`mcp.md`](./mcp.md) | How a box starts its MCP servers, turns each server's tool list into policy actions, and decides each tool call. |
 | [`mcp-discovery.md`](./mcp-discovery.md) | How a box learns each MCP server's tools while it runs, stages their schemas, and finishes discovery. |
 | [`decisions.md`](./decisions.md) | Why the design is the way it is. A historical record, so the code is the authority where the two disagree. |
-| [`policy.md`](./policy.md) | Where policy sits beside operating system enforcement, how one engine per box decides each mediated request, and what the durable history does and doesn't guarantee. |
+| [`policy.md`](./policy.md) | How policy works with operating system enforcement, how one engine per box decides each mediated request, and what the durable history does and doesn't guarantee. |
 | [`egress.md`](./egress.md) | How traffic reaches the egress gateway, how it decides each connection and request, and how it adds credentials. |
-| [`credentials.md`](./credentials.md) | How Box keeps each real secret in the box's trusted process, how the gateway swaps or signs it onto a permitted request, and what a tool or local MCP server gets. |
+| [`credentials.md`](./credentials.md) | How Box keeps each real secret in the box's trusted process, how the gateway adds it to a permitted request or uses it to sign that request, and what a tool or local MCP server gets. |
 | [`monty.md`](./monty.md) | How Box runs a Python script in Monty, decides each file operation it makes, and sends its `fetch()` through the egress gateway. |
 | [`macos-enforcement.md`](./macos-enforcement.md) | How Seatbelt enforces each sandbox on macOS, how the profile for a tool or local MCP server differs from the agent's, and where the restrictions end. |
 | [`linux-enforcement.md`](./linux-enforcement.md) | How Linux constructs the filesystem, process, and network restrictions, and which behavior still needs qualification. |
@@ -38,4 +37,5 @@ enforcement, [`policy.md`](./policy.md) for decisions, and
 | [`terminology.md`](./terminology.md) | The word to use for each thing, and the words not to use. |
 | [`tenets.md`](./tenets.md) | How an agent sandbox should work, in priority order, and what is out of scope. |
 
-The Linux pages explain implementation behavior. Release support requires separate installation and workload qualification.
+The Linux pages explain the implementation. A Linux release also needs installation checks and
+workload qualification.

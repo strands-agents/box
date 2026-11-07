@@ -207,7 +207,7 @@ effects = ["modify_manifest", "network", "update_lockfile"]
 argv = ["cargo", "rm", "serde"]
 action = "remove"
 fields = { dependency = ["serde"] }
-effects = ["modify_manifest", "update_lockfile"]
+effects = ["modify_manifest", "network", "update_lockfile"]
 
 [[case]]
 argv = ["cargo", "publish"]
@@ -277,26 +277,27 @@ effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfil
 argv = ["cargo", "--config", "build.rustc-wrapper=\"/tmp/x\"", "build"]
 action = "build"
 fields = { config = ['build.rustc-wrapper="/tmp/x"'] }
-effects = ["network", "override_config", "run_build_scripts", "update_lockfile"]
+effects = ["network", "override_config", "run_build_scripts", "run_program", "update_lockfile"]
 
 # The parser does not read config values: update_lockfile stays
 [[case]]
 argv = ["cargo", "build", "--config", "net.offline=true"]
 action = "build"
 fields = { config = ["net.offline=true"] }
-effects = ["network", "override_config", "run_build_scripts", "update_lockfile"]
+effects = ["network", "override_config", "run_build_scripts", "run_program", "update_lockfile"]
 
 # `+<toolchain>` is honoured only as the first argument (rustup)
 [[case]]
 argv = ["cargo", "-v", "+stable", "test"]
 action = "unmodeled"
 
-# Cargo refuses without nightly `-Z unstable-options`, verified; harmless
+# Cargo refuses without nightly `-Z unstable-options`. With it, cargo reads
+# `sub/.cargo/config.toml`, which can name a program to run (verified)
 [[case]]
 argv = ["cargo", "-C", "sub", "build"]
 action = "build"
 fields = { directory = "sub" }
-effects = ["network", "run_build_scripts", "update_lockfile"]
+effects = ["network", "override_config", "run_build_scripts", "run_program", "update_lockfile"]
 
 # `-C` is before-only (cargo: "unexpected argument", verified)
 [[case]]
@@ -334,3 +335,46 @@ argv = ["cargo", "test", "-vq"]
 action = "test"
 fields = { quiet = true, verbose = true }
 effects = ["execute_built_code", "network", "run_build_scripts", "update_lockfile"]
+
+# cargo does not pass a global option before `clippy` or `fmt` to the external command
+# (verified: `cargo --frozen clippy` writes Cargo.lock)
+[[case]]
+argv = ["cargo", "--frozen", "clippy"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "--locked", "fmt", "--check"]
+action = "unmodeled"
+
+# After the command word, cargo-clippy passes the option to `cargo check` (verified)
+[[case]]
+argv = ["cargo", "clippy", "--frozen"]
+action = "clippy"
+fields = { frozen = true }
+effects = ["run_build_scripts"]
+
+[[case]]
+argv = ["cargo", "+nightly", "fmt", "-q", "--check"]
+action = "fmt"
+fields = { check = true, quiet = true, toolchain = "nightly" }
+
+# rustup runs `<path>/bin/cargo` for a toolchain that is a path (verified)
+[[case]]
+argv = ["cargo", "+/tmp/evil", "fmt", "--check"]
+action = "unmodeled"
+
+# rustup refuses a relative path, and the line is unmodeled all the same
+[[case]]
+argv = ["cargo", "+./evil", "test"]
+action = "unmodeled"
+
+[[case]]
+argv = ["cargo", "+C:\\evil", "test"]
+action = "unmodeled"
+
+# `remove` resolves the lockfile again, and can reach the registry (verified)
+[[case]]
+argv = ["cargo", "remove", "itoa"]
+action = "remove"
+fields = { dependency = ["itoa"] }
+effects = ["modify_manifest", "network", "update_lockfile"]

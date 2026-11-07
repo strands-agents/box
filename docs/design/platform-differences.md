@@ -35,7 +35,8 @@ For write-only access, macOS permits a `write` or `write_file` grant without ove
 Linux refuses that configuration before the workload starts.
 If the task requires write-only direct access, Linux cannot meet that requirement.
 Use macOS or redesign the operation around file requests through Strands Shell or Monty.
-These are [mediated operations](containment.md#two-kinds-of-enforcement): policy decides each request in the box's trusted process.
+These are [mediated operations](containment.md#two-kinds-of-enforcement). Policy decides each
+request in the box's trusted process.
 Mediated operations have different semantics and need their own validation.
 
 <a id="behavior-and-configuration"></a>
@@ -43,7 +44,7 @@ Mediated operations have different semantics and need their own validation.
 ## Behavior and configuration
 
 `filesystem` below means the agent's table or an explicitly declared tool's table unless the row limits it.
-An accepted configuration can still fail later setup.
+An accepted configuration can still fail later setup. MCP means Model Context Protocol.
 
 | Feature | Behavior and rationale | Configuration | Startup result | Available alternative |
 |---|---|---|---|---|
@@ -58,7 +59,7 @@ An accepted configuration can still fail later setup.
 | Loader directory reads | Linux makes the [listed ARM64 loader directories](linux-enforcement.md#programs-and-shared-libraries) executable when granted read access because libraries require executable mappings. Ordinary agent read trees remain non-executable. | Agent `read` on a recognized loader directory | Accepts valid entries. Programs in that directory can also execute. | Grant exact executable files with their discovered transitive dependencies, then validate later library loads. |
 | Unreachable paths and workspace | Linux omits ungranted paths and can provide an empty initial directory. macOS refuses access through Seatbelt. | `workspace`, plus explicit content grants | Workspace alone grants no content. Runtime errors need not match across platforms. | Declare the required content grants or use mediated access. |
 | Symbolic-link entries | Box validates the actual path identity on both platforms. | Any authored content or execution grant | Refuses symbolic links and noncanonical grant spellings. | Name the resolved target. |
-| Direct network exception | Tools or local Model Context Protocol (MCP) servers with this setting bypass gateway policy. Linux shares the surrounding OS network namespace. | Tool network or MCP `contain_egress = false` | Accepts the exception. The agent refuses a network table. Other sandbox restrictions remain. | Keep gateway mode when policy must decide network requests. |
+| Direct network exception | Tools or local MCP servers with this setting bypass gateway policy. Linux shares the surrounding OS network namespace. | Tool network or MCP `contain_egress = false` | Accepts the exception. The agent refuses a network table. Other sandbox restrictions remain. | Keep gateway mode when policy must decide network requests. |
 | IPv6 and socket families | Linux permits UNIX and IPv4 sockets and rejects other socket families, including IPv6. The network exception keeps this filter. | No field enables Linux IPv6. | Startup can succeed. An IPv6 socket request fails during execution. | Use a validated IPv4 destination or gateway route. |
 | Process information | Linux provides `/proc` within the workload's process namespace. This differs from macOS process restrictions. | No field grants the agent surrounding-OS process visibility. | Linux constructs the isolated view or fails startup. | Observe the workload from the supervisor. |
 | Executable memory | Linux refuses writable-executable mappings and [`mprotect`](linux-enforcement.md#terms) requests whose permissions include executable access, including retained access. It refuses every `pkey_mprotect` request. Tool file execution does not remove these filters. | No field disables these filters. | Startup can succeed. A runtime can fail when it requests executable memory or calls `pkey_mprotect`. | Use an independently validated runtime mode that does not require those operations. |
@@ -84,8 +85,7 @@ For `list = ["~/project"]`, the current Linux error includes:
 cannot be listed without its contents on Linux: the namespace backend has no lowering for `list`; grant `read` instead
 ```
 
-That suggested change grants file contents.
-It changes access, so it is not a neutral portability fix.
+That suggested change exposes file contents. Apply it only if that read access is acceptable.
 
 ## Remaining qualification
 

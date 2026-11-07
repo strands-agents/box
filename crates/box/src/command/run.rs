@@ -13,6 +13,7 @@ use crate::record::config::{
     AuthoritySource, ConfigureRequest, Record, RunContract, trailing_arguments,
 };
 use crate::record::layout::BoxRoot;
+use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
 };
@@ -68,6 +69,42 @@ fn write_credential_stores(
                 output,
                 "strands-box: {table}: exposes {spelling} ({})",
                 kind.key()
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
+/// `shell:spawn`.
+fn write_grammar_disclosures(
+    record: &Record,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::called_name;
+    let programs: std::collections::BTreeSet<&str> = record
+        .tool
+        .values()
+        .filter(|spec| spec.grammar.is_some())
+        .map(called_name)
+        .collect();
+    let tables = record
+        .tool
+        .iter()
+        .map(|(label, spec)| (format!("[tool.{label}]"), spec))
+        .chain(
+            record
+                .contained_mcp
+                .iter()
+                .map(|(label, contained)| (format!("[mcp.{label}]"), &contained.spec)),
+        );
+    for (table, spec) in tables {
+        let program = called_name(spec);
+        if programs.contains(program) {
+            writeln!(
+                output,
+                "strands-box: {table}: a spawn of `{program}` is decided by its tool grammar, and \
+                 no `shell:spawn` rule applies to it"
             )?;
         }
     }
@@ -160,21 +197,20 @@ async fn hosted(
         .clone()
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
-    let _grammar_bindings = HostedBox::bind_tool_grammars(&policy, &locked.record)?;
-    for (label, spec) in &locked.record.tool {
-        if spec.grammar.is_some() {
-            eprintln!(
-                "strands-box: warning: [tool.{label}] grammar: the Shell still decides a spawn of \
-                 `{}` as `shell:spawn`, so a rule on an action of this grammar does not fire yet",
-                crate::record::config::grammar::called_name(spec)
-            );
-        }
-    }
+    let commands = Arc::new(ConfiguredCommands::load(&locked.record)?);
+    let policy = Arc::new(HostedBox::bind_tool_grammars(
+        policy,
+        &locked.record,
+        &commands,
+    )?);
+    write_grammar_disclosures(&locked.record, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
         policy,
+        commands,
         collector,
         &locked.sources,
         locked.owned,
@@ -386,6 +422,44 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws (read)\n\
              strands-box: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
+        );
+    }
+
+    #[test]
+    fn startup_discloses_each_tool_that_a_grammar_decides() {
+        let git: ProcessSpec =
+            toml::from_str("command = [\"/usr/bin/git\"]\n[grammar]\nformat = 1\n")
+                .expect("the tool parses");
+        let record = record_with(
+            None,
+            BTreeMap::from([
+                ("git".to_string(), git),
+                (
+                    "brew_git".to_string(),
+                    spec("/opt/homebrew/bin/git", &[], &[]),
+                ),
+                ("make".to_string(), spec("make", &[], &[])),
+            ]),
+        );
+        let mut record = record;
+        record.contained_mcp.insert(
+            "wrapped".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: spec("/opt/wrap/git", &[], &[]),
+            },
+        );
+        let mut output = Vec::new();
+
+        write_grammar_disclosures(&record, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.brew_git]: a spawn of `git` is decided by its tool grammar, and \
+             no `shell:spawn` rule applies to it\n\
+             strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it\n\
+             strands-box: [mcp.wrapped]: a spawn of `git` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it\n"
         );
     }
 

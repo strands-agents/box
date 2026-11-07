@@ -77,6 +77,7 @@ pub(crate) struct DogwoodEngine {
     rule_ids: HashMap<PolicyToken, RuleId>,
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+    tool_inputs: crate::mcp_input::ToolInputs,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -213,6 +214,7 @@ impl DogwoodEngine {
                 request_scope: Arc::new(()),
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
+                tool_inputs: effective_schema.tool_inputs,
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -229,6 +231,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -246,6 +249,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -262,6 +266,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -269,6 +274,7 @@ impl DogwoodEngine {
         engine: DurableTemporalEngine,
         request_schema: cedar_policy::Schema,
         tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+        tool_inputs: crate::mcp_input::ToolInputs,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -282,6 +288,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema,
             tool_actions,
+            tool_inputs,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -289,6 +296,22 @@ impl DogwoodEngine {
 
     pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
         self.tool_actions.contains(action)
+    }
+
+    /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
+    fn conformed_arguments(
+        &self,
+        request: ActionRequest<'_>,
+        identity: &ActionIdentity,
+    ) -> Result<Option<serde_json::Value>, PolicyError> {
+        let ActionRequest::Request(Request::McpCall {
+            arguments: Some(arguments),
+            ..
+        }) = request
+        else {
+            return Ok(None);
+        };
+        self.tool_inputs.conform(&identity.cedar_uid()?, arguments)
     }
 
     /// Parse, lower, and strict-validate sources against canonical plus MCP schemas.
@@ -319,6 +342,7 @@ impl DogwoodEngine {
         drop(engine);
         self.request_schema = effective_schema.cedar;
         self.tool_actions = effective_schema.tool_actions;
+        self.tool_inputs = effective_schema.tool_inputs;
         Ok(())
     }
 
@@ -346,6 +370,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: None,
         })
     }
@@ -377,6 +402,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: Some(now),
         })
     }
@@ -406,6 +432,17 @@ impl DogwoodEngine {
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>) {
         let identity = request.identity();
+        let conformed_arguments = match self.conformed_arguments(request, &identity) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return (Decision::internal_fault(), None);
+            }
+        };
+        let conformed = conformed_arguments
+            .as_ref()
+            .and_then(|arguments| with_arguments(request, arguments));
+        let request = conformed.as_ref().map_or(request, ActionRequest::Request);
         // Validate the (principal, action, context) tuple against the shipped schema
         // BEFORE deciding.
         //
@@ -1422,6 +1459,32 @@ fn policy_set_change_parts(
 
 fn durable_history_error(error: DurableError) -> PolicyError {
     PolicyError::Evaluation(error.to_string())
+}
+
+/// The same tool call carrying `arguments` in place of its own.
+fn with_arguments<'a>(
+    request: ActionRequest<'a>,
+    arguments: &'a serde_json::Value,
+) -> Option<Request<'a>> {
+    let ActionRequest::Request(Request::McpCall {
+        server,
+        method,
+        tool,
+        prompt,
+        uri,
+        arguments: Some(_),
+    }) = request
+    else {
+        return None;
+    };
+    Some(Request::McpCall {
+        server,
+        method,
+        tool: *tool,
+        prompt: *prompt,
+        uri: *uri,
+        arguments: Some(arguments),
+    })
 }
 
 /// Attach the correlation field declared by the event schema, outside Cedar request context.
