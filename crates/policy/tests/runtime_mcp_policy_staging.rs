@@ -1589,6 +1589,202 @@ permit(principal, action == alpha::Action::"foo\"bar", resource);
 }
 
 #[test]
+fn a_union_argument_is_decided_by_the_policy() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "deepwiki" };
+forbid(principal, action == deepwiki::Action::"ask_wiki_question", resource)
+when {
+    (context.input.repoName has typeChoice0 && context.input.repoName.typeChoice0 == "private/repo")
+    || (context.input.repoName has typeChoice1 && context.input.repoName.typeChoice1.contains("private/repo"))
+};
+permit(principal, action == deepwiki::Action::"ask_wiki_question", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [{
+                "name": "ask_wiki_question",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repoName": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"items": {"type": "string"}, "type": "array"}
+                            ]
+                        },
+                        "question": {"type": "string"}
+                    },
+                    "required": ["repoName", "question"]
+                }
+            }]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "deepwiki",
+                generate_mcp_schema("deepwiki", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |repo_name: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "deepwiki",
+            "ask_wiki_question",
+            &json!({"repoName": repo_name, "question": "How does it work?"}),
+        )
+    };
+    assert!(
+        decide(json!("strands-agents/sdk-python")).is_allow(),
+        "a bare string member is decided by the permit"
+    );
+    assert!(
+        decide(json!(["strands-agents/sdk-python", "strands-agents/box"])).is_allow(),
+        "an array member is decided by the permit"
+    );
+    for forbidden in [
+        json!("private/repo"),
+        json!(["strands-agents/box", "private/repo"]),
+    ] {
+        assert!(
+            matches!(
+                decide(forbidden.clone()),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the forbid reads the member {forbidden}"
+        );
+    }
+    for outside in [json!(7), json!({"typeChoice0": "strands-agents/box"})] {
+        assert!(
+            matches!(
+                decide(outside.clone()),
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a value outside the union is refused: {outside}"
+        );
+    }
+}
+
+#[test]
+fn a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "events" };
+forbid(principal, action == events::Action::"list_events", resource)
+when { context.input.since has typeChoice0 && context.input.since.typeChoice0 < datetime("2024-01-01") };
+permit(principal, action == events::Action::"list_events", resource);
+permit(principal, action == events::Action::"count_events", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [
+                {
+                    "name": "list_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "string"}
+                                ]
+                            }
+                        },
+                        "required": ["since"]
+                    }
+                },
+                {
+                    "name": "count_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "null"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "events",
+                generate_mcp_schema("events", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |tool: &str, since: &str| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "events",
+            tool,
+            &json!({"since": since}),
+        )
+    };
+    assert!(
+        decide("count_events", "2025-06-01T00:00:00Z").is_allow(),
+        "a datetime fills the datetime member of a nullable datetime"
+    );
+    assert!(
+        !decide("list_events", "2023-06-01T00:00:00Z").is_allow(),
+        "a rule on the datetime member is not bypassed by the string member"
+    );
+    assert!(
+        decide("list_events", "yesterday").is_allow(),
+        "a string that is not a datetime fills only the string member"
+    );
+}
+
+#[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient
     // `PolicyPending` without evaluating the engine, so it records no event. The subset commit at
