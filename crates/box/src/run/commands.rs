@@ -70,13 +70,17 @@ impl ConfiguredCommands {
                     return Err(refusal(&table, &path, "must be a regular file"));
                 }
                 let loaded = FileState::of(&metadata);
-                if loaded.links > 1 && writable_by_this_user(&opened, &path, loaded) {
+                let identity = (metadata.dev(), metadata.ino());
+                if loaded.links > 1
+                    && writable_by_this_user(&opened, &path, loaded)
+                    && !every_name_beside(&path, identity, loaded.links)
+                {
                     return Err(refusal(
                         &table,
                         &path,
                         &format!(
-                            "has {} hard links, and the user that runs Box may be able to write \
-                             it. Use a copy with one hard link",
+                            "has {} hard links, a name outside its own folder, and the user that \
+                             runs Box may be able to write it. Use a copy with one hard link",
                             loaded.links
                         ),
                     ));
@@ -167,7 +171,9 @@ impl ConfiguredCommand {
             if self.loaded.links == 1 {
                 now.links == 1
             } else {
-                now == self.loaded && !writable_by_this_user(&self.opened, &self.path, now)
+                now == self.loaded
+                    && (!writable_by_this_user(&self.opened, &self.path, now)
+                        || every_name_beside(&self.path, self.identity, now.links))
             }
         });
         if unchanged_names
@@ -197,6 +203,29 @@ impl ConfiguredCommand {
             || lies_within(&self.path, path)
             || self.routes.iter().any(|route| lies_within(route, path))
     }
+}
+
+/// Whether the folder of `path` holds all `links` names of the file `identity`, so no name lies elsewhere.
+fn every_name_beside(path: &Path, identity: (u64, u64), links: u64) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    let mut names = 0_u64;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if std::fs::symlink_metadata(entry.path())
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+        {
+            names += 1;
+        }
+    }
+    names == links
 }
 
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
@@ -409,12 +438,42 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let command = directory.path().join("reader");
         program(&command);
-        std::fs::hard_link(&command, directory.path().join("alias")).expect("hard link");
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&command, directory.path().join("elsewhere/alias")).expect("hard link");
         let error = ConfiguredCommands::load(&record(&command))
             .expect_err("an unseen writable alias cannot be protected")
             .to_string();
         assert!(
-            error.contains("has 2 hard links, and the user that runs Box may be able to write it"),
+            error.contains(
+                "has 2 hard links, a name outside its own folder, and the user that runs Box may \
+                 be able to write it"
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A writable command whose names all share its folder loads**, as rustup's proxies in
+    /// `~/.cargo/bin` and npm's `bun.exe` and `bunx.exe` do, and launch refuses a name added elsewhere.
+    #[test]
+    fn a_writable_command_whose_names_share_its_folder_loads_and_refuses_a_name_added_elsewhere() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        program(&command);
+        std::fs::hard_link(&command, directory.path().join("alias")).expect("hard link");
+        let commands = ConfiguredCommands::load(&record(&command))
+            .unwrap_or_else(|error| panic!("two names in one folder: {error}"));
+        let loaded = commands.get("reader").expect("loaded");
+        assert!(loaded.has_several_names());
+        loaded.verify().expect("an unchanged command launches");
+        std::fs::remove_file(directory.path().join("alias")).expect("drop the second name");
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&command, directory.path().join("elsewhere/alias")).expect("hard link");
+        let error = loaded
+            .verify()
+            .expect_err("a name outside the folder")
+            .to_string();
+        assert!(
+            error.contains("changed after this run loaded it"),
             "{error}"
         );
     }
@@ -730,7 +789,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("directory");
         let owned = directory.path().join("reader");
         program(&owned);
-        std::fs::hard_link(&owned, directory.path().join("alias")).expect("hard link");
+        std::fs::create_dir(directory.path().join("elsewhere")).expect("a second folder");
+        std::fs::hard_link(&owned, directory.path().join("elsewhere/alias")).expect("hard link");
         let error = loaded_as(&owned, None)
             .verify()
             .expect_err("a file this user can write")

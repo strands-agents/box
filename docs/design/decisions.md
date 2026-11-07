@@ -1385,7 +1385,8 @@ writable grant; the other grants no access at all, for a file outside every writ
 
 A third method pins a configured tool's program. It records the file's link count and requires the
 same count during revalidation. Box accepts a program with several names only when the user running
-Box cannot write it through any name. A backend may make the file non-executable if it cannot preserve both write subtraction and
+Box cannot write it through any name, or when every name is in the program's own folder, which no
+write grant may reach. A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
