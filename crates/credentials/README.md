@@ -66,6 +66,15 @@ signed route the call is accepted and changes nothing, because there is no injec
 |---|---|
 | `attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>>` | What to edit before this request goes upstream, as an `Attachment` of header, path, and query edits. `Ok(None)` when this vault governs no credential for the destination. |
 | `redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions>` | The `Redactions` a response needs because it echoed the injected secret back, or `None` when nothing leaked. It returns no `Result`: a response is already received, so there is nothing to fail closed on. |
+| `response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor>` | An owned scrubber for a streamed response, or `None` when no unique opaque binding matches. |
+
+`ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
+`[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
+`push()` returns bytes ready for delivery and retains a trailing window of up to one less than the
+credential's byte length, including any possible secret prefix. At clean completion, call `finish()`
+to release the tail; on failure, drop the scrubber. Matches can cross chunk boundaries. A small event
+can wait for more bytes or clean completion. Retained state depends on the credential size, not the
+total response size.
 
 `attach_for` performs binding dispatch, phantom location, phantom **validation**,
 and SigV4 signing internally, so the phantom check is not a step a caller can skip.
@@ -115,9 +124,9 @@ constructor cannot see, because `open` is the one seam every route passes whatev
 
 ## Secret handling
 
-No public method vends a resolved plaintext to an egress caller. A resolved secret
-lives only inside the vault, and reaches the wire as edits on an `Attachment`; the
-one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
+No public method vends a resolved plaintext to an egress caller. Credential material stays
+private to the vault and its owned response scrubber. It reaches the request wire as edits on an
+`Attachment`; the one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
 
 Secret-bearing values use `Zeroizing` storage and redact in `Debug`, including a
 `{:?}` of a whole `Vault` or `Attachment`. Redaction happens at each constructor, not at the

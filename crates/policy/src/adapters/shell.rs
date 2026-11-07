@@ -1492,11 +1492,12 @@ mod tests {
                @id("after_a_refused_spawn")
                forbid (principal, action == Box::Action::"shell:exec", resource)
                when temporal {
-                   formerly within 1h Box::Action::"shell:spawn"::request{ input.program: "python" }
+                   formerly within 1h Box::Action::"shell:spawn"::request{ input.program: "git" }
                };"#,
         );
         let mut bindings = policy.grammar_bindings();
         bindings.declare(&programs.file("mise"), "git");
+        programs.replace("mise");
         let interceptor = InterceptorFixture {
             interceptor: ShellPolicyInterceptor::into_handle(
                 Arc::new(policy.bound_by(bindings).expect("the engine issued them")),
@@ -1512,10 +1513,10 @@ mod tests {
             "no refused spawn is in history yet"
         );
         let refused = interceptor
-            .intercept(&spawn("python", &mise, &none))
+            .intercept(&spawn("git", &mise, &none))
             .await
             .err()
-            .expect("an undeclared name on a bound file is refused");
+            .expect("a replaced bound file is refused");
         assert!(refused.to_string().contains("[tool-grammar]"), "{refused}");
         let after = interceptor
             .intercept(&echo)
@@ -1701,11 +1702,11 @@ mod tests {
         );
     }
 
-    /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
-    /// under a policy that permits every action, and a file that no grammar binds stays a
+    /// **A replaced bound file is refused** even under a policy that permits every action, and a
+    /// bound file called by an undeclared name, or a file that no grammar binds, stays a
     /// `shell:spawn`.
     #[tokio::test]
-    async fn an_undeclared_name_or_a_replaced_file_is_refused_whatever_the_policy_permits() {
+    async fn a_replaced_file_is_refused_whatever_the_policy_permits() {
         let programs = Programs::new();
         let (mise, git, make) = (
             programs.path("mise"),
@@ -1731,21 +1732,13 @@ mod tests {
                 "an undeclared name on the shim binary",
                 "python",
                 &mise,
-                Some(format!(
-                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
-                )),
+                None,
             ),
             (
                 "an undeclared name spelled as a path",
                 "/opt/shims/python",
                 &mise,
-                Some(format!(
-                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
-                )),
+                None,
             ),
             (
                 "a replaced bound file",
@@ -1814,10 +1807,11 @@ mod tests {
         }
     }
 
-    /// **A shim binary that grammars bind under other names, replaced by a symlink, is refused**
-    /// for a bound name and for an undeclared name, and a `shell:spawn` permit does not admit it.
+    /// **A shim binary that a grammar binds under another name, replaced by a symlink, is refused**
+    /// for the bound name, and a `shell:spawn` permit does not admit it. An undeclared name stays a
+    /// `shell:spawn`.
     #[tokio::test]
-    async fn a_replaced_shim_binary_is_refused_under_each_name_it_covered() {
+    async fn a_replaced_shim_binary_is_refused_under_its_bound_name() {
         let programs = Programs::new();
         let planted = programs.path("planted");
         let interceptor = interceptor_with_grammars(
@@ -1833,7 +1827,7 @@ mod tests {
 
         for (name, expected) in [
             ("cargo", Some(replaced_message("cargo", &planted))),
-            ("python", Some(replaced_message("python", &planted))),
+            ("python", None),
             ("node", None),
         ] {
             let decided = interceptor
@@ -1937,6 +1931,9 @@ mod tests {
         let bound_elsewhere = interceptor_with_grammars(POLICY, &["git"], |bindings| {
             bindings.declare(&programs.file("vendored-git"), "git");
         });
+        let bound_under_another_name = interceptor_with_grammars(POLICY, &["git"], |bindings| {
+            bindings.declare(&programs.file("mise"), "git");
+        });
         let today = interceptor(POLICY);
         let engine = {
             let history = tempfile::tempdir().expect("history directory");
@@ -1958,6 +1955,10 @@ mod tests {
             ),
             ("a declared name and no binding", declared_only),
             ("a binding on another file", bound_elsewhere),
+            (
+                "a binding on the same file under another name",
+                bound_under_another_name,
+            ),
         ];
 
         for (program, program_path, args) in [

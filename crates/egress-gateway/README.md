@@ -57,16 +57,19 @@ kinds, and the proxy presents each one immediately before its effect:
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
-| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
+| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
-edit. `body_bytes` is a length.
+edit. `HttpRequest::body_bytes` is the complete request body length. Response release requires
+no upfront body length.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
-`ConnectFailed`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
+`ConnectFailed`, `Replied`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
 permit becomes `mark_indeterminate`, so an early return or a panic still reports.
+Response delivery counts include accepted HTTP headers and framing. A source failure after a
+flushed prefix records incomplete delivery; an earlier flush does not make the response complete.
 
 An `io::ErrorKind::PermissionDenied` from `intercept` blocks the effect. For a
 connect, that happens before any upstream socket opens. Both adapter constructors
@@ -214,12 +217,24 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
 never a TCP port. Every admitted connection is terminated and inspected, so TLS
 interception is not selective. The adapter is thread-per-connection, and
-`max_connections` bounds the thread count. `upstream_read_deadline` bounds each read and each
-write on an upstream socket and one exchange's upstream reads and writes as a whole, so an
-upstream that never drains or sips the request, or never replies or drips its reply, ends the
-exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
-exchange whose request and reply together take longer than the deadline, with no reply to the
-workload; `box.toml` exposes no key for it.
+`max_connections` bounds the thread count. `upstream_read_deadline` sets one absolute deadline for
+upstream TLS, request transmission, and complete response receipt.
+Arriving chunks do not reset it. If delivery has started, expiry closes the incomplete response.
+Once upstream receipt finishes, this deadline does not bound the final workload write.
+`box.toml` exposes no key for it.
+
+Responses stream through bounded buffers, including credentialed responses and ordinary HTTP MCP
+results. Credential controls scrub headers before release and body chunks before delivery, including
+matches across chunk boundaries. A nonempty encoded response to a credentialed request is refused.
+`ResponseLimits::max_body_bytes` bounds collected requests and HTTP MCP `tools/list` responses;
+its default remains 16 MiB. Catalog pages retain the existing capture and schema-staging order.
+
+The request outcome is recorded when the upstream response completes, fails, or reaches its deadline.
+After a workload disconnect or a response refusal, the connection discards the remaining upstream
+body under the same deadline and connection limit before recording the request outcome.
+A received status is retained even if the body fails. HTTP MCP calls use this same timing; their
+recorded outcome does not prove tool success. A framing error or unsupported trailer closes the
+response, which may already have delivered a processed prefix.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, and `shutdown()`.
