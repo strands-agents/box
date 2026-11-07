@@ -1139,16 +1139,22 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
 ### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
-A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
-A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+A tool grammar names one program through its `program`, the name the agent types to run the tool. A
+grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command. A stdio `[mcp.<name>]` whose command calls that program name binds
+which grammar reads a command. A stdio `[mcp.<name>]` whose command runs that same file binds
 the same way, so its start is decided as the grammar's action.
 
-For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
-name the program was called by. The identity is the file's device and inode on the surrounding OS. A
+The `program` names the tool, not the file, so a `[tool]` whose command is a link-resolved file binds
+too: `[tool.npm] command = [".../npm/bin/npm-cli.js"]` with `program = "npm"` binds under `npm`, the
+name the agent types, not under `npm-cli.js`. At startup Box resolves the grammar's `program` on the
+same `PATH` the Shell searches at runtime and refuses the grammar unless it reaches the tool's own
+file, so a `git` grammar still cannot sit on a tool that runs `gh`.
+
+For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and its
+grammar's `program`. The identity is the file's device and inode on the surrounding OS. A
 hard link or symbolic link to a bound file therefore refers to the same identity. A command is
 parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
 enough, because several programs can share one binary. mise runs every tool it manages through one
