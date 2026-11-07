@@ -624,12 +624,6 @@ Each of these is refused at startup, before any box state exists:
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
 - A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
   grammar on `[mcp.<name>]` is an unknown field there.
-- A `program` that isn't the last component of `command` and that `PATH` doesn't resolve to the
-  tool's own file, such as `[tool.gh] command = ["gh"]` with `program = "git"`: ``invalid
-  `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
-  `command` runs /usr/bin/gh; ...``. The `program` is the name the agent types, so it may differ
-  from the last component of `command`, such as `program = "npm"` for a `command` that names
-  `npm-cli.js`. Box binds that grammar under `npm` when `npm` on `PATH` reaches the same file.
 - Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
   `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
 - Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
@@ -641,6 +635,17 @@ Each of these is refused at startup, before any box state exists:
 - An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
   grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
   while `tool-grammars` is on; give the server another name``.
+
+A grammar binds under its `program`, the name the agent types, so `program` may differ from the
+last part of `command[0]`. Box CLI writes `npm` as the file its link leads to, such as
+`.../npm/bin/npm-cli.js`, and `program = "npm"` still binds under `npm`. When the last part of
+`command[0]` is the `program`, Box accepts the grammar. Otherwise, after it opens each tool's
+program file and before the workload starts, Box finds `program` on the `PATH` that `run` was
+started with, which is the `PATH` the Shell searches. It refuses the grammar unless that file is the
+one `command[0]` names, such as `[tool.gh] command = ["gh"]` with `program = "git"`:
+``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
+`command` runs /usr/bin/gh; ...``. When `PATH` finds nothing by that name, the message says
+`PATH` finds no program by that name.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.

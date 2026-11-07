@@ -82,7 +82,7 @@ The keys:
 | `format` | The version of the grammar format. Write `1`. A grammar without it is refused. |
 | `version` | The version of this grammar's own content. Version 1 gives the namespace `Tool::git`, and version 2 gives `Tool::git::v2`. |
 | `name` | The name in the policy namespace, so `name = "git"` gives `Tool::git::Action::"push"`. |
-| `program` | The program name the grammar reads. It must be the last part of `command[0]` in its own `[tool]`. |
+| `program` | The program name the grammar reads, which is the name the agent types. When it isn't the last part of `command[0]` in its own `[tool]`, `program` on `PATH` must reach the same file as `command[0]`. |
 | `effects` | Each effect a command can have, with a one-line description. |
 | `global.options` | Options that come before the action's words. Only an action whose `usage` has `[global options]` accepts them. |
 | `shell.<action>` | One action, such as `shell.push`. |
@@ -259,10 +259,19 @@ it at startup. Box also refuses a rule that reads `context.input` over a grammar
 
 ### One grammar covers every tool that runs its program
 
-A grammar names one `program`, and it binds every `[tool]` and every stdio `[mcp.<name>]` whose
-command runs that name. A grammar on `[tool.git]` with `program = "git"` also covers a
-`[tool.brew_git]` with `command = ["/opt/homebrew/bin/git"]`, and `run` prints a startup line for
-each. A second grammar with the same `program` is refused.
+A grammar names one `program`, and it binds its own `[tool]` under that name. It also binds every
+other `[tool]` and every stdio `[mcp.<name>]` whose `command[0]` ends in that name. A grammar on
+`[tool.git]` with `program = "git"` also covers a `[tool.brew_git]` with
+`command = ["/opt/homebrew/bin/git"]`, and `run` prints a startup line for each. A second grammar
+with the same `program` is refused.
+
+The grammar's own `[tool]` may name the file that a link leads to. With
+`command = [".../npm/bin/npm-cli.js"]` and `program = "npm"`, the grammar binds that file under
+`npm`, the name the agent types. When the last part of `command[0]` isn't the `program`, `run` finds
+`program` on its own `PATH`, the one the Shell searches, and starts only when that is the same file.
+Otherwise it refuses the grammar, so a `git` grammar can't sit on a `[tool.gh]`. Another `[tool]` or
+`[mcp.<name>]` whose command names `npm-cli.js` calls the program by another name, so the npm
+grammar doesn't bind it.
 
 ## Which program files a grammar binds
 
@@ -340,8 +349,9 @@ safe when a command does more than its words say.
 
 ## Startup refusals
 
-`run` refuses a grammar problem before it writes any box state, and each message says what is
-wrong. [`[tool.<name>.grammar]`](config.md#toolnamegrammar) lists each refusal with its message.
+`run` refuses a grammar problem before the workload starts, and each message says what is wrong.
+Most refusals come before it writes any box state. The check that `program` on `PATH` reaches the
+tool's file comes after `run` opens each tool's program file. [`[tool.<name>.grammar]`](config.md#toolnamegrammar) lists each refusal with its message.
 
 ## See also
 
