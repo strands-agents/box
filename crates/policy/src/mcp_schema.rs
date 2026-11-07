@@ -1152,6 +1152,24 @@ namespace Box {
                             },
                             "limit": {"type": ["string", "integer", "null"]},
                             "note": {"type": ["string", "null"]},
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "null"}
+                                ]
+                            },
+                            "at": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "string"}
+                                ]
+                            },
+                            "host": {
+                                "anyOf": [
+                                    {"type": "string", "format": "ipv4"},
+                                    {"type": "integer"}
+                                ]
+                            },
                             "link": {
                                 "anyOf": [
                                     {"type": "string", "format": "uri"},
@@ -1228,6 +1246,28 @@ namespace Box {
                 }),
             ),
             (
+                serde_json::json!({
+                    "repoName": "a/b",
+                    "since": "2025-01-01T00:00:00Z",
+                    "at": "2025-01-01",
+                    "host": "10.0.0.1"
+                }),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "since": {"typeChoice0": "2025-01-01T00:00:00Z"},
+                    "at": {"typeChoice0": "2025-01-01", "typeChoice1": "2025-01-01"},
+                    "host": {"typeChoice0": "10.0.0.1"}
+                }),
+            ),
+            (
+                serde_json::json!({"repoName": "a/b", "at": "next tuesday", "host": 7}),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "at": {"typeChoice1": "next tuesday"},
+                    "host": {"typeChoice1": 7}
+                }),
+            ),
+            (
                 serde_json::json!({"repoName": "a/b", "link": "https://example.com"}),
                 serde_json::json!({
                     "repoName": {"typeChoice0": "a/b"},
@@ -1260,6 +1300,8 @@ namespace Box {
             serde_json::json!({"repoName": ["a/b", 7]}),
             serde_json::json!({"repoName": {"typeChoice0": "a/b"}}),
             serde_json::json!({"repoName": "a/b", "limit": true}),
+            serde_json::json!({"repoName": "a/b", "since": "not a date"}),
+            serde_json::json!({"repoName": "a/b", "host": "10.0.0.1\")"}),
             serde_json::json!({"repoName": "a/b", "filter": {"labels": ["bug"]}}),
             serde_json::json!({"repoName": "a/b", "filter": {"labels": [{"title": "bug"}]}}),
         ] {

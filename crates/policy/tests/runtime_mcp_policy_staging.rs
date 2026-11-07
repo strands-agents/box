@@ -1692,6 +1692,99 @@ permit(principal, action == deepwiki::Action::"ask_wiki_question", resource);
 }
 
 #[test]
+fn a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "events" };
+forbid(principal, action == events::Action::"list_events", resource)
+when { context.input.since has typeChoice0 && context.input.since.typeChoice0 < datetime("2024-01-01") };
+permit(principal, action == events::Action::"list_events", resource);
+permit(principal, action == events::Action::"count_events", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [
+                {
+                    "name": "list_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "string"}
+                                ]
+                            }
+                        },
+                        "required": ["since"]
+                    }
+                },
+                {
+                    "name": "count_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "null"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "events",
+                generate_mcp_schema("events", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |tool: &str, since: &str| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "events",
+            tool,
+            &json!({"since": since}),
+        )
+    };
+    assert!(
+        decide("count_events", "2025-06-01T00:00:00Z").is_allow(),
+        "a datetime fills the datetime member of a nullable datetime"
+    );
+    assert!(
+        !decide("list_events", "2023-06-01T00:00:00Z").is_allow(),
+        "a rule on the datetime member is not bypassed by the string member"
+    );
+    assert!(
+        decide("list_events", "yesterday").is_allow(),
+        "a string that is not a datetime fills only the string member"
+    );
+}
+
+#[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient
     // `PolicyPending` without evaluating the engine, so it records no event. The subset commit at

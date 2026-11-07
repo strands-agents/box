@@ -10,6 +10,8 @@ use crate::error::PolicyError;
 
 const UNION_MEMBER_PREFIX: &str = "typeChoice";
 
+const EXTENSION_TYPES: [&str; 4] = ["datetime", "decimal", "duration", "ipaddr"];
+
 /// The input record type of each MCP tool action in one composed schema, resolved on first use.
 #[derive(Debug, Default)]
 pub(crate) struct ToolInputs {
@@ -182,6 +184,13 @@ impl ResolvedInputs {
                 Some(value.clone())
             }
             ("Long", Value::Number(number)) if number.is_i64() => Some(value.clone()),
+            ("Extension", Value::String(text)) => {
+                let name = ty.get("name").and_then(Value::as_str)?;
+                extension_accepts(name, text).then(|| value.clone())
+            }
+            (name, Value::String(text)) if EXTENSION_TYPES.contains(&name) => {
+                extension_accepts(name, text).then(|| value.clone())
+            }
             ("Set", Value::Array(items)) => {
                 let element = ty.get("element")?;
                 items
@@ -260,4 +269,33 @@ fn shown(value: &Value) -> String {
         Some((end, _)) => format!("{}…", &text[..end]),
         None => text,
     }
+}
+
+/// Whether Cedar's constructor for the extension type `name` accepts `text`.
+fn extension_accepts(name: &str, text: &str) -> bool {
+    if !EXTENSION_TYPES.contains(&name)
+        || text
+            .chars()
+            .any(|character| character == '"' || character == '\\' || character.is_control())
+    {
+        return false;
+    }
+    let constructor = if name == "ipaddr" { "ip" } else { name };
+    let Ok(expression) = format!("{constructor}(\"{text}\")").parse::<cedar_policy::Expression>()
+    else {
+        return false;
+    };
+    let Ok(uid) = r#"Box::Agent::"conform""#.parse::<EntityUid>() else {
+        return false;
+    };
+    let Ok(request) = cedar_policy::Request::new(
+        uid.clone(),
+        uid.clone(),
+        uid,
+        cedar_policy::Context::empty(),
+        None,
+    ) else {
+        return false;
+    };
+    cedar_policy::eval_expression(&request, &cedar_policy::Entities::empty(), &expression).is_ok()
 }
