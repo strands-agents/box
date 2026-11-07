@@ -225,6 +225,10 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         number: libc::SYS_fstat,
     },
     PermittedSyscall {
+        name: "statfs",
+        number: libc::SYS_statfs,
+    },
+    PermittedSyscall {
         name: "fsync",
         number: libc::SYS_fsync,
     },
@@ -791,6 +795,7 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
 pub(crate) struct SyscallFilters {
     pub(crate) permit: BpfProgram,
     pub(crate) restrictions: BpfProgram,
+    pub(crate) filesystem_queries: BpfProgram,
 }
 
 /// The static system-call policy for one containment request.
@@ -830,9 +835,23 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let mut filesystem_queries = compile_filter(
+            BTreeMap::from([(libc::SYS_statfs, Vec::new())]),
+            SeccompAction::Allow,
+            SeccompAction::Trace(0),
+        )?;
+        // seccompiler 0.5 has no notification action; retain its architecture guard and rule compiler.
+        for instruction in &mut filesystem_queries {
+            if instruction.code == (libc::BPF_RET | libc::BPF_K) as u16
+                && instruction.k == libc::SECCOMP_RET_TRACE
+            {
+                instruction.k = libc::SECCOMP_RET_USER_NOTIF;
+            }
+        }
         Ok(SyscallFilters {
             permit,
             restrictions,
+            filesystem_queries,
         })
     }
 
@@ -1221,11 +1240,11 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 111);
+    fn permit_filter_has_112_workload_entries_and_one_installer_entry() {
+        assert_eq!(WORKLOAD_PERMITTED.len(), 112);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 114);
+        assert_eq!(rules.len(), 115);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
