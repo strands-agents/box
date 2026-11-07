@@ -187,6 +187,8 @@ To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent 
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
 Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
 Connection and write operations retain their transport timeouts.
+Configured-command [hard-link scans](#configured-command-integrity) retain their separate
+30-second budget per tree, including when `shell.timeout` is `false`.
 Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
 are load errors.
 
@@ -555,20 +557,39 @@ every `[tool.<name>]`, and every local `[mcp.<name>]` table against those progra
 |---|---|---|
 | A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
-| A command has more than one hard link, which are filesystem names for the same file, and Box can't rule out that the user that runs Box can write it. | `has <n> hard links, and the user that runs Box may be able to write it` | Use a copy with one filesystem name, or install the command so that this user can't write it. |
+| A writable directory contains another name for an operator-writable configured command. | `this write grant contains a hard link to a configured tool command` | Narrow the writable directory to exclude the command's hard-link names. |
+| Box cannot finish scanning a writable directory for configured-command hard links. | `cannot be inspected for configured command hard links` | Restore access to the directory, or narrow the writable grant. |
 | The command's file identity changes during the run. A command with more than one hard link also counts as changed when its link count, owner, group, or mode changes. | `changed after this run loaded it` | Update the program between runs. |
+| A change through Strands Shell or Monty reaches a configured command or its ancestor. | `is a configured tool command or its ancestor, which this run does not allow to change` | Select a path outside the configured command and its enclosing directories. |
+| A directory change through Strands Shell or Monty reaches a hard-link alias for a configured command. | `contains a hard link to a configured tool command, so this mutation is not allowed` | Select a directory that excludes the command's hard-link names. |
+| Box cannot finish a directory scan for a change through Strands Shell or Monty. | `cannot finish checking for configured tool command hard links`, followed by the scan failure | Correct the reported access or inspection-limit problem, or select a smaller directory that Box can fully inspect. |
 
-Box accepts a command with more than one hard link when the user that runs Box can't write it
-through any name. The file belongs to another user, such as `root`, has no group or other write
-permission, and no access-control entry lets this user write it. Most system programs are like
-this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
+Box accepts a command with more than one hard link when ownership and access checks rule out
+writes by the operator through every name. The file belongs to another account, such as `root`,
+has no group or other write permission, and no access-control entry lets the operator write it.
+Most system programs are like this, such as `/usr/bin/git` on macOS and `/usr/bin/perl` on Ubuntu.
+
+On macOS and Linux, a command with multiple hard links can remain writable by the operator. A startup scan
+must find none of its names in the declared writable directories of the agent, tools, or local
+MCP servers. The scan includes subdirectories excluded by `deny`. Each tree has a 30-second
+inspection budget and a depth limit of 128 directory levels. Box refuses an incomplete scan.
+It checks elapsed time between filesystem calls and before accepting a completed scan.
+This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
+budgets. The command and its paths must still pass the writable-grant checks.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
-even when policy permits the operation. Reads still require the applicable policy permission.
+even when policy permits the operation. For commands admitted through scanning, directory
+changes require a complete scan that finds none of their hard-link names. The same inspection
+limits apply. Reads still require the applicable policy permission.
 Build output covered by the agent's own grants remains writable when no tool table names it.
+On Linux, native programs can create hard links within one writable mount.
+Links across separate writable grants fail, even when their directories share a filesystem.
 
 To update a configured tool, end the current run. Update the program from the surrounding OS.
 Start a new run to resolve and validate the updated program.
+
+[Tool grammars](#toolnamegrammar) do not require a single hard link. They bind the executable file
+and the called name; other names follow the [`shell:spawn`](shell.md#shellspawn) rules.
 
 ### Installation integrity
 

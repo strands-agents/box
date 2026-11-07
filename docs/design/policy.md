@@ -257,14 +257,17 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses
-configured tool programs with multiple hard links when the user running Box can write them.
-It also refuses configured tool programs that overlap with direct writable grants.
+configured tool programs that overlap with direct writable grants. On macOS and Linux, a command
+with multiple hard links can remain writable by the operator. Box first requires a complete scan
+of every process's declared writable directories. The scan includes subdirectories excluded by
+`deny` and refuses startup if it finds another name for the command.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those
-constraints. When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards),
-Box also refuses wildcard commands that can select different servers for the same request. Box also
-refuses installed trusted programs with unaccounted hard-link names or overlap with any process's
-writable grants. [Installation integrity](../user/config.md#installation-integrity) describes these
-refusals.
+constraints.
+
+When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also refuses wildcard commands that can select different servers for the same request. Box
+also refuses installed trusted programs with unaccounted hard-link names or overlap with any
+process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
+describes these refusals.
 
 The inert-rule check sorts each rule into one of three classes:
 
