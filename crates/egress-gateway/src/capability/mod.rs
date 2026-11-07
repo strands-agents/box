@@ -9,6 +9,8 @@ use std::collections::HashMap;
 pub use credential::CredentialCapability;
 pub use host::{is_bindable_host, normalize_host};
 
+#[cfg(feature = "tls-intercept")]
+use crate::boundary::HeaderMap;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, MutationTarget, Target};
 use crate::error::{ProxyError, Result};
 
@@ -16,6 +18,14 @@ use crate::error::{ProxyError, Result};
 /// does not apply), or the non-secret reason it cannot perform its edit safely, so nothing may
 /// egress.
 type Outcome = std::result::Result<Vec<Mutation>, String>;
+
+/// The body checks retained after response-header edits have passed the capability fold.
+#[cfg(feature = "tls-intercept")]
+#[derive(Debug, Default)]
+pub(crate) struct ResponseControls {
+    pub(crate) redactors: Vec<credentials::ResponseRedactor>,
+    pub(crate) requires_empty_body: bool,
+}
 
 /// The credential capabilities the gateway applies, at most one per destination pattern.
 #[derive(Default)]
@@ -84,6 +94,28 @@ impl CapabilitySet {
             mutation.apply(&mut res.headers, &mut scratch);
         }
         Ok(())
+    }
+
+    /// Scrub response headers and retain the ordered body checks for a streamed response.
+    #[cfg(feature = "tls-intercept")]
+    pub(crate) fn response_controls(
+        &self,
+        headers: &mut HeaderMap,
+        target: &Target,
+    ) -> std::result::Result<ResponseControls, String> {
+        let mut controls = ResponseControls::default();
+        let mut outcomes = Vec::new();
+        for credential in self.matching(&target.as_destination()) {
+            let (edits, body) = credential.response_controls(headers, target);
+            outcomes.push(Ok(edits));
+            controls.redactors.extend(body.redactors);
+            controls.requires_empty_body |= body.requires_empty_body;
+        }
+        let mut scratch = Target::new("", 0);
+        for mutation in fold(outcomes)? {
+            mutation.apply(headers, &mut scratch);
+        }
+        Ok(controls)
     }
 
     /// Config-load fail-closed gate: a hard [`Config`](ProxyError::Config) error, never a silent
@@ -349,5 +381,127 @@ mod tests {
             CapabilitySet::new(vec![one(), one()]).validate().is_err(),
             "two credentials on the same pattern must be a config-load error"
         );
+    }
+
+    #[cfg(feature = "tls-intercept")]
+    mod streaming {
+        use super::*;
+
+        #[test]
+        fn redactors_preserve_the_whole_body_capability_order() {
+            for reverse in [false, true] {
+                let mut credentials = vec![
+                    header_capability("*.example.com", "red").0,
+                    header_capability("api.example.com", "[REDACTED]-blue").0,
+                ];
+                if reverse {
+                    credentials.reverse();
+                }
+                let set = CapabilitySet::new(credentials);
+                set.validate().unwrap();
+                let target = Target::new("api.example.com", 443);
+                let mut baseline =
+                    InterceptedResponse::http(200, HeaderMap::new(), b"red-blue".to_vec());
+                set.apply_to_response(&mut baseline, &target).unwrap();
+
+                let controls = set
+                    .response_controls(&mut HeaderMap::new(), &target)
+                    .unwrap();
+                let mut body = b"red-blue".to_vec();
+                for mut redactor in controls.redactors {
+                    let mut scrubbed = redactor.push(&body);
+                    scrubbed.extend(redactor.finish());
+                    body = scrubbed;
+                }
+                assert_eq!(body, baseline.body);
+                assert_eq!(
+                    body.as_slice(),
+                    if reverse {
+                        b"[REDACTED]-blue".as_slice()
+                    } else {
+                        b"[REDACTED]".as_slice()
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn header_collisions_use_original_values_and_apply_no_edits() {
+            let set = CapabilitySet::new(vec![
+                header_capability("*.example.com", "red").0,
+                header_capability("api.example.com", "red-blue").0,
+            ]);
+            let target = Target::new("api.example.com", 443);
+            let mut headers = HeaderMap::new();
+            headers.append("X-Echo", "red-blue");
+            let original = headers.clone();
+            let mut baseline = InterceptedResponse::http(200, original.clone(), Vec::new());
+            let expected = set.apply_to_response(&mut baseline, &target).unwrap_err();
+            let actual = set.response_controls(&mut headers, &target).unwrap_err();
+            assert_eq!(actual, expected);
+            assert!(actual.starts_with("mutation collision:"));
+            assert_eq!(headers, original);
+        }
+
+        #[test]
+        fn only_matching_capabilities_produce_response_controls() {
+            let (credentials, _) =
+                shared_vault(&["api.github.com", "api.stripe.com"], "real-secret");
+            let target = Target::new("api.github.com", 443);
+            let mut headers = HeaderMap::new();
+            headers.append("X-Echo", "real-secret");
+            headers.append("Content-Encoding", "gzip");
+
+            let (edits, off_route) = credentials[1].response_controls(&headers, &target);
+            assert!(edits.is_empty());
+            assert!(off_route.redactors.is_empty());
+            assert!(!off_route.requires_empty_body);
+
+            let set = CapabilitySet::new(credentials);
+            let mut baseline = InterceptedResponse::http(200, headers.clone(), Vec::new());
+            set.apply_to_response(&mut baseline, &target).unwrap();
+            let controls = set.response_controls(&mut headers, &target).unwrap();
+            assert_eq!(controls.redactors.len(), 1);
+            assert!(controls.requires_empty_body);
+            assert_eq!(headers, baseline.headers);
+        }
+
+        #[test]
+        fn encoded_body_refusal_does_not_depend_on_an_opaque_binding() {
+            let vault = Vault::open(VaultConfig::new(Backend::local(), "tenant"))
+                .unwrap()
+                .into_vault();
+            let set = CapabilitySet::new(vec![CredentialCapability::new(
+                DestinationPattern::parse("api.example.com").unwrap(),
+                Arc::new(vault),
+            )]);
+            let target = Target::new("api.example.com", 443);
+            for (encoding, must_be_empty) in
+                [("gzip", true), ("identity, br", true), ("IDENTITY", false)]
+            {
+                let mut headers = HeaderMap::new();
+                headers.append("Content-Encoding", encoding);
+                let mut baseline = InterceptedResponse::http(200, headers.clone(), vec![1]);
+                assert_eq!(
+                    set.apply_to_response(&mut baseline, &target).is_err(),
+                    must_be_empty
+                );
+                let controls = set.response_controls(&mut headers, &target).unwrap();
+                assert!(controls.redactors.is_empty());
+                assert_eq!(controls.requires_empty_body, must_be_empty);
+            }
+        }
+
+        #[test]
+        fn encoding_is_checked_before_its_header_value_is_redacted() {
+            let set = CapabilitySet::new(vec![header_capability("api.example.com", "gzip").0]);
+            let mut headers = HeaderMap::new();
+            headers.append("Content-Encoding", "gzip");
+            let controls = set
+                .response_controls(&mut headers, &Target::new("api.example.com", 443))
+                .unwrap();
+            assert_eq!(headers.get("content-encoding"), Some("[REDACTED]"));
+            assert!(controls.requires_empty_body);
+        }
     }
 }

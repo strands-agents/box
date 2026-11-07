@@ -497,9 +497,9 @@ Before each launch, a command with multiple hard links must retain its link coun
 and mode. Box also repeats the write-access check for a command admitted through ownership and
 access checks.
 
-Box separately refuses a [tool grammar](../user/config.md#toolnamegrammar) on a command file with
-multiple hard links. Such a grammar would refuse other names of that file that no `[tool]`
-declares.
+[Tool grammars](../user/config.md#toolnamegrammar) do not require a single hard link.
+They bind the executable file and the called name; other names follow the
+[`shell:spawn`](../user/shell.md#shellspawn) rules.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity. Direct
 writable-grant refusals and the broker's mutation checks protect the program's contents.

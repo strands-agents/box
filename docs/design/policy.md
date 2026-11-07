@@ -174,6 +174,13 @@ test before it permits a commit. A connect that definitely failed is a `::error`
 have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
 still counts the uncertain ones.
 
+For an HTTP request, the gateway records accepted request bytes and any received status when the
+upstream response completes, fails, or reaches its deadline. HTTP MCP calls record their outcome at
+the same point. If the workload disconnects or the gateway refuses delivery, the gateway discards
+the remaining body under the same deadline before recording the outcome.
+Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
+Response delivery adds no second policy event.
+
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead. See [temporal rules are enforced
 against recorded history](decisions.md#temporal-rules-are-enforced-against-recorded-history).
@@ -236,9 +243,7 @@ has reported. Until then a tool call for that server is denied without reaching 
 subset](decisions.md#discovery-serves-the-schema-independent-subset). A rule that names only tool
 grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
 from the start, so the rule loads at once or the box refuses it. If policy refuses a server's tool
-listing, only that server loses its per-tool rules. The box starts without those rules. See [a
-server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
+listing, only that server loses its per-tool rules. The box starts without those rules. See [recovery after a denied tool list](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 
 A library caller checks a policy without a run through `check_policy`. It reads `box.toml` and the
 policy file it names with the reader that `run` uses, and it applies the same validation: the
@@ -290,9 +295,15 @@ The inert-rule check sorts each rule into one of three classes:
 A refusal names the rule and says what to write instead.
 
 When a tool grammar binds a program, each spawn of it enters history as its grammar action and not as
-`shell:spawn`. A spawn that the binding refuses before any rule decides it, such as a bound file
-called by a name that no `[tool]` declares, enters history as a `shell:spawn` request, so a rule
-that counts attempts still sees it.
+`shell:spawn`. When a program the Shell started ends, the grammar action's `::response` carries the
+exit status as `output.status`, the same as a `shell:spawn` response, so a rule can refuse a
+`git push` until a `cargo test` has passed. The response records only that the agent ran a command
+the grammar reads as `cargo test`, in a working directory and with arguments the agent chose, and
+that it exited 0. A test in a scratch crate satisfies such a rule, so a rule that must mean "this
+project's tests passed" pins `input.cwd` to the project. A spawn that the binding refuses before any rule decides
+it, such as a bound name whose file was replaced, enters history as a `shell:spawn` request, so a
+rule that counts attempts still sees it. A bound file called by a name that no grammar binds is
+decided as `shell:spawn`.
 
 ## Residual risk
 

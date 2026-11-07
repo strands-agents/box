@@ -130,10 +130,10 @@ pub(crate) enum GrammarCoverage<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CoverageRefusal {
     #[error(
-        "`{name}` runs `{}`, which a tool grammar covers, but no `[tool]` declares the name `{name}`",
+        "`{name}` runs `{}`, which a tool grammar covers, but only a stdio `[mcp]` server start calls it `{name}`",
         .program_path.display()
     )]
-    UndeclaredName { name: String, program_path: PathBuf },
+    ServerName { name: String, program_path: PathBuf },
     #[error(
         "`{name}` runs `{}`, which a tool grammar bound, but the file at that path is no longer the file it bound",
         .program_path.display()
@@ -230,8 +230,8 @@ impl GrammarBindings {
     }
 
     /// Declare that a stdio `[mcp]` server runs the program file `opened` under the name `called`,
-    /// as [`declare_tool`](Self::declare_tool) does, but only for a start of that server. A spawn
-    /// that the agent starts under that name stays undeclared.
+    /// as [`declare_tool`](Self::declare_tool) does. An agent spawn of a bound file under that
+    /// name, when no grammar binds the name and no `[tool]` declares it, is refused.
     pub fn declare_server(
         &mut self,
         opened: &std::fs::File,
@@ -253,8 +253,8 @@ impl GrammarBindings {
     fn declare_as(&mut self, program: &ProgramFile, called: &str, starter: Starter) {
         let pair = (program.identity, called.to_string());
         match starter {
-            Starter::Agent => self.declared.insert(pair.clone()),
-            Starter::Server => self.servers.insert(pair.clone()),
+            Starter::Agent => self.declared.insert(pair),
+            Starter::Server => self.servers.insert(pair),
         };
         let Some(index) = self
             .grammars
@@ -273,7 +273,8 @@ impl GrammarBindings {
                 .entry(spelling.clone())
                 .or_insert(program.identity);
         }
-        self.bound.insert(pair, index);
+        self.bound
+            .insert((program.identity, called.to_string()), index);
     }
 
     /// Whether no grammar binds any file.
@@ -299,15 +300,12 @@ impl GrammarBindings {
             .is_some_and(|((bound, _), _)| *bound == identity)
     }
 
-    /// Whether a bound spelling now leads somewhere other than a file it was bound to that covered
-    /// `name`: a spelling of `program` itself, or a bound spelling that now resolves to `program`.
+    /// Whether a bound spelling now leads somewhere other than a file it was bound to under `name`:
+    /// a spelling of `program` itself, or a bound spelling that now resolves to `program`.
     fn replaced(&self, program: &ProgramFile, name: &str) -> bool {
         let moved = |identity: &FileIdentity| *identity != program.identity;
-        let covered = |identity: FileIdentity| {
-            let pair = (identity, name.to_string());
-            self.bound.contains_key(&pair)
-                || (!self.declared.contains(&pair) && !self.binds_file(program.identity))
-        };
+        let covered =
+            |identity: FileIdentity| self.bound.contains_key(&(identity, name.to_string()));
         program.spellings.iter().any(|spelling| {
             self.spellings
                 .get(spelling)
@@ -331,7 +329,7 @@ impl GrammarBindings {
     }
 
     /// How the grammars cover a spawn that `starter` starts, spelled `spelling`, of the program file
-    /// that `read` found, or `None` when no grammar does.
+    /// that `read` found, or `None` when no grammar does and `shell:spawn` decides it.
     pub(crate) fn coverage_for(
         &self,
         read: Result<ProgramFile, UnreadableProgramFile>,
@@ -346,8 +344,6 @@ impl GrammarBindings {
             )))
         };
         let replaced = |name, program_path| CoverageRefusal::ReplacedFile { name, program_path };
-        let undeclared =
-            |name, program_path| CoverageRefusal::UndeclaredName { name, program_path };
         let program = match read {
             Ok(program) => program,
             Err(unreadable) if self.spellings.contains_key(&unreadable.path) => {
@@ -370,10 +366,15 @@ impl GrammarBindings {
         {
             return refused(replaced, gone);
         }
-        let declared = self.declared.contains(&pair)
-            || (starter == Starter::Server && self.servers.contains(&pair));
-        if self.binds_file(program.identity) && !declared {
-            return refused(undeclared, &program.path);
+        if starter == Starter::Agent
+            && self.servers.contains(&pair)
+            && !self.declared.contains(&pair)
+            && self.binds_file(program.identity)
+        {
+            return refused(
+                |name, program_path| CoverageRefusal::ServerName { name, program_path },
+                &program.path,
+            );
         }
         None
     }
@@ -446,14 +447,14 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Answer {
         Parsed(String),
-        Undeclared,
+        ServerName,
         Replaced,
     }
 
     fn answer(coverage: Option<GrammarCoverage<'_>>) -> Option<Answer> {
         coverage.map(|coverage| match coverage {
             GrammarCoverage::Parsed { grammar, .. } => Answer::Parsed(grammar.name.clone()),
-            GrammarCoverage::Refused(CoverageRefusal::UndeclaredName { .. }) => Answer::Undeclared,
+            GrammarCoverage::Refused(CoverageRefusal::ServerName { .. }) => Answer::ServerName,
             GrammarCoverage::Refused(CoverageRefusal::ReplacedFile { .. }) => Answer::Replaced,
         })
     }
@@ -461,8 +462,6 @@ mod tests {
     fn parsed(grammar: &str) -> Option<Answer> {
         Some(Answer::Parsed(grammar.to_string()))
     }
-
-    const REFUSED: Option<Answer> = Some(Answer::Undeclared);
 
     #[test]
     fn a_grammar_binds_every_declared_tool_that_runs_its_program() {
@@ -569,7 +568,7 @@ mod tests {
                 "an undeclared name on a bound file",
                 CARGO,
                 "cargo-clippy",
-                REFUSED,
+                None,
             ),
             ("an unbound file", "usr/bin/ls", "ls", None),
             (
@@ -600,7 +599,7 @@ mod tests {
                 "the mise shim binary, by an undeclared name",
                 MISE,
                 "python",
-                REFUSED,
+                None,
             ),
             (
                 "a shim binary replaced in place, by its bound name",
@@ -648,7 +647,7 @@ mod tests {
             ("the first grammar's name", "cargo", parsed("cargo")),
             ("the second grammar's name", "aws", parsed("aws")),
             ("a declared name with no grammar", "node", None),
-            ("an undeclared name", "python", REFUSED),
+            ("an undeclared name", "python", None),
         ] {
             assert_eq!(
                 answer(bindings.coverage(Ok(mise.clone()), name)),
@@ -685,22 +684,89 @@ mod tests {
         bindings
             .declare_server(&opened, mise.path(), mise.path(), "mise")
             .expect("the server declares");
-
-        let covered = |starter| {
-            bindings
-                .coverage_for(Ok(mise.clone()), "mise", starter)
-                .map(|coverage| matches!(coverage, GrammarCoverage::Refused(_)))
+        let covered = |bindings: &GrammarBindings, name, starter| {
+            answer(bindings.coverage_for(Ok(mise.clone()), name, starter))
         };
+
+        for (case, name, starter, expected) in [
+            ("the server start", "mise", Starter::Server, None),
+            (
+                "the agent under the server's name",
+                "mise",
+                Starter::Agent,
+                Some(Answer::ServerName),
+            ),
+            (
+                "the agent under a name that nothing declares",
+                "make",
+                Starter::Agent,
+                None,
+            ),
+            ("the declared name", "git", Starter::Agent, parsed("git")),
+        ] {
+            assert_eq!(covered(&bindings, name, starter), expected, "{case}");
+        }
+
+        bindings.declare(&mise, "mise");
         assert_eq!(
-            covered(Starter::Server),
+            covered(&bindings, "mise", Starter::Agent),
             None,
-            "the server starts as `shell:spawn`"
+            "a `[tool]` that declares the name lets the agent run it as `shell:spawn`"
         );
+    }
+
+    #[test]
+    fn a_server_name_on_a_file_that_no_grammar_binds_stays_a_spawn_for_the_agent() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        bindings.declare(&host.program(GIT), "git");
+        let server = host.program("opt/servers/notes");
+        let opened = std::fs::File::open(server.path()).expect("the program opens");
+        bindings
+            .declare_server(&opened, server.path(), server.path(), "notes")
+            .expect("the server declares");
+
         assert_eq!(
-            covered(Starter::Agent),
-            Some(true),
-            "the agent cannot use the server's name to leave the grammar"
+            answer(bindings.coverage_for(Ok(server), "notes", Starter::Agent)),
+            None,
+            "no grammar binds the server's file, so the agent's spawn skips no grammar"
         );
+    }
+
+    #[test]
+    fn a_file_with_several_names_binds_the_declared_name_and_leaves_each_other_name_a_spawn() {
+        let host = Host::new();
+        let mut bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        let launcher = host.program("usr/bin/git");
+        bindings.declare(&launcher, "git");
+
+        for (case, program, name, expected) in [
+            ("the declared name", launcher.clone(), "git", parsed("git")),
+            (
+                "another name of the same file",
+                host.hard_link("usr/bin/git", "usr/bin/make"),
+                "make",
+                None,
+            ),
+            (
+                "a third name of the same file",
+                host.hard_link("usr/bin/git", "usr/bin/clang"),
+                "clang",
+                None,
+            ),
+            (
+                "the declared name at another name of the file",
+                host.program("usr/bin/make"),
+                "git",
+                parsed("git"),
+            ),
+        ] {
+            assert_eq!(
+                answer(bindings.coverage(Ok(program), name)),
+                expected,
+                "{case}: called as {name}"
+            );
+        }
     }
 
     #[test]
@@ -720,9 +786,9 @@ mod tests {
             for (name, expected) in [
                 ("git", parsed("git")),
                 ("git-lfs", None),
-                ("gitk", REFUSED),
-                ("g", REFUSED),
-                ("git-hard", REFUSED),
+                ("gitk", None),
+                ("g", None),
+                ("git-hard", None),
             ] {
                 assert_eq!(
                     answer(bindings.coverage(Ok(program.clone()), name)),
@@ -744,26 +810,26 @@ mod tests {
         let replaced = host.replace(GIT);
 
         assert_eq!(replaced.path(), original.path());
-        assert!(
-            bindings.coverage(Ok(replaced.clone()), "git-lfs").is_none(),
-            "a declared name with no grammar stays a spawn"
-        );
-        for name in ["git", "gitk"] {
-            assert_eq!(
-                bindings
-                    .coverage(Ok(replaced.clone()), name)
-                    .map(|coverage| match coverage {
-                        GrammarCoverage::Refused(refusal) => Some(refusal),
-                        GrammarCoverage::Parsed { .. } => None,
-                    }),
-                Some(Some(CoverageRefusal::ReplacedFile {
-                    name: name.to_string(),
-                    program_path: original.path().to_path_buf(),
-                })),
-                "the new file at {} called as {name}",
-                replaced.path().display()
+        for name in ["git-lfs", "gitk"] {
+            assert!(
+                bindings.coverage(Ok(replaced.clone()), name).is_none(),
+                "a name that no grammar binds stays a spawn: {name}"
             );
         }
+        assert_eq!(
+            bindings
+                .coverage(Ok(replaced.clone()), "git")
+                .map(|coverage| match coverage {
+                    GrammarCoverage::Refused(refusal) => Some(refusal),
+                    GrammarCoverage::Parsed { .. } => None,
+                }),
+            Some(Some(CoverageRefusal::ReplacedFile {
+                name: "git".to_string(),
+                program_path: original.path().to_path_buf(),
+            })),
+            "the new file at {} called as git",
+            replaced.path().display()
+        );
     }
 
     #[test]
@@ -802,12 +868,12 @@ mod tests {
     fn a_refusal_names_the_called_name_and_the_program_file() {
         for (refusal, message) in [
             (
-                CoverageRefusal::UndeclaredName {
-                    name: "python".to_string(),
+                CoverageRefusal::ServerName {
+                    name: "mise".to_string(),
                     program_path: PathBuf::from("/usr/local/bin/mise"),
                 },
-                "`python` runs `/usr/local/bin/mise`, which a tool grammar covers, but no `[tool]` \
-                 declares the name `python`",
+                "`mise` runs `/usr/local/bin/mise`, which a tool grammar covers, but only a stdio \
+                 `[mcp]` server start calls it `mise`",
             ),
             (
                 CoverageRefusal::ReplacedFile {

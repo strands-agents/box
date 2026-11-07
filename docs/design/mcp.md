@@ -320,8 +320,8 @@ subset](decisions.md#discovery-serves-the-schema-independent-subset):
 2. Each server whose schema stages adds one commit with its per-tool rules. The engine enforces
    them from that moment.
 3. The last commit makes the engine `Ready` when the whole policy validates. If startup
-   completes first, a per-tool rule still held back belongs to a server that will never stage, so
-   that server is degraded and the engine is `Ready`.
+   completes first, a per-tool rule still held back is inert. The servers it waits for are degraded,
+   and the engine is `Ready`.
 
 [How Box discovers MCP tools](./mcp-discovery.md) follows one server from its first `tools/list` to
 its commit.
@@ -355,10 +355,29 @@ Each server is then in one of four states:
 |---|---|---|
 | Ready | Its tool list was accepted, and its tools are callable. | Enforced from the moment its schema staged. |
 | No tools | Policy refused its `tools/list`, so it has zero tools. | It has none. |
-| Degraded | Policy refused its `tools/list`, so it has zero tools, and a call to a tool that one of those rules decides is refused. | A rule decides one of its tools, and it can never load. stderr names the server. See [a server whose discovery a policy denies degrades alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone). |
-| Failed | Box couldn't read or stage its tool list. | Never enforced. stderr names the step that failed. |
+| Degraded | Policy refused its `tools/list`, so it has zero tools, and a call to a tool that one of those rules decides is refused. | A rule decides one of its tools, and it hasn't loaded. stderr names the server ([recovery after a denied tool list](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)). |
+| Failed | Box couldn't read or stage its tool list. | Not loaded at startup, and a call to a tool that one of those rules decides is refused. stderr names the step that failed. |
 
-The engine is then `Ready` for the rest of the run. It has loaded every rule that can load.
+The engine is then `Ready` for the rest of the run. It has loaded every rule that can load at startup.
+
+A rule that didn't load leaves its tools refused, and that isn't always for the rest of the run. A
+tool list can still arrive after startup, stage its schema, and complete the whole policy. Those
+rules then load and enforce from that moment, and Box stops refusing their tools. Two things decide
+whether that happens:
+
+- **A later list has to get through.** It goes through the same decision and the same limits as the
+  first, so a refusal doesn't have to repeat: a rule that reads history can refuse one `tools/list`
+  and permit the next, and a server can replace a schema the policy refused with one it accepts. A
+  Degraded server gets through this way whether it's stdio or http. A Failed server gets through
+  only over http, because on stdio the failure stops the server: the connection whose list failed
+  closes, Box stops every other connection open to that server, and it refuses a new one.
+- **Its schema has to be the last thing the policy needs.** A late list is validated with the whole
+  policy, so while another schema is missing or doesn't match its rules, the list is refused and its
+  schema is dropped. How many servers have tools held doesn't decide it, and [how discovery
+  finishes](./mcp-discovery.md#how-discovery-finishes) shows one late list recovering two servers.
+
+The startup warning on stderr was true when it was printed, and nothing prints to say it no longer
+is. Read it as a record of startup, not as the state of the run.
 
 A degraded server has refusals for specific tools. Box holds back the tools that an inert rule
 would decide. The rules that loaded still decide calls to other tools on that server, usually

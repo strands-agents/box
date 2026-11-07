@@ -1973,6 +1973,103 @@ done"#
         }));
     }
 
+    /// A stdio server whose `tools/list` policy refused stays open, so a later list that a rule
+    /// reading history permits lifts the degraded refusal.
+    #[test]
+    fn a_stdio_server_whose_list_policy_refused_recovers_when_a_later_list_is_permitted() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(
+                r#"
+permit (principal, action == Box::Action::"mcp:call", resource);
+forbid (principal, action == Box::Action::"mcp:call", resource)
+when { context.input.method == "tools/list" }
+unless temporal {
+    formerly within 600s Box::Action::"mcp:call"::request{ input.method: "prompts/list" }
+};
+forbid (principal, action == issues_mcp::Action::"Search", resource)
+when { context.input has value && context.input.value == "secret" };
+"#,
+            );
+            let search = |value: &str| {
+                fixture.policy.refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "issues-mcp",
+                    "Search",
+                    &json!({ "value": value }),
+                )
+            };
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) =
+                exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+            initialize(&program, &mut output).await;
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            let refused = next_output(&mut output).await;
+            assert_eq!(refused["error"]["code"], -32001, "{refused}");
+            tokio::time::timeout(TEST_WAIT_TIMEOUT, async {
+                while !matches!(
+                    search("secret"),
+                    Decision::Deny {
+                        reason: policy::DenyReason::NoMatch,
+                        ..
+                    }
+                ) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("discovery finishes with the tool held");
+            assert_eq!(
+                fixture.registry.discovery("issues-mcp"),
+                Some(ServerDiscovery::Failed(DiscoveryFailure::ToolsListDenied))
+            );
+            assert!(
+                fixture.registry.admit_open("issues-mcp").is_ok(),
+                "a refused tools/list does not stop the server"
+            );
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "prompts/list", "params": {}}),
+            )
+            .await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            let listed = next_output(&mut output).await;
+            assert_eq!(listed["id"], 4, "{listed}");
+            assert_eq!(listed["result"]["tools"][0]["name"], "Search", "{listed}");
+            assert_eq!(
+                fixture.registry.discovery("issues-mcp"),
+                Some(ServerDiscovery::Ready)
+            );
+            let forbidden = search("secret");
+            assert!(
+                matches!(
+                    forbidden,
+                    Decision::Deny {
+                        reason: policy::DenyReason::Forbidden,
+                        ..
+                    }
+                ),
+                "the per-tool forbid enforces once the later list stages: {forbidden:?}"
+            );
+            assert!(
+                search("other").is_allow(),
+                "a value the forbid does not name rides the coarse permit"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
     #[test]
     fn a_registry_with_no_stdio_server_reports_done_once() {
         let fixture_policy = Arc::new(crate::test_support::open_policy(Vec::new()));
