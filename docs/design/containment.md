@@ -270,6 +270,14 @@ The sandbox grants bound the workload's own filesystem access.
 They do not bound a separate program that later acts on those entries with its own authority.
 [A direct write grant can alter inputs another process reads](decisions.md#a-direct-grant-replaces-the-policy-decision).
 
+*Figure 1: Root-owned output and filesystem reach. A root workload can write to a directory with
+covering read and write grants. Its sandbox still refuses access to a file that no grant exposes.
+A separate program outside Box uses its own permissions when it reads the output or accesses other files.*
+
+![Inside the surrounding operating system, a Linux sandbox contains a root workload with cleared capabilities. A write grant connects the workload to root-owned output in a directory with read and write grants. A separate program outside Box later reads that output. A red dashed path shows refused workload reads and writes to a file outside its grants. A separate path lets the other program access that file only if its own permissions allow it.](images/linux-root-write-grants.png)
+
+[Editable diagram source](images/linux-root-write-grants.drawio).
+
 Shell and Python filesystem requests run in the box's trusted process under policy and reach checks.
 Permitted file creation retains that process's file identity.
 Those checks govern the requested operation, not later actions by a separate program.

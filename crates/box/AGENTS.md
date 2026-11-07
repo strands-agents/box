@@ -845,18 +845,24 @@ box_root_path, default_box_directory}`, `BoxRoot::{sited, open}`, `config::selec
 argue it as an addition and note what `ls` cannot mean any more: there is no set of boxes to list, so
 the verb would report on one directory the caller already named.
 
-## Open findings — divergences no decision covers
+## Root-owned output
 
-- **Root ownership remains on policy-mediated file creation.** Shell and Python requests execute
-  in the box's trusted process, outside the sandbox. They pass policy and `Reach` checks without
-  becoming containment authorizations. `VfsKernel::open_host_file` and Python's `write` through
-  `HeldPath` can create files with that process's identity. A root launch therefore retains root
-  ownership on permitted new files. Whether a separate privileged program later acts on these files
-  remains unmeasured for this route. Root ownership alone does not identify a failed policy or reach
-  check, and this observation does not establish closure of the broader ownership finding.
-  The Shell's symlink path still requires source read/write and destination write permission.
-  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
-  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+Root-owned output is permitted when the operation passes the controls for its route.
+A Linux sandbox workload uses its filesystem grants; see
+[root sandbox launches](../../docs/design/containment.md#linux-root-sandbox-launches).
+Shell and Python requests execute in the box's trusted process, outside the sandbox.
+They pass policy and `Reach` checks without becoming containment authorizations.
+`VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that
+process's identity. A root launch therefore retains root ownership on permitted new files.
+
+A separate program that later consumes those files uses its own authority.
+Its later access does not by itself establish a failed Box policy, reach check, or sandbox grant.
+Keep the controls on Box's own operations: the Shell's symlink path requires source read/write
+and destination write permission. `VfsKernel::verify_symlink_target` also refuses absolute targets
+and escape beyond the bind root. A project-only policy cannot create a link to `/etc/shadow`
+through this path. Security finding disposition remains separate from this behavior contract.
+
+## Open findings — divergences no decision covers
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not

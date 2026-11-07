@@ -1128,8 +1128,8 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     `root_file_grants_preserve_private_access_and_temporary_storage` covers existing-file writes
     and private temporary storage. `nonroot_directory_grants_preserve_creation` covers non-root creation.
     Policy-mediated Shell and Python file creation retains the trusted process's file identity.
-    Its separate checks remain described in the box crate's
-    [open findings](../box/AGENTS.md#open-findings--divergences-no-decision-covers).
+    The box crate's [root-owned output contract](../box/AGENTS.md#root-owned-output) describes
+    those separate checks and the scope of later actions by another program.
     Startup still clears every capability set. A nested user namespace can restore privileges
     within that namespace. Seccomp still refuses `mount` and `fsopen`, as
     `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
