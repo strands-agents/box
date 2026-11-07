@@ -3,7 +3,6 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
-#[cfg(target_os = "macos")]
 use strands_det_harness::mcp_fixture::server_dir;
 use strands_det_harness::mcp_fixture::{box_sibling, broker_socket, place_server};
 use strands_det_harness::{BoxFixture, RunResult, det_case};
@@ -17,21 +16,12 @@ use strands_det_harness::{BoxFixture, RunResult, det_case};
 // routeless network namespace and cannot. The endpoint is a throwaway HTTP listener bound on the
 // host's loopback — outside any box — so reaching it is proof of real egress: a routeless leaf's
 // `127.0.0.1` is its own empty namespace, while a host-network leaf's `127.0.0.1` is the host's.
-// The server is one self-contained binary (`box-mcp-fetch-server`) that execs nothing else, so the
-// leaf needs only the one exec grant every profile carries — no broad exec (a currently-missing
-// Linux-leaf feature). The client is `box-mcp-call-probe`, which drives one `tools/call` over the
-// broker socket.
+// The server is one self-contained binary (`box-mcp-fetch-server`) that execs nothing else.
+// The client is `box-mcp-call-probe`, which drives one `tools/call` over the broker socket.
 
 const BODY: &str = "STRANDS_NATIVE_EGRESS_OK";
 
-/// The MCP program name (`command[0]`), a UNIQUE bare name resolved on the box's operator PATH,
-/// placed in a directory that is on the PATH and NOT agent-writable (so the box accepts it as the
-/// MCP search path). Per platform (see [`server_dir`]):
-/// - **Linux:** copied to `/usr/bin/<this>` — world-accessible + binds into the leaf's mount view.
-/// - **macOS:** copied to a test-owned dir injected onto the box PATH, with a read+exec grant
-///   (Seatbelt reads the binary in place; there is no mount view to bind).
-///
-/// The name differs from `FETCH_BINARY` so it never collides with the built copy in `target/`.
+/// A unique program name on the operator PATH.
 #[cfg(target_os = "linux")]
 const FETCH_PROGRAM: &str = "box-mcp-fetch-linux";
 #[cfg(target_os = "macos")]
@@ -93,10 +83,6 @@ fn with_fetch_server(config: String, native_egress: bool, url: &str) -> String {
         "[mcp.fetch.env]\nFIXTURE_FETCH_TARGET = {}\n",
         quote(url)
     ));
-    // macOS Seatbelt reads the binary in place (no mount view), so the leaf needs read+exec of the
-    // dir holding the server. Linux needs neither (the /usr/bin copy binds + the baseline exec grant
-    // covers it). Harmless everywhere, but only emitted where required.
-    #[cfg(target_os = "macos")]
     {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));
@@ -110,10 +96,7 @@ fn with_fetch_server(config: String, native_egress: bool, url: &str) -> String {
 fn call_reach(b: &BoxFixture, native_egress: bool, url: &str) -> (String, RunResult) {
     let socket = broker_socket(b);
     let probe = box_sibling("box-mcp-call-probe");
-    // Place the server where a contained leaf can resolve+run it (see `server_dir`): the dir must be
-    // on the box's operator PATH and NOT agent-writable (the box refuses an agent-writable MCP search
-    // path). `/usr/bin` satisfies this inherently on Linux; on macOS we use a test-owned dir and
-    // inject it onto the box PATH below.
+    // The server directory is outside the agent write grants.
     place_server(FETCH_PROGRAM);
 
     let mut probe_output = String::new();
@@ -128,9 +111,6 @@ fn call_reach(b: &BoxFixture, native_egress: bool, url: &str) -> (String, RunRes
         probe_output = String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr);
     };
-    // macOS: the server dir is not on the default PATH, so inject it as the box's operator PATH (the
-    // box resolves the bare `command[0]` there). Linux: /usr/bin is already on PATH.
-    #[cfg(target_os = "macos")]
     let run = {
         let path = format!(
             "{}:{}",
@@ -139,8 +119,6 @@ fn call_reach(b: &BoxFixture, native_egress: bool, url: &str) -> (String, RunRes
         );
         b.run_sh_with_config_meanwhile_env(edit, BLOCK, &[("PATH", path.as_str())], meanwhile)
     };
-    #[cfg(not(target_os = "macos"))]
-    let run = b.run_sh_with_config_meanwhile(edit, BLOCK, meanwhile);
     (probe_output, run)
 }
 

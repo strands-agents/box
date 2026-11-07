@@ -1,6 +1,5 @@
 use std::process::Command;
 
-#[cfg(target_os = "macos")]
 use strands_det_harness::mcp_fixture::server_dir;
 use strands_det_harness::mcp_fixture::{
     box_sibling, broker_socket, place_server, with_fetch_server,
@@ -68,7 +67,6 @@ fn call_tools(b: &BoxFixture, calls: &[(&str, &str)]) -> (Vec<String>, RunResult
             );
         }
     };
-    #[cfg(target_os = "macos")]
     let run = {
         let path = format!(
             "{}:{}",
@@ -82,12 +80,6 @@ fn call_tools(b: &BoxFixture, calls: &[(&str, &str)]) -> (Vec<String>, RunResult
             meanwhile,
         )
     };
-    #[cfg(not(target_os = "macos"))]
-    let run = b.run_sh_with_config_meanwhile(
-        |config| with_fetch_server(config, FETCH_PROGRAM),
-        BLOCK,
-        meanwhile,
-    );
     (outputs, run)
 }
 

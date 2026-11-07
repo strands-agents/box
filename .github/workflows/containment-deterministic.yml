@@ -115,16 +115,6 @@ jobs:
       - name: Test filesystem modes on a supported backend
         run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
 
-      # On Linux the MCP cases install their fixture server into /usr/bin, because a leaf's filesystem
-      # table cannot grant exec there. The runner is not root, so create each file
-      # it names in advance, owned by the runner user; the case then copies over it and sets its mode.
-      - name: Pre-create the Linux MCP fixture paths
-        if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          for name in $(grep -hoE '"box-mcp-fetch(-[a-z0-9]+)*-linux"' test-integ/tests/containment/*.rs | tr -d '"' | sort -u); do
-            sudo install -o "$(id -u)" -g "$(id -g)" -m 0755 /dev/null "/usr/bin/$name"
-          done
-
       # The harness resolves `strands-box` from PATH first (test-integ/src/lib.rs).
       # The trampoline must sit beside it, which the shared target dir gives us.
       - name: Run the deterministic suite
