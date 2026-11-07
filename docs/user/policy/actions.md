@@ -275,6 +275,10 @@ Bind the same variable to `requestId` in two predicates to require events from t
 Treat the identifier's spelling as opaque.
 Older events that lack this field remain in history, but cannot match a predicate that requires it.
 
+For modern stdio MCP, a result that asks for more client input is not a completed operation and
+does not record `mcp:call::response`. Each retry is a new request. Its terminal result or error
+records a response with that retry's request ID.
+
 To cap how many times the agent tries an action, count `A::request`, which also counts denied
 attempts. Use `A::response` when a later rule needs a recorded outcome. Partial or indeterminate
 outcomes also count; an MCP response does not establish tool success.
