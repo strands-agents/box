@@ -1,0 +1,103 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="linux-launch-directory-identity" name="Linux launch directory identity">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="980" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="heading" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Check the directory for each launch&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="20" width="1200" height="32" />
+        </mxCell>
+        <mxCell id="key" value="&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;A and B are different directories. /tools is an example path.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="65" width="1200" height="30" />
+        </mxCell>
+        <mxCell id="first-launch" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#7D8998;fillColor=none;strokeWidth=2;dashed=1;dashPattern=8 5;fixDash=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="120" width="1200" height="280" />
+        </mxCell>
+        <mxCell id="first-title" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#5A6B86&quot;&gt;Replacement during a launch&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="135" width="1160" height="30" />
+        </mxCell>
+        <mxCell id="first-approve" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="210" width="240" height="140" />
+        </mxCell>
+        <mxCell id="first-approve-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#232F3E&quot;&gt;Box approves A&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Directory at /tools&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="92" y="254.8" width="216" height="50.39999999999999" />
+        </mxCell>
+        <mxCell id="first-replace" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="210" width="240" height="140" />
+        </mxCell>
+        <mxCell id="first-replace-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#232F3E&quot;&gt;Another process&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Replaces A with B&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;at /tools&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="532" y="244.0" width="216" height="71.99999999999999" />
+        </mxCell>
+        <mxCell id="first-refuse" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#DD344C;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="960" y="210" width="240" height="140" />
+        </mxCell>
+        <mxCell id="first-refuse-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#DD344C&quot;&gt;Launch refused&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Helper finds B, not A&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Program does not start&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="972" y="244.0" width="216" height="71.99999999999999" />
+        </mxCell>
+        <mxCell id="approve-to-replace" value="after approval" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;dashed=0;" edge="1" parent="1" source="first-approve" target="first-replace">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="420" y="280" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="replace-to-refuse" value="helper loads /tools" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DD344C;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;dashed=1;dashPattern=8 6;fixDash=1;" edge="1" parent="1" source="first-replace" target="first-refuse">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="860" y="280" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="later-launch" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#7D8998;fillColor=none;strokeWidth=2;dashed=1;dashPattern=8 5;fixDash=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="450" width="1200" height="280" />
+        </mxCell>
+        <mxCell id="later-title" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#5A6B86&quot;&gt;Later launch after a fresh approval&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="465" width="1160" height="30" />
+        </mxCell>
+        <mxCell id="later-approve" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="540" width="240" height="140" />
+        </mxCell>
+        <mxCell id="later-approve-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#232F3E&quot;&gt;Box approves B&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Directory now at /tools&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="92" y="584.8" width="216" height="50.39999999999999" />
+        </mxCell>
+        <mxCell id="later-load" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="540" width="240" height="140" />
+        </mxCell>
+        <mxCell id="later-load-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#232F3E&quot;&gt;Launch helper&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Loads the same B&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;that Box approved&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="532" y="574.0" width="216" height="71.99999999999999" />
+        </mxCell>
+        <mxCell id="later-start" value="" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#1D8102;fillColor=none;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="960" y="540" width="240" height="140" />
+        </mxCell>
+        <mxCell id="later-start-text" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#1D8102&quot;&gt;Program starts&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Inside its sandbox&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=center;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="972" y="584.8" width="216" height="50.39999999999999" />
+        </mxCell>
+        <mxCell id="approve-to-load" value="loads /tools" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;dashed=0;" edge="1" parent="1" source="later-approve" target="later-load">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="420" y="610" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="load-to-start" value="same directory" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1D8102;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;dashed=0;" edge="1" parent="1" source="later-load" target="later-start">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="860" y="610" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="helper-definition" value="&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;The launch helper is the separate process that creates the Linux sandbox.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="770" width="1200" height="30" />
+        </mxCell>
+        <mxCell id="scope" value="&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Each new launch still applies Box&amp;#x27;s existing checks.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;overflow=visible;fillColor=none;strokeColor=none;fontFamily=Arial,Helvetica,sans-serif;fontSize=18;fontColor=#232F3E;align=left;verticalAlign=middle;spacing=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="805" width="1200" height="30" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
