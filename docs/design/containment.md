@@ -295,6 +295,12 @@ Ungranted files remain absent, and read-only binds remain read-only.
 The launcher writes only the sanitized bytes with `process_vm_writev`, which rejects read-only output mappings.
 It never asks the kernel to continue the original `statfs` call.
 
+*Figure 1: A filesystem query during Codex startup. Box writes filtered information into Codex's output buffer. A separate status reply completes the paused call.*
+
+![Codex requests filesystem information from Linux. The kernel pauses the call and notifies the Box launcher. The launcher resolves the path within Codex's filesystem view and queries the resolved filesystem. It writes filtered information into Codex's output buffer: filesystem type, block and fragment sizes, filename limit, and mount flags retain their actual values; capacity, free space, file counts, filesystem identifier, and reserved bytes are zero. A separate success reply tells Linux to complete the call. The original statfs call does not run.](images/statfs-query-flow.png)
+
+The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
+
 The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
 Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
 The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
