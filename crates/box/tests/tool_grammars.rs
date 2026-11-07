@@ -148,10 +148,7 @@ fn grammar_box_with(home: &Path, policy: &str, more: &str) -> Configured {
         policy,
         &format!("{}{GRAMMAR}{more}{SWITCH_ON}", git_tool(home)),
     )
-    .env(
-        "PATH",
-        &format!("{}:/usr/bin:/bin", tools_directory(home).display()),
-    )
+    .env("PATH", &tools_first(home))
     .expect()
 }
 
@@ -217,11 +214,66 @@ fn record_version(root: &Path) -> Option<i64> {
     record.get("version")?.as_integer()
 }
 
+/// The search path of a trusted process that finds the test's tools first.
+fn tools_first(home: &Path) -> String {
+    format!("{}:/usr/bin:/bin", tools_directory(home).display())
+}
+
 fn attempt(policy: &str, body: impl FnOnce(&Path) -> String) -> (Output, Option<i64>) {
     let home = support::fixture::short_temporary_home();
     let request = Request::with_config("grammar", policy, &body(home.path()));
     let (configured, output) = request.attempt();
     (output, record_version(&configured.root()))
+}
+
+/// An `attempt` whose trusted process finds the test's tools first on its search path.
+fn attempt_with_tools_first(policy: &str, body: impl FnOnce(&Path) -> String) -> Output {
+    let home = support::fixture::short_temporary_home();
+    Request::with_config("grammar", policy, &body(home.path()))
+        .env("PATH", &tools_first(home.path()))
+        .attempt()
+        .1
+}
+
+const NPM_GRAMMAR: &str = r#"
+[tool.npm.grammar]
+format = 1
+version = 1
+name = "npm"
+program = "npm"
+
+[tool.npm.grammar.shell.install]
+usage = "npm install"
+"#;
+
+/// An install is not allowed.
+const NO_INSTALL: &str = r#"
+permit (principal, action == Box::Action::"shell:exec", resource);
+permit (principal, action == Box::Action::"fs:read", resource);
+@id("no_install")
+@description("Installs are not allowed.")
+forbid (principal, action == Tool::npm::Action::"install", resource);
+"#;
+
+/// The test's `npm-cli.js`, a copy of `true(1)` at its canonical path, with a link `npm` to it
+/// in the tools directory.
+fn linked_npm(home: &Path) -> std::path::PathBuf {
+    let library = tools_directory(home).join("lib");
+    std::fs::create_dir_all(&library).expect("the library directory");
+    let file = library.join("npm-cli.js");
+    std::fs::copy(support::fixture::no_op_program(), &file).expect("an npm stand-in");
+    std::os::unix::fs::symlink("lib/npm-cli.js", tools_directory(home).join("npm"))
+        .expect("the npm link");
+    file.canonicalize().expect("the npm stand-in resolves")
+}
+
+/// A `[tool.<label>]` whose command is `program`, with read access to the tools directory.
+fn tool_at(home: &Path, label: &str, program: &Path) -> String {
+    format!(
+        "[tool.{label}]\ncommand = [{:?}]\n[tool.{label}.filesystem]\nread = [{:?}]\n",
+        program.display().to_string(),
+        tools_directory(home).display().to_string()
+    )
 }
 
 #[test]
@@ -495,5 +547,108 @@ fn a_box_with_the_switch_off_and_no_grammar_is_unchanged() {
         version,
         Some(21),
         "the ordinary record version is unchanged"
+    );
+}
+
+#[test]
+fn a_grammar_decides_the_name_the_agent_types_when_the_command_names_the_linked_file() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let npm = linked_npm(home.path());
+    let (box_, started) = Request::with_config(
+        "grammar-linked",
+        NO_INSTALL,
+        &format!(
+            "{}{NPM_GRAMMAR}{SWITCH_ON}",
+            tool_at(home.path(), "npm", &npm)
+        ),
+    )
+    .env("PATH", &tools_first(home.path()))
+    .attempt();
+    assert!(started.status.success(), "{}", stderr(&started));
+    assert!(
+        stderr(&started).contains(
+            "strands-box: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
+             `shell:spawn` rule applies to it"
+        ),
+        "startup names the program the grammar binds: {}",
+        stderr(&started)
+    );
+
+    let output = in_the_shell(&box_, "npm install");
+
+    assert!(stdout(&output).contains("|status=126"), "{output:?}");
+    assert!(
+        stderr(&output).contains("[policy: no_install]: Installs are not allowed."),
+        "{output:?}"
+    );
+    assert!(
+        decisions(&box_).contains(&(
+            "Tool::npm".to_string(),
+            "install".to_string(),
+            "deny".to_string()
+        )),
+        "telemetry names the grammar action: {:?}",
+        decisions(&box_)
+    );
+}
+
+#[test]
+fn a_grammar_whose_program_finds_another_file_on_path_is_refused_at_startup() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let grammar = GRAMMAR.replace("[tool.git.", "[tool.gh.");
+
+    let output = attempt_with_tools_first(FORBID_PUSH, |home| {
+        git_program(home);
+        let gh = tools_directory(home).join("gh");
+        std::fs::copy(support::fixture::no_op_program(), &gh).expect("a gh stand-in");
+        let gh = gh.canonicalize().expect("the gh stand-in resolves");
+        format!("{}{grammar}{SWITCH_ON}", tool_at(home, "gh", &gh))
+    });
+
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(
+            "invalid `[tool.gh]` table: `tool.gh.grammar.program` is \"git\", and `PATH` finds "
+        ) && stderr(&output).contains("/tools/git, but `command` runs ")
+            && stderr(&output)
+                .contains("/tools/gh; a grammar reads only the program its own tool runs"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_grammar_whose_program_finds_nothing_on_path_is_refused_at_startup() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let grammar = GRAMMAR
+        .replace("[tool.git.", "[tool.absent.")
+        .replace("program = \"git\"", "program = \"strands_box_absent\"")
+        .replace("usage = \"git ", "usage = \"strands_box_absent ");
+
+    let output = attempt_with_tools_first(ORDINARY, |home| {
+        format!(
+            "{}{grammar}{SWITCH_ON}",
+            tool_at(home, "absent", &git_program(home))
+        )
+    });
+
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(
+            "invalid `[tool.absent]` table: `tool.absent.grammar.program` is \
+             \"strands_box_absent\", and `PATH` finds no program by that name, but `command` runs "
+        ),
+        "{}",
+        stderr(&output)
     );
 }

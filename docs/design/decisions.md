@@ -1139,16 +1139,25 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
 ### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
-A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
-A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+A tool grammar names one program through its `program`, the name the agent types to run the tool. A
+grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command. A stdio `[mcp.<name>]` whose command calls that program name binds
-the same way, so its start is decided as the grammar's action.
+which grammar reads a command. A stdio `[mcp.<name>]`, or a `[tool]` with no grammar of its own,
+binds the same way when its command calls that program name, so a server's start is decided as the
+grammar's action.
+
+The grammar's own `[tool]` binds under its `program`, the name the agent types, even when its command
+names a link-resolved file: `[tool.npm] command = [".../npm/bin/npm-cli.js"]` with
+`program = "npm"` binds under `npm`, not under `npm-cli.js`. When the last component of the command
+isn't the `program`, Box resolves the `program` at startup on the same `PATH` that the Shell
+searches at runtime, and refuses the grammar unless it reaches the tool's own file. So a `git`
+grammar still cannot sit on a tool that runs `gh`. A server or another tool whose command names
+`npm-cli.js` calls the program by another name, so the npm grammar doesn't bind it.
 
 For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
-name the program was called by. The identity is the file's device and inode on the surrounding OS. A
+name the program is called by, which is the grammar's `program` for the grammar's own tool. The identity is the file's device and inode on the surrounding OS. A
 hard link or symbolic link to a bound file therefore refers to the same identity. A command is
 parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
 enough, because several programs can share one binary. mise runs every tool it manages through one

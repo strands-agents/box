@@ -81,25 +81,22 @@ fn write_grammar_disclosures(
     record: &Record,
     mut output: impl std::io::Write,
 ) -> std::io::Result<()> {
-    use crate::record::config::grammar::called_name;
+    use crate::record::config::grammar::{bound_name, called_name};
     let programs: std::collections::BTreeSet<&str> = record
         .tool
         .values()
         .filter(|spec| spec.grammar.is_some())
-        .map(called_name)
+        .filter_map(bound_name)
         .collect();
-    let tables = record
-        .tool
-        .iter()
-        .map(|(label, spec)| (format!("[tool.{label}]"), spec))
-        .chain(
-            record
-                .contained_mcp
-                .iter()
-                .map(|(label, contained)| (format!("[mcp.{label}]"), &contained.spec)),
-        );
-    for (table, spec) in tables {
-        let program = called_name(spec);
+    let tables =
+        record
+            .tool
+            .iter()
+            .filter_map(|(label, spec)| Some((format!("[tool.{label}]"), bound_name(spec)?)))
+            .chain(record.contained_mcp.iter().map(|(label, contained)| {
+                (format!("[mcp.{label}]"), called_name(&contained.spec))
+            }));
+    for (table, program) in tables {
         if programs.contains(program) {
             writeln!(
                 output,
@@ -202,6 +199,7 @@ async fn hosted(
         policy,
         &locked.record,
         &commands,
+        &crate::run::contain::executable::host_search_path(),
     )?);
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
@@ -426,26 +424,31 @@ mod tests {
     }
 
     #[test]
-    fn startup_discloses_each_tool_that_a_grammar_decides() {
-        let git: ProcessSpec =
-            toml::from_str("command = [\"/usr/bin/git\"]\n[grammar]\nformat = 1\n")
-                .expect("the tool parses");
+    fn startup_discloses_each_tool_that_a_grammar_decides_under_its_bound_name() {
+        let npm: ProcessSpec = toml::from_str(
+            "command = [\"/usr/lib/node_modules/npm/bin/npm-cli.js\"]\n[grammar]\nformat = 1\n\
+             program = \"npm\"\n",
+        )
+        .expect("the tool parses");
         let record = record_with(
             None,
             BTreeMap::from([
-                ("git".to_string(), git),
+                ("npm".to_string(), npm),
                 (
-                    "brew_git".to_string(),
-                    spec("/opt/homebrew/bin/git", &[], &[]),
+                    "brew_npm".to_string(),
+                    spec("/opt/homebrew/bin/npm", &[], &[]),
                 ),
-                ("make".to_string(), spec("make", &[], &[])),
+                (
+                    "npm_cli".to_string(),
+                    spec("/opt/other/npm-cli.js", &[], &[]),
+                ),
             ]),
         );
         let mut record = record;
         record.contained_mcp.insert(
             "wrapped".to_string(),
             crate::record::config::process::ContainedMcp {
-                spec: spec("/opt/wrap/git", &[], &[]),
+                spec: spec("/opt/wrap/npm", &[], &[]),
             },
         );
         let mut output = Vec::new();
@@ -454,11 +457,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [tool.brew_git]: a spawn of `git` is decided by its tool grammar, and \
+            "strands-box: [tool.brew_npm]: a spawn of `npm` is decided by its tool grammar, and \
              no `shell:spawn` rule applies to it\n\
-             strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
+             strands-box: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n\
-             strands-box: [mcp.wrapped]: a spawn of `git` is decided by its tool grammar, and no \
+             strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
         );
     }
