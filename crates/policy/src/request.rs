@@ -269,6 +269,8 @@ pub enum Request<'a> {
     /// kernel rather than the Shell's VFS, so no `fs:*` decision fires for anything it
     /// does, and its children inherit containment while raising no decision of their own.
     ShellSpawn {
+        /// The admitted MCP server name, absent for an ordinary shell command.
+        server: Option<&'a str>,
         /// The submitted text.
         command: &'a str,
         /// The program name as resolved.

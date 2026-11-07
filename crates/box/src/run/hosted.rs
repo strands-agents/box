@@ -1239,6 +1239,7 @@ mod tests {
             GovernedBox::assigned("codex"),
             None,
             Default::default(),
+            "git-mcp",
         )
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",

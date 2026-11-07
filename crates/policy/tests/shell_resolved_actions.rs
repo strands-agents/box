@@ -156,6 +156,7 @@ fn an_unconditional_run_grant_never_becomes_a_spawn_grant() {
         !allows(
             &policy,
             &Request::ShellSpawn {
+                server: None,
                 command: "git push",
                 program: "git",
                 program_path: "/usr/bin/git",
@@ -179,6 +180,7 @@ fn permitting_shell_run_does_not_permit_a_host_binary() {
         !allows(
             &policy,
             &Request::ShellSpawn {
+                server: None,
                 command: "git push origin main",
                 program: "git",
                 program_path: "/usr/bin/git",
@@ -200,6 +202,7 @@ fn permitting_shell_run_does_not_permit_a_host_binary() {
         allows(
             &both,
             &Request::ShellSpawn {
+                server: None,
                 command: "git push origin main",
                 program: "git",
                 program_path: "/usr/bin/git",
@@ -224,6 +227,7 @@ fn a_spawn_rule_can_pin_the_resolved_binary_path() {
 
     let push = args(&["push"]);
     let spawn = |program_path: &'static str| Request::ShellSpawn {
+        server: None,
         command: "git push",
         program: "git",
         program_path,
@@ -345,6 +349,7 @@ fn covering_both_command_actions_needs_two_permits() {
     assert!(allows(
         &policy,
         &Request::ShellSpawn {
+            server: None,
             command: "git push",
             program: "git",
             program_path: "/usr/bin/git",
@@ -465,6 +470,7 @@ fn credential_reads_are_present_only_on_a_punch_holed_spawn() {
     let words = args(&["s3", "ls"]);
     let paths = vec!["~/.aws".to_string()];
     let spawn = |credential_reads| Request::ShellSpawn {
+        server: None,
         command: "aws s3 ls",
         program: "aws",
         program_path: "/usr/local/bin/aws",
@@ -511,6 +517,7 @@ fn credential_reads_enter_durable_temporal_history() {
         &governed(),
         &Principal::agent(),
         &Request::ShellSpawn {
+            server: None,
             command: "aws s3 ls",
             program: "aws",
             program_path: "/usr/local/bin/aws",

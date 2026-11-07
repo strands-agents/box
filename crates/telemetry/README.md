@@ -71,6 +71,10 @@ Each decision record names the principal, action, resource, policy rule or enfor
 verdict. A refusal also carries its reason. The shape is OTLP: `resourceLogs` for the box's own
 records and `resourceSpans` for an agent trace.
 
+`Subject::mcp_server(name)` adds `strands.box.mcp.server` to a decision record. The MCP broker
+supplies the admitted name for both permitted and refused starts, including starts covered by
+a broad policy rule.
+
 ## The agent's own signals
 
 The collector binds one loopback port and the box hands the agent its address in

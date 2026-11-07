@@ -651,6 +651,7 @@ fn context_for(
             fields
         }
         Request::ShellSpawn {
+            server,
             command,
             program,
             program_path,
@@ -676,6 +677,12 @@ fn context_for(
                     RestrictedExpression::new_string((*cwd).to_string()),
                 ),
             ];
+            if let Some(server) = server {
+                fields.push((
+                    attr::SERVER.to_string(),
+                    RestrictedExpression::new_string((*server).to_string()),
+                ));
+            }
             fields.extend(credential_read_field(credential_reads));
             fields.extend(argument_fields(args));
             fields
@@ -834,6 +841,7 @@ mod tests {
                 cwd: "/workspace",
             },
             Request::ShellSpawn {
+                server: None,
                 command: "git push origin main",
                 program: "git",
                 program_path: "/usr/bin/git",

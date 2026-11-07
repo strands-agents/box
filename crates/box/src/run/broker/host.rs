@@ -311,6 +311,7 @@ async fn authorize_mcp_start(
         spec.governed.clone(),
         home.map(std::path::PathBuf::from),
         credentials,
+        &server.name,
     );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
@@ -331,24 +332,28 @@ async fn authorize_mcp_start(
         });
     match admitted {
         Ok(_permit) => {
-            spec.recorder
-                .record(crate::run::telemetry::EffectiveDecision::gate_permit(
+            spec.recorder.record(
+                crate::run::telemetry::EffectiveDecision::gate_permit(
                     action,
                     &reported_program_path,
                     "shell-policy",
                     determined.as_ref(),
-                ));
+                )
+                .about(Some(telemetry::Subject::mcp_server(&server.name))),
+            );
             Ok(())
         }
         Err(refused) => {
-            spec.recorder
-                .record(crate::run::telemetry::EffectiveDecision::gate_deny(
+            spec.recorder.record(
+                crate::run::telemetry::EffectiveDecision::gate_deny(
                     action,
                     &reported_program_path,
                     "shell-policy",
                     refused.to_string(),
                     determined.as_ref(),
-                ));
+                )
+                .about(Some(telemetry::Subject::mcp_server(&server.name))),
+            );
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("MCP server {:?} may not start: {refused}", server.name),

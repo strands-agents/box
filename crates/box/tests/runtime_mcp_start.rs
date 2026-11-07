@@ -862,3 +862,139 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
         assert!(box_.workload_path("workload.started").exists());
     }
 }
+
+fn named_start_records(box_: &RuntimeMcpBox) -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("decision records");
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let batch: serde_json::Value = serde_json::from_str(line).unwrap();
+        for resource in batch["resourceSpans"].as_array().into_iter().flatten() {
+            for scope in resource["scopeSpans"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] != "strands-box.policy" {
+                    continue;
+                }
+                for span in scope["spans"].as_array().into_iter().flatten() {
+                    let attributes = span["attributes"].as_array().unwrap();
+                    let value = |key| {
+                        attributes
+                            .iter()
+                            .find(|attribute| attribute["key"] == key)
+                            .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    if value("strands.box.policy.action") == "shell:spawn" {
+                        records.push((
+                            value("strands.box.mcp.server"),
+                            value("strands.box.policy.rule"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    records
+}
+
+#[test]
+fn servers_on_one_launcher_have_their_own_start_decisions_and_records() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for named_rules in [true, false] {
+        let box_ = RuntimeMcpBox::new("mcp-named-start");
+        let servers = ["alpha", "beta"].map(|name| {
+            Server::new(name, "shared-mcp", "read", DiscoveryBehavior::Ready).launched_through(
+                "shared-mcp",
+                vec!["-y".into(), "package".into(), name.into()],
+            )
+        });
+        box_.install_server(&servers[0]);
+        let mut policy = call_policy(&["alpha", "beta"]);
+        if named_rules {
+            for name in ["alpha", "beta"] {
+                policy.push_str(&format!(
+                    r#"
+                    @id("start_{name}")
+                    permit (principal, action == Box::Action::"shell:spawn", resource)
+                    when {{ context.input has server && context.input.server == "{name}" }};
+                "#
+                ));
+            }
+        } else {
+            policy.push_str(&start_permit_for("shared-mcp"));
+        }
+        box_.write_workspace_as_authored(&policy, &servers, BLOCKING_WORKLOAD);
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        for name in ["alpha", "beta"] {
+            let mut client = box_.open_client_with("shared-mcp", &["-y", "package", name]);
+            client.initialize_and_activate(json!(name), STARTUP);
+            drop(client);
+        }
+        assert_eq!(box_.invocation_count("shared-mcp"), 2);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(output.status.success(), "{output:?}");
+        let records = named_start_records(&box_);
+        for name in ["alpha", "beta"] {
+            let rule = if named_rules {
+                format!("start_{name}")
+            } else {
+                "start_shared-mcp".into()
+            };
+            assert!(
+                records
+                    .iter()
+                    .any(|(server, matched)| server == name && matched == &rule),
+                "missing {name}/{rule}: {records:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_server_forbid_refuses_only_that_server_on_a_shared_launcher() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-named-forbid");
+    let servers = ["alpha", "beta"].map(|name| {
+        Server::new(name, "shared-mcp", "read", DiscoveryBehavior::Ready).launched_through(
+            "shared-mcp",
+            vec!["-y".into(), "package".into(), name.into()],
+        )
+    });
+    box_.install_server(&servers[0]);
+    let policy = format!(
+        r#"{}
+        {}
+        @id("no_beta") forbid (principal, action == Box::Action::"shell:spawn", resource)
+        when {{ context.input has server && context.input.server == "beta" }};
+    "#,
+        call_policy(&["alpha", "beta"]),
+        start_permit_for("shared-mcp")
+    );
+    box_.write_workspace_as_authored(&policy, &servers, BLOCKING_WORKLOAD);
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let refused = box_.invoke_refused_open_with("shared-mcp", &["-y", "package", "beta"], SHUTDOWN);
+    assert!(!refused.status.success(), "{}", refused.stderr);
+    assert!(refused.stderr.contains("no_beta"), "{}", refused.stderr);
+    assert_eq!(box_.invocation_count("shared-mcp"), 0);
+    let mut client = box_.open_client_with("shared-mcp", &["-y", "package", "alpha"]);
+    client.initialize_and_activate(json!("alpha"), STARTUP);
+    assert_eq!(box_.invocation_count("shared-mcp"), 1);
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+    let records = named_start_records(&box_);
+    assert!(
+        records
+            .iter()
+            .any(|(server, rule)| server == "beta" && rule == "no_beta"),
+        "{records:?}"
+    );
+}

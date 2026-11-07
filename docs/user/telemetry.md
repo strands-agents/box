@@ -143,6 +143,7 @@ log record's `event_name` field is `strands.box.policy.decision`, and the scope 
 | Group | Keys |
 |---|---|
 | The decision | `strands.box.policy.action`, `.resource`, `.verdict`, `.cause`, `.reason` on a denial, and `.principal` |
+| The MCP server on a start decision | `strands.box.mcp.server`, from the admitted configuration entry, on both permits and refusals |
 | The governing rule | `strands.box.policy.rule`, `.description`, `.category`, and `.determining.ids`, which lists every policy that determined the decision |
 | Correlation | `strands.box.request.id` on an egress decision, `jsonrpc.request.id` on an MCP request, and `strands.box.trace.parent_span_id` on the log record |
 | What it was about | `server.address` and `server.port` on a network decision, `http.request.method` on a request, `file.path` on an `fs:*` decision, and `process.command`, `process.command_args`, and `process.working_directory` on a shell decision |

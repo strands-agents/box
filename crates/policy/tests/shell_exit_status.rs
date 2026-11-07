@@ -31,6 +31,7 @@ fn allows(policy: &PolicyEngine, request: &Request<'_>) -> bool {
 
 fn spawn<'a>(command: &'a str, program: &'a str, words: &'a [String]) -> Request<'a> {
     Request::ShellSpawn {
+        server: None,
         command,
         program,
         program_path: "/usr/bin/tool",
