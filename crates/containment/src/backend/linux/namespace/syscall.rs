@@ -795,6 +795,7 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
 pub(crate) struct SyscallFilters {
     pub(crate) permit: BpfProgram,
     pub(crate) restrictions: BpfProgram,
+    pub(crate) filesystem_queries: BpfProgram,
 }
 
 /// The static system-call policy for one containment request.
@@ -834,9 +835,23 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let mut filesystem_queries = compile_filter(
+            BTreeMap::from([(libc::SYS_statfs, Vec::new())]),
+            SeccompAction::Allow,
+            SeccompAction::Trace(0),
+        )?;
+        // seccompiler 0.5 has no notification action; retain its architecture guard and rule compiler.
+        for instruction in &mut filesystem_queries {
+            if instruction.code == (libc::BPF_RET | libc::BPF_K) as u16
+                && instruction.k == libc::SECCOMP_RET_TRACE
+            {
+                instruction.k = libc::SECCOMP_RET_USER_NOTIF;
+            }
+        }
         Ok(SyscallFilters {
             permit,
             restrictions,
+            filesystem_queries,
         })
     }
 
