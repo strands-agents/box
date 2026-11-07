@@ -218,8 +218,8 @@ temporal predicate over one action.
 
 ## How a grammar decides a command
 
-A grammar binds a program: it decides each spawn of the file its `[tool]` runs, under the name in
-that `[tool]`'s `command`.
+A grammar binds a program: it decides each spawn of the file its `[tool]` runs, under the
+grammar's `program`, the name the agent types.
 
 ### A grammar action replaces `shell:spawn`
 
