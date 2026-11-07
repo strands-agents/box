@@ -277,7 +277,7 @@ interpreters are part of the code the operator must trust.
    Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
    using the file identity opened by the run. It declares each stdio `[mcp.<name>]` program.
    For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
-   Rules for `shell:spawn` do not apply to those programs.
+   Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
 5. It resolves bound secrets and starts the gateway with its own certificate authority.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.
