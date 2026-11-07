@@ -51,7 +51,8 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
     )
 }
 
-/// Replace the running box's authored policies with the supplied text.
+/// Replace the running box's authored policies with the supplied text, after active local tool
+/// and remote request checks finish.
 pub fn reload(sources: &[Policy]) -> Result<(), ReloadRefused> {
     run::hosted::reload(sources).map_err(ReloadRefused)
 }
