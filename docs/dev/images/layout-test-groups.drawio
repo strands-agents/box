@@ -1,0 +1,37 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net">
+  <diagram id="layout-test-groups" name="Layout tests">
+    <mxGraphModel background="#ffffff" page="0" grid="1" gridSize="10">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="before-title" value="Before" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fontStyle=1;fontSize=22;">
+          <mxGeometry as="geometry" x="40" y="40" width="280" height="40" />
+        </mxCell>
+        <mxCell id="before" value="layout.rs&lt;br&gt;&lt;br&gt;Mixed layout tests&lt;br&gt;and helpers" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;">
+          <mxGeometry as="geometry" x="40" y="150" width="280" height="240" />
+        </mxCell>
+        <mxCell id="after" value="After: layout::tests" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;fillColor=none;verticalAlign=top;align=left;spacingLeft=16;spacingTop=16;fontSize=22;fontStyle=1;">
+          <mxGeometry as="geometry" x="560" y="40" width="400" height="460" />
+        </mxCell>
+        <mxCell id="identity" value="record_identity.rs" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;">
+          <mxGeometry as="geometry" x="600" y="120" width="320" height="90" />
+        </mxCell>
+        <mxCell id="recovery" value="recovery.rs" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;">
+          <mxGeometry as="geometry" x="600" y="250" width="320" height="90" />
+        </mxCell>
+        <mxCell id="remaining" value="Other tests and shared&lt;br&gt;helpers stay in layout.rs" vertex="1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;fontSize=24;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fontSize=18;fontColor=#5F6B7A;">
+          <mxGeometry as="geometry" x="600" y="380" width="320" height="80" />
+        </mxCell>
+        <mxCell id="extract" value="Group by behavior" edge="1" source="before" target="after" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endSize=10;endArrow=block;endFill=1;fontSize=18;fontStyle=2;fontColor=#414D5C;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontFamily=Arial,Helvetica,sans-serif;">
+          <mxGeometry as="geometry" relative="1">
+            <mxPoint as="offset" x="0" y="-20" />
+            <Array as="points">
+              <mxPoint x="440" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
