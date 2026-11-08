@@ -41,8 +41,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
   `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
   `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
-  `Request`, `GovernedBox`, `Operator`, `PolicyWarning`. That is 52 names with `--all-features` and
-  46 by default; recompute it when you touch the façade.
+  `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
+  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 58 names with `--all-features`
+  and 52 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -57,6 +58,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   endpoint you own; never read it from a request.
 - `decide` is not a pure query: it observes the request into history first, so a denied request
   can advance history. The code and its tests own the exact verdict contract.
+- Retain the confirmed `RequestId` from `decide` for each corresponding `record` call.
+  Refuse an ordinary effect if its allow verdict has no token.
 - One resource entity, `Box::Resource`, always uses the id `"unused"`. It carries no policy
   information, so a rule discriminates on the action and `context.input`.
 - One principal, `Box::Agent`, always uses the id `"self"`. `Principal::with_id` retains integration
@@ -123,6 +126,18 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
+  bare value in every member it matches, before the request gate and the event, so a rule on a
+  duplicate member still fires. It refuses a value that matches none, including a value already in
+  the record shape. A record whose fields
+  are all named `typeChoice<N>` is read as a union, so an object property with that name is too.
+  A `null` matches no member. A `datetime`, `ipaddr`, `decimal`, or `duration` member takes a
+  string that Cedar's constructor accepts. The Dogwood event still carries that value as a string,
+  so a rule that compares it fails evaluation and denies, as it does for a non-union argument.
+  Pinned by
+  `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
+  `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
+  `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
@@ -172,6 +187,22 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Shell outbound HTTP raises no attempt, so policy does not cover it and only the deny-only
   `network_enabled` switch and SSRF floor do. Do not decide egress in the Shell adapter. The MCP
   `shell` tool reaches `run_pipeline`, so it does raise `shell:exec`.
+- A degraded tool recovers only when a complete bundle commits: a late list whose schema is the last
+  thing the bundle needs, or a reload. `stage_mcp_schema` and `reload` clear the whole
+  `degraded_tools` set then, so one commit lifts every hold, on every server. While anything else is
+  missing — a second schema, or a staged schema that does not match its rule — a late list is
+  `Rejected` and its fragment goes out with the proposal that held it, so two missing schemas
+  recover neither server. Closing that would mean retaining an accepted fragment across a rejected
+  bundle — the partial install that only `Discovering` allows — so do not widen the clear to reach
+  it. Clear nothing on `Rejected`, because a cleared tool whose action is undeclared rides the
+  coarse `mcp:call` grant past its `forbid`. Pinned by `runtime_mcp_policy_staging.rs`
+  `::a_complete_bundle_after_completion_clears_the_degraded_mark`,
+  `::a_late_list_that_supplies_the_last_schema_recovers_both_servers`,
+  `::two_missing_schemas_do_not_recover_from_a_relist`,
+  `::a_late_list_is_refused_while_a_staged_schema_does_not_match_its_rule`, and
+  `::a_late_list_refused_for_a_namespace_collision_keeps_the_degraded_mark`, and by
+  `policy.rs::a_degraded_tool_stays_denied_until_a_reload_drops_its_rule`. The `Rejected` exit for a
+  refused durable commit needs an exhausted store, and no test pins the mark there.
 - Record an outcome this vocabulary cannot name as `Indeterminate`; never drop it.
 - Refuse `os.getenv` and `os.environ` while the schema cannot name them, because the box projects
   credential phantoms into the environment. Pinned by
@@ -186,7 +217,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Do not align the Script adapter with upstream `monty-dogwood`, which leaves an unmapped call
   ungated and authorizes the caller's spelling. Deny an unmapped call, and normalize before you
   decide.
-- Write every field a temporal predicate reads to both bags: `.field()` and `.request_context()`.
+- Fill both the logged event and Cedar request context for input data read by both policy types.
+  Use `EventBuilder::logged_field` alone for reserved history fields such as `requestId`.
 - Keep both saturations deny-ward: `Clock::now()` to 0, and `clamp(bytes)` to `i64::MAX`.
 - A dropped `ScriptPermit` submits `FsResult::Indeterminate` from `Drop`. Keep `#[must_use]`, claim
   `reported` before you submit, and discard a `Drop` recording failure. `EffectPermit` and

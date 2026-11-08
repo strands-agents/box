@@ -66,8 +66,9 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   (exec literals and `PATH` entries, placed when a box is configured), `host` owns the one socket
   and the per-connection reader, `program` is the per-Program state a Call mutates, `shell` and
   `python` are the two interpreters, `reach` states the one reachable path set both share,
-  `mcp` owns the two decisions an MCP server meets — `shell:spawn` for whether it starts and
-  `mcp:call` for each tool call — and `protocol` is the contract between the two ends.
+  `mcp` owns the two decisions an MCP server meets — `shell:spawn`, or the grammar action when a
+  tool grammar binds the server's program, for whether it starts, and `mcp:call` for each tool
+  call — and `protocol` is the contract between the two ends.
   *Why one boundary:* `argv[0]` chooses the interpreter before an alias derives a path, so a
   second socket would re-state a decision the client already made. Adding an interpreter costs
   an `Interpreter` variant and a constructor.
@@ -147,7 +148,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   The test is **authority**, not spelling. A key may name a host path and still not be an input.
   A key that decides *which requests are governed*, or grants a reach policy does not judge, is
-  a fifth input whatever it is called.
+  a fifth input whatever it is called. A key that widens only what the workload's own grants
+  allow, and is disclosed with them, is part of the workload, as `file-attributes` is.
 
   Two more are ambient
   dependencies the process makes visible — `$HOME` (which must stay ambient, or it becomes the
@@ -155,8 +157,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **nine** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, and `experimental-features`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **ten** keys — `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, and `file-attributes`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -169,11 +171,15 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **`env` is a key on every `ProcessSpec`, not a fifth input.** It states the literal environment
   the box hands that process, and the box inherits nothing from the host. It grants no reach and
-  cannot claim a name the box owns: `ProcessSpec` refuses every name in
-  `reserved_workload_environment`, so proxy routing, CA trust, `PWD`, `USER`, and every loader hook
-  are out of its reach, and `compose` applies the table *before* every box-owned name as a second
-  line. `HOME` and `PATH` are not reserved, because a process must state where it lives and where it
-  looks for a bare name. `HOME` and `TMPDIR` must each be absolute.
+  cannot claim a name the box owns: `ProcessSpec` refuses every name in `box_owned_environment`, so
+  proxy routing, CA trust, `PWD`, `USER`, and the OTLP exporter are out of its reach, and `compose`
+  applies the table *before* every box-owned name as a second line. It also refuses every
+  `dynamic_loader_environment` name (`LD_*`, `DYLD_*`), because Box's own aliases run in the box. A
+  runtime's own option variable, such as `NODE_OPTIONS` or `PYTHONPATH`, is the operator's literal:
+  it reaches only the process whose table names it, which
+  `box_programs.rs::an_agent_runtime_option_reaches_the_agent_and_no_tool` pins, and `command` can
+  state the same flags. `HOME` and `PATH` are not reserved, because a process must state where it
+  lives and where it looks for a bare name. `HOME` and `TMPDIR` must each be absolute.
   `box_filesystem.rs::no_host_variable_is_inherited` pins the composition.
 
   **There is no declared bind, and the vocabulary is deleted.** `Reach`'s `Bind` and `Mount`
@@ -237,12 +243,15 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries nine top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
-  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`, and
-  `[experimental-features]`.** The experimental setting selects native file checks.
-  It adds no authority beyond the authored policy. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is five fields — `command`, `workspace`, `env`,
-  `filesystem`, and `native-filesystem-policy` — and `filesystem` holds the path lists: eight for `[agent]`, six
+  **`box.toml` carries ten top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
+  `[experimental-features]`, and `file-attributes`.** The experimental settings select native file
+  checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
+  no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
+  workload input, and each process discloses it. `[agent]` and each
+  `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
+  `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS
@@ -437,8 +446,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   and is deleted with it.
 - **The workload's environment is composed, never inherited, and box-owned values go last.** So a
   phantom cannot displace proxy routing, CA trust, or the fixed identity.
-  `reserved_workload_environment` is what a credential may not claim; when the box starts setting
-  a new variable, add it there in the same change. **Never forward the operator's `PATH`.**
+  `reserved_workload_environment` is what a credential may not claim: every loader hook and every
+  `box_owned_environment` name. When the box starts setting a new variable, add it to
+  `box_owned_environment` in the same change. **Never forward the operator's `PATH`.**
 - **One exec rule for the command, and one more for each `exec` entry.** The profile permits
   `process-exec` on exactly the resolved command, so a wrapper script resolved from a bare name needs
   an `exec` grant on the interpreter it runs. The spec's own `PATH`, or `/usr/bin:/bin` when it
@@ -474,11 +484,17 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `a_linked_program_is_started_through_the_link_and_granted_on_its_target` pin. Do not canonicalize
   the final component, and do not render a second spelling.
 
-  **A script launches an interpreter, so the whole chain is granted.** `shebang_interpreter_chain`
-  reads each `#!` line, resolves a `#!/usr/bin/env <name>` line to the real interpreter on the search
-  path, and bounds the chain so a cycle cannot loop. Without those grants a script refuses at exec
-  and no `fs:*` decision explains it. `a_direct_path_shebang_chain_names_its_interpreter` and
-  `env_shebang_resolves_the_real_interpreter_on_the_search_path` are the pins.
+  **Script interpreter authority depends on the platform and process.** On macOS, Box grants a
+  declared command's interpreter chain automatically. On Linux, every interpreter needs coverage
+  from that process's original filesystem grants. Agents need `exec`. Declared tools and local MCP
+  servers can reuse readable or writable grants that permit execution. System paths have no exemption.
+  `shebang_interpreter_chain` follows each `#!` line, including `env` and its selected command,
+  and bounds the chain so a cycle cannot loop. An earlier interpreter cannot authorize a later hop.
+  Workload-selected commands still require existing `exec` coverage on both platforms.
+  `a_direct_path_shebang_chain_names_its_interpreter` and
+  `env_shebang_resolves_the_real_interpreter_on_the_search_path` pin discovery.
+  `declared_scripts_refuse_unlisted_interpreter_files_regardless_of_mode` and
+  `an_authorized_interpreter_cannot_introduce_an_unlisted_nested_interpreter` pin Linux admission.
 
   **The resolver reads no file to pick a different program.** An absolute path is used as authored and
   a bare name is searched on the declared `PATH`, and nothing else can replace the candidate.
@@ -832,12 +848,63 @@ the verb would report on one directory the caller already named.
 
 ## Open findings — divergences no decision covers
 
+- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
+  refuses directory write grants, but Shell and Python requests execute in the trusted process.
+  They pass policy and `Reach` checks without becoming containment authorizations.
+  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
+  identity. A root launch therefore retains root ownership on permitted new files.
+  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
+  does not establish closure of the broader ownership finding.
+  The Shell's symlink path still requires source read/write and destination write permission.
+  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
+  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
   atomic, and the walk stops at the first component it cannot see. A link removed between them, or
   one behind a folder Box cannot search, can let the read record `::response`. That event is the
   one a plain probe of the same reported path already records, and the refusal message does not
   change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
+
+- **A configured command with more than one hard link rests on the kernel's write check.**
+  `ConfiguredCommands::load` accepts such a command only when `writable_by_this_user` is false.
+  `may_change` is true when root runs Box, when the real or the effective user owns the file, when
+  a group or other write bit is set, or when the kernel's write check (`faccessat2` on the opened
+  descriptor on Linux, `faccessat` on the path elsewhere) does not refuse. Only `EACCES` is a
+  refusal by itself. On macOS, `EPERM` and `EROFS` are refusals when `may_carry_access_list` is
+  false. XNU asks its MAC policies and then the read-only mount before it checks permissions, so
+  neither answer says anything about the file's permissions. System Integrity Protection answers
+  `EPERM` for `/usr/bin`, and so does any Sandbox profile that Box inherits for a path it denies.
+  With System Integrity Protection off (as on GitHub's macOS runners), `/usr/bin` answers `EROFS`.
+  Then the root, owner, and mode checks and the absence of an access-control list decide. Every
+  other answer counts as writable, and on Linux `EPERM` and `EROFS` do too, as in
+  `inode_may_be_writable` in the Linux containment backend.
+  `ConfiguredCommand::verify` requires the startup link count, owner, group, and mode before each
+  launch, and asks the kernel again. At launch, `ContainmentConfig::require_command_identity`
+  records the link count of a command with several names in its own `command_identities` wire
+  list, and a command with one name keeps `require_file_identity`. `identity_requirements` and
+  `write_protections` keep exactly one name, also when a payload states a link count.
+  Measured on macOS 26.7.1: `/usr/bin/git` and 77 other developer tools are one `root:wheel`
+  file with 78 names on the sealed read-only volume, and `faccessat` answers `EPERM`. Under a
+  `sandbox-exec` profile that denies writes to a folder, `faccessat` answers `EPERM` for a file in
+  it that this user owns and can write. `/usr/bin/id`
+  has 3 names. Measured on Linux: `/usr/bin/perl` has 2 names on Ubuntu 24.04, Debian, and Fedora,
+  and is root-owned. A `uv tool install` on Linux hard-links an operator-owned program from uv's
+  cache, so it stays refused.
+  Rejected: no link rule at all, because a folder write grant over another name of an
+  operator-writable file can change its bytes. Rejected: a read-only-mount test alone, because it
+  misses root-owned programs on a writable Linux root.
+  A forwarding stub, such as macOS `/usr/bin/git`, starts a second program that Box does not pin.
+  With the Command Line Tools that program is `root:wheel`. With an Xcode.app that the operator
+  extracted, the operator owns it. `command[0]` is the documented scope of the protection.
+
+- **A command seen through a mount that remaps ownership is not covered.** An idmapped bind mount,
+  or a FUSE view such as bindfs, can show a file under a second path with another owner.
+  `validate_reach` compares paths for a directory grant, so a directory write grant over the
+  unmapped path of a command does not refuse, and the identity check sees no change. This is
+  true for a command with one name too, so it does not depend on hard links. Only the operator can
+  create such a mount. Closing it needs the mount analysis of `hard_link_alias_may_be_writable`
+  for every write grant against every configured command.
 
 Do not treat any of these as settled by the code existing.
 
@@ -873,7 +940,8 @@ Do not treat any of these as settled by the code existing.
   branch for an unresolvable home went with it — there is no namespace left to be unable to resolve.
 - **A stdio MCP server runs in a leaf box, and a leaf is wider than the agent's box.**
   `start_mcp_server` starts every declared stdio server as a contained leaf through the trampoline,
-  after `shell:spawn` permits it. The uncontained start below it runs only when the box declares no
+  after `shell:spawn` permits it, or, when a tool grammar binds the server's program, after its
+  grammar action does. The uncontained start below it runs only when the box declares no
   stdio server, so no declared server reaches it, or on a non-unix build. The residuals: the leaf
   reaches its own `filesystem` lists with no `fs:*` decision; on macOS it runs its whole toolchain
   through broad exec, discovers metadata across the operator home, and loses W^X over its own

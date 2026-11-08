@@ -21,6 +21,7 @@ usage = "cargo version"
 usage = "cargo [+<toolchain>] [global options] report [<kind>]"
 
 [shell.report_future_incompatibilities]
-usage = "cargo [global options] report future-incompatibilities [options]"
+usage   = "cargo [global options] report future-incompatibilities [options]"
+aliases = ["report future-incompat"]
 adds  = ["network"]
 options.id = { flag = ["--id"], value = "required" }

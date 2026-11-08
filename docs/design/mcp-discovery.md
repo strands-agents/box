@@ -1,12 +1,12 @@
 # How Box discovers MCP tools
 
-An operator often wants more than "allow this MCP server". They want to allow a tool and still
-refuse some of the ways it can be called, for example a GitHub search that returns at most five
-results. Box's policy language, Dogwood, can express that because it extends Cedar, and Cedar checks
-each rule against a schema before it loads the rule. The schema says which actions exist and what
-each action's input looks like. A rule that names an action the schema doesn't declare, or compares
-an argument as a number when the schema doesn't type it as one, doesn't load ([the policy language
-is Dogwood](decisions.md#the-engine-is-dogwood)).
+MCP means Model Context Protocol. MCP discovery lets Box apply policy to individual tools and
+their arguments. For example, an
+operator can permit GitHub searches but refuse searches that request more than five results.
+Dogwood checks each rule against a schema before loading it. The schema declares the actions and
+their input types. A rule cannot load if it names an undeclared action or compares an argument as
+a number when the schema declares another type. The decision to use
+[Dogwood](decisions.md#the-engine-is-dogwood) explains the policy language choice.
 
 The schema has two parts, and policy loads in two steps to match:
 
@@ -20,31 +20,27 @@ The schema has two parts, and policy loads in two steps to match:
 When the box starts, the policy engine commits every rule that validates against the built-in
 schema, so the agent, the shell, the egress gateway, and every server's `mcp:call` permit work at
 once. A rule that names a tool's own action waits until that server's part of the generated schema
-is staged. Then a rule like this one loads and enforces:
+is staged. The engine can then load and enforce a rule like this:
 
 ```cedar
 forbid (principal, action == github::Action::"search_repositories", resource)
 when { context.input has perPage && context.input.perPage > 5 };
 ```
 
-Building the generated schema is discovery. It works the same way for both kinds of MCP server: a
-stdio server that Box starts, and an http server that Box reaches through the egress gateway. Box
+Discovery builds the generated schema. It works the same way for stdio servers that Box starts
+and http servers that Box reaches through the egress gateway. Box
 reads the replies to the harness's own `tools/list`, and sends no list of its own. It holds the
-reply to the last page until that server's schema commits, so a tool is never callable before its
-rules enforce ([Box discovers an MCP tool schema from the live server's own
-list](decisions.md#mcp-tool-schemas-are-discovered-from-the-live-server)).
+reply to the last page until that server's schema commits, so a tool is not callable until the engine enforces its rules. See [Box discovers an MCP tool schema from the live server's own
+list](decisions.md#mcp-tool-schemas-are-discovered-from-the-live-server).
 
-The rest of this page starts with how a tool list becomes enforced rules, then shows the flow for
-each kind of server, names the parts and the states they move through, and ends with how discovery
-finishes, what happens when a server lists again, and the limits. For the policy levels and how Box
-decides a tool call, start with [How Box runs MCP servers](./mcp.md).
+This page explains discovery for both server types, including completion, repeated lists, and
+failures. For policy levels and tool-call decisions, read [How Box runs MCP servers](./mcp.md).
 
 ## How a tool list becomes enforced rules
 
 Staging is the step that turns one server's complete tool list into enforced rules. Box generates
-the server's schema fragment, one policy action for each tool with typed arguments ([per-tool
-actions and their arguments](./mcp.md#per-tool-actions-and-their-arguments)), and the policy engine
-commits it.
+the server's schema fragment with one policy action per tool and typed arguments. The policy engine
+commits that fragment. See [per-tool actions and their arguments](./mcp.md#per-tool-actions-and-their-arguments).
 
 ```mermaid
 flowchart LR
@@ -57,10 +53,9 @@ flowchart LR
     commit --> accept["The catalogs accept the tool names"]
 ```
 
-The policy engine keeps one fragment for each server. Each commit rebuilds the combined schema from
-all of them, validates the whole policy against it, and commits the result, so the last commit holds
-every server's schema. Commits happen one at a time, and each server commits as soon as its own list
-is complete:
+The policy engine keeps one fragment for each server. For each commit, it combines the fragments, validates the whole policy against them, and commits
+the result. The last commit therefore includes every server's schema. Commits run one at a time.
+Each server commits when its list is complete:
 
 | Commit | When | What it adds | Engine readiness |
 |---|---|---|---|
@@ -70,17 +65,15 @@ is complete:
 A server with no per-tool rule still commits, so its tools join the schema. A server that fails, is
 refused, or never connects adds no commit.
 
-While the engine is `Discovering`, the committed rules decide each request ([discovery serves the
-schema-independent subset](decisions.md#discovery-serves-the-schema-independent-subset)). A tool
-call whose per-tool rule still waits is refused as pending. A call to a tool that an inert rule
-decides, on a server whose per-tool rule can never load, is refused. Both holds are per tool: a call
-to a tool that no waiting rule decides is decided by the rules that did load.
+While the engine is `Discovering`, the committed rules decide each request. See [discovery serves the
+schema-independent subset](decisions.md#discovery-serves-the-schema-independent-subset). Box refuses a tool call as pending while its per-tool rule waits. It also refuses calls that an
+inert per-tool rule would decide on a server whose rule has not loaded. These refusals apply to
+individual tools. The loaded rules still decide calls to tools that have no waiting rule.
 
 ## How a server is discovered
 
-The two kinds of server take the same steps. The main path is below, and the last column of each
-step table is the server's discovery state ([the parts and their
-states](#the-parts-and-their-states)).
+Both server types follow the steps below. Each step table includes the server's discovery state,
+defined in [the parts and their states](#the-parts-and-their-states).
 
 
 ```mermaid
@@ -97,8 +90,8 @@ flowchart TD
     stage --> release["Box releases the reply: the harness sees the last page"]
 ```
 
-Box captures a list that starts with no cursor and follows its own `nextCursor` chain, and builds
-the server's tool list from it ([pages, limits, and failures](#pages-limits-and-failures)).
+Box builds the server's tool list from replies that start without a cursor and follow that list's
+`nextCursor` chain. See [pages, limits, and failures](#pages-limits-and-failures).
 
 The two kinds of server differ in how they hold the last reply. A stdio connection carries many
 frames, so the broker keeps the reply in the connection's queue, stages on a background thread, and
@@ -110,47 +103,46 @@ stages on that thread before it writes the response.
 | Step | What happens | Server state |
 |---|---|---|
 | 1 | The harness runs the server's full command through its alias. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
-| 2 | The harness sends `initialize`. It crosses with no decision, and the broker checks the protocol version in the reply. | `Undiscovered` |
+| 2 | The harness sends `initialize`. Box forwards it without a decision, and the broker checks the protocol version in the reply. | `Undiscovered` |
 | 3 | The harness sends `tools/list`, and `mcp:call` decides it. A refused list never reaches the server. | `Failed` if refused |
 | 4 | The broker relays the request. Box captures a list that names no cursor, and gives it 30 seconds for each reply. | `Undiscovered` |
-| 5 | A page with a `nextCursor` is merged and forwarded at once. | `Listing` |
+| 5 | Box merges and forwards a page with a `nextCursor` immediately. | `Listing` |
 | 6 | The last page completes the list. The broker holds its reply and starts staging. | `Listing` |
-| 7 | The schema commits, and the server's per-tool rules enforce. | `Ready` |
+| 7 | The engine commits the schema and enforces the server's per-tool rules. | `Ready` |
 | 8 | The broker sends the held reply, and the harness sees the last page. | `Ready` |
-| 9 | Once every stdio server is `Ready` or `Failed`, and every held reply is written, the broker reports the stdio side done. | |
+| 9 | Once every stdio server is `Ready` or `Failed`, and every held reply is written, the broker reports that stdio discovery is complete. | |
 
 A failure at steps 5 to 7 sends the harness an MCP error that names the failed step, in place of the
-reply. A failed stdio server takes no new connections for the rest of the run, and its other
-connections close.
+reply. A stdio server that fails there takes no new connections, and its other connections close.
 
 ### An http server
 
 | Step | What happens | Server state |
 |---|---|---|
 | 1 | The harness connects through the egress gateway. `net:connect` decides the host before DNS and each address after it. | `Undiscovered` |
-| 2 | Each request is decided as `http:request`, and its MCP frame as `mcp:call`. `initialize` is decided on an http server. | `Undiscovered` |
+| 2 | Policy decides each request as `http:request` and its MCP frame as `mcp:call`. It also decides `initialize` for an http server. | `Undiscovered` |
 | 3 | `mcp:call` decides `tools/list`. A refusal is a 403. | `Failed` if refused |
 | 4 | The gateway forwards the request and reads the whole response. | `Undiscovered` |
 | 5 | Before it writes the response, the gateway hands the page to the tool catalogs, with the request's `Mcp-Session-Id` and cursor. | `Listing` |
-| 6 | On the last page the catalogs stage the schema, on the request's thread. Once every http server is `Ready` or `Failed`, the gateway reports the http side done. | `Ready` |
+| 6 | On the last page the catalogs stage the schema, on the request's thread. Once every http server is `Ready` or `Failed`, the gateway reports that http discovery is complete. | `Ready` |
 | 7 | The gateway writes the response, and the harness sees the last page. | `Ready` |
 
-The http side reports done before it writes the last response, so it doesn't wait for the harness to
-have the tools, as the stdio side does. A failure withdraws the server's accepted tools, the
-response still reaches the harness, and stderr names the failure. An http server that fails stays
+The gateway reports completion before writing the last response. Unlike the broker, it does not
+wait until the harness has the tools. On failure, it withdraws the server's accepted tools and
+writes the failure to stderr, but still sends the response to the harness. An http server that fails stays
 reachable, and each call to its tools is refused.
 
 ## The parts and their states
 
-Five parts take part in the steps above. All of them run in the box's trusted process.
+Five components handle discovery. All of them run in the box's trusted process.
 
 | Part | What it does | State it holds |
 |---|---|---|
 | The tool catalogs | One set per box, shared by both kinds of server. They collect a server's pages, stage its schema, and check each `tools/call` against the accepted tool names. | Each server's discovery state and accepted tools, and each unfinished list |
 | The MCP broker | Relays each stdio connection, holds the last page's reply, and reports when every stdio server is done. | Each connection's pending lists and held replies; whether the stdio side is done |
 | The egress gateway and its policy hook | Relays each http request, hands each `tools/list` reply to the catalogs, and reports when every http server is done. | None of its own |
-| The policy engine | Validates the policy against the combined schema, and commits it. | Its readiness: `Discovering` or `Ready` |
-| The discovery coordinator | Waits for both kinds of server to report, then finishes discovery once ([the box coordinates discovery completion](decisions.md#the-box-coordinates-discovery-completion)). | The sides still to report |
+| The policy engine | Validates the policy against the combined schema, and commits it. | Its readiness, either `Discovering` or `Ready` |
+| The discovery coordinator | Waits for both kinds of server to report, then finishes discovery once. See [the box coordinates discovery completion](decisions.md#the-box-coordinates-discovery-completion). | The sides still to report |
 
 ### A server's discovery state
 
@@ -168,46 +160,66 @@ stateDiagram-v2
     Ready --> Failed: an http re-list fails
 ```
 
-- **`Undiscovered`**: no list has arrived.
-- **`Listing`**: a list is arriving, and no catalog is accepted yet.
-- **`Ready`**: a catalog is accepted, and its tools are callable.
-- **`Failed`**: discovery failed, and the reason names the step that failed.
+- `Undiscovered` means no list has arrived.
+- `Listing` means a list is arriving, and Box has not accepted a catalog.
+- `Ready` means Box has accepted a catalog and its tools are callable.
+- `Failed` means discovery failed. The reason identifies the failed step.
 
-`Ready` and `Failed` are terminal for startup: a server in either state counts as done.
+`Ready` and `Failed` both count as complete for startup.
 
-These states are how Box tracks discovery. [When startup is
-complete](./mcp.md#when-startup-is-complete) describes the outcome the operator sees: a `Ready`
-server is Ready there, and a `Failed` server is No tools or Degraded when policy refused its
-`tools/list`, and Failed for any other reason ([a server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone)).
+Box uses these states to track discovery. [When startup is
+complete](./mcp.md#when-startup-is-complete) describes the operator-visible outcomes. A `Ready`
+server has the Ready outcome. A `Failed` server has the No tools or Degraded outcome when policy
+refused `tools/list`, and Failed for other causes. See [recovery after a denied tool list](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 
 ## How discovery finishes
 
-Each side reports to the coordinator once: the broker for the stdio servers, and the gateway for the
-http servers. The gateway reports only when `box.toml` declares an http server. When the last side
+The broker reports once to the coordinator for stdio servers. The gateway reports once for http
+servers. The gateway reports only when `box.toml` declares an http server. When the last side
 reports, the coordinator finishes discovery once. A per-tool rule that still hasn't validated
-belongs to a server that will never stage, so that server is degraded, stderr names it, and the
-engine becomes `Ready` for the rest of the run.
+is inert: the servers it waits for are degraded, stderr names them, and the engine becomes `Ready`
+for the rest of the run.
 
-Box names those servers from a different set than the one it holds calls for, and it works one rule
-at a time. It holds the tools it can tell an inert rule decides — the tool its head names, and the
-one its condition pins to a server and a tool. It names the servers that rule still waits for. A
-rule that reaches tools it never names holds nothing, and
-[mcp.md](mcp.md#when-startup-is-complete) states that limit.
+For each inert rule, Box holds back the tools it can identify as subject to that rule. It recognizes
+a tool named in the head or a condition that pins both a server and a tool. The warning instead
+names the servers the rule still needs. If a rule applies to tools it never names, Box holds back
+no calls for that rule. [mcp.md](mcp.md#when-startup-is-complete) explains this limit.
 
-A rule waits for every tool it mentions — in its head, in a condition, or in a history reference —
-to be declared, so an undeclared tool names its own server. A server whose `tools/list` a rule
-refused declares nothing, so every tool named on it is undeclared. A server whose catalog arrived is
-named when the rule asks for a tool it does not offer, which is a misspelling or a tool the server
-dropped.
+Every tool mentioned in the head, a condition, or a history reference must be declared. Box names
+the server for each undeclared tool. A server whose `tools/list` policy refused declares no tools.
+An accepted catalog can still omit a tool because the rule misspells its name or the server removed it.
 
-When every tool a pending rule mentions is declared, the rule failed for another reason — an argument
-name or a type the server declares differently — and Box names every server that rule mentions. That
-can name a server answering correctly, which is weaker than
-[a server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone) asks for, and it is the
-deliberate trade against an inert rule that warns about nothing. A rule that only reads a tool from
-history still decides no call to it, so that tool is not held.
+If every referenced tool is declared, the rule failed for another reason, such as a different
+argument name or type. Box then names every server mentioned in the rule. This can include a server
+that answers correctly. [Box reports these pending rules without refusing the whole
+policy](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone). A history-only
+reference to a tool still does not decide calls to it, so that tool is not held back.
+
+A rule held back this way isn't always held back for the rest of the run. A list that arrives after
+discovery finishes still stages its schema, and if it completes the whole policy those rules load
+and enforce from that moment. Two things decide whether a server gets there: whether a later list
+reaches Box, and whether its schema is the last thing the policy needs.
+
+A later list goes through the same decision, staging, and [limits](#pages-limits-and-failures) as
+the first, so an earlier refusal doesn't have to repeat. A rule that reads history can refuse one
+`tools/list` and permit the next, and a server can follow a schema the policy refused with one it
+accepts. On an http server no state guard stands in the way, so any later `tools/list` that policy
+permits delivers a list, on any session. On a stdio server, a list that fails while the server has
+no accepted catalog stops it: the connection whose list failed closes, the failure wakes every other
+connection open to that server and `admit_open` then stops each one, and a new `Open` is refused. A
+`tools/list` that policy refused doesn't stop a stdio server, so a later one that policy permits
+still stages. Letting a stdio server recover from a failed list would be a change to the broker.
+
+The schema also has to be the last thing the policy needs. After discovery finishes, a late list is
+validated with the whole policy, so it stages only when every other schema the policy needs is
+already there and matches its rules. With two schemas missing, a list from either server leaves the
+other's per-tool rules unvalidated: the policy doesn't validate, the list is refused, and the schema
+it carried is dropped with it. The other server's later list then fails the same way, because the
+first schema is gone, so neither recovers. A schema that staged but doesn't match its rule blocks a
+late list the same way. So what blocks recovery is whatever else the policy still needs, not how
+many servers have tools held. A rule that decides a tool on each of two servers holds both tools
+while one schema is missing, and the late list that supplies that schema completes the policy and
+recovers both.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays
@@ -216,7 +228,7 @@ server's rules are already committed, so no request waits on the missing server.
 
 ## When a server lists again
 
-A harness can list a server again: on a reconnect, from a second window, or after the server sends
+A harness can list a server again when it reconnects, opens a second window, or receives
 `notifications/tools/list_changed`. On a stdio server each connection is its own server process, and
 its list reaches that process.
 
@@ -230,13 +242,13 @@ doesn't change it.
 | A different fingerprint | It commits, and replaces the accepted tools | It commits, and replaces the accepted tools |
 | It fails | The accepted tools stay | The accepted tools are withdrawn |
 
-During a change's commit, only the tools that both lists name pass the catalog check. A server can
+While a changed list commits, only tools named in both lists pass the catalog check. A server can
 change its tools 16 times in one run. After that, its accepted tools stay, and stderr names it.
 
 ## Pages, limits, and failures
 
-Box captures a list only along its own cursor chain: the first request names no cursor, and each
-later request names the `nextCursor` of the page before it, on the same connection. On an http
+Box captures a list only along its own cursor chain. The first request has no cursor. Each later
+request must name the preceding page's `nextCursor` on the same connection. On an http
 server, `Mcp-Session-Id` is the connection. A list that starts with a cursor, or a cursor that
 doesn't continue the chain, still reaches the harness, but Box doesn't capture it. So the harness
 can't shape what Box captures, and the pages always come from the server.
@@ -261,15 +273,18 @@ A failure stays with its server:
 | A re-list fails after `Ready` | stdio: keeps its tools. http: `Failed`, tools withdrawn | Unaffected |
 | The policy history can't be written | stdio: the box stops. http: stderr warns, and the box keeps running | stdio: the box stops |
 
+A rule that decides a tool on two servers is the exception: while it waits for one server's schema,
+it holds its tool on the other server too.
+
 A harness that stops paging before the last page leaves the server unstaged, and each call to its
 tools is refused.
 
 ## Example: Claude Code with five servers
 
 The box runs Claude Code with two stdio servers and three http servers. The `docs` server is
-declared, but nothing is running at its address. This is the MCP part of `box.toml`; the `[agent]`
+declared, but nothing is running at its address. This is the MCP part of `box.toml`. The `[agent]`
 table and the model's egress route are as in [getting started](../user/getting-started.md), and the
-stdio servers' filesystem grants are left out ([the `[mcp.<name>]` table](../user/mcp.md)):
+stdio servers' filesystem grants are omitted. See [the `[mcp.<name>]` table](../user/mcp.md) for those grants:
 
 ```toml
 [mcp.fetch]
@@ -294,7 +309,7 @@ type         = "http"
 destinations = ["mcp.docs.example.com"]
 ```
 
-The MCP rules in `policy.dw`:
+The example uses these MCP rules in `policy.dw`:
 
 ```cedar
 @id("mcp_starts")
@@ -330,25 +345,24 @@ The first five rules validate against the built-in schema, so they load when the
 last two name a tool's own action, so each one waits for its server's part of the generated schema.
 `git` has no per-tool rule, and its schema still stages, so a rule for it could be added later.
 
-When Claude Code starts and lists each server, the states move like this:
+When Claude Code starts and lists each server, discovery proceeds as follows:
 
 | Moment | Engine | fetch | git | github | deepwiki | docs | Waiting to report |
 |---|---|---|---|---|---|---|---|
 | The box starts, commit 1 | `Discovering` | `Undiscovered` | `Undiscovered` | `Undiscovered` | `Undiscovered` | `Undiscovered` | stdio, http |
 | `hide_deepwiki_tools` refuses deepwiki's `tools/list` | | | | | `Failed` | | |
 | Each list's last page arrives, and each reply is held | | `Listing` | `Listing` | `Listing` | | | |
-| github commits: `small_github_searches` enforces | | | | `Ready` | | | |
-| fetch commits: `short_fetches` enforces, and fetch's reply goes out | `Ready` | `Ready` | | | | | |
+| GitHub commits, and the engine enforces `small_github_searches` | | | | `Ready` | | | |
+| Fetch commits, the engine enforces `short_fetches`, and Box sends fetch's reply | `Ready` | `Ready` | | | | | |
 | git commits, and its reply goes out | | | `Ready` | | | | http |
 | `docs` never answers | | | | | | `Undiscovered` | http |
 
 The commits run one after another, so the later servers wait behind the first. The engine becomes
-`Ready` when fetch commits, because both per-tool rules then validate. The stdio side reports done
-when git's reply goes out. Discovery itself never finishes, because `docs` keeps the http side from
+`Ready` when fetch commits, because both per-tool rules then validate. The broker reports stdio completion when it sends git's reply. Discovery itself never finishes, because `docs` keeps the http side from
 reporting, but no request waits on it.
 
 When Claude Code reconnects `fetch`, a new server process answers a new `tools/list`. Its
-fingerprint matches, so nothing commits, and the tools are back at once.
+fingerprint matches, so nothing commits, and the tools become callable immediately.
 
 ## See also
 

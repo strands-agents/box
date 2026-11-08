@@ -703,7 +703,7 @@ mod tests {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "resources/read",
-                    "params": {"uri": uri},
+                    "params": {"uri": uri, "_meta": {"progressToken": "keep-me"}},
                 }))
                 .unwrap();
                 for target in [
@@ -718,9 +718,16 @@ mod tests {
                 }
                 let forwarded = canonicalize_frame_uri(&frame).unwrap_or(frame);
                 let parsed: Value = serde_json::from_slice(&forwarded).unwrap();
-                assert_eq!(parsed["params"]["uri"], expected, "forwarded {uri}");
-                assert_eq!(parsed["method"], "resources/read");
-                assert_eq!(parsed["id"], 1);
+                assert_eq!(
+                    parsed,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "resources/read",
+                        "params": {"uri": expected, "_meta": {"progressToken": "keep-me"}},
+                    }),
+                    "the forwarded frame changes only the resource URI for {uri}"
+                );
             }
         }
     }

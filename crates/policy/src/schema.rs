@@ -24,6 +24,7 @@ pub(crate) struct ActionSchema {
     pub(crate) source: String,
     pub(crate) cedar: Schema,
     pub(crate) tool_actions: HashSet<EntityUid>,
+    pub(crate) tool_inputs: crate::mcp_input::ToolInputs,
 }
 
 /// Compose the canonical schema with ordered MCP schema fragments.
@@ -61,11 +62,13 @@ pub(crate) fn composed_action_schema(
                 && action.type_name().to_string() != FIXED_ACTION_TYPE
         })
         .cloned()
-        .collect();
+        .collect::<HashSet<_>>();
+    let tool_inputs = crate::mcp_input::ToolInputs::new(&source, &tool_actions);
     Ok(ActionSchema {
         source,
         cedar,
         tool_actions,
+        tool_inputs,
     })
 }
 
@@ -206,14 +209,16 @@ pub(crate) fn mcp_action_namespace(server: &str) -> String {
     cedar_identifier(server)
 }
 
-/// The `(namespace, tool)` a per-tool action names, or `None` for the fixed `Box` vocabulary.
+/// The `(namespace, tool)` a per-tool MCP action names, or `None` for the fixed `Box` vocabulary and
+/// a qualified namespace such as a tool grammar's `Tool::<name>`.
 pub(crate) fn mcp_tool_action(action: &EntityUid) -> Option<(String, String)> {
     let type_name = action.type_name();
     if type_name.basename() != "Action" || type_name.to_string() == FIXED_ACTION_TYPE {
         return None;
     }
     let namespace = type_name.namespace();
-    (!namespace.is_empty()).then(|| (namespace, action.id().unescaped().to_string()))
+    (!namespace.is_empty() && !namespace.contains("::"))
+        .then(|| (namespace, action.id().unescaped().to_string()))
 }
 
 pub(crate) fn cedar_identifier(raw: &str) -> String {
@@ -733,6 +738,20 @@ mod tests {
     #[test]
     fn shipped_schema_parses() {
         assert!(schema().is_ok());
+    }
+
+    #[test]
+    fn a_tool_grammar_action_is_not_a_per_tool_mcp_action() {
+        let action = |text: &str| text.parse::<EntityUid>().expect("an action");
+
+        assert_eq!(
+            mcp_tool_action(&action(r#"alpha::Action::"deploy""#)),
+            Some(("alpha".to_string(), "deploy".to_string()))
+        );
+        assert_eq!(
+            mcp_tool_action(&action(r#"Tool::git::Action::"push""#)),
+            None
+        );
     }
 
     #[test]

@@ -21,3 +21,25 @@ pub(crate) mod egress;
 pub(crate) mod script;
 #[cfg(feature = "shell-adapter")]
 pub(crate) mod shell;
+
+#[cfg(all(
+    test,
+    any(
+        feature = "egress-adapter",
+        feature = "script-adapter",
+        feature = "shell-adapter"
+    )
+))]
+mod correlation_tests {
+    pub(super) use crate::test_history::{events, identifier as id};
+
+    pub(super) fn assert_pair(
+        request: &dogwood_language::Event,
+        outcome: &dogwood_language::Event,
+    ) {
+        assert_eq!(request.kind(), "request");
+        assert!(matches!(outcome.kind(), "response" | "error"));
+        assert_eq!(request.action(), outcome.action());
+        assert_eq!(id(request), id(outcome));
+    }
+}

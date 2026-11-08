@@ -35,7 +35,6 @@ on:
         default: true
 
 env:
-  EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
   # Colorize cargo output in Actions logs (from the starter template).
   CARGO_TERM_COLOR: always
   # ubuntu-latest and macos-latest each give ~14 GB of free disk. Full DWARF
@@ -56,15 +55,6 @@ jobs:
     # Cargo test on the full workspace typically finishes in a few minutes;
     # 30 min caps a hung step instead of running to the 6-hour default.
     timeout-minutes: 30
-    # macOS is advisory for now. The `strands-meta-harness/python_handler_e2e`
-    # suite fails on Homebrew's `/opt/homebrew/bin/python3`: the box's
-    # Seatbelt profile grants `process-exec` on the resolved literal, but
-    # Homebrew's symlink chain reaches a target the profile does not name
-    # (see `box/AGENTS.md` — "A rule must name the path a load asks for").
-    # Landing the fix belongs in a follow-up; failing this leg for now would
-    # block every merge on an unrelated defect. The failure is visible in
-    # the Actions UI so the pressure to fix it remains.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -140,9 +130,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features --verbose
 
-      - name: Install the alias image beside unit-test binaries
+      - name: Install launcher images beside unit-test binaries
         if: runner.os == 'Linux'
-        run: install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
 
       - name: Run tests (linux)
         shell: bash
@@ -179,10 +171,44 @@ jobs:
         run: |
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"}
 
+      # The native filesystem checks the workspace run above does not cover: the
+      # standalone signed test package, startup refusal without the Cargo feature,
+      # and the signed receipt checker. They run after a workspace test failure,
+      # and a filtered dispatch skips them.
+      - name: Check the native filesystem test package (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: |
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked --no-run
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked --test bridge -- --nocapture
+          cargo fmt --manifest-path test-native-filesystem/Cargo.toml --check
+          cargo clippy --manifest-path test-native-filesystem/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Test native startup without the Cargo feature (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
+
+      - name: Test signed receipt checker (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: python3 -m unittest discover -s test-native-filesystem -p '*_test.py'
+
+      - name: Check signed receipt freshness (informational, macOS only)
+        id: signed-receipt
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        continue-on-error: true
+        run: python3 test-native-filesystem/receipt.py
+
+      - name: Summarize native validation (macOS only)
+        if: matrix.os == 'macos-latest' && inputs.filter == ''
+        env:
+          RECEIPT_OUTCOME: ${{ steps.signed-receipt.outcome }}
+        run: |
+          echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: Lint
     if: ${{ inputs.run_lint }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Lint typically runs in ~2 min; 20 min caps a hung step instead of
     # letting it run to the 6-hour default.
     timeout-minutes: 20

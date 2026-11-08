@@ -86,11 +86,11 @@ class ShipmentTools:
 
     def check_eligibility(self) -> str:
         """Check whether synthetic order 42 qualifies for a replacement."""
-        return self.request("check_eligibility", "GET", "/orders/42/eligibility")
+        return self.request("check_eligibility", "GET", "/orders/42/replacement")
 
     def dispatch_replacement(self) -> str:
         """Request a replacement for order 42 and return its actual confirmation or refusal."""
-        return self.request("dispatch_replacement", "POST", "/orders/42/dispatch", "replacement-42")
+        return self.request("dispatch_replacement", "POST", "/orders/42/replacement", "replacement-42")
 
     def request_refund(self) -> str:
         """Request a refund for order 42 and return its actual result or refusal."""

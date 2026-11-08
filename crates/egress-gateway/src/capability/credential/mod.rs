@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 
 use super::Outcome;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, Target};
+#[cfg(feature = "tls-intercept")]
+use {super::ResponseControls, crate::boundary::HeaderMap};
 
 /// The `accept-encoding` every credentialed request carries.
 const IDENTITY_ENCODING: &str = "identity";
@@ -166,16 +168,49 @@ impl CredentialCapability {
         }
         Ok(mutations)
     }
+
+    /// The header edits and body checks for a streamed response from this capability's destination.
+    #[cfg(feature = "tls-intercept")]
+    pub(super) fn response_controls(
+        &self,
+        headers: &HeaderMap,
+        target: &Target,
+    ) -> (Vec<Mutation>, ResponseControls) {
+        if !self.pattern.matches(&target.as_destination()) {
+            return (Vec::new(), ResponseControls::default());
+        }
+        let redactor = self.store.response_redactor(target.as_destination());
+        let edits = redactor
+            .iter()
+            .flat_map(|redactor| {
+                headers.iter().filter_map(move |(name, value)| {
+                    redactor
+                        .redact_header(value)
+                        .map(|value| Mutation::SetHeader {
+                            name: name.to_string(),
+                            value: Zeroizing::new(value),
+                        })
+                })
+            })
+            .collect();
+        (
+            edits,
+            ResponseControls {
+                redactors: redactor.into_iter().collect(),
+                requires_empty_body: content_encoding(headers).is_some(),
+            },
+        )
+    }
 }
 
 /// The response's `Content-Encoding` when it names any coding other than `identity`.
-fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<String> {
+fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<&str> {
     let value = headers.get("content-encoding")?;
     value
         .split(',')
         .map(str::trim)
         .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
-        .then(|| value.trim().to_string())
+        .then(|| value.trim())
 }
 
 #[cfg(test)]

@@ -5,9 +5,13 @@ use std::fmt::Write as _;
 use super::Grammar;
 use super::model::UNMODELED_ACTION;
 use super::shell_grammar::{BASE_FIELDS, FieldKind};
+#[cfg(test)]
 use crate::dogwood::check_against;
+#[cfg(test)]
 use crate::error::PolicyError;
+#[cfg(test)]
 use crate::schema::{ActionSchema, composed_action_schema};
+#[cfg(test)]
 use crate::spelling::{Operator, PolicyWarning};
 
 /// The namespace that holds the vocabulary of every tool grammar.
@@ -82,6 +86,7 @@ impl Grammar {
 }
 
 /// The canonical schema, composed with the fragment of each grammar and then each MCP fragment.
+#[cfg(test)]
 pub(crate) fn grammar_action_schema(
     grammars: &[Grammar],
     mcp_schemas: &[String],
@@ -91,6 +96,7 @@ pub(crate) fn grammar_action_schema(
 }
 
 /// Strict-validate `source` against the canonical schema, `grammars`, and `mcp_schemas`.
+#[cfg(test)]
 pub(crate) fn validate_with_grammars(
     source: &str,
     grammars: &[Grammar],
@@ -213,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_policy_loads_or_is_refused_against_the_grammars_installed() {
-        let git = || valid("git-push-commit-status");
+        let git = || valid("git");
         let cargo = || valid("cargo");
         let cases: Vec<(&str, Vec<Grammar>, &str, Option<&str>)> = vec![
             (
@@ -231,13 +237,13 @@ mod tests {
             ),
             (
                 "a v1 rule is refused against a v2 grammar",
-                vec![at_version("git-push-commit-status", 2)],
+                vec![at_version("git", 2)],
                 r#"forbid (principal, action == Tool::git::Action::"push", resource);"#,
                 Some(r#"unrecognized action `Tool::git::Action::"push"`"#),
             ),
             (
                 "a v2 rule loads against a v2 grammar",
-                vec![at_version("git-push-commit-status", 2)],
+                vec![at_version("git", 2)],
                 r#"forbid (principal, action == Tool::git::v2::Action::"push", resource)
                    when { context.input.effects.contains(Tool::git::v2::Effect::"force_push") };"#,
                 None,
@@ -312,7 +318,7 @@ mod tests {
             ),
             (
                 "a rule over v1 and v2 of one grammar that reads their input is refused",
-                vec![git(), at_version("git-push-commit-status", 2)],
+                vec![git(), at_version("git", 2)],
                 r#"forbid (principal, action in [Tool::git::Action::"push", Tool::git::v2::Action::"push"], resource)
                    when { context.input.cwd == "/work" };"#,
                 Some(r#"under actions of more than one family"#),
@@ -380,7 +386,7 @@ mod tests {
             ),
             (
                 "a temporal predicate over the group of a v2 grammar is refused",
-                vec![at_version("git-push-commit-status", 2)],
+                vec![at_version("git", 2)],
                 r#"forbid (principal, action == Tool::git::v2::Action::"push", resource)
                    when temporal { formerly within 1h Tool::git::v2::Action::"*"::response{} };"#,
                 Some(r#"names the action group Tool::git::v2::Action::"*""#),
@@ -472,13 +478,15 @@ mod tests {
             .cedar
             .action_entities()
             .expect("the action entities build");
-        let group: cedar_policy::EntityUid =
-            r#"Tool::git::Action::"*""#.parse().expect("the group parses");
+        let group: cedar_policy::EntityUid = r#"Tool::git_push_commit_status::Action::"*""#
+            .parse()
+            .expect("the group parses");
         let mut members = Vec::new();
         for action in ["commit", "push", "status", UNMODELED_ACTION] {
-            let uid: cedar_policy::EntityUid = format!(r#"Tool::git::Action::"{action}""#)
-                .parse()
-                .expect("the action parses");
+            let uid: cedar_policy::EntityUid =
+                format!(r#"Tool::git_push_commit_status::Action::"{action}""#)
+                    .parse()
+                    .expect("the action parses");
             let ancestors: Vec<_> = entities
                 .ancestors(&uid)
                 .expect("the action exists")
@@ -544,7 +552,7 @@ mod tests {
 
     #[test]
     fn two_grammars_with_one_namespace_do_not_compose() {
-        let grammars = [valid("git"), valid("git-push-commit-status")];
+        let grammars = [valid("git"), valid("git")];
 
         let error = grammar_action_schema(&grammars, &[])
             .err()
@@ -555,6 +563,13 @@ mod tests {
             error.contains("duplicate namespace id: `Tool::git`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_two_git_grammars_have_distinct_namespaces() {
+        let grammars = [valid("git"), valid("git-push-commit-status")];
+
+        assert!(grammar_action_schema(&grammars, &[]).is_ok());
     }
 
     #[test]

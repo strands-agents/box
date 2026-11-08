@@ -19,7 +19,7 @@ These are examples, not reserved versions. Do not include the leading `v` in the
 The workflow adds it to the tag and archive names.
 The version must make one major, minor, or patch increment from the latest stable tag.
 The tag must not already exist. Preview tags do not change the stable version baseline.
-There is no separate macOS preview channel; a Linux preview includes the macOS archive too.
+A Linux preview also includes the macOS archive. There is no separate macOS preview channel.
 
 ## Rehearse
 
@@ -43,13 +43,16 @@ Run the same version, source, and `publish_linux` selection from upstream `main`
 Real releases require macOS signing and signed-package verification, including releases that introduce Linux support.
 Approve the protected signing environment when requested, then approve `release-gate` after the checks pass.
 The workflow creates the tag and publishes the verified bundle from that run.
-A new run rebuilds the package; retain the hashes from the publication run.
+A new run rebuilds the package. Keep the hashes from the publication run.
 
 With `publish_linux=true`, both channels publish these files, with the selected tag in place of `<tag>`:
 
 - `box-<tag>-aarch64-apple-darwin.tar.gz`
-- `box-<tag>-aarch64-unknown-linux-gnu.tar.gz`
+- `box-<tag>-linux-arm64.tar.gz`
 - `SHA256SUMS.txt`
+
+The Linux archive uses the customer-facing name `linux-arm64`. Compilation and intermediate workflow artifacts retain the Rust target `aarch64-unknown-linux-gnu`.
+Build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
 
 For a macOS-only stable release, the bundle omits the Linux archive and its checksum entry.
 Its release notes omit Linux installation instructions. Linux builds and checks still run.
@@ -60,12 +63,30 @@ It does not download and execute the published Linux package.
 
 ## Verify the Linux download
 
-Download the Linux archive and checksum file from the release.
-Follow the checksum and extraction commands in its release notes on the qualified Amazon Linux 2023 ARM64 host.
+Run the downloader on the qualified Amazon Linux 2023 ARM64 host.
+Set `release_tag` to the published tag you are verifying. The command below uses `v0.1.1` as an example.
+
+```sh
+release_tag=v0.1.1
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION="$release_tag" sh
+./box-core/box --version
+```
+
+The downloader reads `SHA256SUMS.txt` from the selected release before downloading its archive.
+It prefers `box-<tag>-linux-arm64.tar.gz`. If that entry is absent, it accepts the older `box-<tag>-aarch64-unknown-linux-gnu.tar.gz` entry from the same release.
+A failed download or checksum for the selected archive stops the operation.
+The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
+The package requires glibc 2.34 or newer and the GCC runtime library, `libgcc_s.so.1`.
+Before replacing files, it runs the candidate's `box --version` inside an existing destination, or beside a new destination.
+This staging location must be writable and permit execution. Temporary download storage can be `noexec`.
+A failed candidate check preserves existing destination files and shows the loader error.
+If execution fails after final extraction, the downloader reports failure and warns that destination files changed.
+If the release omits Linux, select a tag that includes its archive and checksum entry.
+The downloader does not fall back to an older release or a prerelease automatically.
+Manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
 Verify the reported version, an allowed operation, and a denied operation using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
-Linux startup still requires `EXPERIMENTAL_LINUX_SUPPORT=TRUE`.
-A stable version does not remove this runtime requirement or establish security acceptance.
-Use manual checksum verification and extraction; this workflow change does not add Linux support to `download.sh`.
+Linux startup requires no environment opt-in.
+A stable version does not establish security acceptance.

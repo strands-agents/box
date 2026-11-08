@@ -4,6 +4,9 @@ How to write every page in `docs/user/` and `docs/design/`, and each crate `READ
 a consumer. The `docs-writer`, `docs-reviewer`, and `docs-audit` skills apply it. Walk the layers in
 order.
 
+For a wording-only rewrite in `docs/dev/`, apply the sentence rules in Layers 4 and 5. Keep the
+page's structure, source and test references, and Simplified Technical English register.
+
 ## Contents
 
 - [Placement: which guide owns the page](#placement-which-guide-owns-the-page)
@@ -104,7 +107,7 @@ options the guide doesn't use, and to the design guide for background.
 The contract between Box and the operator: `box.toml` keys, CLI verbs and flags, exit codes, and
 the policy action vocabulary. Organize by key, verb, or action. For each item, give the type, the
 default, the constraints, the errors, and an example. Use tables. Accuracy matters more than flow.
-Passive voice is fine. No narrative, no recommendations, and no contractions.
+Name the actor when it matters to the contract. Omit narrative, recommendations, and contractions.
 
 ### Explanation (design guide)
 
@@ -132,43 +135,54 @@ means in plain words, the most likely cause, and the fix. Don't blame the reader
 
 ## Layer 4: Hard constraints
 
-### Plain English
+### Preserve meaning
 
-Write it the way you'd explain it to a colleague out loud.
+For a rewrite, compare the original and the draft assertion by assertion. Keep each actor, action,
+condition, and result. Preserve negation, obligation, defaults, counts, platform limits, event
+order, and stated uncertainty. Removing repeated wording is safe; removing a unique qualification
+changes the claim. A security refusal must remain a refusal.
 
-- **Read it aloud.** If a person wouldn't say a sentence that way, rewrite it. A sentence that needs
-  a second read to parse is wrong, however correct it is.
-- **Short, concrete sentences**, but as long as the idea needs. There's no word limit.
-- **Active voice and the present tense**, except in reference.
-- **One idea per paragraph.**
-- **Contractions are fine**, except in reference.
-- **Say a list once.** If the previous sentence named the items, don't walk through them again.
+During a wording-only edit, keep the structure, code blocks, commands, identifiers, literal output,
+quotations, link targets, and explicit anchors unchanged. Preserve heading anchors when changing
+heading case, for example by adding an explicit anchor with the old ID.
+
+Report a suspected factual error separately. Keep the affected meaning unchanged until a factual
+correction is in scope and verified. Style is not evidence for a new claim.
+
+### Plain sentences
+
+- Name the actor and use an active verb when the actor matters. Passive voice is appropriate when
+  the actor is unknown or irrelevant to the reader.
+- Give each sentence one main idea and each paragraph one topic. Split a sentence when the reader
+  must return to an earlier clause to understand it. Keep the words that explain cause and order.
+- Use complete sentences with articles and verbs. Write the relationship in words instead of
+  arrows or compressed fragments. Table cells and labels can be short.
+- Use the present tense for current behavior. Keep contractions to the plain-English guides and
+  out of reference entries.
+- State the point directly. Use a comparison only when it explains a choice the reader faces.
+  Enumerate the actual items, however many there are. Use a range only for endpoints on a real scale.
+- State a list once. A paragraph after a table or list should add information.
 
 ### Overrides by content type
 
 | Constraint | Tutorial | How-to | Reference | Explanation | Error docs |
 |---|---|---|---|---|---|
-| Passive voice | Avoid | Avoid | **Fine** | Avoid | Avoid |
 | Contractions | Fine | Fine | **Avoid** | Fine | Fine |
 | Reader-goal framing (Layer 2) | Enforce | Enforce | **Exempt** | What it is first | Enforce |
 | The "why" | Only when it changes the action | Only when it changes the action | No | **Required** | The cause only |
-| Negative statements | Avoid | Avoid | Avoid | **Fine for a boundary** | Fine |
+| Negative statements | Keep refusals and limits | Keep refusals and limits | Keep refusals and limits | Keep boundaries | Keep failures |
 
-A negative statement is fine in explanation when the absence is the point. "The workload can't
-reach the box directory" is the security claim, so say it as a negative. A test must pin it.
+Keep a negative statement when the absence is the claim. "The workload cannot reach the box
+directory" states a boundary. A style edit must preserve it.
 
 ### User-guide rules
 
 These come from the operator's need for a contract. They apply to every page in `docs/user/`.
 
-1. **Describe what is, not what isn't.** If a sentence says "no", "not", "never", or "instead of",
-   rewrite it to name the thing that is.
-   - No: "There is no separate configuration flag. The workspace selects the file."
-   - Yes: "`run` searches upward for `.strands-box/box.toml`."
-2. **Don't raise a question the reader didn't ask.** Cut a parenthetical whose only job is to answer
-   a question nobody had.
-   - No: "An unknown key returns an error (including keys from a separate product)."
-   - Yes: "An unknown key returns a configuration error."
+1. **Describe the contract directly.** Keep refusals and limits that affect the operator. Remove
+   comparisons with other products unless the operator needs them to choose or configure Box.
+2. **Answer the operator's question.** Keep a qualification when it affects the task. Remove
+   tangents that neither explain the behavior nor change the next step.
 3. **Don't explain why.** Document the behavior and the shape. Keep a reason only when it changes
    the operator's action, for example "Install the helpers beside `strands-box`, because the box
    finds them there."
@@ -194,33 +208,45 @@ These come from the operator's need for a contract. They apply to every page in 
 5. **Never link a local draft or an exploration note.** `.agents/drafts/` and
    `.agents/explorations/` aren't committed, so the link is dead in every clone.
 
-### Words not to use
+### Concrete words and evidence
 
-AI tells: "notably", "importantly", "it's worth noting", "it's important to understand", "delve",
-"comprehensive", "remarkably", "it should be noted", "as mentioned", "basically", "in general".
+Use the shortest familiar word that keeps the technical meaning. The following patterns require
+an edit or a specific reason to keep them.
 
-Marketing and filler: "robust", "powerful", "seamless", "seamlessly", "effortless", "elegant",
-"rich", "flexible", "simply", "easily", "gracefully", "game-changing", "cutting-edge",
-"state-of-the-art", "leverage" (as a verb), "utilize" (use "use").
+| Pattern | Editing action |
+|---|---|
+| Inflated verbs such as "utilize", "leverage", "facilitate", "enhance", "garner", or "delve" | Use the direct action, such as "use", "help", "add", or "read". |
+| Indirect definitions such as "serves as", "stands as", "boasts", or "features" | Use "is" or "has", or name the action. |
+| Praise such as "crucial", "pivotal", "vibrant", "robust", "powerful", "seamless", or "elegant" | Give the relevant behavior or supported measurement. Otherwise remove the praise. |
+| Abstract labels such as "substrate", "nexus", "landscape", "tapestry", "primitive", "API surface", or "modality" | Name the component, interface, input, or operation. Keep an exact technical term or identifier when it is the right name. |
+| Figurative actions such as "rides along", "stands on", "wedges in", or "evacuates" | Say what moves, calls, contains, or depends on what. Apply the same test to metaphors such as a "north star", "flywheel", or "ratchet". |
+| Padding such as "additionally", "it is important to note", "in order to", or "due to the fact that" | Start with the fact, or use "to" or "because". |
 
-Inflated significance: "crucial", "vital", "pivotal", "plays a key role", "boasts", "serves as".
-Use "is", "has", or "uses".
+Each sentence must give the reader a fact, an instruction, or a reason needed for this page.
+Replace a feeling about the software with what it does. If a sentence could advertise any project,
+make it specific or remove it. Replace slogans and personified code with literal behavior.
 
-Vague approval: "This is powerful." "This makes it easy to". If a feature works, show it working.
+Keep an adverb only when it adds a factual distinction. For a performance claim, use a verified
+measurement; do not invent a number to replace "quickly". Keep supported uncertainty once,
+without stacked hedges. Retain words such as "may" and "only" when they limit the claim.
 
-`docs-reviewer/check-prose.sh` greps for these words and for the punctuation below.
+An attribution needs a named source. A trailing phrase such as "highlighting its flexibility" or
+"ensuring safety" needs a supported, concrete claim. Remove the phrase if it adds no fact.
+Keep chat acknowledgments, praise for the question, offers of further help, and generic closing
+summaries out of the document. End with a result or next step only when the reader needs it.
 
 ### Punctuation and rhythm
 
-- **No em-dashes.** Use a colon, a comma, parentheses, or a period. This includes a glossary gloss:
-  write "**`log`**: diagnostic output".
-- **No emoji.**
-- **Serial comma**, always.
-- **No padded triads.** Use a list of three only when each item is a real, named thing.
-- **No negative parallelism.** Don't write "not just X, but Y" or "it's not X, it's Y". Make the
-  positive statement.
-- **No connective padding.** Don't start a sentence with "Additionally", "Moreover", or
-  "Furthermore". Don't end one with "..., allowing you to" or "..., ensuring that".
+- Use periods or commas to separate prose clauses. Keep em dashes out of authored prose; an en
+  dash, a spaced hyphen, or parentheses must not become a substitute.
+- Use a colon to introduce a list or example. For a connection between two assertions, use a
+  sentence or a conjunction.
+- Use straight quotation marks and apostrophes, sentence case headings, and the serial comma.
+  Keep proper names and identifiers in their exact case.
+- Use bold for a needed emphasis or a short label, not for every name. A list label must add
+  information instead of repeating the sentence. Write it as "**Label.** New information."
+- Keep decorative emoji out of headings, bullets, and prose. The preservation rules above apply
+  to literal output and quotations.
 
 ### Terminology
 
@@ -240,6 +266,7 @@ first column, and never a word from its second column. The terms that drift most
 Don't add a synonym because it reads better in one sentence. If a page needs a term the lock doesn't
 have, ask the user. If the lock disagrees with what the code, the binaries, or `decisions.md` call
 something, ask the user which one wins. Don't silently follow the lock into a word nobody else uses.
+A style rule about metaphors does not rename a defined Box term.
 
 ### Examples
 
@@ -263,14 +290,14 @@ because a grep doesn't catch a lexer error. No ASCII art.
 
 ## Layer 5: Authenticity
 
-After the draft, read it for signs that no person made a choice.
+Read the draft as a whole after checking individual sentences.
 
-- **Structural sameness.** If every section has the same shape (intro sentence, detail, summary
-  sentence), change some.
-- **Visible judgment.** Make a recommendation: write "use X", not "you can use X or Y".
-- **Cut by altitude, not by a percentage.** Remove detail that belongs to another page, sentences
-  that restate what the reader knows, transitions a heading already does, and summaries of the
-  paragraph above. Keep what this page's reader needs, even when the page stays long.
+- Let each section's content determine its shape. Remove repeated introductions and summaries;
+  keep parallel structure when it helps compare real alternatives.
+- When the task needs a recommendation, name the choice and the evidence for it. Reference pages
+  state the contract.
+- Cut repeated ideas and detail outside the page's purpose. Keep every distinct condition and
+  limit when rewriting. Word count is not a completion criterion.
 
 ## Readers that are people and readers that are agents
 
@@ -298,18 +325,11 @@ The page skeletons are in [`page-templates.md`](./page-templates.md).
 
 ## Self-check
 
-1. The page is in the right guide, and its content type is classified.
-2. The structure follows the subject, and each section has one job.
-3. Every detail is at this page's altitude, or it's a clause and a link.
-4. Each section opens with what the reader needs first.
-5. Read aloud, every sentence sounds like a person said it.
-6. User guide: each sentence describes what is, and no sentence explains why unless the reason
-   changes the action.
-7. Design guide: a test backs each claim, the page names no test, and each reason links a decision
-   anchor.
-8. No word from the list of words not to use, no em-dash, and no emoji.
-9. The terminology matches the lock, and each clash with the code went to the user, or is listed
-   as an open question.
-10. The examples are complete, realistic, and verified.
-11. Each diagram shows the main path and compiles with `mmdc`.
-12. The page stands alone, and it's cut.
+Read every paragraph against all the rules in Layers 4 and 5, including the content-type rules.
+Every finding needs an edit or a reason to keep the text. For a rewrite, compare each assertion
+with the original. Report suspected factual errors separately from wording changes.
+
+Then check placement, structure, terminology, examples, and whether the page stands alone.
+The skills run the mechanical checks separately. The prose script catches only some vocabulary
+and punctuation patterns; a clean run does not prove readability or preservation of meaning.
+The reviewer makes those judgments.

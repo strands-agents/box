@@ -575,6 +575,7 @@ fn vocabulary_term(value: &str) -> &str {
 /// Any other declaring namespace **is** the category, because the term after it is server-supplied
 /// text: `alpha::Action::"read"` gives `alpha`, the server, and a tool a server chose to call
 /// `fs:read` still gives `alpha` rather than impersonating the filesystem lane.
+/// `Tool::git::Action::"push"` gives `Tool::git`, the tool grammar.
 fn action_category(action: &str) -> &str {
     let term = vocabulary_term(action);
     fn group(term: &str) -> &str {
@@ -582,7 +583,9 @@ fn action_category(action: &str) -> &str {
     }
     match action.split_once("::") {
         Some((BOX_NAMESPACE, _)) => group(term),
-        Some((namespace, _)) if !namespace.is_empty() => namespace,
+        Some((namespace, _)) if !namespace.is_empty() => action
+            .split_once("::Action::")
+            .map_or(namespace, |(declaring, _)| declaring),
         _ => group(term),
     }
 }
@@ -1049,6 +1052,18 @@ mod tests {
             Some("read")
         );
         assert_eq!(text_of(&per_tool, CATEGORY).as_deref(), Some("alpha"));
+        let grammar = DecisionRecord::deny(
+            r#"Tool::git::Action::"push""#,
+            "/usr/bin/git",
+            "no_push",
+            "forbidden",
+        )
+        .attributes();
+        assert_eq!(
+            text_of(&grammar, "strands.box.policy.action").as_deref(),
+            Some("push")
+        );
+        assert_eq!(text_of(&grammar, CATEGORY).as_deref(), Some("Tool::git"));
 
         // An enforcement gate has no attribution, so the rule it was reached by supplies the name.
         let gate = DecisionRecord::deny(

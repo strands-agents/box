@@ -166,6 +166,8 @@ pub struct RuntimeMcpBox {
     name: String,
     /// `[tool.<label>]` tables the box declares, as `(label, table)`.
     tools: Vec<(String, String)>,
+    /// `[agent] env` entries beside `HOME`, as `(name, value)`.
+    agent_env: Vec<(String, String)>,
     /// Each written workspace's stdio servers, oldest first.
     declared: std::cell::RefCell<Vec<DeclaredCommands>>,
     /// The index in `declared` of the workspace the run that owns the box started from.
@@ -197,6 +199,7 @@ impl RuntimeMcpBox {
             control,
             name: name.to_string(),
             tools: Vec::new(),
+            agent_env: Vec::new(),
             declared: std::cell::RefCell::new(Vec::new()),
             addressed: std::cell::Cell::new(None),
         }
@@ -209,6 +212,11 @@ impl RuntimeMcpBox {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .expect("make the operator program executable");
         path
+    }
+
+    /// Add one `[agent] env` entry beside `HOME`.
+    pub fn set_agent_env(&mut self, name: &str, value: &str) {
+        self.agent_env.push((name.to_string(), value.to_string()));
     }
 
     /// Declare one `[tool.<label>]` table.
@@ -505,6 +513,11 @@ while True:
         // a directory of the fixture's, granted read and write, where the workload leaves its
         // markers.
         let agent_home = self.box_home().display().to_string();
+        let agent_env: String = self
+            .agent_env
+            .iter()
+            .map(|(name, value)| format!(", {name} = {value:?}"))
+            .collect();
         // The contained MCP leaf must READ its own server script (it lives in operator-bin, which the
         // shebang's python opens) and WRITE its lifecycle markers into the control dir. Without these
         // grants the leaf dies at startup under macOS Seatbelt ("Operation not permitted" opening the
@@ -532,7 +545,7 @@ while True:
         let mut config = format!(
             "name = {:?}\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\n\
              [agent]\ncommand = [\"/bin/bash\", \"-c\", {workload}]\nworkspace = {:?}\n\
-             env = {{ HOME = {agent_home:?} }}\n\
+             env = {{ HOME = {agent_home:?}{agent_env} }}\n\
              [agent.filesystem]\nread = [{agent_home:?}]\nwrite = [{agent_home:?}]\n",
             self.name,
             self.root().display().to_string(),
@@ -599,16 +612,12 @@ while True:
                 server.name,
             ));
             if cfg!(target_os = "linux") {
-                let mut files = Vec::new();
+                let mut files = vec![fixture_python()];
                 if matches!(
                     server.behavior,
                     DiscoveryBehavior::FailAfterRelease | DiscoveryBehavior::Hang
                 ) {
                     files.push(fixture_sleep());
-                }
-                if server.executable != server.program {
-                    // An env launcher does not discover its script's interpreter.
-                    files.push(fixture_python());
                 }
                 if server.contain_egress == Some(false) {
                     files.extend(
@@ -625,6 +634,17 @@ while True:
             }
         }
         std::fs::write(dot.join("box.toml"), config).expect("write box.toml");
+    }
+
+    pub fn set_argument_wildcards(&self, server: &str, enabled: bool) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]
+            .as_table_mut()
+            .unwrap()
+            .insert("argument_wildcards".into(), toml::Value::Boolean(enabled));
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
 
     pub fn plant_generated_schema_artifacts(&self, schema: &str) -> (PathBuf, PathBuf, PathBuf) {

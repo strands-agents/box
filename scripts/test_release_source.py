@@ -221,7 +221,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
                 names = ["SHA256SUMS.txt", f"box-{tag}-aarch64-apple-darwin.tar.gz"]
                 if linux_asset:
-                    names.append(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz")
+                    names.append(f"box-{tag}-linux-arm64.tar.gz")
                 if extra_asset:
                     names.append(f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz")
                 gh = root / "gh"
@@ -289,7 +289,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 release = root / "release"
                 expected = {f"box-{tag}-aarch64-apple-darwin.tar.gz", "SHA256SUMS.txt"}
                 if publish_linux:
-                    expected.add(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz")
+                    expected.add(f"box-{tag}-linux-arm64.tar.gz")
                 self.assertEqual({path.name for path in release.iterdir()}, expected)
                 checksums = (release / "SHA256SUMS.txt").read_text()
                 self.assertEqual(len(checksums.splitlines()), 2 if publish_linux else 1)
@@ -298,9 +298,16 @@ class ReleaseBundleTests(unittest.TestCase):
                     capture_output=True, text=True,
                 )
                 self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+                if publish_linux:
+                    self.assertEqual(
+                        (release / f"box-{tag}-linux-arm64.tar.gz").read_bytes(),
+                        (assets / f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz").read_bytes(),
+                    )
+                    self.assertNotIn("unknown", checksums)
                 body = (root / "body.md").read_text()
-                self.assertEqual("EXPERIMENTAL_LINUX_SUPPORT=TRUE" in body, publish_linux)
-                self.assertEqual(f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz" in body, publish_linux)
+                self.assertNotIn("unknown-linux", body)
+                self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
+                self.assertEqual(f"box-{tag}-linux-arm64.tar.gz" in body, publish_linux)
                 self.assertEqual("sha256sum --check box-linux.sha256" in body, publish_linux)
                 self.assertEqual("Package availability does not establish security acceptance" in body, publish_linux)
                 self.assertEqual("## Linux ARM64" in body, publish_linux and not preview)

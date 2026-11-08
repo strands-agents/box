@@ -101,6 +101,7 @@ fn a_canonical_bundle_is_ready_without_an_mcp_schema() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the canonical fast path must install before discovery"
     );
@@ -137,6 +138,7 @@ fn an_empty_authored_bundle_is_ready_and_denies_by_default() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow()
     );
     authority
@@ -180,18 +182,20 @@ permit(principal, action == alpha::Action::"write", resource);
     .observed_by(observer.clone());
 
     let arguments = json!({"path": "/workspace/input"});
-    let pending_tool = authority.decide(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        &Request::McpCall {
-            server: "alpha",
-            method: "tools/call",
-            tool: Some("read"),
-            prompt: None,
-            uri: None,
-            arguments: Some(&arguments),
-        },
-    );
+    let pending_tool = authority
+        .decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::McpCall {
+                server: "alpha",
+                method: "tools/call",
+                tool: Some("read"),
+                prompt: None,
+                uri: None,
+                arguments: Some(&arguments),
+            },
+        )
+        .0;
     assert!(
         matches!(
             pending_tool,
@@ -228,6 +232,7 @@ permit(principal, action == alpha::Action::"write", resource);
                     arguments: None,
                 },
             )
+            .0
             .is_allow(),
         "tools/list is decided by the schema-independent subset while discovering"
     );
@@ -257,8 +262,77 @@ permit(principal, action == alpha::Action::"write", resource);
                     arguments: Some(&json!({})),
                 },
             )
+            .0
             .is_allow(),
         "a degraded server's tool call is denied fail-closed after completion"
+    );
+}
+
+/// A late listing that completes the bundle after discovery finished lifts the degraded mark.
+#[test]
+fn a_complete_bundle_after_completion_clears_the_degraded_mark() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "relist.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["alpha".to_string()],
+        "the first listing never staged, so the server degrades"
+    );
+    assert_eq!(
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("the later listing is not a terminal fault"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        },
+        "the later listing completes the bundle"
+    );
+
+    let forbidden = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({"path": "/workspace/secret"}),
+    );
+    assert!(
+        matches!(
+            forbidden,
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the installed forbid must refuse the path it names, and the refusal must come from that \
+         forbid rather than from a stale degraded mark: {forbidden:?}"
+    );
+
+    let permitted = authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({"path": "/workspace/input"}),
+    );
+    assert!(
+        matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
+        "a path the forbid does not name must stay allowed by the staged per-tool permit itself, \
+         not refused by a stale mark and not riding the coarse grant: {permitted:?}"
     );
 }
 
@@ -308,8 +382,8 @@ when { context.input.env == "prod" };
         "deploy",
         &json!({"env": "prod"}),
     );
-    // Not merely "not allowed": the refusal is terminal, not the transient hold a pending tool
-    // takes, because no later schema can make this rule enforceable.
+    // Not merely "not allowed": the refusal is the degraded mark's, not the transient hold a
+    // pending tool takes, because discovery finished without this rule.
     assert!(
         matches!(
             decision,
@@ -366,9 +440,9 @@ when { context.input.env == "prod" };
 }
 
 /// The two refusals a tool can take are not interchangeable. A tool still waiting for its schema
-/// takes the transient `PolicyPending`, and only a tool whose rule can never stage takes the
-/// terminal `NoMatch`. An operator reads the difference, and a retry is right for one and wrong
-/// for the other.
+/// takes the transient `PolicyPending`, and only a tool whose rule had not staged when discovery
+/// finished takes the terminal `NoMatch`. An operator reads the difference, and a retry is right
+/// for one and wrong for the other.
 #[test]
 fn a_tool_awaiting_its_schema_is_held_and_a_degraded_one_is_refused() {
     let history = tempfile::tempdir().expect("history directory");
@@ -425,7 +499,7 @@ when { context.input.env == "prod" };
                 ..
             }
         ),
-        "once the rule can never stage the refusal is terminal: {refused:?}"
+        "once discovery finishes without the rule the refusal is terminal: {refused:?}"
     );
 }
 
@@ -1515,6 +1589,202 @@ permit(principal, action == alpha::Action::"foo\"bar", resource);
 }
 
 #[test]
+fn a_union_argument_is_decided_by_the_policy() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "deepwiki" };
+forbid(principal, action == deepwiki::Action::"ask_wiki_question", resource)
+when {
+    (context.input.repoName has typeChoice0 && context.input.repoName.typeChoice0 == "private/repo")
+    || (context.input.repoName has typeChoice1 && context.input.repoName.typeChoice1.contains("private/repo"))
+};
+permit(principal, action == deepwiki::Action::"ask_wiki_question", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [{
+                "name": "ask_wiki_question",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repoName": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"items": {"type": "string"}, "type": "array"}
+                            ]
+                        },
+                        "question": {"type": "string"}
+                    },
+                    "required": ["repoName", "question"]
+                }
+            }]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "deepwiki",
+                generate_mcp_schema("deepwiki", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |repo_name: serde_json::Value| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "deepwiki",
+            "ask_wiki_question",
+            &json!({"repoName": repo_name, "question": "How does it work?"}),
+        )
+    };
+    assert!(
+        decide(json!("strands-agents/sdk-python")).is_allow(),
+        "a bare string member is decided by the permit"
+    );
+    assert!(
+        decide(json!(["strands-agents/sdk-python", "strands-agents/box"])).is_allow(),
+        "an array member is decided by the permit"
+    );
+    for forbidden in [
+        json!("private/repo"),
+        json!(["strands-agents/box", "private/repo"]),
+    ] {
+        assert!(
+            matches!(
+                decide(forbidden.clone()),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the forbid reads the member {forbidden}"
+        );
+    }
+    for outside in [json!(7), json!({"typeChoice0": "strands-agents/box"})] {
+        assert!(
+            matches!(
+                decide(outside.clone()),
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a value outside the union is refused: {outside}"
+        );
+    }
+}
+
+#[test]
+fn a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "events" };
+forbid(principal, action == events::Action::"list_events", resource)
+when { context.input.since has typeChoice0 && context.input.since.typeChoice0 < datetime("2024-01-01") };
+permit(principal, action == events::Action::"list_events", resource);
+permit(principal, action == events::Action::"count_events", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [
+                {
+                    "name": "list_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "string"}
+                                ]
+                            }
+                        },
+                        "required": ["since"]
+                    }
+                },
+                {
+                    "name": "count_events",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "null"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "events",
+                generate_mcp_schema("events", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |tool: &str, since: &str| {
+        authority.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "events",
+            tool,
+            &json!({"since": since}),
+        )
+    };
+    assert!(
+        decide("count_events", "2025-06-01T00:00:00Z").is_allow(),
+        "a datetime fills the datetime member of a nullable datetime"
+    );
+    assert!(
+        !decide("list_events", "2023-06-01T00:00:00Z").is_allow(),
+        "a rule on the datetime member is not bypassed by the string member"
+    );
+    assert!(
+        decide("list_events", "yesterday").is_allow(),
+        "a string that is not a datetime fills only the string member"
+    );
+}
+
+#[test]
 fn a_held_pending_tool_decision_appends_no_durable_event() {
     // A `tools/call` held because its typed action is still staging returns a transient
     // `PolicyPending` without evaluating the engine, so it records no event. The subset commit at
@@ -1535,18 +1805,20 @@ permit(principal, action == alpha::Action::"read", resource);
 
     let arguments = json!({"path": "/workspace/input"});
     assert!(matches!(
-        authority.decide(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            &Request::McpCall {
-                server: "alpha",
-                method: "tools/call",
-                tool: Some("read"),
-                prompt: None,
-                uri: None,
-                arguments: Some(&arguments),
-            },
-        ),
+        authority
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::McpCall {
+                    server: "alpha",
+                    method: "tools/call",
+                    tool: Some("read"),
+                    prompt: None,
+                    uri: None,
+                    arguments: Some(&arguments),
+                },
+            )
+            .0,
         Decision::Deny {
             reason: DenyReason::PolicyPending,
             ..
@@ -1620,24 +1892,27 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "a schema-independent request is served by the subset while discovering"
     );
     let beta_arguments = json!({"value": 7});
     assert!(
         matches!(
-            authority.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::McpCall {
-                    server: "beta",
-                    method: "tools/call",
-                    tool: Some("write"),
-                    prompt: None,
-                    uri: None,
-                    arguments: Some(&beta_arguments),
-                },
-            ),
+            authority
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::McpCall {
+                        server: "beta",
+                        method: "tools/call",
+                        tool: Some("write"),
+                        prompt: None,
+                        uri: None,
+                        arguments: Some(&beta_arguments),
+                    },
+                )
+                .0,
             Decision::Deny {
                 reason: DenyReason::PolicyPending,
                 ..
@@ -1660,6 +1935,7 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                     arguments: Some(&alpha_arguments),
                 },
             )
+            .0
             .is_allow(),
         "the staged Alpha tool is enforced during discovery"
     );
@@ -1686,6 +1962,7 @@ fn cumulative_schemas_hold_each_pending_tool_until_it_stages() {
                     arguments: Some(&beta_arguments),
                 },
             )
+            .0
             .is_allow(),
         "the Beta tool is enforced once its schema stages"
     );
@@ -1719,18 +1996,20 @@ fn a_fragment_staged_under_another_server_is_rejected_without_state_change() {
     // being held transiently (there is no read-only `finish` anymore — it degrades and completes).
     assert!(
         matches!(
-            authority.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::McpCall {
-                    server: "alpha",
-                    method: "tools/call",
-                    tool: Some("read"),
-                    prompt: None,
-                    uri: None,
-                    arguments: Some(&json!({ "path": "/x" })),
-                },
-            ),
+            authority
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::McpCall {
+                        server: "alpha",
+                        method: "tools/call",
+                        tool: Some("read"),
+                        prompt: None,
+                        uri: None,
+                        arguments: Some(&json!({ "path": "/x" })),
+                    },
+                )
+                .0,
             Decision::Deny {
                 reason: DenyReason::PolicyPending,
                 ..
@@ -2027,6 +2306,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                     &Principal::agent(),
                     &shell_request(),
                 )
+                .0
                 .is_allow()
         );
     }
@@ -2051,18 +2331,20 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
     assert!(reason.contains("requires namespace"), "{reason}");
     let rejected_arguments = json!({"path": 7});
     assert!(matches!(
-        authority.decide(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            &Request::McpCall {
-                server: "bad",
-                method: "tools/call",
-                tool: Some("read"),
-                prompt: None,
-                uri: None,
-                arguments: Some(&rejected_arguments),
-            },
-        ),
+        authority
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::McpCall {
+                    server: "bad",
+                    method: "tools/call",
+                    tool: Some("read"),
+                    prompt: None,
+                    uri: None,
+                    arguments: Some(&rejected_arguments),
+                },
+            )
+            .0,
         Decision::Deny {
             reason: DenyReason::InternalFault,
             ..
@@ -2075,6 +2357,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the same ready authority must remain operational after rejection"
     );
@@ -2122,6 +2405,7 @@ fn an_incompatible_schema_cannot_change_a_ready_authority_or_later_staging() {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the prior authority must remain operational"
     );
@@ -2283,15 +2567,13 @@ fn partial_staging_retains_the_unchanged_authority_and_adds_the_staged_tool() {
             &path,
         )
         .expect("the existing authority installs");
-        assert!(
-            authority
-                .decide(&governed, &principal, &http_request())
-                .is_allow()
-        );
+        let (decision, request_id) = authority.decide(&governed, &principal, &http_request());
+        assert!(decision.is_allow());
         authority
             .record(
                 &governed,
                 &principal,
+                &request_id.expect("the request records"),
                 &Outcome::Http {
                     host: "api.example.com",
                     port: 443,
@@ -2439,10 +2721,20 @@ fn discovering_record_observes_an_outcome() {
         ],
         &path,
     );
+    let (decision, request_id) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &http_request(),
+    );
+    assert!(
+        decision.is_allow(),
+        "the canonical request is admitted while discovering"
+    );
     authority
         .record(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::Http {
                 host: "api.example.com",
                 port: 443,
@@ -2469,8 +2761,8 @@ fn discovering_record_observes_an_outcome() {
     .expect("the records scan");
     assert_eq!(
         after_events,
-        before_events + 1,
-        "the outcome recorded while discovering must append to durable history"
+        before_events + 2,
+        "the request and outcome recorded while discovering must append to durable history"
     );
 }
 
@@ -2609,6 +2901,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the recovered namespaced request must satisfy the temporal forbid"
     );
@@ -2740,6 +3033,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "the Box action identity must start with empty temporal state"
     );
@@ -2758,6 +3052,7 @@ when temporal {
                     operation: policy::FsOperation::ReadContent,
                 },
             )
+            .0
             .is_allow(),
         "the new fixed request records under Box"
     );
@@ -2768,6 +3063,7 @@ when temporal {
                 &Principal::agent(),
                 &shell_request(),
             )
+            .0
             .is_allow(),
         "new Box temporal state must govern later requests"
     );
@@ -2784,6 +3080,7 @@ when temporal {
                     operation: policy::FsOperation::WriteContent,
                 },
             )
+            .0
             .is_allow(),
         "the namespaced temporal identity must start empty"
     );
@@ -2816,15 +3113,13 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
             &path,
         )
         .expect("budget opens");
-        assert!(
-            authority
-                .decide(&governed, &principal, &http_request())
-                .is_allow()
-        );
+        let (decision, request_id) = authority.decide(&governed, &principal, &http_request());
+        assert!(decision.is_allow());
         authority
             .record(
                 &governed,
                 &principal,
+                &request_id.expect("the request records"),
                 &Outcome::Http {
                     host: "api.example.com",
                     port: 443,
@@ -2871,6 +3166,7 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
     assert!(
         !authority
             .decide(&governed, &principal, &http_request())
+            .0
             .is_allow(),
         "the unchanged temporal policy must retain its exhausted budget"
     );
@@ -2996,5 +3292,237 @@ fn an_existing_store_deletes_obsolete_policies_before_replacing_the_schema() {
     assert!(
         !batches.is_empty(),
         "the transition must contain at least one durable batch"
+    );
+}
+
+/// A tool on each of two servers, held while either server's schema is missing.
+const TWO_SERVERS: &str = r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+permit(principal, action, resource)
+when { action == alpha::Action::"read" || action == beta::Action::"read" };
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+forbid(principal, action == beta::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+"#;
+
+/// One server's `read` of `path`, through the per-tool refinement.
+fn read(authority: &PolicyEngine, server: &str, path: &str) -> Decision {
+    authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        server,
+        "read",
+        &json!({ "path": path }),
+    )
+}
+
+/// With two schemas missing, a late list from either server is `Rejected` in either order, and
+/// both servers keep their refusal.
+#[test]
+fn two_missing_schemas_do_not_recover_from_a_relist() {
+    for order in [["alpha", "beta"], ["beta", "alpha"]] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source("two-servers.dw", TWO_SERVERS)],
+            &history.path().join("dogwood.redb"),
+        );
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["alpha".to_string(), "beta".to_string()],
+            "neither listing staged, so both servers degrade"
+        );
+
+        for server in order {
+            let other = if server == "alpha" { "beta" } else { "alpha" };
+            let relist = authority
+                .stage_mcp_schema(server, generated(server, "read", "path", "string"))
+                .expect("the later listing is not a terminal fault");
+            assert!(
+                matches!(
+                    &relist,
+                    SchemaStage::Rejected { reason }
+                        if reason.contains(&format!("{other}::Action::\"read\""))
+                ),
+                "{order:?}: {other}'s schema is missing, so {server}'s relist is refused and its \
+                 schema is dropped with it: {relist:?}"
+            );
+            for held in ["alpha", "beta"] {
+                let call = read(&authority, held, "/workspace/secret");
+                assert!(
+                    matches!(
+                        call,
+                        Decision::Deny {
+                            reason: DenyReason::NoMatch,
+                            ..
+                        }
+                    ),
+                    "{order:?}: after {server}'s relist, {held}'s tool keeps the degraded \
+                     refusal rather than riding the coarse grant past its forbid: {call:?}"
+                );
+            }
+        }
+    }
+}
+
+/// One rule that decides a tool on each of two servers holds both while one schema is missing, and
+/// the late list that supplies that schema recovers both, in either order.
+#[test]
+fn a_late_list_that_supplies_the_last_schema_recovers_both_servers() {
+    for [early, late] in [["alpha", "beta"], ["beta", "alpha"]] {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = staged(
+            vec![source("two-servers.dw", TWO_SERVERS)],
+            &history.path().join("dogwood.redb"),
+        );
+        assert_eq!(
+            authority
+                .stage_mcp_schema(early, generated(early, "read", "path", "string"))
+                .expect("the listing is not a terminal fault"),
+            SchemaStage::Accepted {
+                authority_ready: false,
+            },
+            "{early}'s schema stages during discovery, and the shared permit still waits for \
+             {late}'s"
+        );
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling");
+        for server in ["alpha", "beta"] {
+            let call = read(&authority, server, "/workspace/input");
+            assert!(
+                matches!(
+                    call,
+                    Decision::Deny {
+                        reason: DenyReason::NoMatch,
+                        ..
+                    }
+                ),
+                "{early} early: {server}'s tool is held whether or not its own schema arrived: \
+                 {call:?}"
+            );
+        }
+
+        assert_eq!(
+            authority
+                .stage_mcp_schema(late, generated(late, "read", "path", "string"))
+                .expect("the later listing is not a terminal fault"),
+            SchemaStage::Accepted {
+                authority_ready: true,
+            },
+            "{late}'s schema is the last one the bundle needs"
+        );
+        for server in ["alpha", "beta"] {
+            let forbidden = read(&authority, server, "/workspace/secret");
+            assert!(
+                matches!(
+                    forbidden,
+                    Decision::Deny {
+                        reason: DenyReason::Forbidden,
+                        ..
+                    }
+                ),
+                "{early} early: {server}'s forbid refuses the path it names: {forbidden:?}"
+            );
+            let permitted = read(&authority, server, "/workspace/input");
+            assert!(
+                matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
+                "{early} early: the shared permit allows {server}'s other path, and the call does \
+                 not ride the coarse grant: {permitted:?}"
+            );
+        }
+    }
+}
+
+/// A late list is refused while a schema that already staged does not match its server's rule.
+#[test]
+fn a_late_list_is_refused_while_a_staged_schema_does_not_match_its_rule() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source("two-servers.dw", TWO_SERVERS)],
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("alpha", generated("alpha", "read", "target", "string"))
+        .expect("the listing is not a terminal fault");
+    authority
+        .finish_mcp_discovery()
+        .expect("completion degrades rather than fataling");
+
+    let relist = authority
+        .stage_mcp_schema("beta", generated("beta", "read", "path", "string"))
+        .expect("the later listing is not a terminal fault");
+    assert!(
+        matches!(
+            &relist,
+            SchemaStage::Rejected { reason } if reason.contains("alpha::Action::\"read\"")
+        ),
+        "beta supplies the only missing schema, but alpha's forbid reads an argument alpha's schema \
+         does not declare: {relist:?}"
+    );
+    for held in ["alpha", "beta"] {
+        let call = read(&authority, held, "/workspace/secret");
+        assert!(
+            matches!(
+                call,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "{held}'s tool keeps the degraded refusal: {call:?}"
+        );
+    }
+}
+
+/// A late list refused for a namespace collision leaves every degraded refusal in place.
+#[test]
+fn a_late_list_refused_for_a_namespace_collision_keeps_the_degraded_mark() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "collision.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+permit(principal, action == a_b::Action::"read", resource);
+forbid(principal, action == beta::Action::"read", resource)
+when { context.input.path == "/workspace/secret" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("a-b", generated("a-b", "read", "path", "string"))
+        .expect("the listing is not a terminal fault");
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["beta".to_string()]
+    );
+
+    let relist = authority
+        .stage_mcp_schema("a.b", generated("a.b", "read", "path", "string"))
+        .expect("the later listing is not a terminal fault");
+    assert!(
+        matches!(
+            &relist,
+            SchemaStage::Rejected { reason } if reason.contains("same Cedar namespace")
+        ),
+        "a.b and a-b share the namespace a_b, so a.b's list is refused: {relist:?}"
+    );
+    let call = read(&authority, "beta", "/workspace/secret");
+    assert!(
+        matches!(
+            call,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "the refused list must not lift beta's degraded refusal, or beta's read rides the coarse \
+         grant past its forbid: {call:?}"
     );
 }

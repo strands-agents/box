@@ -10,6 +10,8 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 - [`monty.md`](./monty.md): the Python that a box runs, its file operations, `fetch()`, and the rules to write.
 - [`shell.md`](./shell.md): Strands Shell, the agent's shell, with what runs where, the fields a rule reads, and the exit statuses.
 - [`shell-policy.md`](./shell-policy.md): write policy for the agent's shell commands, the programs it runs, and the files they touch.
+- [`tool-grammars.md`](./tool-grammars.md): experimental. Describe a program such as `git` as actions
+  and effects, and write one rule for every spelling of a command.
 - [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, what each record carries, and how to read a records file.
 - [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
@@ -36,9 +38,12 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 - [`tutorials/eks.md`](./tutorials/eks.md): build and run a Box coding workload on Amazon EKS, then inspect its permitted operations and refusals.
 - [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a Strands or LangChain shipment agent to AgentCore Runtime with Box.
+- [`tutorials/google-cloud.md`](./tutorials/google-cloud.md): run a Strands agent with Gemini on Google Compute Engine and verify its deployment retry cooldown.
 
 ## Reference
 
+- [`cloud-deployments.md`](./cloud-deployments.md): Linux deployment requirements and configuration guidance
+  for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box

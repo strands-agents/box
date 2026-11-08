@@ -1,4 +1,4 @@
-# expect: tool grammar <file>: `program = "/usr/bin/git"` must be one program name, not a path
+# expect: `<grammar>.program` is "/usr/bin/git", and it must be one program name, not a path
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

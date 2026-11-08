@@ -58,7 +58,7 @@ effects = ["force_push", "network"]
 argv = ["git", "-C", "app", "push", "-f", "origin", "main"]
 action = "push"
 fields = { directory = "app", force = true, refspec = ["main"], remote = "origin" }
-effects = ["force_push", "network"]
+effects = ["force_push", "network", "run_program", "write_file"]
 
 [[case]]
 argv = ["git", "push", "-n", "-f", "origin", "main"]
@@ -142,7 +142,7 @@ action = "unmodeled"
 argv = ["git", "-c", "core.sshCommand=/tmp/x", "push", "origin", "main"]
 action = "push"
 fields = { config = ["core.sshCommand=/tmp/x"], refspec = ["main"], remote = "origin" }
-effects = ["network", "override_config"]
+effects = ["network", "override_config", "run_program", "skip_hooks"]
 
 # `--exec-path` not declared on purpose
 [[case]]
@@ -159,18 +159,21 @@ action = "unmodeled"
 argv = ["git", "-Capp", "status"]
 action = "status"
 fields = { directory = "app" }
+effects = ["run_program", "write_file"]
 
 # The value is taken before the command word
 [[case]]
 argv = ["git", "-C", "push", "status"]
 action = "status"
 fields = { directory = "push" }
+effects = ["run_program", "write_file"]
 
 # The separate-word form (verified)
 [[case]]
 argv = ["git", "--git-dir", "../o/.git", "--work-tree", "../o", "log"]
 action = "log"
 fields = { git_dir = "../o/.git", work_tree = "../o" }
+effects = ["run_program", "write_file"]
 
 # Global option after the subcommand (git: "unknown switch", verified)
 [[case]]
@@ -446,7 +449,7 @@ effects = ["network"]
 argv = ["git", "--no-pager", "-c", "color.ui=always", "log"]
 action = "log"
 fields = { config = ["color.ui=always"], no_pager = true }
-effects = ["override_config"]
+effects = ["override_config", "run_program", "skip_hooks"]
 
 # An unknown subcommand
 [[case]]
@@ -478,7 +481,7 @@ action = "unmodeled"
 argv = ["git", "-C", "app", "push", "-uf", "origin", "main"]
 action = "push"
 fields = { directory = "app", force = true, refspec = ["main"], remote = "origin", set_upstream = true }
-effects = ["force_push", "network"]
+effects = ["force_push", "network", "run_program", "write_file"]
 
 # A shortened long option
 [[case]]
@@ -507,3 +510,115 @@ action = "unmodeled"
 [[case]]
 argv = ["git", "+stable", "status"]
 action = "unmodeled"
+
+# A forced delete is a delete: `+:<ref>` deletes the remote ref (verified)
+[[case]]
+argv = ["git", "push", "origin", "+:refs/heads/victim"]
+action = "push"
+fields = { refspec = ["+:refs/heads/victim"], remote = "origin" }
+effects = ["delete_remote_ref", "force_push", "network"]
+
+# `core.hooksPath` skips the hooks, and other keys name a program to run (verified)
+[[case]]
+argv = ["git", "-c", "core.hooksPath=/var/empty", "commit", "--allow-empty", "-m", "x"]
+action = "commit"
+fields = { allow_empty = true, config = ["core.hooksPath=/var/empty"], message = ["x"] }
+effects = ["override_config", "run_program", "skip_hooks"]
+
+[[case]]
+argv = ["git", "--config-env", "core.hooksPath=EMPTY", "commit", "-m", "x"]
+action = "commit"
+fields = { config_env = ["core.hooksPath=EMPTY"], message = ["x"] }
+effects = ["override_config", "run_program", "skip_hooks"]
+
+# `-U` takes only an attached value, so `--output` stays an option (verified)
+[[case]]
+argv = ["git", "diff", "-U", "--output=/tmp/f"]
+action = "diff"
+fields = { output = "/tmp/f", unified = "" }
+effects = ["write_file"]
+
+[[case]]
+argv = ["git", "diff", "-U5"]
+action = "diff"
+fields = { unified = "5" }
+
+# `-U 5` reads `5` as a commit, as git does (verified)
+[[case]]
+argv = ["git", "diff", "-U", "5"]
+action = "diff"
+fields = { commit = ["5"], unified = "" }
+
+# `--merge` resets a staged change that the working tree also holds (verified)
+[[case]]
+argv = ["git", "reset", "--merge", "HEAD"]
+action = "reset"
+fields = { commit = "HEAD", merge = true }
+effects = ["discard_changes"]
+
+# `--keep` can drop a staged change that the working tree no longer holds (verified)
+[[case]]
+argv = ["git", "reset", "--keep", "HEAD"]
+action = "reset"
+fields = { commit = "HEAD", keep = true }
+effects = ["discard_changes"]
+
+# `switch -C` resets an existing branch and loses its commits (verified)
+[[case]]
+argv = ["git", "switch", "-C", "topic", "main"]
+action = "switch"
+fields = { force_create = "topic", target = "main" }
+effects = ["rewrite_history"]
+
+# `--work-tree` makes git write files there (verified)
+[[case]]
+argv = ["git", "--git-dir=.git", "--work-tree=/tmp/elsewhere", "switch", "topic"]
+action = "switch"
+fields = { git_dir = ".git", target = "topic", work_tree = "/tmp/elsewhere" }
+effects = ["run_program", "write_file"]
+
+# A `+<src>:<dst>` refspec force-updates a local ref (verified)
+[[case]]
+argv = ["git", "fetch", "origin", "+main:local"]
+action = "fetch"
+fields = { refspec = ["+main:local"], remote = "origin" }
+effects = ["force_fetch", "network"]
+
+[[case]]
+argv = ["git", "pull", "origin", "+main:local"]
+action = "pull"
+fields = { refspec = ["+main:local"], remote = "origin" }
+effects = ["force_fetch", "network"]
+
+[[case]]
+argv = ["git", "fetch", "-f", "origin", "main:local"]
+action = "fetch"
+fields = { force = true, refspec = ["main:local"], remote = "origin" }
+effects = ["force_fetch", "network"]
+
+# `+<src>` with no destination names no local ref. The configured refspec is not seen (L1)
+[[case]]
+argv = ["git", "fetch", "origin", "+main"]
+action = "fetch"
+fields = { refspec = ["+main"], remote = "origin" }
+effects = ["network"]
+
+# `-s <name>` runs `git-merge-<name>` from PATH (verified)
+[[case]]
+argv = ["git", "rebase", "-s", "evil", "main"]
+action = "rebase"
+fields = { strategy = "evil", upstream = "main" }
+effects = ["rewrite_history", "run_program"]
+
+[[case]]
+argv = ["git", "pull", "-s", "evil", "origin"]
+action = "pull"
+fields = { remote = "origin", strategy = "evil" }
+effects = ["network", "run_program"]
+
+# A dry run pushes nothing, so the pre-push hook that `--no-verify` skips guards nothing
+[[case]]
+argv = ["git", "push", "-n", "--no-verify", "origin", "main"]
+action = "push"
+fields = { dry_run = true, no_verify = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
