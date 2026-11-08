@@ -192,7 +192,9 @@ where
         let head = head
             .take()
             .ok_or_else(|| ProxyError::Intercept("HTTP head exceeds limit".to_string()))?;
-        let mut response = handle(request, head).await?;
+        let mut response = handle(request, head).await.inspect_err(|error| {
+            eprintln!("strands-box: warning: egress request failed: {error}")
+        })?;
         if let Some(permit) = response.release.take() {
             release.set(Some((permit, writes.get().accepted)));
         }
