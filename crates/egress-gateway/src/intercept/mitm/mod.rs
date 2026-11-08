@@ -1,5 +1,6 @@
 //! The v1 MITM proxy adapter.
 
+pub(crate) mod body;
 pub(crate) mod ca;
 pub(crate) mod connect;
 mod diagnostic;
@@ -27,16 +28,15 @@ use crate::seams::Emitter;
 
 pub use handle::MitmHandle;
 
-/// Response size/content limits enforced on the response leg.
+/// Size limits for captured requests and MCP catalog responses.
 #[derive(Debug, Clone)]
 pub struct ResponseLimits {
-    /// Maximum response body bytes buffered before a `ResponseLimit` error.
+    /// Maximum captured request or processed `tools/list` body bytes before a `ResponseLimit` error.
     pub max_body_bytes: usize,
 }
 
 impl Default for ResponseLimits {
     fn default() -> Self {
-        // 16 MiB — generous for API responses, bounded so a hostile upstream cannot exhaust memory.
         Self {
             max_body_bytes: 16 * 1024 * 1024,
         }
@@ -58,7 +58,7 @@ pub struct MitmConfig {
     pub unix_socket_path: Option<PathBuf>,
     /// Where to write the public ephemeral CA cert; `None` keeps it in memory only.
     pub intercept_ca_dir: Option<PathBuf>,
-    /// Response size/content limits.
+    /// Body capture limits, which do not cap streamed responses.
     pub response_limits: ResponseLimits,
     /// An optional expected proxy session token (best-effort CONNECT check).
     pub expected_token: Option<String>,

@@ -34,8 +34,8 @@ const MAX_SCRIPT_BYTES: usize = MAX_FRAME_BYTES / 16;
 /// Bound on one framed read or write against the daemon's Shell socket.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on waiting for the daemon's Shell to answer.
-const SERVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
+/// Bound on waiting for the daemon's direct Python interpreter to answer.
+const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
@@ -378,6 +378,7 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
     if let Interpreter::Mcp { .. } = &interpreter {
         return stream_mcp(stream, interpreter).await;
     }
+    let python = matches!(interpreter, Interpreter::Python);
 
     // `InputEof` immediately after the Call, because this alias forwards no input: a harness
     // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
@@ -407,13 +408,16 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
     // while it runs.
     loop {
-        let frame =
-            tokio::time::timeout(SERVE_RESPONSE_TIMEOUT, read_frame::<Frame, _>(&mut stream))
+        let response = read_frame::<Frame, _>(&mut stream);
+        let frame = if python {
+            tokio::time::timeout(PYTHON_RESPONSE_TIMEOUT, response)
                 .await
-                .map_err(|_| timed_out("read a transport frame"))??
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed")
-                })?;
+                .map_err(|_| timed_out("read a transport frame"))?
+        } else {
+            // The broker owns the configured Shell deadline.
+            response.await
+        }?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
         match frame.body {
             Body::Output {
                 stream: which,

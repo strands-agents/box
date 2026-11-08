@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **57 names with `--all-features`, and 51 by default.** The adapter features add
+The façade exports **58 names with `--all-features`, and 52 by default.** The adapter features add
 the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
@@ -31,6 +31,7 @@ the six names in the last row.
 | `Principal` | Integration metadata for the fixed `Box::Agent::"self"` identity. |
 | `GovernedBox` | Integration metadata for the box that owns the authority. |
 | `Request`, `FsAccess`, `FsOperation` | Typed authorization request. |
+| `RequestId` | Opaque identifier returned for a recorded request and carried into its outcome. |
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
@@ -41,16 +42,16 @@ the six names in the last row.
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
-| `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, and why one is refused. |
-| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's program file and called name, and why declaring a tool is refused. |
+| `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
+| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
 | `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:
 
 ```text
 PolicyEngine::open(Vec<Policy>, &Path) -> Result<PolicyEngine, PolicyError>
-PolicyEngine::decide(&GovernedBox, &Principal, &Request<'_>) -> Decision
-PolicyEngine::record(&GovernedBox, &Principal, &Outcome<'_>) -> Result<(), PolicyError>
+PolicyEngine::decide(&GovernedBox, &Principal, &Request<'_>) -> (Decision, Option<RequestId>)
+PolicyEngine::record(&GovernedBox, &Principal, &RequestId, &Outcome<'_>) -> Result<(), PolicyError>
 PolicyEngine::effective() -> &EffectivePolicy
 ```
 
@@ -59,7 +60,11 @@ PolicyEngine::effective() -> &EffectivePolicy
 integration metadata and does not change the policy resource.
 
 `decide` observes the request into temporal history before it answers. Two identical
-calls can return different verdicts. A denied request still advances history.
+calls can return different verdicts. A denied request still advances history when its append succeeds.
+An allowed decision returns `Some(RequestId)`. Retain that token until the effect ends and pass it to `record`.
+A refusal before submission, or an unconfirmed append, returns no token.
+`RequestId::as_str()` exposes the identifier stored in the event; callers cannot construct tokens.
+A token remains valid across reload in the same engine. A separately opened engine rejects it.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 
@@ -113,7 +118,7 @@ fn open_policy(database_path: &Path) -> Result<PolicyEngine, PolicyError> {
 }
 
 fn decide(policy: &PolicyEngine) {
-    let decision = policy.decide(
+    let (decision, _request_id) = policy.decide(
         &GovernedBox::assigned("test-box"),
         &Principal::agent(),
         &Request::Connect {
@@ -384,15 +389,16 @@ out — is the only control covering this today. See the crate's `AGENTS.md` for
 ## History And Temporal Rules
 
 A `when temporal { … }` rule reads the history of completed effects. Submit each
-one with `PolicyEngine::record` after the effect happens:
+one with `PolicyEngine::record` after the effect happens, using the token from its allowed decision:
 
 ```rust
-use policy::{Delivery, GovernedBox, Outcome, PolicyEngine, PolicyError, Principal};
+use policy::{Delivery, GovernedBox, Outcome, PolicyEngine, PolicyError, Principal, RequestId};
 
-fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
+fn submit(policy: &PolicyEngine, request_id: &RequestId) -> Result<(), PolicyError> {
     policy.record(
         &GovernedBox::assigned("test-box"),
         &Principal::agent(),
+        request_id,
         &Outcome::Http {
             host: "api.github.com",
             port: 443,
@@ -405,6 +411,12 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
     )
 }
 ```
+
+Every event carries `requestId`. A request and its recorded outcome share the same nonempty string.
+Separate decisions have distinct identifiers, including identical requests that overlap in time.
+The identifier is unique within this history; its spelling is opaque.
+Older events without identifiers remain unchanged and cannot satisfy a predicate on `requestId`.
+Other facts in those events remain available until normal history pruning removes them.
 
 | Variant | Records |
 |---|---|

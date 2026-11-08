@@ -669,8 +669,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   existing file, not what the renderer emits, so removing the file cell's create deny leaves it green.
   Keep it — it catches a change that made the deny bite, which would break `> /dev/null` everywhere —
   but do not count it as the create deny's guard. `a_granted_file_itself_cannot_be_replaced` is that.
-- **The write cells name the leaves they need and never `file-write*`. That is the whole shape, and it
-  replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
+- **The write cells name the leaves they need and never `file-write*`, unless the `file-attributes`
+  switch is on. That is the whole shape, and it replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
   `create`, `unlink`, `xattr`, `mode`, `times` — and the `Write`+`File` cell names `data` alone. The
   flags, the access-control list, the owner, and the set-user-ID bit are **absent rather than denied**,
   so `(deny default)` refuses each. The bound operations were enumerated by compiling one profile per
@@ -690,12 +690,32 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `(allow file-read* file-write-data (literal "/dev/null"))` and holds 46 bare `file-write-data`
     allows. There is no Apple SBPL reference — `strings` over `libsandbox.1.dylib` and the Sandbox kext
     yields no operation table — so those profiles plus compile-and-measure are the authority.
-  - **`file-write-times` IS closable, by omission.** The earlier reading was that no leaf deny takes it
-    back, which is true and is not the same claim: `touch -t` succeeds under `(allow file-write* …)`
-    with `(deny file-write-times …)` rendered. Withholding the leaf refuses it outright. The leaf stays
-    granted on the write root anyway, because `utimes` is ordinary work, so the backdating residual is
-    a decision now rather than a limit.
-  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them.
+  - **`file-write-times` covers `utimes(2)` and `futimes(2)` only.** `utimensat(2)`, which `touch`
+    calls, and `setattrlist(2)` with `ATTR_CMN_MODTIME` or `ATTR_CMN_ACCTIME` check the bare
+    `file-write*` family, so the six-leaf write root refuses them (box#273). That is also why
+    `touch -t` succeeds under `(allow file-write* …)` with `(deny file-write-times …)` rendered: the
+    leaf deny never reaches the bare check. The leaf stays granted on the write root, because `utimes`
+    is ordinary work, so the backdating residual through `utimes` is a decision rather than a limit.
+  - **The `file-attributes` switch is the one write cell that grants `file-write*`.** With
+    `allow_file_attributes`, the write root adds `(allow file-write* (subpath …))` and denies the four
+    members `WRITE_ROOT_LEAVES` withholds, `FILE_ATTRIBUTE_WITHHELD_LEAVES`: `flags`, `owner`, `acl`,
+    and `finderinfo`. A leaf deny beats the wildcard allow by specificity, so those four leaf operations
+    stay refused (`chflags`, `chown`, `acl_set_file`, and `setattrlist ATTR_CMN_FNDRINFO`).
+    `setugid`, `mount`, and `unmount` lie outside the family, so the wildcard does not reach them and
+    the cell renders no rule for them. `protect_write` and `refusals()` already render
+    `(deny file-write* …)`, which has the same name as the new allow and renders after it, so the
+    last matching rule is the deny. Measured 2026-11-03, macOS 26.7.1 arm64 at `euid` 503, in
+    `tests/contains_file_attributes.rs`: with the switch, `utimensat` and `setattrlist ATTR_CMN_MODTIME`
+    succeed; `chflags`, `acl_set_file`, `chown`, and `chmod` of a set-ID bit stay refused; a
+    protected object, a refused folder inside the root, and a path outside every root keep their
+    refusals. **The residual is pinned, not closed:** `setattrlist` `ATTR_CMN_ACCESSMASK` stores
+    the set-user-ID bit, `ATTR_CMN_GRPID` moves the group, `ATTR_CMN_OWNERID` passes the profile and
+    meets only the ownership check (so a root process gives a file away), and
+    `ATTR_CMN_EXTENDED_SECURITY` stores an ACL. Each rides the bare family check.
+    Without the switch, the cell renders byte for byte what it rendered before, and the goldens hold
+    it.
+  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them
+    (the switch grants `finderinfo` through the wildcard and denies it again).
     `xattr` is named because ordinary work sets one, and `mode` because a workload tightens a file it
     created — Claude Code creates `.claude.json` at 644 and `chmod`s it to 600, and **swallows the
     failure**, so withholding the mode leaves a config holding `mcpServers` world-readable.

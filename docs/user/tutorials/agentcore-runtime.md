@@ -5,6 +5,12 @@ The agent reads a synthetic order, checks eligibility, and requests one replacem
 Box refuses dispatch before eligibility and further shipment or refund requests after either resolution.
 Use Strands for the first run. The same sample also includes a LangChain variant.
 
+Eligibility checks and dispatch requests share `/orders/{order_id}/replacement`.
+`GET` checks eligibility, and `POST` requests a replacement.
+The policy matches the earlier GET response to the current POST through `input.path: context.input.path`.
+The order ID is part of that path, so another order's check does not satisfy the rule.
+The eligibility endpoint returns HTTP 200 only for an eligible order.
+
 ## Before you start
 
 Prepare the package on Linux ARM64 with Python 3.12, pip, Git, and Rust through rustup.
@@ -67,7 +73,7 @@ The helper checks the account and bucket Region, uploads the package, and create
 It refuses to update a stack without its example ownership tag.
 Each invocation writes a unique receipt before it sends the request.
 The wrapper starts fresh Box state and a synthetic service for that invocation.
-The checked-in policies use port 0. Each runner binds that field to its synthetic service's allocated port.
+Keep the printed receipt path for [Stop and remove the deployment](#stop-and-remove-the-deployment).
 
 ## Read the result
 
@@ -95,7 +101,13 @@ print("Shipment PASS", len(result["checks"]), "checks")
 PYTHON
 ```
 
-The Strands result contains 24 assertions about this fixed conversation.
+If all checks pass, the command prints:
+
+```text
+Shipment PASS 24 checks
+```
+
+These checks cover this fixed conversation.
 Read the agent's report with the service effects and Box decisions. Intermediate model prose remains ungraded.
 Model responses can vary and can fail verification.
 

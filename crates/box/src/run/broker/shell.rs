@@ -20,10 +20,6 @@ use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
-/// The Shell's own wall-clock bound on a single command. Must stay under the transport's
-/// `SERVE_REQUEST_TIMEOUT`, which a `const` assert there enforces.
-pub(super) const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The most command text the broker will accept into the Shell.
 const SHELL_MAX_INPUT: usize = 256 * 1024;
 const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -47,12 +43,12 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
-    /// The Shell's own bound on one command.
-    pub(super) command_timeout: Duration,
+    /// The Shell's own bound on one submitted Shell call.
+    pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
     /// timeout normally fires first (and reports an `Exit`); this catches a Call that outlives it
     /// and answers `DeniedKind::Timeout`.
-    pub(super) request_timeout: Duration,
+    pub(super) request_timeout: Option<Duration>,
     /// What both interpreters may name, and the one resolver over it.
     pub(super) reach: Arc<Reach>,
     /// The box's one authority, shared rather than opened here.
@@ -168,8 +164,11 @@ impl ShellSpec {
             .max_input(SHELL_MAX_INPUT)
             .max_output(MAX_CAPTURE_STREAM_BYTES)
             .max_file_size(SHELL_MAX_FILE_SIZE)
-            .max_inodes(SHELL_MAX_INODES)
-            .timeout(self.command_timeout);
+            .max_inodes(SHELL_MAX_INODES);
+        let builder = match self.command_timeout {
+            Some(timeout) => builder.timeout(timeout),
+            None => builder.disable_timeout(),
+        };
         // Route outbound HTTP through this box's egress gateway, so a Shell `curl` meets the
         // same `net:connect`/`http:request` policy the workload's own traffic does.
         // With no gateway the network stays off — a fail-closed refusal, never a direct dial
@@ -353,7 +352,7 @@ fn mutates(operation: FsOperation) -> bool {
 }
 
 struct DecisionSubject {
-    action: &'static str,
+    action: std::borrow::Cow<'static, str>,
     resource: String,
     /// What the decision was about, under the standard names. `None` where the resource says it all.
     reported: Option<telemetry::Subject>,
@@ -368,7 +367,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             cwd,
             ..
         } => Some(DecisionSubject {
-            action: r#"Box::Action::"shell:exec""#,
+            action: r#"Box::Action::"shell:exec""#.into(),
             resource: (*program).to_string(),
             reported: Some(telemetry::Subject::process(program, args, literal, cwd)),
         }),
@@ -379,7 +378,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             cwd,
             ..
         } => Some(DecisionSubject {
-            action: r#"Box::Action::"shell:spawn""#,
+            action: r#"Box::Action::"shell:spawn""#.into(),
             resource: reported_path(program_path, home),
             reported: Some(telemetry::Subject::process(
                 &reported_path(program_path, home),
@@ -394,7 +393,7 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
             ..
         } => None,
         EffectAttempt::Filesystem { path, operation } => Some(DecisionSubject {
-            action: fs_action(*operation),
+            action: fs_action(*operation).into(),
             resource: reported_path(path, home),
             reported: None,
         }),
@@ -403,7 +402,8 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
                 strands_shell::FsPairOperation::Rename { .. } => r#"Box::Action::"fs:move""#,
                 strands_shell::FsPairOperation::Symlink => r#"Box::Action::"fs:write""#,
                 _ => r#"Box::Action::"fs:other""#,
-            },
+            }
+            .into(),
             resource: reported_path(to, home),
             reported: None,
         }),
@@ -458,6 +458,14 @@ impl EffectInterceptor for ReachFloor {
             let capture = ObservationCapture::begin();
             let intercepted = self.inner.intercept(effect).await;
             let determined = capture.last();
+            // A grammar action decides a bound spawn in place of `shell:spawn`
+            // (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
+            let subject = subject.map(|mut subject| {
+                if let (EffectAttempt::ShellSpawn { .. }, Some(observed)) = (effect, &determined) {
+                    subject.action = observed.action().to_string().into();
+                }
+                subject
+            });
             let permit = match intercepted {
                 Ok(permit) => permit,
                 Err(error) => {

@@ -139,8 +139,6 @@ pub enum EffectAttempt<'a> {
         path: &'a str,
         /// The governed response status.
         status: u16,
-        /// The governed response body length, without exposing body content.
-        body_bytes: usize,
     },
 }
 

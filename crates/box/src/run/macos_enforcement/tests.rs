@@ -310,6 +310,72 @@ fn the_kernel_denial_replaces_a_provisional_policy_permit() {
 }
 
 #[test]
+fn each_native_authorization_leg_records_its_own_request_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let mut context = context(&root);
+    let mut text = "permit(principal, action, resource);".to_string();
+    for (operation, host) in [("fs:read", "read.example"), ("fs:write", "write.example")] {
+        text.push_str(&format!(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+               when {{ context.input.host == "{host}" }}
+               when temporal {{
+                   exists (id: String). (
+                       formerly within 3600s (
+                           Box::Action::"{operation}"::request{{ requestId: id }}
+                       ) && formerly within 3600s (
+                           Box::Action::"{operation}"::response{{ requestId: id }}
+                       )
+                   )
+               }};"#
+        ));
+    }
+    context.engine = Arc::new(crate::test_support::open_policy(vec![policy::Policy {
+        origin: root.join("correlated-native.dw"),
+        text,
+    }]));
+    let probe = |host| {
+        let (decision, request_id) = context.engine.decide(
+            &context.governed,
+            &Principal::agent(),
+            &Request::Connect {
+                host,
+                ip: None,
+                port: 443,
+            },
+        );
+        assert!(request_id.is_some(), "the probe request commits");
+        decision
+    };
+    let mut raw = readable(&root);
+    raw.flags = FREAD | FWRITE;
+    assert!(context.receive(&raw, 0));
+    assert_eq!(context.tracker.lock().unwrap().pending.len(), 2);
+    for host in ["read.example", "write.example"] {
+        assert!(
+            probe(host).is_allow(),
+            "authorization alone has no response"
+        );
+    }
+    raw.phase = REPLY;
+    raw.result = 1;
+    context.receive(&raw, 0);
+    assert!(!context.tracker.lock().unwrap().failed);
+    for host in ["read.example", "write.example"] {
+        assert!(
+            matches!(
+                probe(host),
+                policy::Decision::Deny {
+                    reason: policy::DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the {host} guard must join its own request and response"
+        );
+    }
+}
+
+#[test]
 fn a_malformed_event_records_an_adapter_denial() {
     let directory = tempfile::tempdir().unwrap();
     let context = context(directory.path());

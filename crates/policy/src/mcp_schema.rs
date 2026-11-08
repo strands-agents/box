@@ -546,8 +546,8 @@ fn lower_schema_node(value: &mut serde_json::Value) {
 /// `number`/`float` becomes `integer` (→ Cedar `Long`). A `type` **array** (a union, or the common
 /// `["X","null"]` nullable form) drops `null` and lowers each member; if one distinct member
 /// remains it collapses to that scalar, so a nullable field becomes a plain type. A genuine
-/// multi-member union stays an array — the generator renders it as a `typeChoice` record, which a
-/// bare value still cannot satisfy (a residual, like a standalone `null`).
+/// multi-member union stays an array — the generator renders it as a `typeChoice` record, and
+/// `ToolInputs::conform` places a call's bare value in the member it matches.
 fn lower_type(ty: &serde_json::Value) -> Option<serde_json::Value> {
     fn lower_scalar(kind: &str) -> &str {
         if kind == "number" || kind == "float" {
@@ -589,16 +589,7 @@ fn lower_type(ty: &serde_json::Value) -> Option<serde_json::Value> {
 
 /// Compose the canonical action schema with ordered generated MCP schemas.
 pub fn compose_action_schema(generated: &[(&str, &str)]) -> Result<String, McpSchemaError> {
-    validate_mcp_schema_composition(generated)?;
-    let fragments = generated
-        .iter()
-        .map(|(_, source)| (*source).to_string())
-        .collect::<Vec<_>>();
-    crate::schema::action_schema(&fragments)
-        .map(|schema| schema.source)
-        .map_err(|source| McpSchemaError::Composition {
-            reason: source.to_string(),
-        })
+    crate::ToolGrammars::default().compose_action_schema(generated)
 }
 
 fn make_unsupported_schema_references_opaque(tools_list: &str) -> Cow<'_, str> {
@@ -1141,6 +1132,187 @@ namespace Box {
         // No opaque `Number` entity survives, even inside a genuine multi-type union.
         assert!(!generated.contains("entity Number"), "{generated}");
         validate_mcp_schema_composition(&[("srv", &generated)]).expect("composes");
+    }
+
+    #[test]
+    fn a_union_argument_accepts_each_member_and_refuses_a_non_member() {
+        let tools = r#"
+        {
+            "result": {
+                "tools": [{
+                    "name": "ask",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "repoName": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "string"}}
+                                ]
+                            },
+                            "limit": {"type": ["string", "integer", "null"]},
+                            "note": {"type": ["string", "null"]},
+                            "since": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "null"}
+                                ]
+                            },
+                            "at": {
+                                "anyOf": [
+                                    {"type": "string", "format": "date-time"},
+                                    {"type": "string"}
+                                ]
+                            },
+                            "host": {
+                                "anyOf": [
+                                    {"type": "string", "format": "ipv4"},
+                                    {"type": "integer"}
+                                ]
+                            },
+                            "link": {
+                                "anyOf": [
+                                    {"type": "string", "format": "uri"},
+                                    {"type": "string"}
+                                ]
+                            },
+                            "filter": {
+                                "type": "object",
+                                "properties": {
+                                    "labels": {
+                                        "type": "array",
+                                        "items": {
+                                            "oneOf": [
+                                                {"type": "boolean"},
+                                                {
+                                                    "type": "object",
+                                                    "properties": {"name": {"type": "string"}},
+                                                    "required": ["name"]
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "required": ["repoName"]
+                    }
+                }]
+            }
+        }
+        "#;
+        let generated = generate_mcp_schema("wiki", tools).expect("schema generates");
+        assert!(generated.contains("note?: String"), "{generated}");
+        let schema = crate::schema::action_schema(&[generated]).expect("schema composes");
+        let identity = crate::schema::ActionIdentity::mcp_tool("wiki", "ask");
+        let action = identity.cedar_uid().expect("tool action");
+        let decided = |arguments: serde_json::Value| {
+            let conformed = schema
+                .tool_inputs
+                .conform(&action, &arguments)?
+                .expect("the tool declares its input");
+            let request = crate::Request::McpCall {
+                server: "wiki",
+                method: "tools/call",
+                tool: Some("ask"),
+                prompt: None,
+                uri: None,
+                arguments: Some(&conformed),
+            };
+            crate::schema::to_cedar_request(
+                &crate::Principal::agent(),
+                &request,
+                &identity,
+                &schema.cedar,
+            )?;
+            Ok::<_, crate::PolicyError>(conformed)
+        };
+
+        for (arguments, read) in [
+            (
+                serde_json::json!({"repoName": "strands-agents/box"}),
+                serde_json::json!({"repoName": {"typeChoice0": "strands-agents/box"}}),
+            ),
+            (
+                serde_json::json!({"repoName": ["a/b", "c/d"]}),
+                serde_json::json!({"repoName": {"typeChoice1": ["a/b", "c/d"]}}),
+            ),
+            (
+                serde_json::json!({"repoName": "a/b", "limit": 5, "note": "n"}),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "limit": {"typeChoice1": 5},
+                    "note": "n"
+                }),
+            ),
+            (
+                serde_json::json!({
+                    "repoName": "a/b",
+                    "since": "2025-01-01T00:00:00Z",
+                    "at": "2025-01-01",
+                    "host": "10.0.0.1"
+                }),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "since": {"typeChoice0": "2025-01-01T00:00:00Z"},
+                    "at": {"typeChoice0": "2025-01-01", "typeChoice1": "2025-01-01"},
+                    "host": {"typeChoice0": "10.0.0.1"}
+                }),
+            ),
+            (
+                serde_json::json!({"repoName": "a/b", "at": "next tuesday", "host": 7}),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "at": {"typeChoice1": "next tuesday"},
+                    "host": {"typeChoice1": 7}
+                }),
+            ),
+            (
+                serde_json::json!({"repoName": "a/b", "link": "https://example.com"}),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "link": {
+                        "typeChoice0": "https://example.com",
+                        "typeChoice1": "https://example.com"
+                    }
+                }),
+            ),
+            (
+                serde_json::json!({
+                    "repoName": "a/b",
+                    "filter": {"labels": [true, {"name": "bug"}]}
+                }),
+                serde_json::json!({
+                    "repoName": {"typeChoice0": "a/b"},
+                    "filter": {"labels": [{"typeChoice0": true}, {"typeChoice1": {"name": "bug"}}]}
+                }),
+            ),
+        ] {
+            assert_eq!(
+                decided(arguments.clone()).expect("a union member is accepted"),
+                read,
+                "{arguments}"
+            );
+        }
+
+        for arguments in [
+            serde_json::json!({"repoName": 7}),
+            serde_json::json!({"repoName": ["a/b", 7]}),
+            serde_json::json!({"repoName": {"typeChoice0": "a/b"}}),
+            serde_json::json!({"repoName": "a/b", "limit": true}),
+            serde_json::json!({"repoName": "a/b", "since": "not a date"}),
+            serde_json::json!({"repoName": "a/b", "host": "10.0.0.1\")"}),
+            serde_json::json!({"repoName": "a/b", "filter": {"labels": ["bug"]}}),
+            serde_json::json!({"repoName": "a/b", "filter": {"labels": [{"title": "bug"}]}}),
+        ] {
+            let refusal = decided(arguments.clone()).expect_err("a non-member is refused");
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("no member of the declared union"),
+                "{arguments}: {refusal}"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,10 @@ use super::{
 };
 use crate::error::{BoxError, ConfigError};
 
+/// The prefix a phantom carries when a route sets none; keep in step with
+/// `credentials::DEFAULT_PHANTOM_PREFIX`.
+const DEFAULT_PHANTOM_PREFIX: &str = "strands_box_";
+
 /// The longest a `secret.phantom_prefix` may be; keep in step with `credentials::check_phantom_prefix`.
 const PHANTOM_PREFIX_MAX_LEN: usize = 64;
 
@@ -148,8 +152,32 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
     // rather than mislabelled there. Keyed by the normalized host so a case- or IP-form-only
     // difference collides here as it does at run time.
     let mut hosts: BTreeMap<String, (Origin, &str, Protocol)> = BTreeMap::new();
+    // Which entry first named each `env://` variable, and the phantom prefix it asked for. Every
+    // route that names one variable shares one phantom, and one variable holds one value.
+    let mut variables: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for &(origin, name, entry) in entries {
         entry.validate()?;
+        if let Some(secret) = &entry.secret
+            && let Some((SecretScheme::Env, variable)) = secret.deliverable()
+        {
+            let prefix = secret
+                .phantom_prefix
+                .as_deref()
+                .unwrap_or(DEFAULT_PHANTOM_PREFIX);
+            if let Some(&(earlier, earlier_prefix)) = variables.get(variable)
+                && earlier_prefix != prefix
+            {
+                return Err(ConfigError::Credential {
+                    host: entry.destinations.first().cloned().unwrap_or_default(),
+                    reason: format!(
+                        "`{name}` and `{earlier}` both name env://{variable} with a different \
+                         phantom_prefix; every route that names one variable shares one phantom, \
+                         so set the same phantom_prefix on both"
+                    ),
+                });
+            }
+            variables.entry(variable).or_insert((name, prefix));
+        }
         // A remote MCP server's name is its `context.input.server`, which a rule reads to gate its
         // tool calls. It must be present and nameable: empty leaves it nameless, and a control
         // character (a newline) could break out of a policy comment and inject a rule.
@@ -1000,6 +1028,57 @@ mod tests {
                 "the refusal names the key: {error}"
             );
         }
+    }
+
+    /// Two routes that name one variable share one phantom, so they must ask for one prefix.
+    #[test]
+    fn one_variable_with_two_phantom_prefixes_is_refused() {
+        let route = |name: &str, host: &str, prefix: &str| {
+            format!(
+                "[egress.{name}]\ndestinations = [\"{host}\"]\nsecret.ref = \"env://TOKEN\"\n{prefix}\n"
+            )
+        };
+        let error = load(&format!(
+            "{}{}",
+            route(
+                "a",
+                "management.example.dev",
+                "secret.phantom_prefix = \"ksk_\""
+            ),
+            route("b", "runtime.example.dev", ""),
+        ))
+        .expect_err("one variable holds one phantom");
+        let message = error.to_string();
+        assert!(
+            message.contains("env://TOKEN") && message.contains("phantom_prefix"),
+            "the refusal names the variable and the key: {message}"
+        );
+
+        load(&format!(
+            "{}{}",
+            route(
+                "a",
+                "management.example.dev",
+                "secret.phantom_prefix = \"ksk_\""
+            ),
+            route(
+                "b",
+                "runtime.example.dev",
+                "secret.phantom_prefix = \"ksk_\""
+            ),
+        ))
+        .expect("one variable with one prefix is valid");
+
+        load(&format!(
+            "{}{}",
+            route(
+                "a",
+                "management.example.dev",
+                "secret.phantom_prefix = \"strands_box_\""
+            ),
+            route("b", "runtime.example.dev", ""),
+        ))
+        .expect("an omitted prefix is the default prefix");
     }
 
     #[test]

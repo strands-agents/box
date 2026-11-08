@@ -192,9 +192,8 @@ elif AGENT == "strands":
         "PATH": man.get("agent_path", "/usr/bin:/bin"),
         "AWS_REGION": REGION,
         "TMPDIR": TMP,
-        # The box reserves every loader hook, PYTHONPATH included, and it refuses a
-        # table that claims one. So the SDK directory travels under a name of this
-        # suite, and the entry script puts it on sys.path itself.
+        # The SDK directory travels under a name of this suite, and the entry
+        # script puts it on sys.path itself.
         "STRANDS_LIB_DIR": P["STRANDS_LIB"],
         # The model id and the scratch directory travel in the environment, so the
         # agent needs no configuration file and the pair names no extra path.
@@ -204,8 +203,8 @@ elif AGENT == "strands":
 elif AGENT == "codex":
     # The npm package ships a Node shim that starts the vendored native binary.
     # On Linux the shim runs under node, which the box stops without --jitless
-    # (F29/F64: an executable memory permission is refused and NODE_OPTIONS is a
-    # refused name), so the flag sits in `command` here too.
+    # (F29/F64: an executable memory permission is refused), so the flag sits in
+    # `command` here too.
     launcher = plat_items("agent_program")
     if not launcher and os.environ.get("WL_CODEX_BINARY"):
         codex_binary = os.path.realpath(os.environ["WL_CODEX_BINARY"])

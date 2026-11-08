@@ -163,6 +163,7 @@ libc = "0.2"
 [dev-dependencies]
 cedar-policy = "=4.11.0"
 containment = { package = "strands-box-containment", path = "../containment", features = ["test-support"] }
+tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unused_must_use = "deny"

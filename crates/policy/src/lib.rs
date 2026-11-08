@@ -18,6 +18,7 @@ mod error;
     )
 )]
 mod grammar;
+mod mcp_input;
 mod mcp_schema;
 mod observe;
 mod outcome;
@@ -28,6 +29,13 @@ mod request;
 mod rerun;
 mod schema;
 mod spelling;
+
+#[cfg(test)]
+#[path = "../tests/support/event_schema.rs"]
+mod test_event_schema;
+#[cfg(test)]
+#[path = "../tests/support/history.rs"]
+mod test_history;
 
 #[cfg(feature = "egress-adapter")]
 pub use adapters::egress::EgressPolicyInterceptor;
@@ -55,6 +63,6 @@ pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,
 };
-pub use request::{FsAccess, FsOperation, Principal, Request};
+pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
 pub use spelling::{Operator, PolicyWarning};

@@ -6,8 +6,9 @@
 
 #![allow(dead_code)]
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,6 +46,7 @@ enum Reply {
     Silent,
     Deaf,
     Sip(Duration),
+    Controlled(Arc<Mutex<Option<Receiver<Vec<u8>>>>>),
 }
 
 pub struct TlsUpstream {
@@ -99,6 +101,18 @@ impl TlsUpstream {
     /// Start a TLS upstream that writes its response one byte per `interval`.
     pub fn start_dripping(host: &str, response: &'static [u8], interval: Duration) -> Self {
         Self::start_serving(host, Reply::Drip(Arc::from(response), interval))
+    }
+
+    /// Write each supplied response fragment immediately. Dropping the sender closes the reply.
+    pub fn start_controlled(host: &str) -> (Self, SyncSender<Vec<u8>>) {
+        let (sender, receiver) = sync_channel(0);
+        (
+            Self::start_serving(
+                host,
+                Reply::Controlled(Arc::new(Mutex::new(Some(receiver)))),
+            ),
+            sender,
+        )
     }
 
     /// Start a TLS upstream that completes the handshake and then never reads, so the peer's
@@ -193,6 +207,20 @@ impl TlsUpstream {
                             Reply::Silent => {
                                 let mut sink = [0u8; 1024];
                                 while matches!(tls.read(&mut sink), Ok(n) if n > 0) {}
+                            }
+                            Reply::Controlled(receiver) => {
+                                tls.sock
+                                    .set_write_timeout(Some(Duration::from_secs(5)))
+                                    .unwrap();
+                                let receiver = receiver.lock().unwrap().take().unwrap();
+                                while let Ok(fragment) =
+                                    receiver.recv_timeout(Duration::from_secs(5))
+                                {
+                                    if tls.write_all(&fragment).and_then(|()| tls.flush()).is_err()
+                                    {
+                                        break;
+                                    }
+                                }
                             }
                             Reply::Deaf | Reply::Sip(_) => {}
                         }
@@ -388,7 +416,27 @@ impl WorkloadClient {
         }
     }
 
-    /// Read one complete `Content-Length`-framed response from the proxy.
+    /// Bound reads in a test that deliberately leaves an upstream response unfinished.
+    pub fn set_read_timeout(&self, timeout: Duration) {
+        self.tls
+            .as_ref()
+            .expect("connect (TLS) first")
+            .sock
+            .set_read_timeout(Some(timeout))
+            .unwrap();
+    }
+
+    /// Read just the response head, leaving the body available for incremental reads.
+    pub fn read_head(&mut self) -> String {
+        read_http_head(self)
+    }
+
+    /// Decode the response body's wire framing without accumulating the body.
+    pub fn response_body<'a>(&'a mut self, head: &str) -> ResponseBody<'a, Self> {
+        ResponseBody::new(self, head)
+    }
+
+    /// Read a response and decode its body framing, retaining the original head.
     pub fn read_response(&mut self) -> String {
         let tls = self.tls.as_mut().expect("connect (TLS) first");
         read_http_head_and_body(tls)
@@ -398,6 +446,82 @@ impl WorkloadClient {
     pub fn read_status(&mut self) -> u16 {
         parse_status(&self.read_response())
     }
+}
+
+impl Read for WorkloadClient {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.tls.as_mut().expect("connect (TLS) first").read(bytes)
+    }
+}
+
+pub struct ResponseBody<'a, R> {
+    stream: &'a mut R,
+    remaining: usize,
+    chunked: bool,
+    finished: bool,
+}
+
+impl<'a, R: Read> ResponseBody<'a, R> {
+    pub fn new(stream: &'a mut R, head: &str) -> Self {
+        let chunked = header_value(head, "transfer-encoding").is_some_and(|v| v == "chunked");
+        Self {
+            stream,
+            remaining: header_value(head, "content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            chunked,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read> Read for ResponseBody<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if bytes.is_empty() || self.finished {
+            return Ok(0);
+        }
+        if self.chunked && self.remaining == 0 {
+            let mut line = Vec::new();
+            while !line.ends_with(b"\r\n") {
+                let mut byte = [0];
+                self.stream.read_exact(&mut byte)?;
+                line.push(byte[0]);
+                assert!(line.len() < 1024, "unbounded response chunk header");
+            }
+            let line = std::str::from_utf8(&line).unwrap().trim();
+            self.remaining = usize::from_str_radix(line.split(';').next().unwrap(), 16).unwrap();
+            if self.remaining == 0 {
+                let mut ending = [0; 2];
+                self.stream.read_exact(&mut ending)?;
+                assert_eq!(&ending, b"\r\n", "unexpected response trailers");
+                self.finished = true;
+                return Ok(0);
+            }
+        }
+        if self.remaining == 0 {
+            self.finished = true;
+            return Ok(0);
+        }
+        let count = bytes.len().min(self.remaining);
+        let read = self.stream.read(&mut bytes[..count])?;
+        if read == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        self.remaining -= read;
+        if self.chunked && self.remaining == 0 {
+            let mut ending = [0; 2];
+            self.stream.read_exact(&mut ending)?;
+            assert_eq!(&ending, b"\r\n", "missing response chunk terminator");
+        }
+        Ok(read)
+    }
+}
+
+pub fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.split("\r\n").find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
 }
 
 /// A serialized guard that sets the ambient `AWS_*` env for the v1 provider and restores it on drop.
@@ -456,8 +580,7 @@ fn read_until_blank_line(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// Read an HTTP head + Content-Length body from a TLS stream (upstream side), returning the raw text.
-fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
+pub fn read_http_head<S: Read>(stream: &mut S) -> String {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     // Head.
@@ -467,22 +590,15 @@ fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
             break;
         }
     }
-    let head = String::from_utf8_lossy(&buf).into_owned();
-    // Body per Content-Length.
-    let len = head
-        .split("\r\n")
-        .find_map(|l| {
-            let (n, v) = l.split_once(':')?;
-            n.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| v.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-    let mut body = vec![0u8; len];
-    if len > 0 {
-        let _ = stream.read_exact(&mut body);
-    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn read_http_head_and_body<S: Read>(stream: &mut S) -> String {
+    let head = read_http_head(stream);
+    let mut body = Vec::new();
+    ResponseBody::new(stream, &head)
+        .read_to_end(&mut body)
+        .expect("complete HTTP body");
     format!("{head}{}", String::from_utf8_lossy(&body))
 }
 
