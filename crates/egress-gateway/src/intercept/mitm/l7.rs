@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use crate::audit::RequestId;
 
 use super::body::ResponseBody;
-use super::connect::{ConnectRequest, parse_authority, same_host};
+use super::connect::{ConnectRequest, parse_authority, same_host, tunneled_origin_target};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
@@ -38,6 +38,9 @@ pub(crate) async fn forward_tls(
         })?;
     let upstream = Upstream::new(upstream, Some(server_name), state, completion);
     let correlation = correlation.with_headers(&parsed.headers);
+    if let Some(origin) = tunneled_origin_target(connect, &parsed.target) {
+        parsed.target = origin;
+    }
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
         validate_request_binding(connect, &parsed.method, &parsed.target, &parsed.headers)

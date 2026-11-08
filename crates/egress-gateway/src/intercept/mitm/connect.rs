@@ -68,8 +68,31 @@ pub(crate) fn parse_authority(authority: &str, default_port: Option<u16>) -> Opt
 /// HTTPS client reaches the proxy with CONNECT (the TLS path) and never here, so an `https://`
 /// absolute-form request is illegitimate rather than something to forward unencrypted.
 pub(crate) fn parse_absolute_target(target: &str) -> Option<(String, u16, String)> {
-    let default_port = 80u16;
-    let rest = target.strip_prefix("http://")?;
+    split_absolute_target(target.strip_prefix("http://")?, 80)
+}
+
+/// The origin-form target of an absolute-form request read inside a tunnel, when its authority is
+/// the CONNECT authority.
+///
+/// Some proxy clients, such as Yarn 4, send absolute-form inside the tunnel too, and RFC 9112
+/// §3.2.2 requires a server to accept it. Returns `None` for any other authority, so the binding
+/// check still refuses a request that names a different destination.
+pub(crate) fn tunneled_origin_target(connect: &ConnectRequest, target: &str) -> Option<String> {
+    let (scheme, rest) = target.split_once("://")?;
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        return None;
+    };
+    let (host, port, origin) = split_absolute_target(rest, default_port)?;
+    (same_host(&host, &connect.host) && port == connect.port).then_some(origin)
+}
+
+/// Split the part of an absolute-form target after its scheme into the host, port, and the
+/// origin-form target.
+fn split_absolute_target(rest: &str, default_port: u16) -> Option<(String, u16, String)> {
     // A fragment is a client-only construct (RFC 3986 §3.5) and must never reach an origin server, so
     // drop it before anything else. The authority then ends at the first `/` or `?`; a query with no
     // path still needs an origin-form target that begins with `/`.
@@ -231,6 +254,36 @@ mod tests {
         );
         // Not an absolute URL: an origin-form target names no destination and is refused.
         assert!(parse_absolute_target("/mcp?foo=bar").is_none());
+    }
+
+    #[test]
+    fn tunneled_absolute_target_is_origin_form_only_for_the_connect_authority() {
+        let connect = ConnectRequest {
+            host: "registry.npmjs.org".to_string(),
+            port: 443,
+        };
+        for (target, expected) in [
+            // Yarn 4's spelling: `http://` with the tunnel's port.
+            (
+                "http://registry.npmjs.org:443/a/-/a-1.tgz",
+                Some("/a/-/a-1.tgz"),
+            ),
+            ("https://registry.npmjs.org/a?b=c", Some("/a?b=c")),
+            ("HTTPS://Registry.NPMJS.org.:443?q#frag", Some("/?q")),
+            ("https://registry.npmjs.org", Some("/")),
+            // Any other authority stays absolute, for the binding check to refuse.
+            ("https://example.com/a", None),
+            ("http://registry.npmjs.org/a", None),
+            ("https://registry.npmjs.org:8443/a", None),
+            ("ftp://registry.npmjs.org:443/a", None),
+            ("/a", None),
+        ] {
+            assert_eq!(
+                tunneled_origin_target(&connect, target).as_deref(),
+                expected,
+                "{target}"
+            );
+        }
     }
 
     #[test]
