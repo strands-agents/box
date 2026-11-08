@@ -214,6 +214,9 @@ by reading `src/` belongs in `src/` — the README describes the shape.
 
 ## macOS, measured
 
+- **`sysconf(_SC_ARG_MAX)` reads the `kern.argmax` sysctl.** Under the seven-name profile, Python's
+  `os.sysconf('SC_ARG_MAX')` raised `PermissionError: [Errno 1]`, which stops pre-commit on import;
+  with `kern.argmax` named it returned `1048576`. The name is a public host limit.
 - **The profile carries no `/`, `/etc`, `/private/tmp`, or `/dev/null` rule of its own.** Each arrives
   as a grant instead, because static text gave every box every harness's needs — a Python box carried
   Bun's `/private/tmp` entry. The measurement that first put that entry in the profile still holds,
