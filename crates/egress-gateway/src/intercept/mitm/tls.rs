@@ -76,6 +76,15 @@ mod tests {
     }
 
     #[test]
+    fn upstream_config_offers_tls_1_2() {
+        use rustls::ProtocolVersion::{TLSv1_2, TLSv1_3};
+        // `upstream_client_config` takes rustls's default versions, which hold TLS 1.2 only with
+        // the crate's `tls12` feature. Building this crate alone must not lose it.
+        let offered: Vec<_> = rustls::DEFAULT_VERSIONS.iter().map(|v| v.version).collect();
+        assert_eq!(offered, [TLSv1_3, TLSv1_2]);
+    }
+
+    #[test]
     fn upstream_config_accepts_extra_ca() {
         // The ephemeral CA's own public PEM is a valid extra CA to add.
         let ca = EphemeralCa::generate(None, None).unwrap();

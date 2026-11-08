@@ -58,7 +58,7 @@ fluent-uri = { version = "=0.4.1", default-features = false, features = ["alloc"
 # builds a tunnel-only MITM with none of the TLS stack compiled in.
 # ------------------------------------------------------------------------------
 # The TLS terminator (server side to the workload, client side to the upstream).
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", optional = true }
 # System-root trust anchors for the upstream (client) side of interception.
 webpki-roots = { version = "1", optional = true }
