@@ -259,25 +259,31 @@ Linux renders nothing for this switch.
 
 ### Linux root sandbox launches
 
-A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its
-capabilities. If root starts the workload, new files and symbolic links in granted directories can
-therefore belong to root in the surrounding OS. A separate privileged program can follow one of
-those links outside the workload's grants.
+Linux accepts sandbox directory write grants from root and non-root launchers.
+Each write grant requires covering read access and passes the protected-path checks.
+Box clears every capability set before the workload starts and retains the filesystem and syscall restrictions.
+Existing-file write grants permit writes to their named files, and `/tmp` provides private writable storage.
 
-Box refuses sandbox directory write grants when the launcher's real or effective user ID is zero. It
-checks the composed grants during validation and again before entering the namespaces. The
-restriction applies to agent, tool, and local-server workloads. Existing-file writes, read-only
-directories, and private `/tmp` storage remain available. Directory writes require a non-root
-launch, including when an outer container presents the launcher as user ID zero. This check uses the
-launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
+A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
+A root launch can create root-owned files and symbolic links inside explicitly granted directories.
+The sandbox grants bound the workload's own filesystem access.
+They do not bound a separate program that later acts on those entries with its own authority.
+[A direct write grant can alter inputs another process reads](decisions.md#a-direct-grant-replaces-the-policy-decision).
 
-Shell and Python filesystem requests run in the trusted process under policy and reach checks. They
-do not use sandbox grants, and permitted file creation retains that process's file identity. This
-startup restriction does not protect later privileged consumers of those files.
+*Figure 1: Root-owned output and filesystem reach. A root workload can write to a directory with
+covering read and write grants. Its sandbox still refuses access to a file that no grant exposes.
+A separate program outside Box uses its own permissions when it reads the output or accesses other files.*
 
-macOS retains root file creation inside granted directories. Seatbelt path denials do not establish
-protection against later privileged consumers of those entries. This Linux change does not test or
-change that macOS behavior.
+![Inside the surrounding operating system, a Linux sandbox contains a root workload with cleared capabilities. A write grant connects the workload to root-owned output in a directory with read and write grants. A separate program outside Box later reads that output. A red dashed path shows refused workload reads and writes to a file outside its grants. A separate path lets the other program access that file only if its own permissions allow it.](images/linux-root-write-grants.png)
+
+[Editable diagram source](images/linux-root-write-grants.drawio).
+
+Shell and Python filesystem requests run in the box's trusted process under policy and reach checks.
+Permitted file creation retains that process's file identity.
+Those checks govern the requested operation, not later actions by a separate program.
+
+macOS also retains root file creation inside granted directories.
+Seatbelt path denials govern the sandboxed process's own access.
 
 ### Linux filesystem metadata
 
