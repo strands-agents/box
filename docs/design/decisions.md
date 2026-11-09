@@ -1378,7 +1378,18 @@ A third method pins a configured tool's program. It records the file's link coun
 same count during revalidation. Box first rules out workload writes through its other names.
 On macOS and Linux, Box can establish this by scanning every process's declared writable
 directories before the workload starts. The broker and each platform's native boundary prevent
-later alias imports.
+later creation of writable filesystem paths to those programs. Linux can skip a scan when Box
+counts every hard-link name in the program's own directory and verifies the mount layout for
+a directory named in a write grant or requested change. Other paths retain the existing
+identity checks. The program and both directories must share one ext4, XFS, or tmpfs mount
+that exposes the filesystem's root (`/`). No other mount may share its device or mount point,
+or sit at or below the program's directory or the checked path. Box reads the mount table before and after counting and requires both results
+to match. Another mounted path does not increase the file's hard-link count, so counting names
+alone cannot rule out writes. Each shortcut check has a 30-second budget, checked between
+filesystem calls; a blocked call must return first.
+Box repeats the checks before each skip. Any unmet condition, inspection error, or timeout
+falls back to the bounded recursive scan. macOS retains that scan for directory targets.
+File identity and link-count verification at launch still apply.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.

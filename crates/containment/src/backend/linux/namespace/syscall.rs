@@ -1244,11 +1244,11 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_112_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 112);
+    fn permit_filter_has_113_workload_entries_and_one_installer_entry() {
+        assert_eq!(WORKLOAD_PERMITTED.len(), 113);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 115);
+        assert_eq!(rules.len(), 116);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
