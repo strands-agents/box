@@ -1329,6 +1329,43 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn hard_linked_tool_names_keep_separate_grammar_and_spawn_decisions() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked-tool");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let make = home.path().join("make");
+        std::fs::hard_link(&program, &make).expect("a second name for the tool");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the hard-linked tool loads");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
+
+        spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect("the grammar permits git status");
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the second name does not bypass the git grammar"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "the second name uses its shell:spawn permission"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn a_grammar_on_apples_git_binds_git_and_leaves_its_other_names_to_shell_spawn() {

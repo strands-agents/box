@@ -127,6 +127,10 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         number: libc::SYS_unlinkat,
     },
     PermittedSyscall {
+        name: "linkat",
+        number: libc::SYS_linkat,
+    },
+    PermittedSyscall {
         name: "symlinkat",
         number: libc::SYS_symlinkat,
     },
@@ -1221,11 +1225,11 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 111);
+    fn permit_filter_has_112_workload_entries_and_one_installer_entry() {
+        assert_eq!(WORKLOAD_PERMITTED.len(), 112);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 114);
+        assert_eq!(rules.len(), 115);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
@@ -1575,7 +1579,7 @@ mod tests {
 
     #[test]
     fn accepted_file_mutation_calls_are_permitted() {
-        for required in ["pwrite64", "fdatasync", "symlinkat"] {
+        for required in ["pwrite64", "fdatasync", "symlinkat", "linkat"] {
             assert!(
                 WORKLOAD_PERMITTED
                     .iter()
