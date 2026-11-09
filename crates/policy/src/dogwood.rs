@@ -1616,10 +1616,7 @@ fn outcome_kind(outcome: &Outcome<'_>) -> &'static str {
                 KIND_ERROR
             }
         }
-        // A completed call is a `response`, whatever the server replied — a JSON-RPC error is still
-        // `::response`, exactly as `ShellRun` is always a `response` regardless of exit status and a
-        // delivered `Http` request is a `response` regardless of a 500. A call that never completes
-        // records nothing, so there is no MCP `::error` producer.
+        // Terminal and indeterminate MCP outcomes are responses, with no claim of tool success.
         Outcome::Mcp { .. } => KIND_RESPONSE,
     }
 }

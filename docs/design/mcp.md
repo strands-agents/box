@@ -499,23 +499,33 @@ Identical continuations each count toward this limit. A new continuation at capa
 the oldest allowance. An evicted retry is refused without closing the connection.
 Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
 survive a connection closing. A client that reconnects must repeat the initial operation.
+
 A cancellation releases an active request slot and retains the request ID until its late reply
-arrives or the connection closes.
-The broker does not forward that reply, but the server may still have run the call, so a
-terminal reply records the call's `mcp:call::response` event. Only an `input_required` reply
-records none. Cancellation alone records no response event.
+arrives or the connection closes. For an admitted item call, the broker records
+`mcp:call::response` at cancellation because the server may have run it without sending a reply.
+This is an indeterminate outcome under the
+[recorded-history contract](decisions.md#temporal-rules-are-enforced-against-recorded-history).
+The broker hides every late reply, and that reply adds no second event. A later `input_required`
+reply cannot undo the earlier count, even when the operation did not finish.
+
 The broker retains up to 1,024 cancelled requests separately from the active limit. Their request
-ID copies and call text have a combined allocation limit of 16 MiB.
+ID copies and method names have a combined allocation limit of 16 MiB.
 It closes the connection and stops the server before another cancellation exceeds either bound.
-It retains each cancelled request's policy record until a reply arrives or the connection closes.
+It records the cancelled call's outcome before checking these bounds.
 Repeated cancellations for a retained ID do not consume more capacity.
 Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
 refused.
 
-An `input_required` result leaves the operation incomplete, so it does not record an
-`mcp:call::response` event. A terminal result or error records the response against the admitted
-retry's request ID. Each retry has its own request event and policy decision. Result types added
-by extensions are refused until the broker can validate their meaning.
+A valid `input_required` result received before cancellation leaves the operation incomplete,
+so it does not record an `mcp:call::response` event. A terminal result or error records the response
+against the admitted retry's request ID before the broker sends it to the client.
+Each retry has its own request event and policy decision. Result types added by extensions are
+refused until the broker can validate their meaning.
+
+When a stdio connection ends, the broker stops its server and records each remaining admitted
+item call as an indeterminate outcome. A failed or interrupted write can have sent part of a
+request, so the broker cannot infer that the server did nothing. Client disconnection cannot
+erase a terminal outcome or an unresolved admitted call from this accounting.
 
 ## See also
 

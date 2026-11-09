@@ -61,8 +61,15 @@ are refused.
 Cancelling a modern request releases its active slot. Box retains the cancelled request's ID
 until a late reply arrives or the connection closes, so the client cannot reuse that ID meanwhile.
 Box retains up to 1,024 cancelled requests per connection and up to 16 MiB of their request IDs
-and call text. If another cancellation exceeds either limit, Box closes the connection and stops
+and method names. If another cancellation exceeds either limit, Box closes the connection and stops
 the server. Other calls on that connection can be interrupted. Start a new connection to continue.
+
+Cancelling an admitted modern `tools/call`, `prompts/get`, or `resources/read` records one
+`mcp:call::response` immediately, even if the server never replies. A late reply adds no second
+event, including a reply that asks for more input. When a stdio connection ends, Box stops the
+server and records its remaining admitted calls as indeterminate outcomes.
+These [response events](./policy/actions.md#what-a-temporal-rule-observes) count toward policy
+budgets and can satisfy response-based rules; they do not establish tool success.
 
 ## `[mcp.<name>]`, `type = "stdio"`
 
@@ -290,7 +297,8 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 | `modern MCP requests cannot use a legacy handshake connection` | The client mixed the modern request protocol with a legacy handshake. Start a new connection using one protocol era. |
 | `MCP input answers do not match a pending server request` | A retry changed its original parameters or request state, used a consumed or evicted continuation, or arrived on another connection. Restart the operation. |
 | `too many retained cancelled MCP requests; reconnect` | Box already retains 1,024 cancelled request IDs without replies. Cancelling another active request closes the connection and stops the server. Start a new connection. |
-| `too much retained cancelled MCP request data; reconnect` | A cancellation exceeds the 16 MiB limit for retained request IDs and call text. Box closes the connection and stops the server. Start a new connection. |
+| `too much retained cancelled MCP request data; reconnect` | A cancellation exceeds the 16 MiB limit for retained request IDs and method names. Box closes the connection and stops the server. Start a new connection. |
+| `failed to record MCP response: ...` | Box could not save the call's outcome. The connection stops. |
 | `a modern MCP result has an unsupported resultType` | The server returned a result type the broker cannot validate. |
 
 The harness gets these errors when it starts a server, and the box keeps running:

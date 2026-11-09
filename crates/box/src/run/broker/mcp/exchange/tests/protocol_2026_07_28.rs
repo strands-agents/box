@@ -408,7 +408,7 @@ fn a_pending_probe_does_not_prevent_legacy_timeout_fallback() {
 }
 
 #[test]
-fn modern_cancellation_releases_active_capacity_without_recording_a_response() {
+fn modern_cancellation_counts_a_call_even_if_the_server_never_replies() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
         let fixture = fixture(&format!(
@@ -417,6 +417,64 @@ fn modern_cancellation_releases_active_capacity_without_recording_a_response() {
             when {{ context.input has tool && context.input.tool == "Search" }}
             when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
         ));
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let mut command = modern_server(log.path());
+        command[2] = command[2].replace(
+            "case \"$frame\" in",
+            r#"case "$frame" in
+  *'"method":"tools/call"'*'"value":"wait"'*) continue ;;
+  *'"method":"ping"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete"}}\n' "$id"; continue ;;"#,
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        send(
+            &program,
+            modern_request(
+                2,
+                "tools/call",
+                json!({"name": "Search", "arguments": {"value": "wait"}}),
+            ),
+        )
+        .await;
+        send(
+            &program,
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}),
+        )
+        .await;
+        send(&program, modern_request(3, "ping", json!({}))).await;
+        assert_eq!(next_output(&mut output).await["id"], 3);
+        send(
+            &program,
+            modern_request(
+                4,
+                "tools/call",
+                json!({"name": "Search", "arguments": {"value": "continue"}}),
+            ),
+        )
+        .await;
+        let refused = next_output(&mut output).await;
+        assert_eq!(refused["id"], 4, "{refused}");
+        assert_eq!(
+            refused["error"]["code"], -32001,
+            "a cancelled call consumes its response budget without a server reply: {refused}"
+        );
+        program.stop_and_wait().await.expect("stop the exchange");
+        assert_eq!(
+            read_log(log.path())
+                .iter()
+                .filter(|frame| frame["method"] == "tools/call")
+                .count(),
+            1
+        );
+    }));
+}
+
+#[test]
+fn modern_cancellation_releases_active_capacity() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());
         command[2] = command[2].replace(
@@ -447,7 +505,7 @@ fn modern_cancellation_releases_active_capacity_without_recording_a_response() {
         assert_eq!(response["id"], 130, "{response}");
         assert_eq!(
             response["result"]["resultType"], "complete",
-            "silent cancellations release capacity and record no response: {response}"
+            "silent cancellations release active capacity: {response}"
         );
         program.stop_and_wait().await.unwrap();
         assert_eq!(
@@ -461,16 +519,27 @@ fn modern_cancellation_releases_active_capacity_without_recording_a_response() {
 }
 
 #[test]
-fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
+fn modern_cancellation_records_once_and_hides_every_late_reply() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
         let late_complete = r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}"#;
         let late_input = r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","inputRequests":{"root":{"method":"roots/list"}},"requestState":"opaque"}}"#;
-        for (late_reply, counts) in [(late_complete, true), (late_input, false)] {
+        let late_malformed = r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"unknown"}}"#;
+        for late_reply in [late_complete, late_input, late_malformed] {
             let fixture = fixture(&format!(r#"{PERMIT_ALL_MCP}
                 forbid (principal, action == Box::Action::"mcp:call", resource)
                 when {{ context.input has tool && context.input.tool == "Search" }}
-                when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#));
+                when temporal {{
+                    exists (total: Long). (
+                        (count for (t: Timepoint). where (
+                            formerly within 3600s (
+                                Box::Action::"mcp:call"::response{{input.tool: "Search"}} && tp(t)
+                            )
+                        )) == total && total >= 3
+                    )
+                }};
+                forbid (principal, action == issues_mcp::Action::"Search", resource)
+                when {{ context.input has value && context.input.value == "denied" }};"#));
             let log = tempfile::NamedTempFile::new().expect("frame log");
             let mut command = modern_server(log.path());
             // The server ignores the cancellation: it answers the cancelled call late, just
@@ -481,35 +550,227 @@ fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
             let (mut program, mut output) = exchange(command, &fixture).await;
             send(&program, modern_request(1, "tools/list", json!({}))).await;
             assert!(next_output(&mut output).await["result"]["tools"].is_array());
+            send(&program, modern_request(9, "tools/call", json!({"name": "Search", "arguments": {"value": "denied"}}))).await;
+            assert_eq!(next_output(&mut output).await["error"]["code"], -32001);
+            for id in [1, 9, 999] {
+                send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}})).await;
+            }
             let mut call = input_call(2);
             call["params"]["arguments"] = json!({"value": "wait"});
             send(&program, call.clone()).await;
-            send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
-            let mut frames = String::new();
-            for id in 10..137 {
-                let mut pending = call.clone();
-                pending["id"] = json!(id);
-                let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
-                frames.push_str(&format!("{pending}\n{cancel}\n"));
+            for _ in 0..2 {
+                send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
             }
-            program.input(frames.into_bytes()).await.unwrap();
             send(&program, call).await;
             let refused = next_output(&mut output).await;
             assert_eq!(refused["id"], 2, "{refused}");
             assert_eq!(refused["error"]["code"], -32600, "cancelled id remains reserved: {refused}");
             send(&program, modern_request(3, "ping", json!({}))).await;
             assert_eq!(next_output(&mut output).await["id"], 3, "cancelled response never reaches the client");
-            send(&program, modern_request(4, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
-            let response = next_output(&mut output).await;
-            assert_eq!(response["id"], 4, "{response}");
-            if counts {
-                assert_eq!(response["error"]["code"], -32001, "a cancelled call that ran records its response: {response}");
-            } else {
-                assert_eq!(response["result"]["resultType"], "complete", "an incomplete cancelled call records no response: {response}");
+            send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
+            program.stop_and_wait().await.expect("stop after the late reply");
+            let (mut program, mut output) = exchange(modern_server(log.path()), &fixture).await;
+            send(&program, modern_request(1, "tools/list", json!({}))).await;
+            assert!(next_output(&mut output).await["result"]["tools"].is_array());
+            for id in [4, 5] {
+                send(&program, modern_request(id, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
+                let response = next_output(&mut output).await;
+                assert_eq!(response["id"], id, "{response}");
+                assert_eq!(response["result"]["resultType"], "complete", "one cancellation uses exactly one response allowance: {response}");
+                send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}})).await;
             }
+            send(&program, modern_request(6, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
+            assert_eq!(next_output(&mut output).await["error"]["code"], -32001, "one cancellation and two completions exhaust three response allowances");
             program.stop_and_wait().await.expect("stop the exchange");
-            assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 128 + usize::from(!counts));
+            assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 3);
         }
+    }));
+}
+
+#[test]
+fn modern_connection_closure_records_uncertain_calls_but_not_known_input_requests() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        for ending in ["stop", "drop", "eof", "malformed", "lost_output", "input_required"] {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == Box::Action::"mcp:call", resource)
+                when {{ context.input has tool && context.input.tool == "Search" }}
+                when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let reply = if ending == "malformed" {
+                r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"unknown"}}"#
+            } else {
+                r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}"#
+            };
+            let mut command = modern_server(log.path());
+            command[2] = command[2].replace("case \"$frame\" in", &format!(r#"case "$frame" in
+  *'"method":"tools/call"'*'"value":"wait"'*) continue ;;
+  *'"method":"ping"'*)
+    case "$frame" in *'"release":true'*) printf '%s\n' '{reply}' ;; esac
+    printf '{{"jsonrpc":"2.0","id":%s,"result":{{"resultType":"complete"}}}}\n' "$id"; continue ;;"#));
+            if ending == "input_required" {
+                command = input_server(log.path());
+            }
+            let (mut program, mut output) = exchange(command, &fixture).await;
+            send(&program, modern_request(1, "tools/list", json!({}))).await;
+            assert!(next_output(&mut output).await["result"]["tools"].is_array());
+            let mut call = input_call(2);
+            call["params"]["arguments"] = json!({"value": "wait"});
+            send(&program, call).await;
+            if ending == "input_required" {
+                assert_eq!(next_output(&mut output).await["result"]["resultType"], "input_required");
+            } else {
+                send(&program, modern_request(3, "ping", json!({}))).await;
+                assert_eq!(next_output(&mut output).await["id"], 3);
+            }
+            tokio::time::timeout(TEST_WAIT_TIMEOUT, async {
+                match ending {
+                    "stop" | "input_required" => program.stop_and_wait().await.unwrap(),
+                    "drop" => {
+                        drop(program);
+                        assert!(output.recv().await.is_none(), "drop finishes exchange cleanup");
+                    }
+                    "eof" => {
+                        program.eof().await.unwrap();
+                        let error = program.join().await.expect_err("the server closes stdout");
+                        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                    }
+                    "malformed" => {
+                        send(&program, modern_request(4, "ping", json!({"release": true}))).await;
+                        assert_eq!(next_output(&mut output).await["error"]["code"], -32603);
+                        program.join().await.expect_err("the malformed reply closes the exchange");
+                    }
+                    "lost_output" => {
+                        drop(output);
+                        send(&program, modern_request(4, "ping", json!({"release": true}))).await;
+                        program.join().await.expect_err("the closed client output ends the exchange");
+                    }
+                    _ => unreachable!(),
+                }
+            })
+            .await
+            .expect("the exchange closes within the test deadline");
+            assert_eq!(
+                read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(),
+                1,
+                "the first Search reached the server before {ending}"
+            );
+            let response = search_on_new_connection(&fixture).await;
+            if ending == "input_required" {
+                assert_eq!(response["result"]["resultType"], "complete", "known input_required is not an uncertain completion: {response}");
+            } else {
+                assert_eq!(response["error"]["code"], -32001, "{ending} must not erase a forwarded call: {response}");
+            }
+        }
+    }));
+}
+
+async fn search_on_new_connection(fixture: &Fixture) -> Value {
+    let log = tempfile::NamedTempFile::new().expect("frame log");
+    let (mut program, mut output) = exchange(modern_server(log.path()), fixture).await;
+    send(&program, modern_request(1, "tools/list", json!({}))).await;
+    assert!(next_output(&mut output).await["result"]["tools"].is_array());
+    send(
+        &program,
+        modern_request(2, "tools/call", json!({"name": "Search", "arguments": {}})),
+    )
+    .await;
+    let response = next_output(&mut output).await;
+    program
+        .stop_and_wait()
+        .await
+        .expect("stop the new exchange");
+    response
+}
+
+#[test]
+fn modern_eof_forwards_an_unterminated_final_frame_before_closing_stdin() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+        ));
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let (mut program, mut output) = exchange(modern_server(log.path()), &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        let request = modern_request(
+            2,
+            "tools/call",
+            json!({"name": "Search", "arguments": {"value": "final"}}),
+        );
+        program
+            .input(serde_json::to_vec(&request).expect("request JSON"))
+            .await
+            .expect("send the unterminated final frame");
+        program.eof().await.expect("close client input");
+        let response = next_output(&mut output).await;
+        assert_eq!(response["id"], 2, "{response}");
+        assert_eq!(response["result"]["content"][0]["text"], "called", "{response}");
+        let error = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+            .await
+            .expect("the exchange closes within the test deadline")
+            .expect_err("the server closes stdout after EOF");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            read_log(log.path())
+                .iter()
+                .filter(|frame| frame["method"] == "tools/call")
+                .count(),
+            1,
+            "the final Search reaches the server before stdin closes"
+        );
+        assert_eq!(
+            search_on_new_connection(&fixture).await["error"]["code"],
+            -32001,
+            "the delivered final Search consumes its response allowance"
+        );
+    }));
+}
+
+#[test]
+fn modern_input_after_eof_does_not_record_a_response() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+        ));
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let mut command = modern_server(log.path());
+        command[2].push_str("\nsleep 60");
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        program.eof().await.expect("close client input");
+        send(
+            &program,
+            modern_request(2, "tools/call", json!({"name": "Search", "arguments": {}})),
+        )
+        .await;
+        let error = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+            .await
+            .expect("the exchange closes within the test deadline")
+            .expect_err("input after EOF closes the exchange");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(
+            !read_log(log.path())
+                .iter()
+                .any(|frame| frame["method"] == "tools/call"),
+            "a Search after EOF never reaches the server"
+        );
+        let response = search_on_new_connection(&fixture).await;
+        assert_eq!(
+            response["result"]["resultType"], "complete",
+            "definite non-delivery leaves the response allowance available: {response}"
+        );
     }));
 }
 
@@ -517,13 +778,18 @@ fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
 fn modern_cancelled_retention_is_bounded_and_late_replies_release_capacity() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        let fixture = fixture(PERMIT_ALL_MCP);
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+        ));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());
         command[2] = command[2].replace(
             "id=$(printf",
             r#"case "$frame" in
-  *'"method":"notifications/cancelled"'*|*'"wait":true'*) continue ;;
+  *'"method":"notifications/cancelled"'*|*'"wait":true'*|*'"value":"wait"'*) continue ;;
 esac
 id=$(printf"#,
         );
@@ -600,7 +866,11 @@ id=$(printf"#,
             11_002,
             "a late reply releases its id and one cancelled-request slot"
         );
-        let overflow = modern_request(1026, "ping", json!({"wait": true}));
+        let overflow = modern_request(
+            1026,
+            "tools/call",
+            json!({"name": "Search", "arguments": {"value": "wait"}}),
+        );
         let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1026}});
         program
             .input(format!("{overflow}\n{cancel}\n").into_bytes())
@@ -614,6 +884,10 @@ id=$(printf"#,
             failure.to_string(),
             "too many retained cancelled MCP requests; reconnect"
         );
+        assert_eq!(
+            search_on_new_connection(&fixture).await["error"]["code"], -32001,
+            "the cancellation that exceeds retention still records its uncertain call"
+        );
     }));
 }
 
@@ -621,13 +895,34 @@ id=$(printf"#,
 fn modern_cancelled_large_ids_reach_the_byte_limit_before_the_count_limit() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        let fixture = fixture(PERMIT_ALL_MCP);
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+        ));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let replies = tempfile::NamedTempFile::new().expect("late replies");
-        let (mut program, mut output) =
-            exchange(large_id_server(log.path(), replies.path()), &fixture).await;
+        let mut command = large_id_server(log.path(), replies.path());
+        command[2] = command[2].replacen(
+            "case \"$frame\" in",
+            "case \"$frame\" in\n  *'\"value\":\"wait\"'*) continue ;;",
+            1,
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
         send(&program, modern_request(1, "tools/list", json!({}))).await;
         assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        send(
+            &program,
+            modern_request(
+                9000,
+                "tools/call",
+                json!({"name": "Search", "arguments": {"value": "wait"}}),
+            ),
+        )
+        .await;
+        send(&program, modern_request(9001, "ping", json!({}))).await;
+        assert_eq!(next_output(&mut output).await["id"], 9001);
         let padding = "x".repeat(128 * 1024);
         for index in 0..64 {
             let id = format!("{index}-{padding}");
@@ -642,6 +937,10 @@ fn modern_cancelled_large_ids_reach_the_byte_limit_before_the_count_limit() {
         assert_eq!(
             failure.to_string(),
             "too much retained cancelled MCP request data; reconnect"
+        );
+        assert_eq!(
+            search_on_new_connection(&fixture).await["error"]["code"], -32001,
+            "overflow cannot erase another pending call when the connection closes"
         );
     }));
 }

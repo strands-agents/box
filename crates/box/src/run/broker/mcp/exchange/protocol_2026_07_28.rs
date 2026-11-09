@@ -214,27 +214,6 @@ pub(super) fn accept_reply(
     Ok(true)
 }
 
-/// Whether a late reply to a cancelled request ends an operation that may have run.
-///
-/// Only a well-formed `input_required` result proves the operation is incomplete. Any other reply,
-/// including a malformed one, may follow a completed call, so it counts as a response.
-pub(super) fn cancelled_reply_is_terminal(
-    key: &str,
-    response: &Value,
-    exchange: &mut Exchange<'_>,
-) -> bool {
-    exchange
-        .connection
-        .modern_requests
-        .remove(key)
-        .is_none_or(|request| {
-            !matches!(
-                request.validate_reply(response),
-                Ok(ModernReply::InputRequired(_))
-            )
-        })
-}
-
 pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io::Result<()> {
     if request["method"] != "notifications/cancelled"
         || (exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
@@ -251,6 +230,9 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
     if exchange.connection.modern_requests.contains_key(&key)
         && !exchange.connection.cancelled.contains_key(&key)
     {
+        if let Some(call) = exchange.connection.decided_calls.remove(&key) {
+            record_response_leg(exchange, &call)?;
+        }
         if exchange.connection.cancelled.len() >= protocol_2026_07_28::MAXIMUM_CANCELLED {
             return Err(invalid_data(
                 "too many retained cancelled MCP requests; reconnect",
@@ -264,8 +246,6 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
                 "too much retained cancelled MCP request data; reconnect",
             ));
         }
-        // The call stays in `decided_calls`: the server may still run it, so its late reply
-        // records the response leg even though the client never sees that reply.
         if exchange.connection.lists.remove(&key).is_some() {
             exchange.registry.list_failed(
                 exchange.running.server(),
@@ -282,14 +262,6 @@ fn retained_request_bytes(connection: &McpConnection, key: &str) -> usize {
     let mut bytes = connection.in_flight.get(key).map_or(0, String::capacity);
     if let Some((id, request)) = connection.modern_requests.get_key_value(key) {
         bytes += id.capacity() + request.method.capacity();
-    }
-    if let Some((id, call)) = connection.decided_calls.get_key_value(key) {
-        bytes += id.capacity() + call.method.capacity();
-        bytes += [call.tool.as_ref(), call.prompt.as_ref(), call.uri.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(String::capacity)
-            .sum::<usize>();
     }
     bytes
 }
