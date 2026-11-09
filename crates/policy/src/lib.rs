@@ -18,6 +18,7 @@ mod error;
     )
 )]
 mod grammar;
+mod mcp_input;
 mod mcp_schema;
 mod observe;
 mod outcome;

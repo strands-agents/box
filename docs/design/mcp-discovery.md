@@ -67,7 +67,7 @@ refused, or never connects adds no commit.
 
 While the engine is `Discovering`, the committed rules decide each request. See [discovery serves the
 schema-independent subset](decisions.md#discovery-serves-the-schema-independent-subset). Box refuses a tool call as pending while its per-tool rule waits. It also refuses calls that an
-inert per-tool rule would decide on a server whose rule cannot load. These refusals apply to
+inert per-tool rule would decide on a server whose rule has not loaded. These refusals apply to
 individual tools. The loaded rules still decide calls to tools that have no waiting rule.
 
 ## How a server is discovered
@@ -113,8 +113,7 @@ stages on that thread before it writes the response.
 | 9 | Once every stdio server is `Ready` or `Failed`, and every held reply is written, the broker reports that stdio discovery is complete. | |
 
 A failure at steps 5 to 7 sends the harness an MCP error that names the failed step, in place of the
-reply. A failed stdio server takes no new connections for the rest of the run, and its other
-connections close.
+reply. A stdio server that fails there takes no new connections, and its other connections close.
 
 For MCP `2026-07-28`, the broker validates the version and capabilities on every request.
 It checks that a list result has `resultType: "complete"`, a nonnegative `ttlMs`, and a valid
@@ -189,16 +188,15 @@ stateDiagram-v2
 Box uses these states to track discovery. [When startup is
 complete](./mcp.md#when-startup-is-complete) describes the operator-visible outcomes. A `Ready`
 server has the Ready outcome. A `Failed` server has the No tools or Degraded outcome when policy
-refused `tools/list`, and Failed for other causes. See [a server whose discovery a policy denies degrades
-alone](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
+refused `tools/list`, and Failed for other causes. See [recovery after a denied tool list](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
 
 ## How discovery finishes
 
 The broker reports once to the coordinator for stdio servers. The gateway reports once for http
 servers. The gateway reports only when `box.toml` declares an http server. When the last side
 reports, the coordinator finishes discovery once. A per-tool rule that still hasn't validated
-belongs to a server that will never stage, so that server is degraded, stderr names it, and the
-engine becomes `Ready` for the rest of the run.
+is inert: the servers it waits for are degraded, stderr names them, and the engine becomes `Ready`
+for the rest of the run.
 
 For each inert rule, Box holds back the tools it can identify as subject to that rule. It recognizes
 a tool named in the head or a condition that pins both a server and a tool. The warning instead
@@ -211,10 +209,35 @@ An accepted catalog can still omit a tool because the rule misspells its name or
 
 If every referenced tool is declared, the rule failed for another reason, such as a different
 argument name or type. Box then names every server mentioned in the rule. This can include a server
-that answers correctly, which is less precise than
-[the decision to degrade only a server whose discovery policy denies](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
-We accept that warning rather than leave an inert rule unreported. A history-only reference to a
-tool still does not decide calls to it, so that tool is not held back.
+that answers correctly. [Box reports these pending rules without refusing the whole
+policy](decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone). A history-only
+reference to a tool still does not decide calls to it, so that tool is not held back.
+
+A rule held back this way isn't always held back for the rest of the run. A list that arrives after
+discovery finishes still stages its schema, and if it completes the whole policy those rules load
+and enforce from that moment. Two things decide whether a server gets there: whether a later list
+reaches Box, and whether its schema is the last thing the policy needs.
+
+A later list goes through the same decision, staging, and [limits](#pages-limits-and-failures) as
+the first, so an earlier refusal doesn't have to repeat. A rule that reads history can refuse one
+`tools/list` and permit the next, and a server can follow a schema the policy refused with one it
+accepts. On an http server no state guard stands in the way, so any later `tools/list` that policy
+permits delivers a list, on any session. On a stdio server, a list that fails while the server has
+no accepted catalog stops it: the connection whose list failed closes, the failure wakes every other
+connection open to that server and `admit_open` then stops each one, and a new `Open` is refused. A
+`tools/list` that policy refused doesn't stop a stdio server, so a later one that policy permits
+still stages. Letting a stdio server recover from a failed list would be a change to the broker.
+
+The schema also has to be the last thing the policy needs. After discovery finishes, a late list is
+validated with the whole policy, so it stages only when every other schema the policy needs is
+already there and matches its rules. With two schemas missing, a list from either server leaves the
+other's per-tool rules unvalidated: the policy doesn't validate, the list is refused, and the schema
+it carried is dropped with it. The other server's later list then fails the same way, because the
+first schema is gone, so neither recovers. A schema that staged but doesn't match its rule blocks a
+late list the same way. So what blocks recovery is whatever else the policy still needs, not how
+many servers have tools held. A rule that decides a tool on each of two servers holds both tools
+while one schema is missing, and the late list that supplies that schema completes the policy and
+recovers both.
 
 A declared server that never connects stays `Undiscovered`, so its side never reports and discovery
 never finishes. The engine still becomes `Ready` if every per-tool rule validates, and stays
@@ -267,6 +290,9 @@ A failure stays with its server:
 | The schema can't be generated, or policy refuses it | `Failed` | Unaffected |
 | A re-list fails after `Ready` | stdio: keeps its tools. http: `Failed`, tools withdrawn | Unaffected |
 | The policy history can't be written | stdio: the box stops. http: stderr warns, and the box keeps running | stdio: the box stops |
+
+A rule that decides a tool on two servers is the exception: while it waits for one server's schema,
+it holds its tool on the other server too.
 
 A harness that stops paging before the last page leaves the server unstaged, and each call to its
 tools is refused.

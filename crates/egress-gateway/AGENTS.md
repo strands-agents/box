@@ -36,6 +36,7 @@ The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and retur
 `ResponseRelease` — each admitted before its effect and each reporting a terminal `EffectOutcome`.
 `record_outcome` and `mark_indeterminate` consume `self: Box<Self>`, and `ClaimedEffectPermit`'s
 `Drop` calls `mark_indeterminate`, so one permit makes one terminal transition even on a panic.
+`ResponseRelease` carries routing and status only; `HttpRequest` retains `body_bytes`.
 
 ### One thing here is deliberately not authorization
 
@@ -117,9 +118,17 @@ Conventions: `docs/conventions.md`.
   protection is its boundary
   ([memory is a defended asset](../../docs/design/decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
   Only the public cert reaches disk, at `0o400`.
-- Release a reply only after the response fold (`CapabilitySet::apply_to_response`), so a redirect
-  or any other reply that carries a secret is scrubbed first. The workload follows a redirect, so
-  each hop is a new request that policy decides.
+- Apply response header controls before release, and scrub each body chunk before delivery.
+  Preserve credential order, cross-chunk matching, and encoded-body refusals.
+  The workload follows a redirect, so each hop is a new request that policy decides.
+- Stream ordinary and credentialed responses through one bounded lifecycle. Keep `tools/list`
+  capture bounded and attempt schema staging before release. Preserve staging failure behavior
+  and the request body cap.
+- Retain the absolute upstream deadline through body receipt, including downstream backpressure.
+  Track source completion separately from writes; a flushed prefix followed by failure is incomplete.
+- Record the HTTP request outcome at upstream response completion, failure, or the absolute
+  deadline. After downstream abandonment, retain and drain the upstream within the connection's
+  runtime and slot. Preserve known status and the existing uncertain-outcome semantics for HTTP MCP.
 - Keep both pattern checks: `CapabilitySet` applies only the credentials whose pattern matches, and
   `CredentialCapability::on_request` and `on_response` check again. Without them, a two-route box
   has a mutation-collision outage.

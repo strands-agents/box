@@ -21,6 +21,9 @@ impl ShellGrammar {
             && let Some(selector) = argv.first().and_then(|first| first.strip_prefix('+'))
             && !selector.is_empty()
         {
+            if selector.contains(['/', '\\']) {
+                return None;
+            }
             toolchain = Some(selector.to_string());
             index = 1;
         }

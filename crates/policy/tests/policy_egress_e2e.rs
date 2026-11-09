@@ -84,7 +84,7 @@ fn interceptor_maps_connect_request_and_the_response_phase() {
         .record_outcome(EffectOutcome::Completed(100))
         .expect("local outcome recording succeeds");
     interceptor
-        .intercept(&response_attempt(443, 84))
+        .intercept(&response_attempt(443))
         .expect("response release is allowed")
         .record_outcome(EffectOutcome::Completed(120))
         .expect("local outcome recording succeeds");
@@ -131,7 +131,7 @@ fn the_request_is_decided_and_the_release_is_not() {
         .expect("http:request allows the request")
         .mark_indeterminate();
     request_only
-        .intercept(&response_attempt(443, 0))
+        .intercept(&response_attempt(443))
         .expect("the release takes no decision, so it is admitted")
         .mark_indeterminate();
 
@@ -142,7 +142,7 @@ fn the_request_is_decided_and_the_release_is_not() {
         "an unpermitted request must be refused"
     );
     nothing
-        .intercept(&response_attempt(443, 0))
+        .intercept(&response_attempt(443))
         .expect("the release is admitted whatever policy says")
         .mark_indeterminate();
 }
@@ -257,14 +257,13 @@ fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
     }
 }
 
-fn response_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
+fn response_attempt(port: u16) -> EffectAttempt<'static> {
     EffectAttempt::ResponseRelease {
         host: "api.github.com",
         port,
         method: "POST",
         path: "/v1/messages",
         status: 201,
-        body_bytes,
     }
 }
 

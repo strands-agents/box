@@ -1015,6 +1015,206 @@ mod tests {
         );
     }
 
+    /// A tracked demo server over a staged policy, with its policy and its catalogs.
+    fn tracked_demo(
+        source: &str,
+    ) -> (
+        Arc<PolicyEngine>,
+        Arc<ToolCatalogs>,
+        Arc<dyn EgressEffectInterceptor>,
+        tempfile::TempDir,
+    ) {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = Arc::new(
+            PolicyEngine::open_staged(
+                &crate::Operator::unanchored(),
+                vec![Policy {
+                    origin: PathBuf::from("adapter-test.cedar"),
+                    text: source.to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("the staged policy opens"),
+        );
+        let catalogs = demo_catalogs(&policy);
+        let interceptor = EgressPolicyInterceptor::into_handle_with_discovery(
+            Arc::clone(&policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
+            Arc::clone(&catalogs),
+            Arc::new(|| {}),
+        );
+        (policy, catalogs, interceptor, history)
+    }
+
+    /// The per-tool refinement of one `demo` `add`, without the catalog gate in front of it.
+    fn refine_add(policy: &PolicyEngine, a: i64) -> Decision {
+        policy.refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "demo",
+            "add",
+            &serde_json::json!({"a": a, "b": 2}),
+        )
+    }
+
+    /// The forbid that a staged demo schema arms.
+    const DEMO_ADD_FORBID: &str = r#"
+        forbid(principal, action == demo::Action::"add", resource)
+        when { context.input.a > 5 };
+    "#;
+
+    /// A rule that reads history refuses one `tools/list` and permits the next, and the later list
+    /// lifts the degraded refusal.
+    #[test]
+    fn a_remote_server_whose_list_policy_refused_recovers_when_a_later_list_is_permitted() {
+        let (policy, catalogs, interceptor, _history) = tracked_demo(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input.method == "tools/list" }}
+            unless temporal {{
+                formerly within 600s
+                    Box::Action::"mcp:call"::request{{ input.method: "prompts/list" }}
+            }};
+            {DEMO_ADD_FORBID}"#
+        ));
+        assert!(
+            interceptor
+                .intercept(&mcp_list_attempt("demo", "tools/list"))
+                .is_err(),
+            "no prompts/list is in history yet, so the forbid refuses the first tools/list"
+        );
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::ToolsListDenied
+            ))
+        );
+        assert_eq!(
+            policy
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["demo".to_string()]
+        );
+        let held = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                held,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "the degraded refusal holds the tool: {held:?}"
+        );
+
+        interceptor
+            .intercept(&mcp_list_attempt("demo", "prompts/list"))
+            .expect("the coarse permit admits prompts/list");
+        interceptor
+            .intercept(&mcp_list_attempt("demo", "tools/list"))
+            .expect("the same policy permits this tools/list, because history changed");
+        interceptor
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the later list stages");
+        assert_eq!(catalogs.state("demo"), Some(crate::ServerDiscovery::Ready));
+        interceptor
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#))
+            .expect("an add the forbid does not name passes");
+        let forbidden = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                forbidden,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the per-tool forbid, not a stale mark, refuses the add it names: {forbidden:?}"
+        );
+        assert!(
+            interceptor
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":2}"#))
+                .is_err(),
+            "the gateway refuses the add the forbid names"
+        );
+    }
+
+    /// A remote server that replaces a schema the policy refused with one it accepts lifts the
+    /// degraded refusal.
+    #[test]
+    fn a_remote_server_recovers_when_it_corrects_the_schema_the_policy_refused() {
+        let (policy, catalogs, interceptor, _history) =
+            tracked_demo(&format!("{DEMO_PERMITS}{DEMO_ADD_FORBID}"));
+        assert!(
+            interceptor
+                .stage_mcp_catalog("demo", root_reply(b"not a tools/list reply"))
+                .is_err()
+        );
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::CatalogCapture
+            ))
+        );
+        assert_eq!(
+            policy
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["demo".to_string()]
+        );
+
+        let renamed = r#"{"result":{"tools":[{"name":"add","inputSchema":{"type":"object",
+          "properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}}]}}"#;
+        let refused = interceptor
+            .stage_mcp_catalog("demo", root_reply(renamed.as_bytes()))
+            .expect_err("the forbid reads an argument this schema does not declare");
+        assert!(refused.to_string().contains("rejected"), "{refused}");
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::PolicyStaging
+            ))
+        );
+        let held = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                held,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "the degraded refusal still holds the tool: {held:?}"
+        );
+
+        interceptor
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the corrected list stages");
+        assert_eq!(catalogs.state("demo"), Some(crate::ServerDiscovery::Ready));
+        interceptor
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#))
+            .expect("an add the forbid does not name passes");
+        let forbidden = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                forbidden,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the per-tool forbid, not a stale mark, refuses the add it names: {forbidden:?}"
+        );
+        assert!(
+            interceptor
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":2}"#))
+                .is_err(),
+            "the gateway refuses the add the forbid names"
+        );
+    }
+
     /// Staging a catalog declares the per-tool action, so the complete bundle validates, the
     /// authority becomes Ready, and the per-tool `forbid` takes effect.
     #[test]
@@ -1098,25 +1298,7 @@ mod tests {
     /// An interceptor under `source` that tracks the demo server, so its host is a bootstrap target
     /// while pending.
     fn tracked_interceptor(source: &str) -> InterceptorFixture {
-        let history = tempfile::tempdir().expect("history directory");
-        let policy = PolicyEngine::open_staged(
-            &crate::Operator::unanchored(),
-            vec![Policy {
-                origin: PathBuf::from("adapter-test.cedar"),
-                text: source.to_string(),
-            }],
-            &history.path().join("dogwood.redb"),
-        )
-        .expect("the staged policy opens");
-        let policy = Arc::new(policy);
-        let interceptor = EgressPolicyInterceptor::into_handle_with_discovery(
-            Arc::clone(&policy),
-            Principal::agent(),
-            GovernedBox::assigned("test-box"),
-            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
-            demo_catalogs(&policy),
-            Arc::new(|| {}),
-        );
+        let (_, _, interceptor, history) = tracked_demo(source);
         InterceptorFixture {
             interceptor,
             _history: history,
@@ -1414,7 +1596,6 @@ mod tests {
                 method: "POST",
                 path: "/v1/messages",
                 status: 201,
-                body_bytes: 84,
             })
             .expect("response release is allowed")
             .record_outcome(EgressEffectOutcome::Completed(120))
@@ -1440,7 +1621,6 @@ mod tests {
             method: "GET",
             path: "/",
             status: 200,
-            body_bytes: 0,
         };
 
         // A cap of two `::response` records within the window. One exchange must leave it unfired.

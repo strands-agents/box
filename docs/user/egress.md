@@ -138,6 +138,11 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 
+Responses arrive progressively, including on credentialed routes. Credential redaction retains a
+short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
+`tools/list` responses retain the default 16 MiB cap. The gateway's 300-second upstream deadline
+covers complete response receipt; expiry or a later transfer error closes an unfinished response.
+
 ## See also
 
 - [How Box controls outbound traffic](../design/egress.md): routing, the connect and request
