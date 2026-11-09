@@ -40,6 +40,7 @@ impl Fixture {
             id: Some(17),
             filesystem: b"ext4".to_vec(),
             device: b"7:19".to_vec(),
+            namespace_device: None,
             root: PathBuf::from(root),
             point: point.to_path_buf(),
         }
@@ -954,4 +955,186 @@ fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants()
     assert!(installation.refuses_mutation(&hidden_alias));
     println!("UNREADABLE_MOUNT_ALIASES_REMAIN_PROTECTED");
     println!("{COMPLETE}");
+}
+
+#[test]
+fn namespace_mounts_keep_their_mount_identity_and_point() {
+    for kind in ["net", "mnt", "pid", "user", "uts", "ipc", "cgroup", "time"] {
+        let table = format!(
+            "18 17 0:4 {kind}:[4026531840] /run/docker/netns/default rw shared:7 - nsfs nsfs rw\n"
+        );
+        let mounts = parse(table.as_bytes()).unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].id, Some(18));
+        assert_eq!(mounts[0].point, Path::new("/run/docker/netns/default"));
+    }
+}
+
+#[test]
+fn namespace_mounts_do_not_hide_a_protected_file_alias() {
+    let fixture = Fixture::new();
+    let alias = fixture.alias("workspace/mounted-file");
+    let table = format!(
+        "17 1 7:19 / {} rw - ext4 /dev/example rw\n18 17 7:19 /storage/install/launcher {} rw - ext4 /dev/example rw\n19 17 0:4 net:[4026531840] /run/docker/netns/default rw - nsfs nsfs rw\n",
+        fixture.root.display(),
+        alias.display(),
+    );
+    assert_ne!(fixture.identity().0, libc::makedev(0, 4));
+    let names = names_at_mounts(
+        std::slice::from_ref(&fixture.installed),
+        fixture.identity(),
+        &parse(table.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        names.contains(&alias),
+        "the protected bind alias is still inventoried"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("/run/docker/netns"))
+    );
+}
+
+#[test]
+fn namespace_mounts_on_any_protected_device_refuse_the_inventory() {
+    let fixture = Fixture::new();
+    for device in ["0:4", "00:004"] {
+        let table = format!(
+            "17 1 8:1 / / rw - ext4 /dev/example rw\n18 17 {device} net:[123] /run/netns/test rw - nsfs nsfs rw\n"
+        );
+        let binary = |device| InstalledBinary {
+            path: fixture.installed.clone(),
+            names: vec![fixture.installed.clone()],
+            opened: File::open(&fixture.installed).unwrap(),
+            identity: (device, fixture.identity().1),
+        };
+        let error = aliases_with_reader(
+            &[binary(fixture.identity().0), binary(libc::makedev(0, 4))],
+            || Ok(table.as_bytes().to_vec()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{device}");
+    }
+}
+
+#[test]
+fn malformed_namespace_mounts_and_other_non_path_roots_are_refused() {
+    for (device, root, point, filesystem) in [
+        ("0:4", "net:[123]", "/run/test", "ext4"),
+        ("0:4", "net:[123]", "/run/test", "fuse.nsfs"),
+        ("0:4", "relative", "/run/test", "nsfs"),
+        ("0:4", "net:[]", "/run/test", "nsfs"),
+        ("0:4", "net:[0]", "/run/test", "nsfs"),
+        ("0:4", "net:[-1]", "/run/test", "nsfs"),
+        ("0:4", "net:[+1]", "/run/test", "nsfs"),
+        ("0:4", "Net:[1]", "/run/test", "nsfs"),
+        ("0:4", "net1:[1]", "/run/test", "nsfs"),
+        ("0:4", "net:[18446744073709551616]", "/run/test", "nsfs"),
+        ("0:4", "net:[1]/tail", "/run/test", "nsfs"),
+        ("0:4", ":[1]", "/run/test", "nsfs"),
+        ("0:4", "n/t:[1]", "/run/test", "nsfs"),
+        ("0:4", "net:[123]", "relative", "nsfs"),
+        ("0:4", "net:[123]", "/run/\\777", "nsfs"),
+        ("4294967296:4", "net:[123]", "/run/test", "nsfs"),
+        ("0:4294967296", "net:[123]", "/run/test", "nsfs"),
+    ] {
+        let table = format!("18 17 {device} {root} {point} rw - {filesystem} nsfs rw\n");
+        assert!(parse(table.as_bytes()).is_err(), "accepted {table:?}");
+    }
+    for prefix in [
+        "invalid 17 0:4",
+        "0 17 0:4",
+        "18446744073709551616 17 0:4",
+        "18 invalid 0:4",
+        "18 0 0:4",
+        "18 18446744073709551616 0:4",
+        "+18 17 0:4",
+        "18 +17 0:4",
+    ] {
+        let table = format!("{prefix} net:[123] /run/test rw - nsfs nsfs rw\n");
+        assert!(parse(table.as_bytes()).is_err(), "accepted {table:?}");
+    }
+    assert!(parse(b"18 17 0:4 net:[123] /run/test rw  - nsfs nsfs rw\n").is_err());
+}
+
+#[test]
+fn namespace_mount_changes_still_invalidate_the_alias_inventory() {
+    let mut reads = 0;
+    let error = aliases_with_reader(&[], || {
+        reads += 1;
+        Ok(format!("17 1 8:1 / / rw - ext4 /dev/example rw\n18 17 0:4 net:[{}] /run/netns/test rw - nsfs nsfs rw\n", 100 + reads).into_bytes())
+    }).unwrap_err();
+    assert_eq!(reads, 6);
+    assert!(error.to_string().contains("mount table changed"), "{error}");
+}
+
+#[test]
+fn the_name_shortcut_accepts_an_unrelated_namespace_mount() {
+    let mut table = ordinary_mount_table();
+    table.extend_from_slice(b"18 17 0:4 net:[123] /run/netns/test rw - nsfs nsfs rw\n");
+    assert!(accepts_shortcut_table(&table, ordinary_mount_identities()));
+}
+
+#[test]
+fn the_name_shortcut_keeps_namespace_mount_obstructions() {
+    for point in [
+        "/tools/bin/netns",
+        "/work/netns",
+        "/tools/bin",
+        "/work",
+        "/",
+    ] {
+        let mut table = ordinary_mount_table();
+        table.extend_from_slice(
+            format!("18 17 0:4 net:[123] {point} rw - nsfs nsfs rw\n").as_bytes(),
+        );
+        assert!(
+            !accepts_shortcut_table(&table, ordinary_mount_identities()),
+            "{point}"
+        );
+    }
+    for device in ["8:1", "08:001"] {
+        let mut table = ordinary_mount_table();
+        table.extend_from_slice(
+            format!("18 17 {device} net:[123] /run/netns/test rw - nsfs nsfs rw\n").as_bytes(),
+        );
+        assert!(
+            !accepts_shortcut_table(&table, ordinary_mount_identities()),
+            "{device}"
+        );
+    }
+}
+
+#[test]
+fn the_name_shortcut_observes_namespace_mount_changes() {
+    let mut reads = 0;
+    let accepted = inspect_with_mount_table(
+        || {
+            reads += 1;
+            let mut table = ordinary_mount_table();
+            table.extend_from_slice(
+                format!(
+                    "18 17 0:4 net:[{}] /run/netns/test rw - nsfs nsfs rw\n",
+                    100 + reads
+                )
+                .as_bytes(),
+            );
+            Ok(table)
+        },
+        &|| Ok(()),
+        |mounts| {
+            one_complete_mount(
+                mounts,
+                ordinary_mount_identities(),
+                Path::new("/tools/bin"),
+                Path::new("/work"),
+                &|| Ok(()),
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(reads, 2);
+    assert!(!accepted);
 }
