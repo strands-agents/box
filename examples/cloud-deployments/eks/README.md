@@ -26,6 +26,14 @@ For Claude, `--exercise deployment-cooldown` selects the default deployment task
 Use `--exercise boundaries` for the coding and file-permission task.
 The [Claude README](claude/README.md) explains both examples and how to test them without a model.
 
+## Cluster requirements
+
+Use the [cluster baseline](../../../docs/user/tutorials/eks.md#cluster-baseline) before building or deploying.
+It lists the tested worker configuration, required settings, admission requirements, and older-cluster limits.
+`run.py` stops before Job creation if Kubernetes removes required settings during a server dry run.
+It also checks the created Job and Pods.
+A preserved setting does not prove that the worker runtime can implement it.
+
 ## Tested configuration
 
 The Box source pin is `f0dc6f49ea8bb8608502afffa50c8748f6c24ca2`.

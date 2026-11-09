@@ -52,6 +52,31 @@ def manifest(args):
                      'template': {'spec': pod}}}
 
 
+def require_sandbox_settings(pod, source):
+    """Reject API responses that lost the workload's required sandbox settings."""
+    differences = []
+    if pod.get('hostUsers') is not False:
+        differences.append(f"hostUsers: expected false; received {json.dumps(pod.get('hostUsers'))}")
+    workload = next((c for c in pod.get('containers', []) if c.get('name') == 'workload'), None)
+    if workload is None:
+        differences.append('containers: required workload container is absent')
+    else:
+        security = workload.get('securityContext', {})
+        if security.get('procMount') != 'Unmasked':
+            differences.append(f"procMount: expected Unmasked; received {json.dumps(security.get('procMount'))}")
+        seccomp = security.get('seccompProfile', pod.get('securityContext', {}).get('seccompProfile', {}))
+        if seccomp.get('type') != 'Unconfined':
+            differences.append(f"seccompProfile.type: expected Unconfined; received {json.dumps(seccomp.get('type'))}")
+    if differences:
+        raise RuntimeError(
+            f'The cluster did not preserve required Box settings in {source}:\n  '
+            + '\n  '.join(differences)
+            + '\nBox cannot start its sandbox with this configuration. '
+            'See docs/user/tutorials/eks.md#cluster-baseline for cluster, worker, and admission requirements. '
+            'This check does not identify which feature gate or admission rule changed the settings.'
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
@@ -88,6 +113,10 @@ def main():
         if required and result.returncode:
             raise RuntimeError(result.stderr.strip() or shlex.join(command) + f' exited {result.returncode}')
         return result
+    preview = json.loads(call('create', '--dry-run=server', '-f', '-', '-o', 'json',
+                              data=json.dumps(job), timeout=COMMAND_TIMEOUT_SECONDS).stdout)
+    require_sandbox_settings(preview.get('spec', {}).get('template', {}).get('spec', {}),
+                             'the server dry-run Job; no Job was created')
     created = json.loads(call('create', '-f', '-', '-o', 'json', data=json.dumps(job)).stdout)
     name = created['metadata']['name']
     dest = Path('evidence') / name
@@ -98,13 +127,26 @@ def main():
     current = created
     polling_error = None
     try:
+        require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
+                                 'the created Job')
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError('The deadline expired before Job completion was confirmed')
             current = json.loads(call('get', 'job', name, '-o', 'json',
                                       timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('The deadline expired before Pod configuration was confirmed')
+            observed = json.loads(call('get', 'pods', '-l', 'job-name=' + name, '-o', 'json',
+                                       timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
+            (dest / 'pod-configuration.json').write_text(json.dumps(observed, indent=2))
+            for pod in observed.get('items', []):
+                require_sandbox_settings(pod.get('spec', {}),
+                                         'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
             status = current.get('status', {})
+            if status.get('succeeded') and not observed.get('items'):
+                raise RuntimeError('The Job completed but no Pod configuration could be verified')
             if status.get('succeeded') or status.get('failed') or any(
                 x.get('type') == 'Failed' and x.get('status') == 'True' for x in status.get('conditions', [])
             ):

@@ -20,20 +20,32 @@ spec.loader.exec_module(runner)
 
 class JobReceiptTests(unittest.TestCase):
     def run_case(self, polling_failure=False, workload_passed=True, polling_timeout=False,
-                 diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=()):
+                 diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=(),
+                 dry_run_edit=None, created_edit=None, pod_edit=None, no_pods=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
         os.chdir(temporary.name)
         self.addCleanup(os.chdir, previous)
-        created = {"metadata": {"name": "box-scripted-test"}}
-        calls = []
+        pod_spec = {"hostUsers": False, "containers": [{"name": "workload", "securityContext": {
+            "procMount": "Unmasked", "seccompProfile": {"type": "Unconfined"}}}]}
+        created = {"metadata": {"name": "box-scripted-test"}, "spec": {"template": {"spec": pod_spec}}}
+        self.calls = calls = []
+        self.stderr = stderr = io.StringIO()
+        self.observed_polls = 0
         self.call_timeouts = []
 
         def kubectl(command, **kwargs):
             calls.append(command)
             self.call_timeouts.append((command, kwargs.get("timeout")))
+            if "--dry-run=server" in command:
+                preview = json.loads(kwargs["input"])
+                if dry_run_edit:
+                    dry_run_edit(preview["spec"]["template"]["spec"])
+                return subprocess.CompletedProcess(command, 0, json.dumps(preview), "")
             if "create" in command:
+                if created_edit:
+                    created_edit(created["spec"]["template"]["spec"])
                 return subprocess.CompletedProcess(command, 0, json.dumps(created), "")
             if "job" in command:
                 if polling_timeout:
@@ -42,6 +54,12 @@ class JobReceiptTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 1, "", "Kubernetes API unavailable")
                 status = {} if job_pending else {"succeeded": 1}
                 return subprocess.CompletedProcess(command, 0, json.dumps({**created, "status": status}), "")
+            if "pods" in command and not polling_failure and not polling_timeout and self.observed_polls == 0:
+                self.observed_polls += 1
+                pod = {"metadata": {"name": "box-pod"}, "spec": json.loads(json.dumps(pod_spec))}
+                if pod_edit:
+                    pod_edit(pod["spec"])
+                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [] if no_pods else [pod]}), "")
             if "logs" in command:
                 if diagnostic_hook:
                     diagnostic_hook(stderr.getvalue())
@@ -93,7 +111,7 @@ class JobReceiptTests(unittest.TestCase):
         self.assertIn("Kubernetes API unavailable", receipt["error"])
         self.assertEqual(receipt["job"], "box-scripted-test")
         self.assertIn("kubectl --context test-context --namespace box-demo get job box-scripted-test", stderr)
-        self.assertEqual(sum("create" in call for call in calls), 1)
+        self.assertEqual(sum("create" in call and "--dry-run=server" not in call for call in calls), 1)
         self.assertTrue(Path("evidence/box-scripted-test/submitted-job.json").is_file())
 
 
@@ -115,11 +133,11 @@ class JobReceiptTests(unittest.TestCase):
         self.assertIn("timed out", receipt["error"])
         self.assertIn("Inspect it with:", stderr)
         self.assertEqual([timeout for command, timeout in self.call_timeouts if "job" in command], [0.2])
-        self.assertEqual(sum("create" in call for call in calls), 1)
+        self.assertEqual(sum("create" in call and "--dry-run=server" not in call for call in calls), 1)
 
     def test_pending_job_at_deadline_keeps_an_incomplete_receipt(self):
         with mock.patch.object(runner, "JOB_WAIT_SECONDS", {"scripted": 0.2}), \
-                mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 1, 1]):
+                mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 0, 1, 1]):
             status, receipt, stderr, _ = self.run_case(job_pending=True)
         self.assertEqual(status, 1)
         self.assertTrue(receipt["incomplete"])
@@ -136,8 +154,9 @@ class JobReceiptTests(unittest.TestCase):
         self.assertIn("get pods", diagnostics)
         self.assertTrue(Path("evidence/box-scripted-test/pods.json").is_file())
         self.assertEqual([timeout for command, timeout in self.call_timeouts
-                          if "logs" in command or "pods" in command], [runner.DIAGNOSTIC_TIMEOUT_SECONDS] * 2)
-        self.assertEqual(sum("create" in call for call in calls), 1)
+                          if "logs" in command or "pods" in command],
+                         [runner.COMMAND_TIMEOUT_SECONDS] + [runner.DIAGNOSTIC_TIMEOUT_SECONDS] * 2)
+        self.assertEqual(sum("create" in call and "--dry-run=server" not in call for call in calls), 1)
 
     def test_real_hanging_kubectl_processes_finish_with_recovery_evidence(self):
         for phase in ("poll", "diagnostics"):
@@ -149,8 +168,12 @@ import json, os, sys, time
 from pathlib import Path
 args = sys.argv[1:]
 with Path("calls.jsonl").open("a") as stream: stream.write(json.dumps(args) + "\\n")
-if "create" in args:
-    print(json.dumps({"metadata": {"name": "box-scripted-hang"}}))
+if "--dry-run=server" in args:
+    print(sys.stdin.read())
+elif "create" in args:
+    job = json.load(sys.stdin)
+    job["metadata"]["name"] = "box-scripted-hang"
+    print(json.dumps(job))
 elif "job" in args:
     if os.environ["HANG_PHASE"] == "poll": time.sleep(30)
     print("synthetic polling failure", file=sys.stderr)
@@ -193,8 +216,97 @@ raise SystemExit(module.main())
                     observed = json.loads((root / (label + "-observed.json")).read_text())
                     self.assertEqual(observed, {"incomplete": True, "recovery_printed": True})
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
-                self.assertEqual(sum("create" in call for call in calls), 1)
-                self.assertEqual(len(calls), 4)
+                self.assertEqual(sum("create" in call and "--dry-run=server" not in call for call in calls), 1)
+                self.assertEqual(len(calls), 5)
+
+    def test_dry_run_rejects_stripped_settings_without_creating_a_job(self):
+        def strip(pod):
+            pod.pop("hostUsers")
+            pod["containers"][0]["securityContext"]["procMount"] = "Default"
+        with self.assertRaisesRegex(RuntimeError, "hostUsers: expected false") as error:
+            self.run_case(dry_run_edit=strip)
+        self.assertIn("procMount: expected Unmasked", str(error.exception))
+        self.assertIn("no Job was created", str(error.exception))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("--dry-run=server", self.calls[0])
+        self.assertFalse(Path("evidence").exists())
+
+    def test_dry_run_api_errors_and_timeouts_never_create_a_job(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as temporary:
+                previous = Path.cwd()
+                try:
+                    os.chdir(temporary)
+                    result = subprocess.CompletedProcess([], 1, "", "Forbidden: admission policy")
+                    error = subprocess.TimeoutExpired(["kubectl"], 30) if timeout else None
+                    with mock.patch.object(sys, "argv", ["run.py", "--image", "example:test"]), \
+                            mock.patch.object(runner.subprocess, "run", return_value=result, side_effect=error) as call:
+                        with self.assertRaisesRegex(RuntimeError, "timed out" if timeout else "Forbidden"):
+                            runner.main()
+                    call.assert_called_once()
+                    self.assertIn("--dry-run=server", call.call_args.args[0])
+                    self.assertEqual(call.call_args.kwargs["timeout"], runner.COMMAND_TIMEOUT_SECONDS)
+                    self.assertFalse(Path("evidence").exists())
+                finally:
+                    os.chdir(previous)
+
+    def test_created_job_change_preserves_recovery_evidence(self):
+        status, receipt, stderr, _ = self.run_case(created_edit=lambda pod: pod.pop("hostUsers"))
+        self.assertEqual(status, 1)
+        self.assertIn("created Job", receipt["error"])
+        self.assertTrue(receipt["incomplete"])
+        self.assertIn("Inspect it with:", stderr)
+        self.assertTrue(Path("evidence/box-scripted-test/submitted-job.json").is_file())
+
+    def test_actual_pod_change_cannot_be_hidden_by_successful_workload(self):
+        status, receipt, stderr, calls = self.run_case(pod_edit=lambda pod: pod.pop("hostUsers"))
+        self.assertEqual(status, 1)
+        self.assertFalse(receipt["passed"])
+        self.assertIn("Pod box-pod", receipt["error"])
+        self.assertIn("Inspect it with:", stderr)
+        snapshot = json.loads(Path("evidence/box-scripted-test/pod-configuration.json").read_text())
+        self.assertNotIn("hostUsers", snapshot["items"][0]["spec"])
+        self.assertFalse(any("delete" in call for call in calls))
+
+    def test_completed_job_without_pod_evidence_is_not_success(self):
+        status, receipt, _, _ = self.run_case(no_pods=True)
+        self.assertEqual(status, 1)
+        self.assertIn("no Pod configuration", receipt["error"])
+
+
+class SandboxSettingsTests(unittest.TestCase):
+    def pod(self):
+        return {"hostUsers": False, "containers": [{"name": "workload", "securityContext": {
+            "procMount": "Unmasked", "seccompProfile": {"type": "Unconfined"}}}]}
+
+    def test_each_required_setting_is_checked_independently(self):
+        for key, value in (("procMount", "Default"), ("seccompProfile", {"type": "RuntimeDefault"})):
+            with self.subTest(key=key):
+                pod = self.pod()
+                pod["containers"][0]["securityContext"][key] = value
+                with self.assertRaisesRegex(RuntimeError, key):
+                    runner.require_sandbox_settings(pod, "fixture")
+        for value in (None, True, 0, "false"):
+            with self.subTest(hostUsers=value):
+                pod = self.pod()
+                pod["hostUsers"] = value
+                with self.assertRaisesRegex(RuntimeError, "hostUsers"):
+                    runner.require_sandbox_settings(pod, "fixture")
+
+    def test_named_workload_is_required_even_when_a_sidecar_is_valid(self):
+        pod = self.pod()
+        pod["containers"][0]["name"] = "sidecar"
+        with self.assertRaisesRegex(RuntimeError, "workload container is absent"):
+            runner.require_sandbox_settings(pod, "fixture")
+
+    def test_pod_seccomp_is_inherited_but_container_override_wins(self):
+        pod = self.pod()
+        pod["securityContext"] = {"seccompProfile": {"type": "Unconfined"}}
+        del pod["containers"][0]["securityContext"]["seccompProfile"]
+        runner.require_sandbox_settings(pod, "fixture")
+        pod["containers"][0]["securityContext"]["seccompProfile"] = {"type": "RuntimeDefault"}
+        with self.assertRaisesRegex(RuntimeError, "seccompProfile"):
+            runner.require_sandbox_settings(pod, "fixture")
 
 
 class JobManifestTests(unittest.TestCase):

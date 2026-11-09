@@ -21,6 +21,58 @@ The [sample README](../../../examples/cloud-deployments/eks/README.md#tested-con
 The coding and deployment examples passed on EKS, including checks through the full ten-minute cooldown.
 Test the deployment example on your cluster. The recorded versions are tested configurations, not minimum requirements.
 
+## Cluster baseline
+
+Use the recorded configuration as a starting point: Kubernetes 1.35, Amazon Linux 2023 ARM64 workers,
+Linux kernel 6.12.111, and containerd 2.3.5. These versions describe the tested combination, not the
+minimum supported versions. Check the control plane and workers separately; upgrading the control
+plane does not establish that the workers can run this example.
+
+```sh
+kubectl version -o yaml
+kubectl get nodes -o custom-columns='NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion,KERNEL:.status.nodeInfo.kernelVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion,ARCH:.status.nodeInfo.architecture'
+```
+
+The cluster must preserve and implement these settings:
+
+| Setting | Requirement |
+| --- | --- |
+| Pod `hostUsers: false` | Pod user namespaces isolate the container's user IDs from the node's IDs. The API server, kubelet, container runtime, and worker filesystems must support them. |
+| Container `procMount: Unmasked` | The outer container must leave `/proc` unmasked so Box can mount the process-information filesystem in its own sandbox. |
+| Container `seccompProfile.type: Unconfined` | The outer container must permit the Linux system calls Box uses to create its sandbox. |
+| Admission rules | The namespace's Pod Security settings and any custom admission rules must permit these settings. Permission to create a Job alone does not establish this. |
+
+Kubernetes 1.31 has separate feature gates, `UserNamespacesSupport` and `ProcMountType`, for the first
+two settings. A feature gate is a switch that enables a Kubernetes feature. When these API-server
+gates are disabled, Kubernetes can remove `hostUsers` or replace `procMount` with `Default` instead
+of rejecting the request. Both features became enabled by default in upstream Kubernetes 1.33.
+That default alone does not verify an EKS cluster's worker or admission configuration.
+
+For an older cluster, use a compatible cluster and worker configuration before running this example.
+Changing only `spec.kubelet.config.featureGates.UserNamespacesSupport` in an AL2023 node launch
+template does not enable an API-server feature or `ProcMountType`. This guide does not provide a
+validated older-cluster opt-in procedure. Do not treat a nonzero
+`/proc/sys/user/max_user_namespaces` as proof of pod user namespace support: the runtime and mounted
+filesystems also need support. See the [Kubernetes user namespace requirements](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)
+and [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
+
+Before creating a Job, `run.py` sends a server-side dry run and checks the returned settings.
+A dry run uses the API server's validation and admission path without saving the Job.
+The operator therefore needs permission to create Jobs even for this check.
+If Kubernetes removes a required setting, the script exits with a configuration error and creates no Job:
+
+```text
+The cluster did not preserve required Box settings in the server dry-run Job; no Job was created:
+  hostUsers: expected false; received null
+  procMount: expected Unmasked; received "Default"
+```
+
+The script also checks the created Job and its Pods, because Pod admission can differ from Job
+admission. If those checks fail, it saves a failed receipt and prints a recovery command.
+It leaves the Job available for inspection and cleanup. A Pod might already have started before
+this later check; this diagnostic is not a security boundary. A successful check confirms only
+that the settings were preserved. The workload must still start and pass its checks.
+
 ## Build the image
 
 Clone the repository and enter the sample directory:
@@ -56,7 +108,9 @@ kubectl --context "$KUBE_CONTEXT" create namespace "$NAMESPACE" --dry-run=client
 python3 run.py --image "$IMAGE" --namespace "$NAMESPACE" --context "$KUBE_CONTEXT"
 ```
 
-The runner creates a Job, waits for completion, and saves logs and a receipt under `evidence/JOB_NAME/`.
+The runner checks the server dry run, creates a Job, verifies its Pod settings, and waits for completion.
+It saves logs and a receipt under `evidence/JOB_NAME/`.
+`pod-configuration.json` preserves the last Pod configuration checked during polling.
 A successful receipt contains `passed: true` and 11 successful checks.
 A failed workload or missing result returns a nonzero exit code.
 If polling fails after submission, the runner saves an incomplete receipt and prints the command to inspect the existing Job.
