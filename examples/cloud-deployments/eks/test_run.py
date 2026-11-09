@@ -23,7 +23,7 @@ class JobReceiptTests(unittest.TestCase):
                  diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=(),
                  dry_run_edit=None, created_edit=None, pod_edit=None, no_pods=False,
                  dry_run_warning="", failed_create=None, event_failure=False,
-                 pending_job_polls=0, empty_pod_polls=0):
+                 pending_job_polls=0, empty_pod_polls=0, failed_job=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
@@ -62,6 +62,8 @@ class JobReceiptTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 1, "", "Kubernetes API unavailable")
                 self.job_polls += 1
                 status = {} if job_pending or self.job_polls <= pending_job_polls else {"succeeded": 1}
+                if failed_job:
+                    status = {"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}
                 return subprocess.CompletedProcess(command, 0, json.dumps({**created, "status": status}), "")
             if "pods" in command and not polling_failure and not polling_timeout and not any("logs" in previous for previous in calls):
                 self.observed_polls += 1
@@ -259,9 +261,9 @@ raise SystemExit(module.main())
                 finally:
                     os.chdir(previous)
 
-    def test_pod_admission_rejection_reports_the_job_event_without_waiting(self):
+    def test_pod_admission_rejection_is_preserved_when_the_job_fails(self):
         message = 'pods "box-pod" is forbidden: violates PodSecurity "baseline": procMount=Unmasked'
-        status, receipt, stderr, calls = self.run_case(no_pods=True, job_pending=True, failed_create=message)
+        status, receipt, stderr, calls = self.run_case(no_pods=True, failed_job=True, failed_create=message)
         self.assertEqual(status, 1)
         self.assertIn(message, receipt["error"])
         self.assertTrue(receipt["incomplete"])
@@ -294,6 +296,29 @@ raise SystemExit(module.main())
         self.assertTrue(receipt["passed"])
         self.assertIn("Could not inspect Pod creation events", stderr)
         self.assertEqual(sum("events" in call for call in calls), 1)
+
+    def test_creation_errors_do_not_prevent_a_later_valid_pod(self):
+        for message in ('forbidden: exceeded quota: compute',
+                        'failed calling webhook: context deadline exceeded',
+                        'admission webhook denied the request'):
+            with self.subTest(message=message), mock.patch.object(runner.time, "sleep"):
+                status, receipt, stderr, _ = self.run_case(
+                    pending_job_polls=1, empty_pod_polls=1, failed_create=message)
+                self.assertEqual(status, 0)
+                self.assertTrue(receipt["passed"])
+                self.assertIsNone(receipt["error"])
+                self.assertIn(message, stderr)
+
+    def test_persistent_creation_error_is_in_the_deadline_receipt(self):
+        message = 'forbidden: exceeded quota: compute'
+        with mock.patch.object(runner, "JOB_WAIT_SECONDS", {"scripted": 0.2}), \
+                mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 1]), \
+                mock.patch.object(runner.time, "sleep"):
+            status, receipt, stderr, _ = self.run_case(no_pods=True, job_pending=True, failed_create=message)
+        self.assertEqual(status, 1)
+        self.assertIn("deadline expired", receipt["error"])
+        self.assertIn(message, receipt["error"])
+        self.assertEqual(stderr.count(message), 1)
 
     def test_created_job_change_preserves_recovery_evidence(self):
         status, receipt, stderr, _ = self.run_case(created_edit=lambda pod: pod.pop("hostUsers"))

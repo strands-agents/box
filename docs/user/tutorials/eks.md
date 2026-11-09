@@ -72,7 +72,10 @@ because Pod admission can differ from Job admission. While no Pods exist, it rea
 `FailedCreate` events and reports the controller's message, including admission rejections.
 The operator needs permission to list namespace events for this diagnostic. If the event query
 fails, the script prints a warning, saves the error, and continues its bounded wait.
-A configuration mismatch or a failed Pod-creation event produces a failed receipt and a recovery command.
+Pod-creation events are warnings: quota exhaustion, webhook outages, and admission rules can change
+while the controller retries. The script keeps waiting and accepts a later valid Pod. If the Job fails
+before creating a Pod or the wait expires, the failed receipt includes the last creation error.
+A configuration mismatch also produces a failed receipt and a recovery command.
 It leaves the Job available for inspection and cleanup. A Pod might already have started before
 this later check; this diagnostic is not a security boundary. A successful check confirms only
 that the settings were preserved. The workload must still start and pass its checks.

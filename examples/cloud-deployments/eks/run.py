@@ -130,6 +130,7 @@ def main():
     current = created
     polling_error = None
     event_warning_printed = False
+    last_creation_error = None
     try:
         require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
                                  'the created Job')
@@ -145,6 +146,8 @@ def main():
             observed = json.loads(call('get', 'pods', '-l', 'job-name=' + name, '-o', 'json',
                                        timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
             (dest / 'pod-configuration.json').write_text(json.dumps(observed, indent=2))
+            if observed.get('items'):
+                last_creation_error = None
             for pod in observed.get('items', []):
                 require_sandbox_settings(pod.get('spec', {}),
                                          'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
@@ -166,17 +169,25 @@ def main():
                     failures = json.loads(events.stdout).get('items', [])
                     if failures:
                         messages = '; '.join(event.get('message') or 'No event message' for event in failures)
-                        raise RuntimeError('The Job controller could not create a Pod: ' + messages)
+                        if messages != last_creation_error:
+                            print('The Job controller could not create a Pod: ' + messages,
+                                  file=sys.stderr, flush=True)
+                        last_creation_error = messages
             status = current.get('status', {})
             if status.get('succeeded') and not observed.get('items'):
                 raise RuntimeError('The Job completed but no Pod configuration could be verified')
-            if status.get('succeeded') or status.get('failed') or any(
+            failed = status.get('failed') or any(
                 x.get('type') == 'Failed' and x.get('status') == 'True' for x in status.get('conditions', [])
-            ):
+            )
+            if failed and not observed.get('items') and last_creation_error:
+                raise RuntimeError('The Job failed before a Pod was created')
+            if status.get('succeeded') or failed:
                 break
             time.sleep(min(POLL_INTERVAL_SECONDS, max(0, deadline - time.monotonic())))
     except (RuntimeError, json.JSONDecodeError) as error:
         polling_error = str(error)
+        if last_creation_error:
+            polling_error += '\nLast Pod creation error: ' + last_creation_error
     receipt = {'job': name, 'image': args.image, 'mode': args.mode,
                'passed': False, 'checks': {}, 'error': polling_error,
                'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
