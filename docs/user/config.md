@@ -577,15 +577,23 @@ It checks elapsed time between filesystem calls and before accepting a completed
 This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
 budgets. The command and its paths must still pass the writable-grant checks.
 
-Box skips the scan when every name of the command is in the command's own folder, because no
-write grant may reach that folder. Rustup's proxies in `~/.cargo/bin` and npm's `bun.exe` and
-`bunx.exe` are like this. Box counts the names again before it relies on the skip, so a name in
-another folder brings the scan back.
+On Linux, Box can skip this scan for a configured program when it counts every hard-link name
+in the program's own directory and verifies the mount layout for the path being checked.
+The program, its directory, and that path must share one ext4, XFS, or tmpfs mount that exposes
+the filesystem's root (`/`). No other mount may share its device or mount point, or sit at or
+below the program's directory or the checked path. Box reads the mount table before and after
+counting and requires both results to match.
+
+Box repeats this check for each writable directory and each path changed through Strands Shell
+or Monty. Each check has a separate 30-second budget, checked between filesystem calls; it
+cannot interrupt a blocked call. On macOS, or when any condition is unmet, an inspection error
+occurs, or the budget expires, Box uses the recursive scan and its limits instead.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
-even when policy permits the operation. For commands admitted through scanning, directory
-changes require a complete scan that finds none of their hard-link names. The same inspection
-limits apply. Reads still require the applicable policy permission.
+even when policy permits the operation. For operator-writable programs with multiple hard links,
+directory changes require a complete scan that finds none of their names, unless the Linux
+checks allow Box to skip it. The same inspection limits apply. Reads still require the
+applicable policy permission.
 Build output covered by the agent's own grants remains writable when no tool table names it.
 On Linux, native programs can create hard links within one writable mount.
 Links across separate writable grants fail, even when their directories share a filesystem.

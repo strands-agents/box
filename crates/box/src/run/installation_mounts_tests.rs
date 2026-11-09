@@ -37,6 +37,8 @@ impl Fixture {
 
     fn mount(&self, root: &str, point: &Path) -> Mount {
         Mount {
+            id: Some(17),
+            filesystem: b"ext4".to_vec(),
             device: b"7:19".to_vec(),
             root: PathBuf::from(root),
             point: point.to_path_buf(),
@@ -46,6 +48,160 @@ impl Fixture {
     fn filesystem(&self) -> Mount {
         self.mount("/", &self.root)
     }
+}
+
+fn ordinary_mount_table() -> Vec<u8> {
+    b"17 1 8:1 / / rw - ext4 /dev/example rw\n".to_vec()
+}
+
+fn ordinary_mount_identities() -> [MountIdentity; 3] {
+    [MountIdentity {
+        id: 17,
+        device: libc::makedev(8, 1),
+    }; 3]
+}
+
+fn accepts_shortcut_table(table: &[u8], identities: [MountIdentity; 3]) -> bool {
+    one_complete_mount(
+        &parse(table).unwrap(),
+        identities,
+        Path::new("/tools/bin"),
+        Path::new("/work"),
+        &|| Ok(()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_name_shortcut_accepts_one_complete_supported_filesystem() {
+    for filesystem in ["ext4", "xfs", "tmpfs"] {
+        let table = format!("17 1 8:1 / / rw - {filesystem} /dev/example rw\n");
+        assert!(accepts_shortcut_table(
+            table.as_bytes(),
+            ordinary_mount_identities()
+        ));
+    }
+}
+
+#[test]
+fn the_name_shortcut_refuses_another_mount_of_the_commands_device() {
+    let mut table = ordinary_mount_table();
+    table.extend_from_slice(b"18 17 8:1 /tools /elsewhere rw - ext4 /dev/example rw\n");
+    assert!(!accepts_shortcut_table(&table, ordinary_mount_identities()));
+}
+
+#[test]
+fn the_name_shortcut_refuses_a_file_mount_inside_the_counted_folder() {
+    let mut table = ordinary_mount_table();
+    table.extend_from_slice(b"18 17 8:2 /file /tools/bin/other-name rw - ext4 /dev/other rw\n");
+    assert!(!accepts_shortcut_table(&table, ordinary_mount_identities()));
+}
+
+#[test]
+fn the_name_shortcut_refuses_a_nested_mount_inside_the_mutation_target() {
+    let mut table = ordinary_mount_table();
+    table.extend_from_slice(b"18 17 8:2 / /work/nested rw - ext4 /dev/other rw\n");
+    assert!(!accepts_shortcut_table(&table, ordinary_mount_identities()));
+}
+
+#[test]
+fn the_name_shortcut_refuses_partial_unknown_or_ambiguous_views() {
+    for table in [
+        b"17 1 8:1 /subtree / rw - ext4 /dev/example rw\n".as_slice(),
+        b"17 1 8:1 / / rw - overlay overlay rw\n".as_slice(),
+        b"17 1 8:1 / / rw - btrfs /dev/example rw\n".as_slice(),
+        b"17 1 8:2 / / rw - ext4 /dev/example rw\n".as_slice(),
+        b"18 1 8:1 / / rw - ext4 /dev/example rw\n".as_slice(),
+        b"17 1 8:1 / / rw - ext4 /dev/example rw\n17 1 8:2 / /hidden rw - ext4 /dev/other rw\n"
+            .as_slice(),
+        b"17 1 8:1 / / rw - ext4 /dev/example rw\n18 1 8:2 / / rw - ext4 /dev/other rw\n"
+            .as_slice(),
+    ] {
+        assert!(
+            !accepts_shortcut_table(table, ordinary_mount_identities()),
+            "{}",
+            String::from_utf8_lossy(table)
+        );
+    }
+}
+
+#[test]
+fn the_name_shortcut_requires_all_opened_paths_to_share_one_mount_and_device() {
+    for changed in 0..3 {
+        let mut identities = ordinary_mount_identities();
+        identities[changed].id = 18;
+        assert!(!accepts_shortcut_table(&ordinary_mount_table(), identities));
+        identities = ordinary_mount_identities();
+        identities[changed].device = libc::makedev(8, 2);
+        assert!(!accepts_shortcut_table(&ordinary_mount_table(), identities));
+    }
+}
+
+#[test]
+fn the_name_shortcut_rechecks_the_mount_table_after_inspecting_names() {
+    let inspected = std::cell::Cell::new(false);
+    let reads = std::cell::Cell::new(0);
+    let accepted = inspect_with_mount_table(
+        || {
+            reads.set(reads.get() + 1);
+            let mut table = ordinary_mount_table();
+            if inspected.get() {
+                table.extend_from_slice(
+                    b"18 17 8:1 /tools /work/nested rw - ext4 /dev/example rw\n",
+                );
+            }
+            Ok(table)
+        },
+        &|| Ok(()),
+        |_| {
+            inspected.set(true);
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(inspected.get(), "the name inspection must execute");
+    assert_eq!(reads.get(), 2);
+    assert!(!accepted, "a changed table cannot support the shortcut");
+    assert!(
+        inspect_with_mount_table(|| Ok(ordinary_mount_table()), &|| Ok(()), |_| Ok(true)).unwrap()
+    );
+}
+
+#[test]
+fn the_name_shortcut_preserves_table_read_and_name_inspection_failures() {
+    let error = inspect_with_mount_table(
+        || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        &|| Ok(()),
+        |_| panic!("an unreadable mount table cannot reach name inspection"),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    let error = inspect_with_mount_table(
+        || Ok(ordinary_mount_table()),
+        &|| Ok(()),
+        |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn the_name_shortcut_checks_the_deadline_during_mount_parsing() {
+    let checks = std::cell::Cell::new(0);
+    let check = || {
+        checks.set(checks.get() + 1);
+        if checks.get() >= 3 {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        } else {
+            Ok(())
+        }
+    };
+    let mut table = ordinary_mount_table();
+    table.extend_from_slice(b"18 17 8:2 / /elsewhere rw - ext4 /dev/other rw\n");
+    assert_eq!(
+        parse_with_check(&table, &check).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
 }
 
 #[test]
