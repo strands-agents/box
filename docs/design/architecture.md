@@ -292,10 +292,6 @@ interpreters are part of the code the operator must trust.
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
-   For a terminal run, the agent retains its original terminal streams. Core redirects its own
-   stderr to a reader that retains up to 32 KiB and drains the rest. After the workload and hosted
-   services stop, Core restores stderr and prints the retained messages. It reports any truncation.
-   Piped runs keep live diagnostics. A caller-supplied terminal uses the same deferred output.
 
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
 It then removes the record that identifies the running box and releases the run lock.

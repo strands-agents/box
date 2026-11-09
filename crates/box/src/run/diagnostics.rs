@@ -100,18 +100,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overflow_is_drained_with_bounded_retention() {
-        let mut input = io::Cursor::new(vec![b'x'; CAPACITY * 4]);
-        let report = drain(&mut input).unwrap();
-        assert_eq!(report.bytes, vec![b'x'; CAPACITY]);
-        assert!(report.truncated);
-        assert_eq!(input.position(), (CAPACITY * 4) as u64);
-        let small = drain(&b"small report"[..]).unwrap();
-        assert_eq!(small.bytes, b"small report");
-        assert!(!small.truncated);
-    }
-
-    #[test]
     fn stderr_is_restored_and_inherited_writers_do_not_block_replay() {
         const CHILD: &str = "BOX_DIAGNOSTICS_TEST_CHILD";
         if let Ok(scenario) = std::env::var(CHILD) {
@@ -124,7 +112,7 @@ mod tests {
             let mut native = diagnostics.stderr().unwrap();
             native.write_all(b"NATIVE\n").unwrap();
             let bytes = if scenario == "overflow" {
-                vec![b'x'; CAPACITY * 4]
+                vec![b'x'; 4 * 1024 * 1024]
             } else {
                 b"CORE\n".to_vec()
             };
