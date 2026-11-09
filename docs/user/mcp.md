@@ -29,6 +29,48 @@ secret.ref   = "env://GITHUB_MCP_TOKEN"
 The table's name, `fetch` or `github`, is the server name. Policy reads it as
 `context.input.server`.
 
+## Protocol versions
+
+The stdio broker accepts MCP `2026-07-28` and the legacy versions `2024-11-05`,
+`2025-03-26`, `2025-06-18`, and `2025-11-25`. No configuration change is needed.
+Server frames with duplicate JSON object keys are refused for both protocol paths.
+
+A modern client sends its protocol version and capabilities with each request. It can list
+tools without an initialization handshake or a discovery request. A legacy client must complete
+its handshake before listing tools. Both paths use the same tool catalog and policy checks.
+`policy generate-schema` also discovers modern stdio servers and falls back to a legacy handshake
+when its discovery probe receives an error other than a recognized error from the new protocol,
+or no reply within two seconds. A server that closes stdout without replying gets one fresh
+start with the legacy handshake. A valid modern discovery reply that arrives while the
+handshake waits selects one fresh start with modern requests. Discovery permits at most one
+restart within its 30-second deadline. Partial or malformed replies fail discovery.
+
+Some modern calls ask the client for more input, such as a list of roots or an elicitation answer.
+Box first checks the retried call against the catalog and its policy, then checks each answer
+under the requested method's `mcp:call` policy.
+The client must retry on the same connection with the original parameters and the server's exact
+request state. If that connection closes, start the operation again. Box retains up to 64 active
+requests and 64 pending continuations per connection, with up to 64 input requests per continuation.
+A new continuation at capacity replaces the oldest one. A matching retry uses its allowance
+even if policy denies it. Restart an operation whose allowance was used or replaced.
+Identical pending calls retain separate retry allowances. A server must return distinct request
+states when parallel calls need distinct identities. Conflicting input IDs or methods for the
+same parameters and state close the connection. Unknown result types from protocol extensions
+are refused.
+
+Cancelling a modern request releases its active slot. Box retains the cancelled request's ID
+until a late reply arrives or the connection closes, so the client cannot reuse that ID meanwhile.
+Box retains up to 1,024 cancelled requests per connection and up to 16 MiB of their request IDs
+and method names. If another cancellation exceeds either limit, Box closes the connection and stops
+the server. Other calls on that connection can be interrupted. Start a new connection to continue.
+
+Cancelling an admitted modern `tools/call`, `prompts/get`, or `resources/read` records one
+`mcp:call::response` immediately, even if the server never replies. A late reply adds no second
+event, including a reply that asks for more input. When a stdio connection ends, Box stops the
+server and records its remaining admitted calls as indeterminate outcomes.
+These [response events](./policy/actions.md#what-a-temporal-rule-observes) count toward policy
+budgets and can satisfy response-based rules; they do not establish tool success.
+
 ## `[mcp.<name>]`, `type = "stdio"`
 
 | Key | Type | Default | Meaning |
@@ -280,6 +322,14 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 | A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. |
 | `` `[mcp.<a>]` and `[mcp.<b>]` declare the same command "<command>" `` | Two tables declare the same exact command or wildcard pattern on one alias. Remove one, or change its arguments. |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
+| `modern MCP requests require ...` | The client omitted required protocol metadata. Update the client to one that sends the fields on every request. |
+| `Unsupported MCP protocol version` | The request names a modern version Box does not support. The error lists the supported version. |
+| `modern MCP requests cannot use a legacy handshake connection` | The client mixed the modern request protocol with a legacy handshake. Start a new connection using one protocol era. |
+| `MCP input answers do not match a pending server request` | A retry changed its original parameters or request state, used a consumed or evicted continuation, or arrived on another connection. Restart the operation. |
+| `too many retained cancelled MCP requests; reconnect` | Box already retains 1,024 cancelled request IDs without replies. Cancelling another active request closes the connection and stops the server. Start a new connection. |
+| `too much retained cancelled MCP request data; reconnect` | A cancellation exceeds the 16 MiB limit for retained request IDs and method names. Box closes the connection and stops the server. Start a new connection. |
+| `failed to record MCP response: ...` | Box could not save the call's outcome. The connection stops. |
+| `a modern MCP result has an unsupported resultType` | The server returned a result type the broker cannot validate. |
 
 The harness gets these errors when it starts a server, and the box keeps running:
 

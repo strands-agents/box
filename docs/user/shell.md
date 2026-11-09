@@ -93,8 +93,8 @@ A program's filesystem lists bound its own file operations.
 When an experimental [tool grammar](config.md#toolnamegrammar) binds the program, Box decides the
 spawn as the grammar's action, such as `Tool::git::Action::"push"`, or as `unmodeled` when the
 grammar can't read the command, and `shell:spawn` doesn't decide it. A grammar binds the program
-file of each `[tool]` and each stdio `[mcp.<name>]` whose command runs its `program`, under that
-name. A spawn of a bound file by any other name is a `shell:spawn`, except in the refused cases
+file of its own `[tool]` under its `program`, the name the agent types, and the file of each other
+`[tool]` and each stdio `[mcp.<name>]` whose command ends in that name. A spawn of a bound file by any other name is a `shell:spawn`, except in the refused cases
 below. For example, macOS `/usr/bin/git` is one file with many names, so with a git grammar on it,
 `git` is decided by the grammar and `make` is decided by `shell:spawn`. The agent may be able to make a link to a bound file
 under a name that no grammar binds, and `shell:spawn` decides that spawn too. So pin each

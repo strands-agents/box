@@ -25,6 +25,8 @@ use super::server::{
 };
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
 
+mod protocol_2026_07_28;
+
 /// How long an MCP caller can wait to enter the exchange input queue.
 pub(super) const MCP_INPUT_SEND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(100);
@@ -91,9 +93,10 @@ enum McpConnectionPhase {
     AwaitingInitialize,
     AwaitingInitialized,
     Active,
+    PerRequestMetadata,
 }
 
-/// A decided client request awaiting its reply, so the reply can record `mcp:call::response`.
+/// An admitted item call awaiting a terminal or indeterminate outcome.
 struct RecordedCall {
     request_id: RequestId,
     method: String,
@@ -128,6 +131,10 @@ struct McpConnection {
     lists: BTreeMap<String, PendingList>,
     /// Server requests forwarded to the client, by id, with the method each one asked.
     server_requests: BTreeMap<String, String>,
+    modern_requests: BTreeMap<String, super::protocol_2026_07_28::ModernRequest>,
+    /// Cancelled request IDs and their retained string allocations, in bytes.
+    cancelled: BTreeMap<String, usize>,
+    pending_inputs: VecDeque<super::protocol_2026_07_28::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
     policy: Arc<PolicyEngine>,
@@ -265,11 +272,15 @@ async fn run_mcp_program(
         decided_calls: BTreeMap::new(),
         lists: BTreeMap::new(),
         server_requests: BTreeMap::new(),
+        modern_requests: BTreeMap::new(),
+        cancelled: BTreeMap::new(),
+        pending_inputs: VecDeque::new(),
         held: VecDeque::new(),
         policy: Arc::clone(&policy),
         governed: governed.clone(),
     };
     let mut client_frames = VecDeque::new();
+    let mut client_input_closed = false;
 
     let result = if let Err(error) = initial_admission {
         Err(error)
@@ -336,6 +347,9 @@ async fn run_mcp_program(
                     connection: &mut connection,
                 };
                 let outcome = match event {
+                    ProgramEvent::Input(Some(McpInput::Bytes(_))) if client_input_closed => Err(
+                        io::Error::new(io::ErrorKind::BrokenPipe, "MCP stdin is closed"),
+                    ),
                     ProgramEvent::Input(Some(McpInput::Bytes(bytes))) => {
                         exchange.running.complete_frames(&bytes).map(|complete| {
                             client_frames.extend(complete);
@@ -343,14 +357,21 @@ async fn run_mcp_program(
                         })
                     }
                     ProgramEvent::Input(Some(McpInput::Eof)) => {
-                        if let Some(frame) = exchange.running.take_pending() {
-                            client_frames.push_back(frame);
+                        client_input_closed = true;
+                        let final_frame = match exchange.running.take_pending() {
+                            Some(frame) => {
+                                handle_client_frame(frame, &mut exchange, &policy, &governed).await
+                            }
+                            None => Ok(ProgramAction::Continue),
+                        };
+                        match final_frame {
+                            Ok(ProgramAction::Continue) => exchange
+                                .running
+                                .close_stdin()
+                                .await
+                                .map(|()| ProgramAction::Continue),
+                            outcome => outcome,
                         }
-                        exchange
-                            .running
-                            .close_stdin()
-                            .await
-                            .map(|()| ProgramAction::Continue)
                     }
                     ProgramEvent::Input(Some(McpInput::Stop) | None) => Ok(ProgramAction::Close),
                     ProgramEvent::Output(Some(Ok(frame))) => {
@@ -395,11 +416,19 @@ async fn run_mcp_program(
     registry.connection_closed(&connection.key);
     reader.abort_and_join().await;
     let cleanup = running.stop_and_wait().await;
-    match (result, cleanup) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    let pending = std::mem::take(&mut connection.decided_calls);
+    let exchange = Exchange {
+        running: &mut running,
+        registry: &registry,
+        frames: &frames,
+        program,
+        connection: &mut connection,
+    };
+    let mut recorded = Ok(());
+    for call in pending.into_values() {
+        recorded = recorded.and(record_response_leg(&exchange, &call));
     }
+    result.and(cleanup).and(recorded)
 }
 
 async fn next_staged(held: &mut VecDeque<HeldReply>) -> StagedList {
@@ -603,9 +632,28 @@ async fn handle_client_frame(
                 });
             let request = parse_client_frame(&text)?;
             let Some(method) = request.get("method").and_then(Value::as_str) else {
+                if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
+                    return Err(invalid_data(
+                        "modern MCP clients cannot send JSON-RPC responses",
+                    ));
+                }
                 return handle_client_response(&text, &request, exchange, policy, governed).await;
             };
             let method = method.to_string();
+            let notification = method.starts_with("notifications/") && request.get("id").is_none();
+            if !notification
+                && (exchange.connection.phase == McpConnectionPhase::PerRequestMetadata
+                    || super::protocol_2026_07_28::carries_metadata(&request)
+                    || method == "server/discover")
+            {
+                return protocol_2026_07_28::handle_request(
+                    &text, &request, exchange, policy, governed,
+                )
+                .await;
+            }
+            if notification {
+                protocol_2026_07_28::cancel_request(&request, exchange)?;
+            }
             if method == "tools/list" {
                 if exchange.connection.phase != McpConnectionPhase::Active {
                     emit_request_error(
@@ -621,7 +669,7 @@ async fn handle_client_frame(
                 }
                 return handle_tools_list(&text, &request, exchange, policy, governed).await;
             }
-            handle_request(&text, &request, &method, exchange, policy, governed).await
+            handle_request(&text, &request, &method, exchange, policy, governed, &[]).await
         })
         .await
 }
@@ -829,9 +877,12 @@ async fn handle_request(
     exchange: &mut Exchange<'_>,
     policy: &PolicyEngine,
     governed: &GovernedBox,
+    input_methods: &[String],
 ) -> io::Result<ProgramAction> {
     if method == "initialize" {
-        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize {
+        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize
+            || exchange.connection.initialize_id.is_some()
+        {
             emit_request_error(
                 exchange.frames,
                 exchange.program,
@@ -946,6 +997,11 @@ async fn handle_request(
             }
             ClientRequestAdmission::Refused => return Ok(ProgramAction::Continue),
         };
+    if !protocol_2026_07_28::admit_input_answers(input_methods, request, exchange, policy, governed)
+        .await?
+    {
+        return Ok(ProgramAction::Continue);
+    }
     if let Some((key, _)) = request_id {
         // Only a call that names an item records `mcp:call::response`, so listing does not count
         // toward a temporal cap.
@@ -975,6 +1031,7 @@ async fn forward_server_frame(
     raw: &[u8],
     exchange: &mut Exchange<'_>,
 ) -> io::Result<ProgramAction> {
+    egress_gateway::refuse_duplicate_mcp_keys(raw)?;
     let response: Value = serde_json::from_slice(raw)
         .map_err(|error| invalid_data(format!("invalid MCP server frame: {error}")))?;
     let object = response
@@ -987,6 +1044,11 @@ async fn forward_server_frame(
     }
     if let Some(method) = object.get("method") {
         if let Some(id) = object.get("id") {
+            if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
+                return Err(invalid_data(
+                    "modern MCP servers cannot send JSON-RPC requests",
+                ));
+            }
             let method = method.as_str().unwrap_or_default();
             let key = id_key(id)?;
             if exchange.connection.server_requests.len() >= MAXIMUM_PENDING_SERVER_REQUESTS
@@ -1026,14 +1088,48 @@ async fn forward_server_frame(
             "the MCP server returned an unknown response id",
         ));
     }
+    if exchange.connection.cancelled.remove(&key).is_some() {
+        exchange.connection.modern_requests.remove(&key);
+        return Ok(ProgramAction::Continue);
+    }
+    let terminal = match protocol_2026_07_28::accept_reply(&key, &response, exchange) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            if exchange.connection.lists.remove(&key).is_some() {
+                exchange.registry.list_failed(
+                    exchange.running.server(),
+                    &exchange.connection.key,
+                    DiscoveryFailure::CatalogCapture,
+                );
+            }
+            emit_request_error(
+                exchange.frames,
+                exchange.program,
+                Some(id),
+                -32603,
+                &error.to_string(),
+                None,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     if let Some(list) = exchange.connection.lists.remove(&key) {
         return forward_list_reply(raw, &response, list, exchange).await;
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
-    // The reply reaches the client before its usage is recorded, so bookkeeping never drops it.
+    if let Some(call) = response_leg.filter(|_| terminal) {
+        record_response_leg(exchange, &call)?;
+    }
     emit_text(exchange.frames, exchange.program, raw, None).await?;
-    if let Some(call) = response_leg
-        && let Err(error) = exchange.connection.policy.record(
+    Ok(ProgramAction::Continue)
+}
+
+fn record_response_leg(exchange: &Exchange<'_>, call: &RecordedCall) -> io::Result<()> {
+    exchange
+        .connection
+        .policy
+        .record(
             &exchange.connection.governed,
             &Principal::agent(),
             &call.request_id,
@@ -1045,10 +1141,10 @@ async fn forward_server_frame(
                 uri: call.uri.as_deref(),
             },
         )
-    {
-        eprintln!("[broker] failed to record mcp:call response leg: {error}");
-    }
-    Ok(ProgramAction::Continue)
+        .map_err(|error| {
+            eprintln!("[broker] failed to record mcp:call response leg: {error}");
+            io::Error::other(format!("failed to record MCP response: {error}"))
+        })
 }
 
 /// Capture one `tools/list` reply, and hold the final page until its schema stages.
@@ -1110,6 +1206,8 @@ async fn emit_list_failure(
 
 #[cfg(test)]
 mod tests {
+    mod protocol_2026_07_28;
+
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -1232,6 +1330,11 @@ done"#
             panic!("non-output frame: {:?}", outbound.frame);
         };
         let bytes = crate::run::broker::protocol::decode_payload(&data).expect("output payload");
+        assert_eq!(
+            bytes.last(),
+            Some(&b'\n'),
+            "an MCP response ends with a newline"
+        );
         serde_json::from_slice(&bytes).expect("the MCP output is JSON")
     }
 

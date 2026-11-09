@@ -373,15 +373,14 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
-On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
-Run Box as a non-root account to grant sandbox directory writes.
-Root launches support explicitly granted existing-file writes and read-only directory access.
+On Linux, root and non-root launches support directory writes with explicit read and write grants.
+Permitted file creation retains the launcher's underlying file identity.
+Existing-file write grants permit writes to their named files.
 Private `/tmp` storage remains writable and separate from the surrounding OS.
-The same restriction applies when a container maps a non-root account to user ID zero.
 
 These filesystem lists govern sandbox access.
-Shell and Python requests through Box use separate policy and reach checks in the trusted process.
-This restriction does not change their file ownership or permission to create files.
+Shell and Python requests through Box use separate policy and reach checks in the box's trusted process.
+Permitted file creation retains that process's file identity.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
@@ -402,15 +401,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
+| Read-write | Explicit read and write grants | Supported | Supported |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
@@ -577,10 +576,25 @@ It checks elapsed time between filesystem calls and before accepting a completed
 This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
 budgets. The command and its paths must still pass the writable-grant checks.
 
+On Linux, Box can skip this scan for a configured program when it counts every hard-link name
+in the program's own directory and verifies the mount layout for the directory being checked.
+The program and both directories must share one ext4, XFS, or tmpfs mount that exposes
+the filesystem's root (`/`). No other mount may share its device or mount point, or sit at or
+below the program's directory or the checked path. Box reads the mount table before and after
+counting and requires both results to match.
+
+Box repeats this check for each writable directory and each directory changed through Strands
+Shell or Monty. Files and missing paths use the existing identity checks without this optional
+mount inspection. Each optional inspection has a separate 30-second budget, checked between
+filesystem calls; it cannot interrupt a blocked call. Directory targets use the recursive scan
+and its limits on macOS. Linux also uses that scan if any condition is unmet, an inspection
+error occurs, or the budget expires.
+
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
-even when policy permits the operation. For commands admitted through scanning, directory
-changes require a complete scan that finds none of their hard-link names. The same inspection
-limits apply. Reads still require the applicable policy permission.
+even when policy permits the operation. For operator-writable programs with multiple hard links,
+directory changes require a complete scan that finds none of their names, unless the Linux
+checks allow Box to skip it. The same inspection limits apply. Reads still require the
+applicable policy permission.
 Build output covered by the agent's own grants remains writable when no tool table names it.
 On Linux, native programs can create hard links within one writable mount.
 Links across separate writable grants fail, even when their directories share a filesystem.
@@ -645,9 +659,6 @@ Each of these is refused at startup, before any box state exists:
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
 - A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
   grammar on `[mcp.<name>]` is an unknown field there.
-- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
-  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
-  `command` runs "gh"; ...``.
 - Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
   `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
 - Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
@@ -659,6 +670,17 @@ Each of these is refused at startup, before any box state exists:
 - An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
   grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
   while `tool-grammars` is on; give the server another name``.
+
+A grammar binds under its `program`, the name the agent types, so `program` may differ from the
+last part of `command[0]`. Box CLI writes `npm` as the file its link leads to, such as
+`.../npm/bin/npm-cli.js`, and `program = "npm"` still binds under `npm`. When the last part of
+`command[0]` is the `program`, Box accepts the grammar. Otherwise, after it opens each tool's
+program file and before the workload starts, Box finds `program` on the `PATH` that `run` was
+started with, which is the `PATH` the Shell searches. It refuses the grammar unless that file is the
+one `command[0]` names, such as `[tool.gh] command = ["gh"]` with `program = "git"`:
+``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
+`command` runs /usr/bin/gh; ...``. When `PATH` finds nothing by that name, the message says
+`PATH` finds no program by that name.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.

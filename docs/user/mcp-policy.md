@@ -61,6 +61,10 @@ when { ["fetch", "github"].contains(context.input.server) };
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
 
+For modern stdio servers, an input answer inside a retried call is checked in the same way as a
+legacy reply. For example, a `forbid` on `context.input.method == "roots/list"` prevents either
+form of roots answer from reaching the server. The retried tool call also needs its own permit.
+
 For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the alias name
 and effective launch arguments, with received values in the `*` positions and fixed arguments expanded.
 `arg1`, `arg2`, and `arg_count` describe those same launch arguments.

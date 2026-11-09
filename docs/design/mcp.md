@@ -471,10 +471,68 @@ flowchart LR
 If `perPage` is 5, no `forbid` matches. The `mcp:call` permit allows the call to reach the server. The decision log names the server's permit.
 
 For a stdio server, the broker runs the same checks without the first, checks the tool list before
-`mcp:call`, and refuses with an MCP error. A stdio server's own requests, such as `roots/list`, reach
+`mcp:call`, and refuses with an MCP error. A legacy stdio server's own requests, such as `roots/list`, reach
 the harness, and the harness's reply is decided as `mcp:call` on the method of the request it answers. See [the client's reply to a server's own request is
 decided](decisions.md#a-client-reply-to-a-server-request-is-decided). For each refusal message and its cause, see
 [troubleshooting](../user/mcp-policy.md#troubleshooting).
+
+## Modern stdio requests
+
+The `2026-07-28` protocol uses per-request metadata instead of an initialization handshake.
+The broker checks each request's version, capabilities, and ID before the existing catalog and
+policy checks. Client identity is optional and grants no authority. A successful discovery
+response selects the modern era, but does not validate later requests. A direct modern request
+can select that era without discovery. A legacy error or an unanswered discovery probe permits
+a legacy handshake on the same connection. After that handshake starts, modern requests are
+refused.
+
+Modern servers return requests for client input inside an `input_required` result. The broker
+accepts the core roots, sampling, and elicitation methods only when the original client request
+advertised the corresponding capability. It hashes the original method and canonical parameters
+with the opaque server-supplied request state. This identity binds a retry to its original
+parameters without retaining their text. It cannot distinguish identical parallel operations
+with the same state. Distinct server-supplied states distinguish those operations. The broker remembers the input IDs and methods
+under that identity.
+
+Before forwarding a retry, the broker matches that identity and rejects unknown input IDs.
+The outer call first meets its catalog and policy checks. Each answer then meets a separate
+`mcp:call` decision on its requested method. An outer refusal creates no input-answer decisions.
+A retry with matching state and valid input IDs consumes one continuation allowance before
+policy admission. A denial sends none of the answers to the server. Identical input IDs and methods under the same identity accumulate separate
+allowances. Conflicting input IDs or methods under that identity fail the connection.
+
+The broker bounds both active modern requests and continuation allowances at 64 per connection.
+Identical continuations each count toward this limit. A new continuation at capacity evicts
+the oldest allowance. An evicted retry is refused without closing the connection.
+Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
+survive a connection closing. A client that reconnects must repeat the initial operation.
+
+A cancellation releases an active request slot and retains the request ID until its late reply
+arrives or the connection closes. For an admitted item call, the broker records
+`mcp:call::response` at cancellation because the server may have run it without sending a reply.
+This is an indeterminate outcome under the
+[recorded-history contract](decisions.md#temporal-rules-are-enforced-against-recorded-history).
+The broker hides every late reply, and that reply adds no second event. A later `input_required`
+reply cannot undo the earlier count, even when the operation did not finish.
+
+The broker retains up to 1,024 cancelled requests separately from the active limit. Their request
+ID copies and method names have a combined allocation limit of 16 MiB.
+It closes the connection and stops the server before another cancellation exceeds either bound.
+It records the cancelled call's outcome before checking these bounds.
+Repeated cancellations for a retained ID do not consume more capacity.
+Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
+refused.
+
+A valid `input_required` result received before cancellation leaves the operation incomplete,
+so it does not record an `mcp:call::response` event. A terminal result or error records the response
+against the admitted retry's request ID before the broker sends it to the client.
+Each retry has its own request event and policy decision. Result types added by extensions are
+refused until the broker can validate their meaning.
+
+When a stdio connection ends, the broker stops its server and records each remaining admitted
+item call as an indeterminate outcome. A failed or interrupted write can have sent part of a
+request, so the broker cannot infer that the server did nothing. Client disconnection cannot
+erase a terminal outcome or an unresolved admitted call from this accounting.
 
 ## See also
 

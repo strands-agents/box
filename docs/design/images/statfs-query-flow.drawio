@@ -1,0 +1,88 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="statfs-query-flow" name="Filesystem query during Codex startup">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1340" pageHeight="860" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="filesystem-view" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Codex&amp;#x27;s filesystem view&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="800" y="440" width="400" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="output-buffer" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Codex&amp;#x27;s output buffer&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:36px;font-weight:bold&quot;&gt;Actual values&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal&quot;&gt;Type, block / fragment sizes&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal&quot;&gt;Filename limit, mount flags&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:36px;font-weight:bold&quot;&gt;Zeroed&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal&quot;&gt;Capacity and free space&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal&quot;&gt;File counts, filesystem identifier&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal&quot;&gt;Reserved bytes&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="340" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="codex" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Codex&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#5F6B7A;font-style:italic&quot;&gt;sandboxed program&lt;/div&gt;" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.generic_application;spacing=0;fontSize=24;fontColor=#232F3E;fontStyle=0;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="120" y="200" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="kernel" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Linux kernel&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#5F6B7A;font-style:italic&quot;&gt;pauses one call&lt;/div&gt;" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.gear;spacing=0;fontSize=24;fontColor=#232F3E;fontStyle=0;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="520" y="200" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="launcher" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Box launcher&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#5F6B7A;font-style:italic&quot;&gt;answers the query&lt;/div&gt;" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.generic_application;spacing=0;fontSize=24;fontColor=#232F3E;fontStyle=0;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="920" y="200" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="path" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Resolved path&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#5F6B7A;font-style:italic&quot;&gt;within Codex&amp;#x27;s root&lt;/div&gt;" style="sketch=0;outlineConnect=0;gradientColor=none;fillColor=#232F3D;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.documents;spacing=0;fontSize=24;fontColor=#232F3E;fontStyle=0;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="920" y="520" width="80" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="query" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;1. Request filesystem&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;information&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="codex" target="kernel">
+          <mxGeometry x="0" relative="1" as="geometry">
+            <mxPoint x="0" y="-28" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="notify" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;2. Pause and notify&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="kernel" target="launcher">
+          <mxGeometry x="0" relative="1" as="geometry">
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="resolve" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;3. Resolve path;&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;query filesystem&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=right;" edge="1" parent="1" source="launcher" target="path">
+          <mxGeometry x="-0.03" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1120" y="260" />
+              <mxPoint x="1120" y="560" />
+            </Array>
+            <mxPoint x="-12" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="write-buffer" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;4. Write filtered data&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.6153846153846154;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="launcher" target="output-buffer">
+          <mxGeometry x="0.57" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="260" />
+              <mxPoint x="760" y="600" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="status" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;5. Success status&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="launcher" target="kernel">
+          <mxGeometry x="0" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="140" />
+              <mxPoint x="580" y="140" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="resume" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;font-style:italic&quot;&gt;6. Return success&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.25;exitY=0;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="kernel" target="codex">
+          <mxGeometry x="0" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="540" y="60" />
+              <mxPoint x="180" y="60" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="buffer-owner" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=none;endFill=1;endSize=10;startArrow=none;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="codex" target="output-buffer">
+          <mxGeometry x="0" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="40" y="260" />
+              <mxPoint x="40" y="400" />
+              <mxPoint x="210" y="400" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note" value="&lt;div style=&quot;font-size:16px;line-height:20px;font-weight:normal;color:#5F6B7A&quot;&gt;The original statfs call does not run. Box writes the data before replying with a success status.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=16;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="740" width="1160" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

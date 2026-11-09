@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt as _;
 
+use super::protocol_2026_07_28::{self, ModernReply, ModernRequest};
 use crate::record::config::mcp::McpServer;
 
 /// The MCP protocol version the offline `tools/list` client requests.
@@ -105,6 +106,7 @@ async fn list_tools_until_cancelled(
         cancellation,
         maximum_response_bytes,
         MCP_DISCOVERY_RESPONSE_TIMEOUT,
+        Some((admitted, home, cwd)),
     )
     .await
 }
@@ -115,6 +117,7 @@ async fn list_tools_from_running_server_until_cancelled(
     cancellation: impl std::future::Future<Output = ()>,
     maximum_response_bytes: usize,
     response_timeout: Duration,
+    restart: Option<(&McpServer, &Path, &Path)>,
 ) -> Result<Value, McpToolDiscoveryError> {
     let result = {
         let mut stdout = tokio::io::BufReader::new(stdout);
@@ -123,7 +126,7 @@ async fn list_tools_from_running_server_until_cancelled(
             () = cancellation => Err(McpToolDiscoveryError::Cancelled),
             result = tokio::time::timeout(
                 response_timeout,
-                list_tools_before_deadline(&mut running, &mut stdout, maximum_response_bytes),
+                list_tools_before_deadline(&mut running, &mut stdout, maximum_response_bytes, restart),
             ) => result.map_err(|_| McpToolDiscoveryError::Discovery(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -145,36 +148,37 @@ async fn list_tools_before_deadline(
     running: &mut RunningMcpServer,
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
     maximum_response_bytes: usize,
+    restart: Option<(&McpServer, &Path, &Path)>,
 ) -> io::Result<Value> {
-    send_json(
-        running,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "strands-box",
-                    "version": env!("CARGO_PKG_VERSION")
+    let mut restart = restart;
+    let probe = match probe_modern(running, stdout).await {
+        Ok(probe) => probe,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            let Some(context) = restart.take() else {
+                return Err(error);
+            };
+            restart_server(running, stdout, context).await?;
+            DiscoveryProtocol::Legacy
+        }
+        Err(error) => return Err(error),
+    };
+    let modern = match probe {
+        DiscoveryProtocol::PerRequestMetadata => true,
+        DiscoveryProtocol::Legacy | DiscoveryProtocol::Pending => {
+            match initialize_legacy(running, stdout, matches!(probe, DiscoveryProtocol::Pending))
+                .await?
+            {
+                LegacyHandshake::Complete => false,
+                LegacyHandshake::LateModernDiscovery => {
+                    let context = restart.take().ok_or_else(|| {
+                        invalid_data("late MCP discovery needs a fresh server process")
+                    })?;
+                    restart_server(running, stdout, context).await?;
+                    true
                 }
             }
-        }),
-    )
-    .await?;
-    let (initialized, _) = read_response(running, stdout, 1).await?;
-    validate_initialize_result(&initialized)?;
-
-    send_json(
-        running,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }),
-    )
-    .await?;
+        }
+    };
 
     let mut tools = Vec::new();
     let mut tool_names = BTreeSet::new();
@@ -184,20 +188,23 @@ async fn list_tools_before_deadline(
     let mut request_id = 2_u64;
     let mut response_bytes = 0;
     loop {
-        let params = cursor
+        let mut params = cursor
             .as_ref()
             .map_or_else(|| json!({}), |cursor| json!({ "cursor": cursor }));
-        send_json(
-            running,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tools/list",
-                "params": params
-            }),
-        )
-        .await?;
-        let (response, page_bytes) = read_response(running, stdout, request_id).await?;
+        if modern {
+            params["_meta"] = protocol_2026_07_28::request_meta();
+        }
+        let request = json!({
+            "jsonrpc": "2.0", "id": request_id, "method": "tools/list", "params": params
+        });
+        send_json(running, &request).await?;
+        let (response, page_bytes) =
+            read_response(running, stdout, request_id, modern, false).await?;
+        if modern {
+            ModernRequest::parse(&request)
+                .map_err(|_| invalid_data("invalid offline MCP request"))?
+                .validate_reply(&response)?;
+        }
         admit_discovery_response_bytes(&mut response_bytes, page_bytes, maximum_response_bytes)?;
         let result = response
             .get("result")
@@ -269,6 +276,146 @@ async fn list_tools_before_deadline(
     }))
 }
 
+enum DiscoveryProtocol {
+    PerRequestMetadata,
+    Legacy,
+    Pending,
+}
+
+enum LegacyHandshake {
+    Complete,
+    LateModernDiscovery,
+}
+
+async fn restart_server(
+    running: &mut RunningMcpServer,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    (admitted, home, cwd): (&McpServer, &Path, &Path),
+) -> io::Result<()> {
+    running.stop_and_wait().await?;
+    let (replacement, output) = RunningMcpServer::start(admitted, home, cwd).await?;
+    *running = replacement;
+    *stdout = tokio::io::BufReader::new(output);
+    Ok(())
+}
+
+async fn initialize_legacy(
+    running: &mut RunningMcpServer,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    probe_pending: bool,
+) -> io::Result<LegacyHandshake> {
+    send_json(
+        running,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "strands-box",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+    )
+    .await?;
+    let (initialized, _) = read_response(running, stdout, 1, false, probe_pending).await?;
+    if initialized["id"] == 0 {
+        return Ok(LegacyHandshake::LateModernDiscovery);
+    }
+    validate_initialize_result(&initialized)?;
+
+    send_json(
+        running,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    )
+    .await?;
+    Ok(LegacyHandshake::Complete)
+}
+
+async fn probe_modern(
+    running: &mut RunningMcpServer,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> io::Result<DiscoveryProtocol> {
+    let request = discovery_request();
+    send_json(running, &request).await?;
+    let deadline = Instant::now() + MCP_BROKER_IO_TIMEOUT;
+    let mut frame = Vec::new();
+    loop {
+        match tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            read_server_frame_into(stdout, &mut frame),
+        )
+        .await
+        {
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof && !frame.is_empty() => {
+                return Err(invalid_data(
+                    "MCP discovery probe ended within a response frame",
+                ));
+            }
+            Ok(result) => result?,
+            Err(_) if frame.is_empty() => return Ok(DiscoveryProtocol::Pending),
+            Err(_) => {
+                return Err(invalid_data(
+                    "MCP discovery probe timed out within a response frame",
+                ));
+            }
+        }
+        egress_gateway::refuse_duplicate_mcp_keys(&frame)?;
+        let response: Value =
+            serde_json::from_slice(&frame).map_err(|error| invalid_data(error.to_string()))?;
+        if response["jsonrpc"] != "2.0" {
+            return Err(invalid_data(
+                "MCP discovery probe response must declare JSON-RPC 2.0",
+            ));
+        }
+        if response.get("method").is_some() {
+            answer_server_request(running, &response).await?;
+            frame.clear();
+            continue;
+        }
+        if response["id"] != 0 {
+            return Err(invalid_data(
+                "MCP discovery probe received an unexpected response id",
+            ));
+        }
+        return validate_discovery_response(&response);
+    }
+}
+
+fn discovery_request() -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": 0, "method": "server/discover",
+        "params": {"_meta": protocol_2026_07_28::request_meta()}
+    })
+}
+
+fn validate_discovery_response(response: &Value) -> io::Result<DiscoveryProtocol> {
+    let reply = ModernRequest::parse(&discovery_request())
+        .map_err(|_| invalid_data("invalid offline MCP discovery request"))?
+        .validate_reply(response)?;
+    if matches!(reply, ModernReply::LegacyProbe) {
+        return Ok(DiscoveryProtocol::Legacy);
+    }
+    if response.get("error").is_some() {
+        return Err(invalid_data(
+            "MCP server refused the modern discovery version or capabilities",
+        ));
+    }
+    if !response["result"]["capabilities"]["tools"].is_object() {
+        return Err(invalid_data(
+            "MCP server/discover does not advertise the tools capability",
+        ));
+    }
+    Ok(DiscoveryProtocol::PerRequestMetadata)
+}
+
 fn admit_discovery_response_bytes(
     total: &mut usize,
     page: usize,
@@ -294,10 +441,14 @@ async fn read_response(
     running: &mut RunningMcpServer,
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
     expected_id: u64,
+    modern: bool,
+    mut probe_pending: bool,
 ) -> io::Result<(Value, usize)> {
+    let mut initialize_error = None;
     loop {
         let frame = read_server_frame(stdout).await?;
         let frame_bytes = frame.len();
+        egress_gateway::refuse_duplicate_mcp_keys(&frame)?;
         let response: Value = serde_json::from_slice(&frame).map_err(|source| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -310,21 +461,46 @@ async fn read_response(
             ));
         }
         if response.get("method").is_some() {
+            if modern && response.get("id").is_some() {
+                return Err(invalid_data(
+                    "modern MCP servers cannot send JSON-RPC requests",
+                ));
+            }
             answer_server_request(running, &response).await?;
             continue;
         }
         let Some(id) = response.get("id") else {
             return Err(invalid_data("MCP server response has no id"));
         };
+        if id.as_u64() == Some(0) {
+            if probe_pending {
+                match validate_discovery_response(&response)? {
+                    DiscoveryProtocol::PerRequestMetadata => return Ok((response, frame_bytes)),
+                    DiscoveryProtocol::Legacy => {
+                        probe_pending = false;
+                        if let Some(error) = initialize_error {
+                            return Err(error);
+                        }
+                    }
+                    DiscoveryProtocol::Pending => unreachable!("a response completes the probe"),
+                }
+            }
+            continue;
+        }
         if id.as_u64() != Some(expected_id) {
             return Err(invalid_data(format!(
                 "MCP server answered request {id}, expected request {expected_id}"
             )));
         }
         if response.get("error").is_some() {
-            return Err(io::Error::other(format!(
+            let error = io::Error::other(format!(
                 "MCP server returned an error for request {expected_id}"
-            )));
+            ));
+            if probe_pending {
+                initialize_error = Some(error);
+                continue;
+            }
+            return Err(error);
         }
         if response.get("result").is_none() {
             return Err(invalid_data(format!(
@@ -403,6 +579,14 @@ pub(super) async fn read_server_frame(
     stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
 ) -> io::Result<Vec<u8>> {
     let mut frame = Vec::new();
+    read_server_frame_into(stdout, &mut frame).await?;
+    Ok(frame)
+}
+
+async fn read_server_frame_into(
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    frame: &mut Vec<u8>,
+) -> io::Result<()> {
     loop {
         let available = stdout.fill_buf().await?;
         if available.is_empty() {
@@ -431,7 +615,7 @@ pub(super) async fn read_server_frame(
                 frame.clear();
                 continue;
             }
-            return Ok(frame);
+            return Ok(());
         }
     }
 }
@@ -755,6 +939,8 @@ impl Drop for RunningMcpServer {
 
 #[cfg(test)]
 mod tests {
+    mod protocol_2026_07_28;
+
     use super::*;
 
     #[test]
@@ -840,6 +1026,7 @@ mod tests {
             std::future::pending(),
             MAXIMUM_DISCOVERY_RESPONSE_BYTES,
             Duration::from_millis(10),
+            None,
         )
         .await
         .expect_err("silent discovery must time out");
@@ -887,6 +1074,8 @@ mod tests {
             }),
         ];
         let script = r#"
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r request
 printf '%s\n' "$1"
 IFS= read -r notification

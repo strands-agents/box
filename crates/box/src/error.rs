@@ -554,6 +554,9 @@ pub(crate) enum ShellError {
 /// The child could not be spawned, supervised, or reaped.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SuperviseError {
+    #[error("workload diagnostics failed: {source}")]
+    Diagnostics { source: std::io::Error },
+
     #[error("spawn contained workload: {source}")]
     Spawn { source: std::io::Error },
 
