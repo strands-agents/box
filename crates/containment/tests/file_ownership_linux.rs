@@ -1,4 +1,4 @@
-//! Linux root launch restrictions and permitted file writes through the production trampoline.
+//! Linux filesystem grants through the production trampoline under root and nonroot launch identities.
 #![cfg(all(target_os = "linux", target_arch = "aarch64"))]
 
 use containment::{ContainmentConfig, Operation, Scope};
@@ -10,6 +10,10 @@ use std::process::{Command, Output};
 const RESULT: &str = "ROOT_FILE_RESULT=";
 
 fn launch(directory: &Path, directory_write: bool) -> Output {
+    let outside = tempfile::NamedTempFile::new_in("/var/tmp").unwrap();
+    std::fs::write(outside.path(), b"OUTSIDE").unwrap();
+    std::os::unix::fs::symlink(outside.path(), directory.join("outside-link")).unwrap();
+    assert_eq!(std::fs::read(outside.path()).unwrap(), b"OUTSIDE");
     let executable = std::env::current_exe().unwrap();
     let mut config = ContainmentConfig::new()
         .allow(&executable, Operation::Read, Scope::File)
@@ -34,11 +38,11 @@ fn launch(directory: &Path, directory_write: bool) -> Output {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
+    let output = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
         .arg("--config")
         .arg(config_file.path())
         .args(["--config-sha256", &digest, "--target-env-json"])
-        .arg(serde_json::json!({"BOX_ROOT_FILE_PROBE": directory}).to_string())
+        .arg(serde_json::json!({"BOX_ROOT_FILE_PROBE": directory, "BOX_OUTSIDE_FILE_PROBE": outside.path()}).to_string())
         .arg("--")
         .arg(executable)
         .args([
@@ -49,7 +53,9 @@ fn launch(directory: &Path, directory_write: bool) -> Output {
         ])
         .current_dir(directory)
         .output()
-        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(outside.path()).unwrap(), b"OUTSIDE");
+    output
 }
 
 fn fixture() -> tempfile::TempDir {
@@ -70,6 +76,12 @@ fn root_file_probe() {
         return;
     };
     let directory = Path::new(&directory);
+    let outside = std::env::var_os("BOX_OUTSIDE_FILE_PROBE").unwrap();
+    let outside_read_refused = std::fs::read(&outside).is_err();
+    let outside_write_refused = std::fs::write(&outside, b"CHANGED").is_err();
+    let outside_link_read_refused = std::fs::read(directory.join("outside-link")).is_err();
+    let outside_link_write_refused =
+        std::fs::write(directory.join("outside-link"), b"CHANGED").is_err();
     let read = std::fs::read(directory.join("existing")).ok().as_deref() == Some(b"PRIVATE");
     let write = std::fs::write(directory.join("existing"), b"UPDATED").is_ok();
     std::fs::set_permissions(
@@ -105,7 +117,7 @@ fn root_file_probe() {
         });
     println!(
         "{RESULT}{}",
-        serde_json::json!({"read":read,"write":write,"create":create,"symlink":symlink,"private_tmp":private_tmp,"capabilities_clear":capabilities_clear,"special_bits_refused":special_bits_refused})
+        serde_json::json!({"read":read,"write":write,"create":create,"symlink":symlink,"private_tmp":private_tmp,"capabilities_clear":capabilities_clear,"special_bits_refused":special_bits_refused,"outside_read_refused":outside_read_refused,"outside_write_refused":outside_write_refused,"outside_link_read_refused":outside_link_read_refused,"outside_link_write_refused":outside_link_write_refused})
     );
 }
 
@@ -129,7 +141,7 @@ fn file_grants_preserve_private_access_and_refuse_new_host_entries() {
     let result = observations(&launch(directory.path(), false));
     assert_eq!(
         result,
-        serde_json::json!({"read":true,"write":true,"create":false,"symlink":false,"private_tmp":true,"capabilities_clear":true,"special_bits_refused":true})
+        serde_json::json!({"read":true,"write":true,"create":false,"symlink":false,"private_tmp":true,"capabilities_clear":true,"special_bits_refused":true,"outside_read_refused":true,"outside_write_refused":true,"outside_link_read_refused":true,"outside_link_write_refused":true})
     );
     assert_eq!(
         std::fs::read(directory.path().join("existing")).unwrap(),
@@ -151,7 +163,7 @@ fn nonroot_directory_grants_preserve_creation() {
     let result = observations(&launch(directory.path(), true));
     assert_eq!(
         result,
-        serde_json::json!({"read":true,"write":true,"create":true,"symlink":true,"private_tmp":true,"capabilities_clear":true,"special_bits_refused":true})
+        serde_json::json!({"read":true,"write":true,"create":true,"symlink":true,"private_tmp":true,"capabilities_clear":true,"special_bits_refused":true,"outside_read_refused":true,"outside_write_refused":true,"outside_link_read_refused":true,"outside_link_write_refused":true})
     );
 }
 
@@ -189,30 +201,28 @@ fn root_file_grants_preserve_private_access_and_temporary_storage() {
 }
 
 #[test]
-fn root_directory_grants_are_refused_before_workload_execution() {
-    if !in_root_namespace("root_directory_grants_are_refused_before_workload_execution") {
+fn root_directory_grants_preserve_creation() {
+    if !in_root_namespace("root_directory_grants_preserve_creation") {
         return;
     }
     let directory = fixture();
-    let output = launch(directory.path(), true);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "root directory grant unexpectedly ran"
-    );
-    assert!(
-        stderr.contains("root launch cannot grant writes to host directory"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(directory.path().to_str().unwrap()),
-        "{stderr}"
-    );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(RESULT));
+    let result = observations(&launch(directory.path(), true));
     assert_eq!(
-        std::fs::read(directory.path().join("existing")).unwrap(),
-        b"PRIVATE"
+        result,
+        serde_json::json!({"read":true,"write":true,"create":true,"symlink":true,"private_tmp":true,"capabilities_clear":true,"special_bits_refused":true,"outside_read_refused":true,"outside_write_refused":true,"outside_link_read_refused":true,"outside_link_write_refused":true})
     );
-    assert!(!directory.path().join("new-file").exists());
-    assert!(std::fs::symlink_metadata(directory.path().join("new-link")).is_err());
+    assert_eq!(
+        std::fs::read(directory.path().join("new-file")).unwrap(),
+        b"NEW"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("new-link")).unwrap(),
+        b"UPDATED"
+    );
+    assert_eq!(
+        std::fs::metadata(directory.path().join("new-file"))
+            .unwrap()
+            .uid(),
+        0
+    );
 }

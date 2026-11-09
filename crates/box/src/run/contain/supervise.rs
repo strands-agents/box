@@ -1,5 +1,7 @@
 //! The contained child's OS lifetime: its process group and the terminal.
 
+#[cfg(unix)]
+use std::io::IsTerminal;
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -405,6 +407,8 @@ pub(crate) struct Contained {
     /// broker socket, joins the gateway's thread, withdraws the live record, and releases the box
     /// lock. [`Contained::wait`] also watches its broker, because a boundary that stopped serving
     hosted: crate::run::hosted::HostedBox,
+    #[cfg(unix)]
+    diagnostics: Option<crate::run::diagnostics::Diagnostics>,
 }
 
 impl Contained {
@@ -456,6 +460,7 @@ impl Contained {
             #[cfg(target_os = "linux")]
             _relays: Vec::new(),
             hosted,
+            diagnostics: None,
         })
     }
 
@@ -483,6 +488,25 @@ impl Contained {
         if own_terminal {
             signals.restore_default = false;
         }
+        #[cfg(unix)]
+        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+            Some(
+                crate::run::diagnostics::Diagnostics::capture()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            )
+        } else {
+            None
+        };
+        let stderr = Stdio::inherit();
+        #[cfg(unix)]
+        let stderr = match &diagnostics {
+            Some(diagnostics) => Stdio::from(
+                diagnostics
+                    .stderr()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            ),
+            None => stderr,
+        };
         let (stdin, stdout, stderr) = match terminal {
             Some(file) => {
                 let input = file
@@ -493,7 +517,7 @@ impl Contained {
                     .map_err(|source| SuperviseError::Spawn { source })?;
                 (Stdio::from(input), Stdio::from(output), Stdio::from(file))
             }
-            None => (stdio(), stdio(), Stdio::inherit()),
+            None => (stdio(), stdio(), stderr),
         };
         let (mut group, trampoline) = spawn_registered(
             &boundary,
@@ -552,6 +576,8 @@ impl Contained {
             #[cfg(target_os = "linux")]
             _relays: relays,
             hosted,
+            #[cfg(unix)]
+            diagnostics,
         })
     }
 
@@ -585,6 +611,16 @@ impl Contained {
             None => Ok(()),
         };
         let setup_result = self.trampoline.setup_failure();
+        #[cfg(unix)]
+        let diagnostics_result = match self.diagnostics.as_mut() {
+            Some(diagnostics) => {
+                drop(self.hosted);
+                diagnostics
+                    .finish()
+                    .map_err(|source| SuperviseError::Diagnostics { source })
+            }
+            None => Ok(()),
+        };
 
         // The drain moved to `command::run::execute`, which is the one point every exit reaches —
         // including the failures before a `HostedBox` exists. A run that ends in an error still
@@ -597,6 +633,8 @@ impl Contained {
         termination_result?;
         native_result?;
         terminal_result?;
+        #[cfg(unix)]
+        diagnostics_result?;
         contained_exit_code(status, setup_result)
     }
 }

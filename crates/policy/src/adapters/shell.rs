@@ -771,6 +771,18 @@ mod tests {
         _history: tempfile::TempDir,
     }
 
+    impl InterceptorFixture {
+        /// Close the engine, and keep its history.
+        fn close(self) -> tempfile::TempDir {
+            let Self {
+                interceptor,
+                _history,
+            } = self;
+            drop(interceptor);
+            _history
+        }
+    }
+
     impl Deref for InterceptorFixture {
         type Target = dyn EffectInterceptor;
 
@@ -1276,6 +1288,16 @@ mod tests {
         bind: impl FnOnce(&mut crate::GrammarBindings),
     ) -> InterceptorFixture {
         let history = tempfile::tempdir().expect("history directory");
+        interceptor_with_grammars_over(source, grammars, history, bind)
+    }
+
+    /// An `interceptor_with_grammars` over the history in `history`.
+    fn interceptor_with_grammars_over(
+        source: &str,
+        grammars: &[&str],
+        history: tempfile::TempDir,
+        bind: impl FnOnce(&mut crate::GrammarBindings),
+    ) -> InterceptorFixture {
         let policy = PolicyEngine::open_with_tool_grammars(
             vec![Policy {
                 origin: PathBuf::from("shell-adapter-test.dw"),
@@ -1458,11 +1480,12 @@ mod tests {
                @id("after_a_refused_spawn")
                forbid (principal, action == Box::Action::"shell:exec", resource)
                when temporal {
-                   formerly within 1h Box::Action::"shell:spawn"::request{ requestId: _, input.program: "python", input.cwd: "~/work" }
+                   formerly within 1h Box::Action::"shell:spawn"::request{ requestId: _, input.program: "git", input.cwd: "~/work" }
                };"#,
         );
         let mut bindings = policy.grammar_bindings();
         bindings.declare(&programs.file("mise"), "git");
+        programs.replace("mise");
         let interceptor = InterceptorFixture {
             interceptor: ShellPolicyInterceptor::into_handle_reporting_under(
                 Arc::new(policy.bound_by(bindings).expect("the engine issued them")),
@@ -1479,10 +1502,10 @@ mod tests {
             "no refused spawn is in history yet"
         );
         let refused = interceptor
-            .intercept(&spawn("python", &mise, &none))
+            .intercept(&spawn("git", &mise, &none))
             .await
             .err()
-            .expect("an undeclared name on a bound file is refused");
+            .expect("a replaced bound file is refused");
         assert!(refused.to_string().contains("[tool-grammar]"), "{refused}");
         let after = interceptor
             .intercept(&echo)
@@ -1552,7 +1575,7 @@ mod tests {
         @id("push_after_a_passing_test")
         forbid (principal, action == Tool::git::Action::"push", resource)
         unless temporal {
-            formerly within 1h Tool::cargo::Action::"test"::response{ output.status: 0 }
+            formerly within 1h Tool::cargo::Action::"test"::response{ input.cwd: "/work", output.status: 0 }
         };
     "#;
 
@@ -1600,11 +1623,79 @@ mod tests {
         assert!(pushed().await.is_ok(), "a test exited 0");
     }
 
-    /// **A bound file called by an undeclared name, or a replaced bound file, is refused** even
-    /// under a policy that permits every action, and a file that no grammar binds stays a
+    /// **A test that passed in another directory does not satisfy a rule pinned to `input.cwd`.**
+    #[tokio::test]
+    async fn a_test_that_passed_in_another_directory_does_not_allow_the_push() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let interceptor =
+            interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], |b| {
+                b.declare(&programs.file("git"), "git");
+                b.declare(&programs.file("cargo"), "cargo");
+            });
+        let test = words(&["test"]);
+        interceptor
+            .intercept(&EffectAttempt::ShellSpawn {
+                command: "cargo",
+                program: "cargo",
+                program_path: &cargo,
+                args: &test,
+                literal: &[],
+                cwd: "/tmp/scratch",
+            })
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        assert!(
+            interceptor
+                .intercept(&spawn("git", &git, &words(&["push", "origin"])))
+                .await
+                .is_err(),
+            "a test in /tmp/scratch does not allow a push from /work"
+        );
+    }
+
+    /// **A grammar response is durable:** a new engine on the same history reads it.
+    #[tokio::test]
+    async fn a_new_engine_on_the_same_history_reads_an_earlier_grammar_response() {
+        let programs = Programs::new();
+        let (git, cargo) = (programs.path("git"), programs.path("cargo"));
+        let bind = |bindings: &mut crate::GrammarBindings| {
+            bindings.declare(&programs.file("git"), "git");
+            bindings.declare(&programs.file("cargo"), "cargo");
+        };
+        let push = words(&["push", "origin", "main"]);
+        let test = words(&["test"]);
+        let first = interceptor_with_grammars(PUSH_AFTER_A_PASSING_TEST, &["git", "cargo"], bind);
+        first
+            .intercept(&spawn("cargo", &cargo, &test))
+            .await
+            .expect("the test run is admitted")
+            .record_outcome(EffectOutcome::ShellCommand { reported_status: 0 })
+            .await
+            .expect("outcome reporting is best effort");
+
+        let second = interceptor_with_grammars_over(
+            PUSH_AFTER_A_PASSING_TEST,
+            &["git", "cargo"],
+            first.close(),
+            bind,
+        );
+
+        assert!(
+            second.intercept(&spawn("git", &git, &push)).await.is_ok(),
+            "the test that exited 0 before the new engine opened allows the push"
+        );
+    }
+
+    /// **A replaced bound file is refused** even under a policy that permits every action, and a
+    /// bound file called by an undeclared name, or a file that no grammar binds, stays a
     /// `shell:spawn`.
     #[tokio::test]
-    async fn an_undeclared_name_or_a_replaced_file_is_refused_whatever_the_policy_permits() {
+    async fn a_replaced_file_is_refused_whatever_the_policy_permits() {
         let programs = Programs::new();
         let (mise, git, make) = (
             programs.path("mise"),
@@ -1630,21 +1721,13 @@ mod tests {
                 "an undeclared name on the shim binary",
                 "python",
                 &mise,
-                Some(format!(
-                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
-                )),
+                None,
             ),
             (
                 "an undeclared name spelled as a path",
                 "/opt/shims/python",
                 &mise,
-                Some(format!(
-                    "policy denied this operation on '{mise}' [tool-grammar]: `python` runs \
-                     `{mise}`, which a tool grammar covers, but no `[tool]` declares the name \
-                     `python`. No policy can permit it."
-                )),
+                None,
             ),
             (
                 "a replaced bound file",
@@ -1713,10 +1796,11 @@ mod tests {
         }
     }
 
-    /// **A shim binary that grammars bind under other names, replaced by a symlink, is refused**
-    /// for a bound name and for an undeclared name, and a `shell:spawn` permit does not admit it.
+    /// **A shim binary that a grammar binds under another name, replaced by a symlink, is refused**
+    /// for the bound name, and a `shell:spawn` permit does not admit it. An undeclared name stays a
+    /// `shell:spawn`.
     #[tokio::test]
-    async fn a_replaced_shim_binary_is_refused_under_each_name_it_covered() {
+    async fn a_replaced_shim_binary_is_refused_under_its_bound_name() {
         let programs = Programs::new();
         let planted = programs.path("planted");
         let interceptor = interceptor_with_grammars(
@@ -1732,7 +1816,7 @@ mod tests {
 
         for (name, expected) in [
             ("cargo", Some(replaced_message("cargo", &planted))),
-            ("python", Some(replaced_message("python", &planted))),
+            ("python", None),
             ("node", None),
         ] {
             let decided = interceptor
@@ -1836,6 +1920,9 @@ mod tests {
         let bound_elsewhere = interceptor_with_grammars(POLICY, &["git"], |bindings| {
             bindings.declare(&programs.file("vendored-git"), "git");
         });
+        let bound_under_another_name = interceptor_with_grammars(POLICY, &["git"], |bindings| {
+            bindings.declare(&programs.file("mise"), "git");
+        });
         let today = interceptor(POLICY);
         let engine = {
             let history = tempfile::tempdir().expect("history directory");
@@ -1857,6 +1944,10 @@ mod tests {
             ),
             ("a declared name and no binding", declared_only),
             ("a binding on another file", bound_elsewhere),
+            (
+                "a binding on the same file under another name",
+                bound_under_another_name,
+            ),
         ];
 
         for (program, program_path, args) in [

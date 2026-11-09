@@ -720,7 +720,7 @@ impl HostedBox {
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
-    /// for it, with each stdio `[mcp.<name>]` program declared for its own start
+    /// for it, and to the program file of each stdio `[mcp.<name>]`
     /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
         policy: PolicyEngine,
@@ -731,20 +731,11 @@ impl HostedBox {
         if !record.experimental_features.tool_grammars {
             return Ok(policy);
         }
-        let programs: BTreeSet<&str> = record
-            .tool
-            .values()
-            .filter(|spec| spec.grammar.is_some())
-            .map(crate::record::config::grammar::called_name)
-            .collect();
         for (label, spec) in &record.tool {
             let command = commands.get(label).ok_or_else(|| ConfigError::Process {
                 table: format!("[tool.{label}]"),
                 reason: "has no configured command for this run".to_string(),
             })?;
-            if programs.contains(crate::record::config::grammar::called_name(spec)) {
-                command.refuse_a_grammar_on_several_names()?;
-            }
             bindings.declare_tool(
                 command.opened(),
                 command.path(),
@@ -752,7 +743,7 @@ impl HostedBox {
                 crate::record::config::grammar::called_name(spec),
             )?;
         }
-        for (label, contained) in &record.contained_mcp {
+        for contained in record.contained_mcp.values() {
             let spec = &contained.spec;
             let Ok(program) =
                 crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
@@ -763,23 +754,6 @@ impl HostedBox {
             else {
                 continue;
             };
-            let called = crate::record::config::grammar::called_name(spec);
-            let names = opened.metadata().map_or(1, |metadata| {
-                use std::os::unix::fs::MetadataExt as _;
-                metadata.nlink()
-            });
-            if programs.contains(called) && names > 1 {
-                return Err(ConfigError::Process {
-                    table: format!("[mcp.{label}]"),
-                    reason: format!(
-                        "configured command {} has {names} names, and a tool grammar on it \
-                         refuses each name that no `[tool]` declares. Point `command` at a copy \
-                         with one name",
-                        program.granted_path().display()
-                    ),
-                }
-                .into());
-            }
             bindings.declare_server(
                 &opened,
                 program.granted_path(),
@@ -1223,6 +1197,15 @@ mod tests {
         program_path: &str,
         args: &[&str],
     ) -> Result<(), String> {
+        spawned_as(engine, "git", program_path, args).await
+    }
+
+    async fn spawned_as(
+        engine: &Arc<PolicyEngine>,
+        program: &str,
+        program_path: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
         let args: Vec<String> = args.iter().map(ToString::to_string).collect();
         policy::ShellPolicyInterceptor::into_handle(
             Arc::clone(engine),
@@ -1230,8 +1213,8 @@ mod tests {
             GovernedBox::assigned("codex"),
         )
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
-            command: "git",
-            program: "git",
+            command: program,
+            program,
             program_path,
             args: &args,
             literal: &[],
@@ -1352,7 +1335,7 @@ mod tests {
         assert_eq!(
             started,
             Ok(()),
-            "the operator declared the name, so `shell:spawn` decides the start"
+            "no grammar binds the server's name, so `shell:spawn` decides the start"
         );
         let by_the_agent = policy::ShellPolicyInterceptor::into_handle(
             Arc::clone(&engine),
@@ -1376,10 +1359,16 @@ mod tests {
                 .is_err_and(|refused| refused.contains("[tool-grammar]")),
             "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
         );
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the declared name keeps its grammar, and `shell:spawn` does not decide it"
+        );
     }
 
-    #[test]
-    fn an_mcp_server_that_a_grammar_binds_is_refused_when_its_file_has_several_names() {
+    #[tokio::test]
+    async fn an_mcp_server_that_a_grammar_binds_starts_when_its_file_has_several_names() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp-names");
         let program = home.path().join("git");
@@ -1389,7 +1378,8 @@ mod tests {
         std::fs::create_dir(&shared).expect("a second directory");
         let server = shared.join("git");
         install_program(&server);
-        std::fs::hard_link(&server, shared.join("make")).expect("a second name");
+        let make = shared.join("make");
+        std::fs::hard_link(&server, &make).expect("a second name");
         let mut record = grammar_record(&root, &program);
         record.contained_mcp.insert(
             "repo".to_string(),
@@ -1399,42 +1389,92 @@ mod tests {
             },
         );
         let commands = ConfiguredCommands::load(&record).expect("the commands load");
-        let grammars =
-            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
-        let engine =
-            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
-                .expect("the policy opens");
-
-        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
-            .expect_err("a grammar on a server file with several names is refused")
-            .to_string();
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
 
         assert!(
-            refusal.contains("[mcp.repo]") && refusal.contains("has 2 names"),
-            "{refusal}"
+            spawned(&engine, &server.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the server's file keeps the grammar under the name `git`"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "another name of the server's file is a `shell:spawn`"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn hard_linked_tool_names_keep_separate_grammar_and_spawn_decisions() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked-tool");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let make = home.path().join("make");
+        std::fs::hard_link(&program, &make).expect("a second name for the tool");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the hard-linked tool loads");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
+
+        spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect("the grammar permits git status");
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the second name does not bypass the git grammar"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "the second name uses its shell:spawn permission"
         );
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn a_grammar_on_apples_git_is_refused_because_its_file_has_several_names() {
+    #[tokio::test]
+    async fn a_grammar_on_apples_git_binds_git_and_leaves_its_other_names_to_shell_spawn() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-several");
         let record = grammar_record(&root, Path::new("/usr/bin/git"));
         let commands = ConfiguredCommands::load(&record).expect("/usr/bin/git loads");
-        let grammars =
-            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
-        let engine =
-            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
-                .expect("the policy opens");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
 
-        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
-            .expect_err("a grammar on a file with several names is refused")
-            .to_string();
-
+        spawned(&engine, "/usr/bin/git", &["status"])
+            .await
+            .expect("the grammar action permit admits `git status`");
         assert!(
-            refusal.contains("names, and a tool grammar on it refuses"),
-            "{refusal}"
+            spawned(&engine, "/usr/bin/git", &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "no rule permits the push"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", "/usr/bin/git", &["all"]).await,
+            Ok(()),
+            "another name of the launcher file is a `shell:spawn`"
         );
     }
 

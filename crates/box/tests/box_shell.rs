@@ -3277,7 +3277,7 @@ fn compile_command_integrity_probe(path: &std::path::Path, source: &str) {
     );
 }
 
-fn configured_command_mutation_is_refused(operation: &str) {
+fn configured_command_mutation_is_refused(operation: &str, linked: bool) {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -3303,6 +3303,10 @@ read_file = ["~/tool-only-marker"]
     std::fs::write(&marker, "TOOL_ONLY_BYTES\n").expect("the tool-only marker");
     install_command_integrity_probe(&command, "ORIGINAL_TOOL");
     install_command_integrity_probe(&replacement, "ATTACKER_TOOL");
+    let alias = command.with_file_name("command-hard-link");
+    if linked {
+        std::fs::hard_link(&command, &alias).expect("the preexisting command hard link");
+    }
     let original = std::fs::read(&command).expect("the original program bytes");
     let box_ = request.expect();
     let output = box_.bash(&format!(
@@ -3355,24 +3359,42 @@ zsh -lc "'{command}' '{marker}'"
         "the same original tool must run before and after the refused mutation: {output:?}"
     );
     assert_eq!(
-        std::fs::read(command).expect("the configured command remains"),
+        std::fs::read(&command).expect("the configured command remains"),
         original,
         "the configured program bytes must remain unchanged"
     );
+    if linked {
+        assert_eq!(
+            std::fs::read(alias).expect("the command hard link remains"),
+            original,
+            "the linked program bytes must remain unchanged"
+        );
+    }
 }
 
 #[test]
 fn a_configured_command_cannot_be_overwritten_through_the_hosted_shell() {
-    configured_command_mutation_is_refused("cp");
+    configured_command_mutation_is_refused("cp", false);
 }
 
 #[test]
 fn a_configured_command_cannot_be_replaced_through_the_hosted_shell() {
-    configured_command_mutation_is_refused("mv");
+    configured_command_mutation_is_refused("mv", false);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn monty_cannot_change_a_configured_command() {
+fn a_linked_configured_command_cannot_be_overwritten_through_the_hosted_shell() {
+    configured_command_mutation_is_refused("cp", true);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_linked_configured_command_cannot_be_replaced_through_the_hosted_shell() {
+    configured_command_mutation_is_refused("mv", true);
+}
+
+fn configured_command_monty_mutations_are_refused(linked: bool) {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -3389,6 +3411,10 @@ command = ["{workspace}/configured-command"]
     std::fs::create_dir_all(&workspace).expect("the configured command workspace");
     let command = workspace.join("configured-command");
     compile_command_integrity_probe(&command, "fn main() { println!(\"CONFIGURED_TOOL_OK\"); }");
+    let alias = command.with_file_name("command-hard-link");
+    if linked {
+        std::fs::hard_link(&command, &alias).expect("the preexisting command hard link");
+    }
     let original = std::fs::read(&command).expect("the configured command bytes");
     let control = workspace.join("ordinary-output");
     let moved = workspace.join("moved-output");
@@ -3396,14 +3422,19 @@ command = ["{workspace}/configured-command"]
     let quoted = |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
     let box_ = request.expect();
 
-    for operation in [
-        "command.write_text('CHANGED')",
-        "command.unlink()",
-        "command.rename(other)",
-        "other.rename(command)",
-    ] {
-        let script = format!(
-            r#"from pathlib import Path
+    let mut targets = vec![&command];
+    if linked {
+        targets.push(&alias);
+    }
+    for target in targets {
+        for operation in [
+            "command.write_text('CHANGED')",
+            "command.unlink()",
+            "command.rename(other)",
+            "other.rename(command)",
+        ] {
+            let script = format!(
+                r#"from pathlib import Path
 command = Path({command})
 control = Path({control})
 moved = Path({moved})
@@ -3420,28 +3451,43 @@ try:
 except PermissionError as error:
     print('MUTATION_REFUSED:' + str(error))
 "#,
-            command = quoted(&command),
-            control = quoted(&control),
-            moved = quoted(&moved),
-            other = quoted(&other),
-        );
-        let output = box_.bash(&format!("python3 -c '{}'", script.replace('\'', "'\\''")));
-        let seen = format!("{}{}", stdout(&output), stderr(&output));
-        assert!(output.status.success(), "{operation}: {output:?}");
-        assert!(seen.contains("MONTY_CONTROL_OK"), "{operation}: {output:?}");
-        assert!(
-            seen.contains("MUTATION_REFUSED:") && seen.contains("configured"),
-            "{operation} must meet the configured-command refusal: {output:?}"
-        );
-        assert!(!seen.contains("MUTATION_LANDED"), "{operation}: {output:?}");
-        assert_eq!(std::fs::read(&command).unwrap(), original, "{operation}");
-        assert_eq!(
-            std::fs::read_to_string(&other).unwrap(),
-            "OTHER",
-            "{operation}"
-        );
-        assert!(!control.exists() && !moved.exists(), "{operation}");
+                command = quoted(target),
+                control = quoted(&control),
+                moved = quoted(&moved),
+                other = quoted(&other),
+            );
+            let output = box_.bash(&format!("python3 -c '{}'", script.replace('\'', "'\\''")));
+            let seen = format!("{}{}", stdout(&output), stderr(&output));
+            assert!(output.status.success(), "{operation}: {output:?}");
+            assert!(seen.contains("MONTY_CONTROL_OK"), "{operation}: {output:?}");
+            assert!(
+                seen.contains("MUTATION_REFUSED:") && seen.contains("configured"),
+                "{operation} must meet the configured-command refusal: {output:?}"
+            );
+            assert!(!seen.contains("MUTATION_LANDED"), "{operation}: {output:?}");
+            assert_eq!(std::fs::read(&command).unwrap(), original, "{operation}");
+            if linked {
+                assert_eq!(std::fs::read(&alias).unwrap(), original, "{operation}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(&other).unwrap(),
+                "OTHER",
+                "{operation}"
+            );
+            assert!(!control.exists() && !moved.exists(), "{operation}");
+        }
     }
+}
+
+#[test]
+fn monty_cannot_change_a_configured_command() {
+    configured_command_monty_mutations_are_refused(false);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn monty_cannot_change_a_linked_configured_command_through_either_name() {
+    configured_command_monty_mutations_are_refused(true);
 }
 
 const COMMAND_INTEGRITY_TOOL: &str = r#"
@@ -3464,6 +3510,7 @@ fn prepare_command_integrity_tool(request: &Request) -> std::path::PathBuf {
     command
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     if !fixture::namespace_launcher_is_usable() {
@@ -3497,6 +3544,437 @@ fn a_configured_command_with_a_hard_link_refuses_before_the_agent_starts() {
     );
     assert_eq!(std::fs::read(command).unwrap(), original);
     assert_eq!(std::fs::read(alias).unwrap(), original);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn prepare_linked_command_integrity_tool(
+    request: &Request,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let command = prepare_command_integrity_tool(request);
+    let workspace = command.parent().expect("the command workspace");
+    let aliases = workspace.join("installed-aliases/nested");
+    let writable = workspace.join("writable");
+    std::fs::create_dir_all(&aliases).expect("the installed alias directory");
+    std::fs::create_dir(&writable).expect("the writable directory");
+    let alias = aliases.join("command-hard-link");
+    std::fs::hard_link(&command, &alias).expect("the preexisting command hard link");
+    (command, alias, writable)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_linked_configured_command_outside_native_write_grants_keeps_its_tool_grants() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let policy = r#"
+permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/tool-only-marker" };
+"#;
+    let table = format!(
+        "{COMMAND_INTEGRITY_TOOL}\nread = [\"{{workspace}}/writable\"]\nwrite = [\"{{workspace}}/writable\"]\n"
+    );
+    let request = Request::with_config("linked-command-grants", policy, &table)
+        .without_agent_home()
+        .agent_list("read", &["{workspace}/writable"])
+        .agent_list("write", &["{workspace}/writable"]);
+    let (command, alias, writable) = prepare_linked_command_integrity_tool(&request);
+    let marker = request.operator_home().join("tool-only-marker");
+    let original = std::fs::read(&command).expect("the original command");
+    let metadata = std::fs::metadata(&command).expect("the command identity");
+    assert_eq!(metadata.nlink(), 2);
+    let box_ = request.expect();
+
+    let output = box_.bash(&format!(
+        r#"printf 'AGENT_ENTERED\n'
+if IFS= read -r value < '{marker}'; then
+    printf 'AGENT_READ_MARKER:%s\n' "$value"
+else
+    printf 'AGENT_MARKER_REFUSED\n'
+fi
+zsh -lc "cat '{marker}'" 2>&1 || printf 'BROKER_MARKER_REFUSED\n'
+printf CACHE_WRITTEN > '{cache}'
+zsh -lc "'{command}' '{marker}'"
+"#,
+        marker = marker.display(),
+        cache = writable.join("ordinary-output").display(),
+        command = command.display(),
+    ));
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(output.status.success(), "{output:?}");
+    for expected in [
+        "AGENT_ENTERED",
+        "AGENT_MARKER_REFUSED",
+        "BROKER_MARKER_REFUSED",
+        "ORIGINAL_TOOL:TOOL_ONLY_BYTES",
+    ] {
+        assert!(seen.contains(expected), "{expected}: {output:?}");
+    }
+    assert!(!seen.contains("AGENT_READ_MARKER:"), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(writable.join("ordinary-output")).unwrap(),
+        "CACHE_WRITTEN"
+    );
+    assert_eq!(std::fs::read(&command).unwrap(), original);
+    assert_eq!(std::fs::read(&alias).unwrap(), original);
+    let after = std::fs::metadata(&alias).unwrap();
+    assert_eq!((after.dev(), after.ino()), (metadata.dev(), metadata.ino()));
+    assert_eq!(after.nlink(), 2);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_command_alias_in_any_native_write_grant_refuses_before_the_agent_starts() {
+    for owner in ["agent-tree", "agent-file", "agent-deny", "tool", "server"] {
+        let extra = match owner {
+            "tool" => format!(
+                "\n[tool.writer]\ncommand = [{:?}]\n[tool.writer.filesystem]\n\
+                 read = [\"{{workspace}}/writable\"]\n\
+                 write = [\"{{workspace}}/writable\"]\n",
+                fixture::no_op_program()
+            ),
+            "server" => String::from(
+                "\n[mcp.writer]\ntype = \"stdio\"\ncommand = [\"true\"]\n\
+                 env = { PATH = \"/usr/bin:/bin\" }\n\
+                 [mcp.writer.filesystem]\nread = [\"{workspace}/writable\"]\n\
+                 write = [\"{workspace}/writable\"]\n",
+            ),
+            _ => String::new(),
+        };
+        let request = Request::with_config(
+            &format!("linked-{owner}"),
+            "permit(principal, action, resource);",
+            &format!("{COMMAND_INTEGRITY_TOOL}{extra}"),
+        )
+        .without_agent_home();
+        let command = prepare_command_integrity_tool(&request);
+        let writable = command.parent().unwrap().join("writable");
+        std::fs::create_dir(&writable).expect("the writable directory");
+        let alias = if owner == "agent-deny" {
+            let nested = writable.join("nested");
+            std::fs::create_dir(&nested).expect("the denied alias directory");
+            nested.join("command-hard-link")
+        } else {
+            writable.join("command-hard-link")
+        };
+        std::fs::hard_link(&command, &alias).expect("the writable command alias");
+        let original = std::fs::read(&command).unwrap();
+        let request = match owner {
+            "agent-tree" => request
+                .agent_list("read", &["{workspace}/writable"])
+                .agent_list("write", &["{workspace}/writable"]),
+            "agent-file" => request
+                .agent_list("read_file", &["{workspace}/writable/command-hard-link"])
+                .agent_list("write_file", &["{workspace}/writable/command-hard-link"]),
+            "agent-deny" => request
+                .agent_list("read", &["{workspace}/writable"])
+                .agent_list("write", &["{workspace}/writable"])
+                .agent_list("deny", &["{workspace}/writable/nested"]),
+            _ => request,
+        };
+        let (box_, _) = request.attempt();
+        let output = box_.bash("printf AGENT_ENTERED");
+        let seen = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(!output.status.success(), "{owner}: {output:?}");
+        assert!(!seen.contains("AGENT_ENTERED"), "{owner}: {output:?}");
+        assert!(
+            seen.contains("configured") && seen.contains("writable") && seen.contains("writ"),
+            "{owner}: refusal must identify the write grant that reaches a command: {output:?}"
+        );
+        assert_eq!(std::fs::read(&command).unwrap(), original, "{owner}");
+        assert_eq!(std::fs::read(&alias).unwrap(), original, "{owner}");
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn native_operations_cannot_import_a_command_alias_but_can_link_cache_files() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let table = format!(
+        "{COMMAND_INTEGRITY_TOOL}\n\
+         [tool.mutator]\ncommand = [\"{{workspace}}/native-link-probe\"]\n\
+         [tool.mutator.filesystem]\nread = [\"{{workspace}}/writable\"]\n\
+         read_file = [\"{{workspace}}/configured-command\", \
+         \"{{workspace}}/installed-aliases/nested/command-hard-link\"]\n\
+         write = [\"{{workspace}}/writable\"]\n"
+    );
+    let request = Request::with_config(
+        "linked-command-native",
+        "permit(principal, action, resource);",
+        &table,
+    )
+    .without_agent_home();
+    let (command, alias, writable) = prepare_linked_command_integrity_tool(&request);
+    let aliases = alias.parent().unwrap().parent().unwrap();
+    let probe = command.with_file_name("native-link-probe");
+    compile_command_integrity_probe(
+        &probe,
+        r#"
+use std::{fs, io, path::PathBuf};
+fn denied(name: &str, result: io::Result<()>) {
+    let expected = if cfg!(target_os = "linux") {
+        match name {
+            "HARD_LINK" | "RENAME" | "DIRECTORY_RENAME" => io::ErrorKind::CrossesDevices,
+            "SYMLINK_WRITE" => io::ErrorKind::ReadOnlyFilesystem,
+            _ => io::ErrorKind::PermissionDenied,
+        }
+    } else {
+        io::ErrorKind::PermissionDenied
+    };
+    match result {
+        Err(error) if error.kind() == expected => {
+            println!("{name}_REFUSED");
+        }
+        other => panic!("{name} must meet {expected:?}: {other:?}"),
+    }
+}
+fn main() {
+    let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let command = &args[0];
+    let aliases = &args[1];
+    let writable = &args[2];
+    let alias = aliases.join("nested/command-hard-link");
+    assert_eq!(fs::read(command).unwrap(), fs::read(&alias).unwrap());
+    denied("HARD_LINK", fs::hard_link(&alias, writable.join("hard-link")));
+    denied("RENAME", fs::rename(&alias, writable.join("renamed-command")));
+    denied("DIRECTORY_RENAME", fs::rename(aliases, writable.join("imported")));
+    let symbolic = writable.join("symbolic-command");
+    match std::os::unix::fs::symlink(command, &symbolic) {
+        Ok(()) => denied("SYMLINK_WRITE", fs::write(&symbolic, b"CHANGED")),
+        Err(error) => denied("SYMLINK_CREATE", Err(error)),
+    }
+    let cache = writable.join("cache-file");
+    let cache_alias = writable.join("cache-hard-link");
+    fs::write(&cache, b"CACHE").unwrap();
+    fs::hard_link(&cache, &cache_alias).unwrap();
+    fs::write(&cache_alias, b"UPDATED").unwrap();
+    assert_eq!(fs::read(&cache).unwrap(), b"UPDATED");
+    println!("CACHE_LINK_OK");
+}
+"#,
+    );
+    let original = std::fs::read(&command).unwrap();
+    let box_ = request.expect();
+    let output = box_.bash(&format!(
+        "zsh -lc \"'{}' '{}' '{}' '{}'\"",
+        probe.display(),
+        command.display(),
+        aliases.display(),
+        writable.display(),
+    ));
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(output.status.success(), "{output:?}");
+    for expected in [
+        "HARD_LINK_REFUSED",
+        "RENAME_REFUSED",
+        "DIRECTORY_RENAME_REFUSED",
+        "CACHE_LINK_OK",
+    ] {
+        assert!(seen.contains(expected), "{expected}: {output:?}");
+    }
+    assert!(
+        seen.contains("SYMLINK_WRITE_REFUSED") || seen.contains("SYMLINK_CREATE_REFUSED"),
+        "{output:?}"
+    );
+    assert_eq!(std::fs::read(&command).unwrap(), original);
+    assert_eq!(std::fs::read(&alias).unwrap(), original);
+    assert_eq!(std::fs::metadata(&command).unwrap().nlink(), 2);
+    assert!(!writable.join("hard-link").exists());
+    assert!(!writable.join("renamed-command").exists());
+    assert!(!writable.join("imported").exists());
+    let cache = std::fs::metadata(writable.join("cache-file")).unwrap();
+    let cache_alias = std::fs::metadata(writable.join("cache-hard-link")).unwrap();
+    assert_eq!(
+        (cache.dev(), cache.ino()),
+        (cache_alias.dev(), cache_alias.ino())
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn hosted_links_cannot_import_a_configured_command_alias() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let request = Request::with_config(
+        "linked-hosted-links",
+        "permit(principal, action, resource);",
+        COMMAND_INTEGRITY_TOOL,
+    )
+    .without_agent_home()
+    .agent_list("read", &["{workspace}/writable"])
+    .agent_list("write", &["{workspace}/writable"]);
+    let (command, alias, writable) = prepare_linked_command_integrity_tool(&request);
+    let original = std::fs::read(&command).unwrap();
+    let identity = std::fs::metadata(&command).unwrap();
+    let marker = request.operator_home().join("tool-only-marker");
+    let ordinary = writable.join("ordinary");
+    let ordinary_symlink = writable.join("ordinary-symlink");
+    let shell_link = writable.join("shell-hard-link");
+    let python_link = writable.join("python-hard-link");
+    let pathlib_link = writable.join("pathlib-hard-link");
+    let python_control = writable.join("python-control");
+    let quoted = |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let python = format!(
+        r#"import os
+from pathlib import Path
+control = Path({control})
+control.write_text('PYTHON_CONTROL')
+assert control.read_text() == 'PYTHON_CONTROL'
+print('PYTHON_CONTROL_OK')
+try:
+    os.link({alias}, {python_link})
+    print('OS_LINK_LANDED')
+except AttributeError:
+    print('OS_LINK_UNSUPPORTED')
+try:
+    Path({pathlib_link}).hardlink_to(Path({alias}))
+    print('PATHLIB_LINK_LANDED')
+except AttributeError:
+    print('PATHLIB_LINK_UNSUPPORTED')
+"#,
+        control = quoted(&python_control),
+        alias = quoted(&alias),
+        python_link = quoted(&python_link),
+        pathlib_link = quoted(&pathlib_link),
+    );
+    let box_ = request.expect();
+    let output = box_.bash(&format!(
+        r#"printf 'CONTROL' > '{ordinary}'
+zsh -lc "cd '{writable}'; ln -s ordinary ordinary-symlink" || exit 1
+printf 'SHELL_SYMLINK_OK\n'
+zsh -lc "ln '{alias}' '{shell_link}'" 2>&1 && \
+    printf 'SHELL_LINK_LANDED\n' || printf 'SHELL_LINK_REFUSED\n'
+python3 -c '{python}' || exit 1
+zsh -lc "'{command}' '{marker}'"
+"#,
+        ordinary = ordinary.display(),
+        writable = writable.display(),
+        alias = alias.display(),
+        shell_link = shell_link.display(),
+        python = python.replace('\'', "'\\''"),
+        command = command.display(),
+        marker = marker.display(),
+    ));
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(output.status.success(), "{output:?}");
+    for expected in [
+        "SHELL_SYMLINK_OK",
+        "SHELL_LINK_REFUSED",
+        "hard links not supported",
+        "PYTHON_CONTROL_OK",
+        "OS_LINK_UNSUPPORTED",
+        "PATHLIB_LINK_UNSUPPORTED",
+        "ORIGINAL_TOOL:TOOL_ONLY_BYTES",
+    ] {
+        assert!(seen.contains(expected), "{expected}: {output:?}");
+    }
+    assert!(!seen.contains("_LINK_LANDED"), "{output:?}");
+    for imported in [&shell_link, &python_link, &pathlib_link] {
+        assert!(
+            std::fs::symlink_metadata(imported)
+                .is_err_and(|error| { error.kind() == std::io::ErrorKind::NotFound }),
+            "the broker must not create {}",
+            imported.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_link(&ordinary_symlink).unwrap(),
+        std::path::Path::new("ordinary")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ordinary_symlink).unwrap(),
+        "CONTROL"
+    );
+    assert_eq!(
+        std::fs::read_to_string(python_control).unwrap(),
+        "PYTHON_CONTROL"
+    );
+    for protected in [&command, &alias] {
+        assert_eq!(std::fs::read(protected).unwrap(), original);
+        let after = std::fs::metadata(protected).unwrap();
+        assert_eq!((after.dev(), after.ino()), (identity.dev(), identity.ino()));
+        assert_eq!(after.nlink(), 2);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn hosted_moves_cannot_import_a_directory_containing_a_command_alias() {
+    for interpreter in ["shell", "python"] {
+        let request = Request::with_config(
+            &format!("linked-import-{interpreter}"),
+            "permit(principal, action, resource);",
+            COMMAND_INTEGRITY_TOOL,
+        )
+        .without_agent_home()
+        .agent_list("read", &["{workspace}/writable"])
+        .agent_list("write", &["{workspace}/writable"]);
+        let (command, alias, writable) = prepare_linked_command_integrity_tool(&request);
+        let source = alias.parent().unwrap().parent().unwrap();
+        let destination = writable.join("imported");
+        let control = command.with_file_name("ordinary-directory");
+        std::fs::create_dir(&control).expect("the ordinary source directory");
+        std::fs::write(control.join("ordinary-file"), "CONTROL").unwrap();
+        let moved_control = writable.join("ordinary-directory");
+        let marker = request.operator_home().join("tool-only-marker");
+        let original = std::fs::read(&command).unwrap();
+        let box_ = request.expect();
+        let script = if interpreter == "shell" {
+            format!(
+                "zsh -lc \"mv -- '{}' '{}'\" || exit 1\n\
+                 zsh -lc \"mv -- '{}' '{}'\" 2>&1 && \
+                 printf 'MUTATION_LANDED\\n' || printf 'MUTATION_REFUSED\\n'\n",
+                control.display(),
+                moved_control.display(),
+                source.display(),
+                destination.display(),
+            )
+        } else {
+            let quoted =
+                |path: &std::path::Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+            let python = format!(
+                r#"from pathlib import Path
+Path({control}).rename(Path({moved_control}))
+try:
+    Path({source}).rename(Path({destination}))
+    print('MUTATION_LANDED')
+except PermissionError as error:
+    print('MUTATION_REFUSED:' + str(error))
+"#,
+                control = quoted(&control),
+                moved_control = quoted(&moved_control),
+                source = quoted(source),
+                destination = quoted(&destination),
+            );
+            format!("python3 -c '{}' || exit 1\n", python.replace('\'', "'\\''"))
+        };
+        let output = box_.bash(&format!(
+            "{script}zsh -lc \"'{}' '{}'\"",
+            command.display(),
+            marker.display(),
+        ));
+        let seen = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(output.status.success(), "{interpreter}: {output:?}");
+        assert!(
+            seen.contains("MUTATION_REFUSED") && seen.contains("configured"),
+            "{interpreter}: the configured-command guard must refuse the import: {output:?}"
+        );
+        assert!(
+            !seen.contains("MUTATION_LANDED"),
+            "{interpreter}: {output:?}"
+        );
+        assert!(seen.contains("ORIGINAL_TOOL:TOOL_ONLY_BYTES"), "{output:?}");
+        assert!(!destination.exists(), "{interpreter}");
+        assert!(!control.exists(), "{interpreter}");
+        assert_eq!(
+            std::fs::read_to_string(moved_control.join("ordinary-file")).unwrap(),
+            "CONTROL",
+            "{interpreter}"
+        );
+        assert_eq!(std::fs::read(&command).unwrap(), original, "{interpreter}");
+        assert_eq!(std::fs::read(&alias).unwrap(), original, "{interpreter}");
+    }
 }
 
 /// A root-owned host program with several names that the user that runs Box cannot write, and the
