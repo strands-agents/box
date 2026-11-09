@@ -279,6 +279,44 @@ macOS retains root file creation inside granted directories. Seatbelt path denia
 protection against later privileged consumers of those entries. This Linux change does not test or
 change that macOS behavior.
 
+### Linux filesystem metadata
+
+After execution, Linux workloads can use `statfs` to identify the filesystem behind an absolute path in their sandbox view.
+The result preserves the filesystem type, block and fragment sizes, maximum filename length, and mount flags.
+Box returns zero for capacity, free space, inode counts, filesystem identifiers, and reserved bytes.
+Programs can select database behavior for network filesystems without reading surrounding-OS storage usage.
+Programs that need actual free-space counts cannot obtain them through this query.
+Relative paths return `EOPNOTSUPP`, and `fstatfs` remains denied.
+
+A seccomp notification sends each query to the existing launcher outside the workload's PID namespace.
+The launcher copies the pathname and pins the requesting process's root through a private procfs descriptor.
+It resolves the copied path with `openat2` and `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, then queries the pinned result.
+Ungranted files remain absent, and read-only binds remain read-only.
+The launcher writes only the sanitized bytes with `process_vm_writev`, which rejects read-only output mappings.
+It never asks the kernel to continue the original `statfs` call.
+
+*Figure 1: A filesystem query during Codex startup. Box writes filtered information into Codex's output buffer. A separate status reply completes the paused call.*
+
+![Codex requests filesystem information from Linux. The kernel pauses the call and notifies the Box launcher. The launcher resolves the path within Codex's filesystem view and queries the resolved filesystem. It writes filtered information into Codex's output buffer: filesystem type, block and fragment sizes, filename limit, and mount flags retain their actual values; capacity, free space, file counts, filesystem identifier, and reserved bytes are zero. A separate success reply tells Linux to complete the call. The original statfs call does not run.](images/statfs-query-flow.png)
+
+The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
+
+The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
+Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
+The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
+The namespace reaper and workload retain their existing capability removal.
+Program execution establishes the workload's memory in the sandbox user namespace.
+Direct `Containment::apply` callers that continue without execution can retain memory owned by an ancestor user namespace, so the query can be refused.
+Box preserves this refusal rather than weakening process-memory checks.
+Hosts that prohibit process-memory access can also refuse these queries.
+
+The workload installs the notification filter and transfers its listener before its final syscall restrictions and execution.
+A failed handoff prevents execution.
+After a fatal service error, the launcher exits; the reaper's existing parent-death signal terminates the namespace.
+Request validation rejects canceled notifications, but does not make a numeric process identifier an atomic lifetime reference.
+The kernel's user-namespace checks independently restrict memory access, and both trusted launcher processes are excluded as query targets.
+Filesystem lookup and statistics can block in the kernel, which can delay launcher exit handling.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the surrounding OS. The mount's `nosuid`

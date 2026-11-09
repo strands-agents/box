@@ -81,6 +81,16 @@ fn verify_closed(attempted: &[libc::c_int]) -> Result<(), ContainmentError> {
 
 /// Clear every capability set, including bounding and ambient.
 pub(crate) fn drop_all_capabilities() -> Result<(), ContainmentError> {
+    retain_capabilities(0)
+}
+
+/// Retain process inspection only within the launcher's existing private user namespace.
+pub(super) fn retain_workload_memory_access() -> Result<(), ContainmentError> {
+    // Linux UAPI linux/capability.h defines CAP_SYS_PTRACE as capability 19.
+    retain_capabilities(1_u64 << 19)
+}
+
+fn retain_capabilities(permitted: u64) -> Result<(), ContainmentError> {
     // Drop the bounding set first, one capability at a time: `PR_CAPBSET_DROP` takes a single
     // capability, and it requires CAP_SETPCAP -- which is in the effective set we are about to
     // clear.
@@ -116,9 +126,19 @@ pub(crate) fn drop_all_capabilities() -> Result<(), ContainmentError> {
         // single-threaded.
         pid: 0,
     };
-    // All-zero data clears effective, permitted, and inheritable in both 32-bit
-    // halves.
-    let data = [CapabilityData::default(); 2];
+    // Retain the requested effective and permitted bits, with no inheritable capability.
+    let data = [
+        CapabilityData {
+            effective: permitted as u32,
+            permitted: permitted as u32,
+            inheritable: 0,
+        },
+        CapabilityData {
+            effective: (permitted >> 32) as u32,
+            permitted: (permitted >> 32) as u32,
+            inheritable: 0,
+        },
+    ];
 
     // SAFETY: `capset` reads one header and two data words, both of which are
     // valid, correctly sized locals for the duration of the call.
@@ -335,5 +355,43 @@ mod tests {
              4=a capability set was non-empty, 5=no_new_privs was not set, \
              6=the child could not enter a user namespace)"
         );
+    }
+
+    #[test]
+    fn filesystem_supervisor_retains_only_scoped_process_inspection() {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let capabilities = || {
+                let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+                let value = |field: &str| {
+                    let value = status
+                        .lines()
+                        .find_map(|line| line.strip_prefix(field))
+                        .unwrap();
+                    u64::from_str_radix(value.trim(), 16).unwrap()
+                };
+                [
+                    value("CapInh:"),
+                    value("CapPrm:"),
+                    value("CapEff:"),
+                    value("CapBnd:"),
+                    value("CapAmb:"),
+                ]
+            };
+            assert_ne!(
+                capabilities()[2] & !0x80000,
+                0,
+                "positive control must hold other namespace capabilities"
+            );
+            retain_workload_memory_access().unwrap();
+            set_no_new_privileges().unwrap();
+            refuse_process_memory_access().unwrap();
+            assert_eq!(capabilities(), [0, 0x80000, 0x80000, 0, 0]);
+            // SAFETY: both prctl operations read scalar state and require no pointer.
+            assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0);
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
+                1
+            );
+        });
     }
 }

@@ -1,6 +1,7 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
+mod filesystem_queries;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
@@ -216,11 +217,15 @@ impl ContainmentBackend for NamespaceBackend {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
-        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        let filesystem_handoff = establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
+        filesystem_queries::install(&filters.filesystem_queries, &filesystem_handoff).map_err(
+            |source| apply_failure(format!("installing filesystem query mediation: {source}")),
+        )?;
+        drop(filesystem_handoff);
         install_syscall_filters(&filters)?;
 
         // Every listener belongs to a relay, and each relay lives in the box.
@@ -445,13 +450,56 @@ fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()
     }
 }
 
+fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int>) {
+    if let Err(error) = authority::close_inherited_descriptors(keep) {
+        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exits before the workload starts, terminating the namespace.
+        unsafe { libc::_exit(127) };
+    }
+}
+
+fn protect_reaper_memory(confirm_fd: Option<libc::c_int>) {
+    if let Err(error) = authority::refuse_process_memory_access() {
+        eprintln!(
+            "strands-box: namespace reaper could not refuse process-memory access \
+             ({error:?}); killing the namespace rather than starting a workload \
+             from a reachable PID 1"
+        );
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
+        unsafe { libc::_exit(127) };
+    }
+}
+
+fn drop_reaper_authority(confirm_fd: Option<libc::c_int>) {
+    let dropped = authority::drop_all_capabilities();
+    let locked = authority::set_no_new_privileges();
+    if dropped.is_err() || locked.is_err() {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        eprintln!(
+            "strands-box: namespace reaper could not drop its own authority \
+             ({dropped:?}, {locked:?}); killing the namespace rather than \
+             supervising from a privileged PID 1"
+        );
+        // The workload is already running with the view, but PID 1 would keep capabilities —
+        // the exact escape this closes.
+        unsafe { libc::_exit(127) };
+    }
+}
+
 fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
-) -> Result<(), ContainmentError> {
+) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
+    use std::os::fd::AsRawFd as _;
+    let proc = filesystem_queries::open_proc()
+        .map_err(|source| apply_failure(format!("pinning the launcher process view: {source}")))?;
     let (parent_control, reaper_control) = std::os::unix::net::UnixStream::pair()
         .map_err(|source| apply_failure(format!("creating reaper lifetime channel: {source}")))?;
+    let (query_parent, query_workload) = std::os::unix::net::UnixStream::pair()
+        .map_err(|source| apply_failure(format!("creating filesystem query handoff: {source}")))?;
     // SAFETY: a single syscall with a constant argument. Affects children only.
     if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
         return Err(apply_failure(format!(
@@ -472,27 +520,43 @@ fn establish_pid_namespace_and_reaper(
 
     if reaper > 0 {
         drop(reaper_control);
+        drop(query_workload);
+        let preserved = [
+            0,
+            1,
+            2,
+            proc.as_raw_fd(),
+            query_parent.as_raw_fd(),
+            parent_control.as_raw_fd(),
+        ];
+        let mut preserved = preserved.to_vec();
+        preserved.extend(confirm_fd);
+        let hardened = authority::close_inherited_descriptors(&preserved)
+            .and_then(|_| authority::retain_workload_memory_access())
+            .and_then(|_| authority::set_no_new_privileges())
+            .and_then(|_| authority::refuse_process_memory_access());
+        if let Err(error) = hardened {
+            eprintln!("strands-box: filesystem query supervisor could not drop authority: {error}");
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+            // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
+            unsafe { libc::_exit(127) };
+        }
         if !reaper::confirm_parent_death(&parent_control) {
             write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-            // SAFETY: the identifier names this process's unreaped child.
-            unsafe { libc::kill(reaper, libc::SIGKILL) };
+            // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
+            unsafe { libc::_exit(127) };
         }
         drop(parent_control);
         close_confirm_descriptor(confirm_fd);
-        // The original caller.
-        let code = reaper_exit_code(|status| {
-            // SAFETY: waiting on this process's own child.
-            if unsafe { libc::waitpid(reaper, status, 0) } != -1 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
+        // The original caller retains only scoped process inspection and the notification channel.
+        let code = filesystem_queries::supervise(reaper, proc, query_parent);
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
 
     // Namespace PID 1.
+    drop(proc);
+    drop(query_parent);
     drop(parent_control);
     if !reaper::arm_parent_death(&reaper_control) {
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
@@ -512,22 +576,10 @@ fn establish_pid_namespace_and_reaper(
 
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
-    if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
-        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        // SAFETY: as above.
-        unsafe { libc::_exit(127) };
-    }
-    if let Err(error) = authority::refuse_process_memory_access() {
-        eprintln!(
-            "strands-box: namespace reaper could not refuse process-memory access \
-             ({error:?}); killing the namespace rather than starting a workload \
-             from a reachable PID 1"
-        );
-        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
-        unsafe { libc::_exit(127) };
-    }
+    let mut keep = keep.to_vec();
+    keep.push(query_workload.as_raw_fd());
+    close_reaper_descriptors(&keep, confirm_fd);
+    protect_reaper_memory(confirm_fd);
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };
@@ -540,19 +592,8 @@ fn establish_pid_namespace_and_reaper(
 
     if workload > 0 {
         // Still PID 1.
-        let dropped = authority::drop_all_capabilities();
-        let locked = authority::set_no_new_privileges();
-        if dropped.is_err() || locked.is_err() {
-            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-            eprintln!(
-                "strands-box: namespace reaper could not drop its own authority \
-                 ({dropped:?}, {locked:?}); killing the namespace rather than \
-                 supervising from a privileged PID 1"
-            );
-            // The workload is already running with the view, but PID 1 would keep capabilities —
-            // the exact escape this closes.
-            unsafe { libc::_exit(127) };
-        }
+        drop(query_workload);
+        drop_reaper_authority(confirm_fd);
 
         write_confirm_byte(confirm_fd, REAPER_READY_BYTE);
         close_confirm_descriptor(confirm_fd);
@@ -565,7 +606,7 @@ fn establish_pid_namespace_and_reaper(
     }
 
     // The workload process — the only one that returns `Ok`.
-    Ok(())
+    Ok(query_workload)
 }
 
 /// An apply failure carrying this backend's mechanism name.
