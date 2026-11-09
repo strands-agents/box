@@ -257,7 +257,7 @@ Every action of a grammar carries these fields, and `unmodeled` carries only the
 |---|---|---|
 | `program` | String | The first word after expansion, as on `shell:spawn`. |
 | `program_path` | String | The resolved program file, spelled `~/…` under the operator's home and absolute elsewhere. |
-| `cwd` | String | The Shell's working directory, as an absolute path. |
+| `cwd` | String | The program's selected launch directory, as an absolute path. See [directory selection](#shell). |
 | `args` | Set of String | Every word after the program. |
 | `effects` | Set of `Tool::<name>::Effect` | The effects of this command. A grammar that declares no effect has no `effects` field. |
 | `credential_reads?` | Set of String | The credential stores that the program's `[tool.<name>]` lists name, as on `shell:spawn`. |
