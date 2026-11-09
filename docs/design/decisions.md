@@ -529,6 +529,17 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-executable-filenames-name-their-aliases"></a>
+### MCP executable filenames name their aliases
+
+A stdio MCP `command` names the executable to launch, as a bare name or an absolute path.
+The executable's filename names the alias the agent calls, including when the executable is outside
+`PATH`. The path as written keeps the invocation name of a symbolic link, while policy checks the
+resolved executable identity. We rejected separate `alias` or `executable` fields because the
+filename supplies the invocation name without another configuration choice. The cost is that two
+executable paths with the same filename and identical fixed arguments cannot select different
+servers; the existing exact-match precedence and wildcard-overlap rules apply to the derived alias.
+
 <a id="a-stdio-mcp-server-runs-contained"></a>
 ### Every stdio MCP server runs contained, in its own sandbox
 

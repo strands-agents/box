@@ -53,16 +53,16 @@ when { ["fetch", "github"].contains(context.input.server) };
 
 | Action | Field | Value |
 |---|---|---|
-| `shell:spawn` | `context.input.program` | Element 0 of the server's `command`. |
+| `shell:spawn` | `context.input.program` | The executable's filename, which is the server's alias name. |
 | | `context.input.program_path` | The program's file, with every link resolved. `~` is the operator's home. |
 | | `context.input.arg1`, `arg2`, `arg_count` | The server's arguments. |
-| | `context.input.command` | By default, the server's full `command` as written in `box.toml`: the program and its arguments, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
+| | `context.input.command` | By default, the alias name and the arguments as written in `box.toml`, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
 | `mcp:call` | `context.input.server` | The `[mcp.<name>]` table's name. |
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
 
-For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the effective
-launch command, with received values in the `*` positions and fixed arguments expanded.
+For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the alias name
+and effective launch arguments, with received values in the `*` positions and fixed arguments expanded.
 `arg1`, `arg2`, and `arg_count` describe those same launch arguments.
 A permit that checks only `program`, as above, matches every value supplied in the `*` positions.
 To restrict those values, add conditions on the effective arguments.
@@ -71,9 +71,9 @@ To restrict those values, add conditions on the effective arguments.
 
 Add each server to the harness's own MCP configuration.
 
-- **A `stdio` server:** set its command to the server's full `command` from `box.toml`: the
-  program, then every argument, in the same order. The harness runs the alias with those arguments,
-  and the box starts the server whose `command` matches. With `argument_wildcards = true` on that server, supply
+- **A `stdio` server:** set its command to the executable's filename, then every argument from
+  `box.toml`, in the same order. The harness runs the alias with those arguments,
+  and the box starts the matching server. With `argument_wildcards = true` on that server, supply
   the runtime value for each `*` position.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.
@@ -91,6 +91,10 @@ a client that takes a command and its arguments apart gets:
 ```json
 { "mcpServers": { "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] } } }
 ```
+
+If the table instead uses `command = ["/opt/node/bin/npx", "-y", "@playwright/mcp"]`, the harness
+configuration stays the same. Box launches that absolute executable path when the harness calls
+the `npx` alias.
 
 A harness entry that sets only the program, `"command": "npx"` with no `args`, is refused for this
 server with `no MCP server declares "npx"; servers on npx: playwright`. Add the

@@ -135,8 +135,8 @@ three kinds of event:
 - `::error` for an operation that definitely didn't happen.
 
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
-`shell:spawn` request records the effective launch command and arguments, including the received
-values in the `*` positions.
+`shell:spawn` request records the alias name and effective launch arguments, including the received
+values in the `*` positions. The `program_path` field identifies the resolved executable file.
 
 A metadata read has occurred once the workload receives its answer. A Shell `test -e`, `test -L`, or
 `test -r` on a missing file in an existing folder therefore records a `::response`. The same applies
@@ -260,8 +260,10 @@ A policy that validates can still fail to run, because opening the history has i
 configured tool programs with multiple hard links when the user running Box can write them.
 It also refuses configured tool programs that overlap with direct writable grants.
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those
-constraints. When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards),
-Box also refuses wildcard commands that can select different servers for the same request. Box also
+constraints. MCP command matching uses the executable's filename and the arguments, including for
+an absolute executable path. Box refuses duplicate exact invocations. When two MCP entries enable
+[argument wildcards](../user/mcp.md#argument-wildcards), Box refuses wildcard commands that can select
+different servers for the same request. Box also
 refuses installed trusted programs with unaccounted hard-link names or overlap with any process's
 writable grants. [Installation integrity](../user/config.md#installation-integrity) describes these
 refusals.

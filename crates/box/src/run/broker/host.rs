@@ -418,7 +418,7 @@ async fn start_mcp_server(
     authorize_mcp_start(
         spec,
         server,
-        Path::new(server.program()),
+        Path::new(server.executable()),
         server.arguments(),
         &spec.mcp_working_directory,
         &[],
@@ -1883,7 +1883,7 @@ done"#;
             @id("no_marker_start")
             forbid (principal, action == Box::Action::"shell:spawn", resource)
             when {
-                context.input.program == "/bin/sh" &&
+                context.input.program == "sh" &&
                 context.input.program_path == "/bin/sh" &&
                 context.input has arg1 && context.input.arg1 == "-c" &&
                 context.input.arg_count == 2
@@ -3299,7 +3299,7 @@ done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3344,7 +3344,7 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3393,7 +3393,7 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3505,7 +3505,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3597,7 +3597,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3667,7 +3667,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3812,7 +3812,7 @@ done"#,
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3969,7 +3969,7 @@ done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
